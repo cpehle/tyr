@@ -68,25 +68,42 @@ lean_object* backward(lean_obj_arg /* shape */, b_lean_obj_arg output, b_lean_ob
     return fromTorchTensor(output_);
 }
 
+// --
 // tensor creation api
-lean_object* lean_torch_randn(lean_obj_arg s) {
-  auto t = torch::randn(getShape(s));
+lean_object* lean_torch_randn(lean_obj_arg s, int requires_grad) {
+  auto t = torch::randn(getShape(s), torch::TensorOptions().requires_grad(requires_grad));
   return lean::io_result_mk_ok(fromTorchTensor(t));
 }
-lean_object* lean_torch_rand(lean_obj_arg s) {
-  auto t = torch::rand(getShape(s));
+lean_object* lean_torch_rand(lean_obj_arg s, int requires_grad) {
+  auto t = torch::rand(getShape(s), torch::TensorOptions().requires_grad(requires_grad));
   return lean::io_result_mk_ok(fromTorchTensor(t));
 }
 
-lean_object* lean_torch_zeros(lean_obj_arg s) {
-  auto t = torch::zeros(getShape(s));
+lean_object* lean_torch_zeros(lean_obj_arg s, int requires_grad) {
+  auto t = torch::zeros(getShape(s), torch::TensorOptions().requires_grad(requires_grad));
   return fromTorchTensor(t);
 }
+
+lean_object* lean_torch_ones(lean_obj_arg s, int requires_grad) {
+  auto t = torch::ones(getShape(s), torch::TensorOptions().requires_grad(requires_grad));
+  return fromTorchTensor(t);
+}
+
 
 lean_object* lean_torch_arange(int start, int stop, int step) {
   auto t = torch::arange(start, stop, step);
   return fromTorchTensor(t);
 }
+
+
+bool lean_torch_requires_grad(lean_obj_arg /* shape */, b_lean_obj_arg x) {
+    auto x_ = toTorchTensor(x);
+    auto res_ = x_.requires_grad();
+    x_.unsafeReleaseTensorImpl();
+    return res_;
+}
+
+//
 
 lean_object* lean_torch_get(lean_obj_arg /*s*/, b_lean_obj_arg self, int idx) {
   auto self_ = toTorchTensor(self);
@@ -110,11 +127,6 @@ lean_object* lean_torch_slice(lean_obj_arg /*s*/,
   auto res = self_.slice(dim_, start, stop, step);
   self_.unsafeReleaseTensorImpl();
   return fromTorchTensor(res);
-}
-
-lean_object* lean_torch_ones(lean_obj_arg s) {
-  auto t = torch::ones(getShape(s));
-  return fromTorchTensor(t);
 }
 
 #define BINOP_FUN(F) \
@@ -150,6 +162,40 @@ UNOP_FUN(relu6)
 UNOP_FUN(rrelu)
 UNOP_FUN(selu)
 #undef UNOP_FUN
+
+lean_object* lean_torch_tensor_grad(lean_obj_arg /* s */, lean_obj_arg /* s' */, b_lean_obj_arg output, b_lean_obj_arg input, b_lean_obj_arg grad_output) {
+  auto output_ = toTorchTensor(output);
+  auto input_ = toTorchTensor(input);
+  auto grad_output_ = toTorchTensor(grad_output);
+
+  torch::autograd::variable_list out_v({output_});
+  torch::autograd::variable_list in_v({input_});
+  torch::autograd::variable_list grad_out_v({grad_output_});    
+  auto grad_in_v = torch::autograd::grad(out_v, in_v, grad_out_v);
+
+  output_.unsafeReleaseTensorImpl();
+  input_.unsafeReleaseTensorImpl();
+  grad_output_.unsafeReleaseTensorImpl();
+  
+  return fromTorchTensor(grad_in_v[0]);
+}
+
+lean_object* lean_torch_backward(lean_obj_arg /* shape */, b_lean_obj_arg output, b_lean_obj_arg grad_output) {
+  auto out_ = toTorchTensor(output);
+  auto grad_output_ = toTorchTensor(grad_output);
+  out_.backward(grad_output_);
+
+  grad_output_.unsafeReleaseTensorImpl();
+  return output;
+}
+
+lean_object* lean_torch_grad_of(lean_obj_arg /* shape */, b_lean_obj_arg x) {
+    auto out_ = toTorchTensor(x);
+    auto grad_out_ = out_.grad();
+    out_.unsafeReleaseTensorImpl();
+    return fromTorchTensor(grad_out_);
+}
+
 
 
 lean_object* lean_torch_tensor_softmax(lean_obj_arg /**/, b_lean_obj_arg a) {

@@ -24,6 +24,10 @@ instance (s : Shape) : Inhabited (T s) := {
 @[extern "lean_torch_to_string"] constant T.toString {s : Shape} (t : @& T s) : String
 @[extern "lean_torch_tensor_print"] constant T.print {s : Shape} (t : @& T s) : IO Unit
 
+instance {s : Shape} : ToString (T s) where
+  toString t := t.toString
+
+-- | Tensor Creation API
 -- arange: Returns a tensor with a sequence of integers,
 @[extern "lean_torch_arange"] constant arange (start : UInt64) (stop : UInt64) (step : UInt64 := 1) : T #[(stop - start)/step]
 -- empty: Returns a tensor with uninitialized values,
@@ -32,14 +36,17 @@ instance (s : Shape) : Inhabited (T s) := {
 -- linspace: Returns a tensor with values linearly spaced in some interval,
 -- logspace: Returns a tensor with values logarithmically spaced in some interval,
 -- ones: Returns a tensor filled with all ones,
-@[extern "lean_torch_ones"] constant ones (s : Shape) : T s
+@[extern "lean_torch_ones"] constant ones (s : Shape) (requires_grad : Bool := false) : T s
 -- rand: Returns a tensor filled with values drawn from a uniform distribution on [0, 1).
-@[extern "lean_torch_rand"] constant rand (s : Shape) : IO (T s)
+@[extern "lean_torch_rand"] constant rand (s : Shape) (requires_grad : Bool := false) : IO (T s)
 -- randint: Returns a tensor with integers randomly drawn from an interval,
 -- zeros: Returns a tensor filled with all zeros
-@[extern "lean_torch_zeros"] constant zeros (s : Shape) : T s
+@[extern "lean_torch_zeros"] constant zeros (s : Shape) (requires_grad : Bool := false) : T s
 -- randn: Returns a tensor filled with values drawn from a unit normal distribution,
-@[extern "lean_torch_randn"] constant randn (s : Shape) : IO (T s)
+@[extern "lean_torch_randn"] constant randn (s : Shape) (requires_grad : Bool := false) : IO (T s)
+
+
+@[extern "lean_torch_requires_grad"] constant T.requires_grad {s : Shape} (t : @& T s) : Bool
 
 instance (shape : Shape) : Inhabited (T shape) := ⟨zeros shape⟩
 
@@ -98,6 +105,14 @@ def slicedShape (s : Array UInt64) (dim : Nat := 0)  (start : UInt64 := 0) (stop
   (startPositive : start >= 0 := by simp)
   (dimInBounds : dim < s.size := by simp)
   (stopInBounds : stop <= s[dim] := by simp) : T (slicedShape s dim start stop step)
+
+
+namespace autograd
+@[extern "lean_torch_tensor_grad"] constant grad {sx sy : Shape} (y : (T sy)) (x : (T sx)) (dy : (T sy)) : (T sx)
+def pullback {sx sy : Shape} (f : T sx → T sy) (x : T sx) (dy : T sy) : T sx :=
+    grad (f x) x dy
+end autograd
+
 
 namespace nn
 
