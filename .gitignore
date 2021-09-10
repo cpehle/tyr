@@ -3,4 +3,4 @@
 *.a
 build/
 bak/
-test/out/**/*produced.out
+*produced.out

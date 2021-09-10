@@ -1,31 +1,6 @@
+import Tyr.Basic
+
 namespace torch
-def Shape := Array UInt64
-
-inductive DType where
-| UInt8
-| Int8
-| Int16
-| Int32
-| Int64
-| Float16
-| Float32
-| Float64
-
-inductive Device where
-| CUDA : Nat → Device
-| CPU
-
-constant TSpec : PointedType
-def T (s : Shape) : Type :=  TSpec.type
-instance (s : Shape) : Inhabited (T s) := {
-  default := TSpec.val
-}
-
-@[extern "lean_torch_to_string"] constant T.toString {s : Shape} (t : @& T s) : String
-@[extern "lean_torch_tensor_print"] constant T.print {s : Shape} (t : @& T s) : IO Unit
-
-instance {s : Shape} : ToString (T s) where
-  toString t := t.toString
 
 -- | Tensor Creation API
 -- arange: Returns a tensor with a sequence of integers,
@@ -108,10 +83,67 @@ def slicedShape (s : Array UInt64) (dim : Nat := 0)  (start : UInt64 := 0) (stop
 
 
 namespace autograd
+
 @[extern "lean_torch_tensor_grad"] constant grad {sx sy : Shape} (y : (T sy)) (x : (T sx)) (dy : (T sy)) : (T sx)
+
 def pullback {sx sy : Shape} (f : T sx → T sy) (x : T sx) (dy : T sy) : T sx :=
     grad (f x) x dy
+
+@[extern "lean_torch_grad_of"] constant grad_of {s : Shape} (x : T s) : T s
 end autograd
+
+
+
+class differentiable (α : Type _) :=
+    (cotangent_space : Type _)
+    (grad : α → cotangent_space)
+
+instance {s : Shape} : differentiable (torch.T s) := ⟨torch.T s, fun (t : (torch.T s)) => torch.autograd.grad_of t⟩
+
+structure Linear {n m : UInt64} :=
+    (w : T #[n, m])
+
+namespace Linear
+instance  {n m : UInt64} : differentiable (@Linear n m) := ⟨@Linear n m, fun (m : Linear) => ⟨differentiable.grad m.w⟩⟩
+end Linear
+
+structure Affine {n m : UInt64} :=
+    (w : T #[m, n])
+    (b : T #[n])
+
+namespace Affine
+instance {n m : UInt64}: differentiable (@Affine n m) := ⟨@Affine n m, fun (a : Affine) => ⟨differentiable.grad a.w, differentiable.grad a.b⟩⟩
+end Affine
+
+
+structure LSTM {n m : UInt64} :=
+    (w_i : @Affine n m)  
+    (r_i : @Affine n n)
+    (w_f : @Affine n m)
+    (r_f : @Affine n n)
+    (w_o : @Affine n m)
+    (r_o : @Affine n n)
+    (w_c : @Affine n m)
+    (r_c : @Affine n n)
+
+namespace LSTM
+instance {n m : UInt64}: differentiable (@LSTM n m) := ⟨@LSTM n m, fun (a : LSTM) => ⟨
+  differentiable.grad a.w_i, 
+  differentiable.grad a.r_i, 
+  differentiable.grad a.w_f, 
+  differentiable.grad a.r_f, 
+  differentiable.grad a.w_o, 
+  differentiable.grad a.r_o, 
+  differentiable.grad a.w_c, 
+  differentiable.grad a.r_c⟩
+⟩
+end LSTM
+
+
+-- def rjvp {a b : Type} [differentiable a] [differentiable b] (f : a → b) (x : a) : b × (differentiable.cotangent_space b → differentiable.cotangent_space a) :=
+--     let y := f x;
+--     let fT := λ (dy : differentiable.cotangent_space b) => torch.backward y dy
+--     (y, fT)
 
 
 namespace nn
@@ -240,22 +272,3 @@ namespace nn
 end nn
 end torch
 
-
--- def main : IO Unit := do
---  let x <- torch.randn #[5,5]
---   let y <- torch.rand #[5,5]
--- let M := torch.zeros #[5,5]
--- let b := torch.ones #[5]
--- let z := (x + M)
--- let a := (x - x)
---  M[1].print
--- (torch.ones #[5,5]).print
--- z.print
--- IO.println "------------------------"
--- x.print
--- (torch.linear x M).print
--- (torch.affine x M b).print
--- ((torch.zeros #[4,5,10]).slice (dim := 1) (start := 2)).print
--- IO.println "------------------------"
--- (torch.nn.softmax (torch.ones #[2,3])).print
--- pure ()
