@@ -7,6 +7,9 @@ RMPATH := rm -rf
 LEANMAKEFILE := ${LEAN_HOME}/share/lean/lean.mk
 LEANMAKE := $(MAKE) -f $(LEANMAKEFILE)
 
+
+LD_PRELOAD="$(PWD)/plugin/build/TyrPlugin.dll $(shell $(LEAN) --print-libdir)/libleanshared.so"
+
 all: plugin
 
 clean: clean-cc clean-lib clean-plugin clean-test
@@ -32,7 +35,7 @@ clean-plugin:
 	$(MAKE) -C plugin clean
 
 test: plugin
-	$(MAKE) -C test
+	LD_PRELOAD=$(LD_PRELOAD) $(MAKE) -C test
 
 clean-test:
 	$(MAKE) -C test clean
