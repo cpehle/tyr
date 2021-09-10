@@ -1,0 +1,3 @@
+{
+    "lean4.executablePath": "LD_LIBRARY_PATH=/home/cpehle/work/tyr/thirdparty/libtorch/lib LD_PRELOAD=\"/home/cpehle/work/tyr/plugin/build/TyrPlugin.dll /home/cpehle/.elan/toolchains/leanprover-lean4-nightly-2021-09-05/lib/lean/libleanshared.so\" lean "
+}
