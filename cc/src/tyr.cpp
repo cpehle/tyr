@@ -16,7 +16,6 @@ void deleteFinalize(void *p) { delete static_cast<T *>(p); }
 
 template<typename T>
 void decrefFinalize(void *p) { 
-  std::cout << "in decref finalize" << std::endl;
   auto ptr = c10::intrusive_ptr<T>::reclaim(static_cast<T *>(p));
 }
 
@@ -31,7 +30,6 @@ lean::external_object_class *registerDeleteClass() {
   return lean::register_external_object_class(&deleteFinalize<T>, &trivialForeach);
 }
 
-// torch::Tensor
 
 static
 lean::external_object_class* getTorchTensorImplClass() {
@@ -75,10 +73,38 @@ lean_object* lean_torch_randn(lean_obj_arg s) {
   auto t = torch::randn(getShape(s));
   return lean::io_result_mk_ok(fromTorchTensor(t));
 }
+lean_object* lean_torch_rand(lean_obj_arg s) {
+  auto t = torch::rand(getShape(s));
+  return lean::io_result_mk_ok(fromTorchTensor(t));
+}
 
 lean_object* lean_torch_zeros(lean_obj_arg s) {
   auto t = torch::zeros(getShape(s));
   return fromTorchTensor(t);
+}
+
+lean_object* lean_torch_get(lean_obj_arg /*s*/, b_lean_obj_arg self, int idx) {
+  auto self_ = toTorchTensor(self);
+  auto res = self_.index({idx});
+  self_.unsafeReleaseTensorImpl();
+  return fromTorchTensor(res);
+}
+
+lean_object* lean_torch_slice(lean_obj_arg /*s*/, 
+  b_lean_obj_arg self, 
+  b_lean_obj_arg dim,
+  int start,
+  int stop,
+  int step,
+  lean_obj_arg /* */,
+  lean_obj_arg /* */, 
+  lean_obj_arg /* */) {
+
+  auto dim_ = lean_uint64_of_nat(dim);
+  auto self_ = toTorchTensor(self);
+  auto res = self_.slice(dim_, start, stop, step);
+  self_.unsafeReleaseTensorImpl();
+  return fromTorchTensor(res);
 }
 
 lean_object* lean_torch_ones(lean_obj_arg s) {
@@ -86,23 +112,57 @@ lean_object* lean_torch_ones(lean_obj_arg s) {
   return fromTorchTensor(t);
 }
 
-lean_object* lean_torch_tensor_add(lean_obj_arg s, b_lean_obj_arg a, b_lean_obj_arg b) {
+#define BINOP_FUN(F) \
+lean_object* lean_torch_tensor_##F(lean_obj_arg s, b_lean_obj_arg a, b_lean_obj_arg b) { \
+  auto a_ = toTorchTensor(a); \
+  auto b_ = toTorchTensor(b); \
+  auto c_ = torch::F(a_, b_); \
+  a_.unsafeReleaseTensorImpl(); \
+  b_.unsafeReleaseTensorImpl(); \
+  return fromTorchTensor(c_); \
+}
+
+BINOP_FUN(add)
+BINOP_FUN(sub)
+BINOP_FUN(mul)
+#undef BINOP_FUN
+
+#define UNOP_FUN(F) \
+lean_object* lean_torch_tensor_##F(lean_obj_arg s, b_lean_obj_arg a) { \
+  auto a_ = toTorchTensor(a); \
+  auto c_ = torch::F(a_); \
+  a_.unsafeReleaseTensorImpl(); \
+  return fromTorchTensor(c_); \
+}
+
+UNOP_FUN(celu)
+UNOP_FUN(elu)
+UNOP_FUN(gelu)
+UNOP_FUN(hardtanh)
+UNOP_FUN(leaky_relu)
+UNOP_FUN(relu)
+UNOP_FUN(relu6)
+UNOP_FUN(rrelu)
+UNOP_FUN(selu)
+#undef UNOP_FUN
+
+
+lean_object* lean_torch_tensor_softmax(lean_obj_arg /**/, b_lean_obj_arg a) {
+  auto a_ = toTorchTensor(a);
+  auto c_ = torch::softmax(a_, 0);
+  a_.unsafeReleaseTensorImpl();
+  return fromTorchTensor(c_);
+}
+
+lean_object* lean_torch_tensor_cross_entropy(lean_obj_arg s, b_lean_obj_arg a, b_lean_obj_arg b) {
   auto a_ = toTorchTensor(a);
   auto b_ = toTorchTensor(b);
-  auto c_ = torch::add(a_, b_);
+  auto c_ = torch::nn::functional::cross_entropy(a_, b_);
   a_.unsafeReleaseTensorImpl();
   b_.unsafeReleaseTensorImpl();
   return fromTorchTensor(c_);
 }
 
-lean_object* lean_torch_tensor_sub(lean_obj_arg s, b_lean_obj_arg a, b_lean_obj_arg b) {
-  auto a_ = toTorchTensor(a);
-  auto b_ = toTorchTensor(b);
-  auto c_ = torch::sub(a_, b_);
-  a_.unsafeReleaseTensorImpl();
-  b_.unsafeReleaseTensorImpl();
-  return fromTorchTensor(c_);
-}
 
 extern "C" lean_object *lean_torch_to_string(lean_object /* s */, b_lean_obj_arg t) {
   auto tensor = toTorchTensor(t);
@@ -119,4 +179,57 @@ extern "C" lean_object* lean_torch_tensor_print(lean_object /* s */, b_lean_obj_
   tensor.unsafeReleaseTensorImpl();
   return lean::io_result_mk_ok(lean_box(0));
 }
+
+lean_object* lean_torch_linear(
+  lean_obj_arg /*m*/,
+  lean_obj_arg /*n*/,
+  lean_obj_arg /*b*/,
+  b_lean_obj_arg x,
+  b_lean_obj_arg M
+) {
+  auto M_ = toTorchTensor(M);
+  auto x_ = toTorchTensor(x);
+  auto y_ = torch::linear(x_, M_);
+  M_.unsafeReleaseTensorImpl();
+  x_.unsafeReleaseTensorImpl();
+  return fromTorchTensor(y_);
+}
+
+lean_object* lean_torch_affine(
+  lean_obj_arg /*m*/,
+  lean_obj_arg /*n*/,
+  lean_obj_arg /*b*/,
+  b_lean_obj_arg x,
+  b_lean_obj_arg M, 
+  b_lean_obj_arg b
+) {
+  auto M_ = toTorchTensor(M);
+  auto b_ = toTorchTensor(b);
+  auto x_ = toTorchTensor(x);
+  auto y_ = torch::linear(x_, M_, b_);
+  M_.unsafeReleaseTensorImpl();
+  x_.unsafeReleaseTensorImpl();
+  b_.unsafeReleaseTensorImpl();
+  return fromTorchTensor(y_);
+}
+
+lean_object* lean_torch_conv2d(
+  lean_obj_arg /*b*/,
+  lean_obj_arg /*ic*/,
+  lean_obj_arg /*ih*/,
+  lean_obj_arg /*iw*/,
+  lean_obj_arg /*oc */,
+  lean_obj_arg /*kh */,
+  lean_obj_arg /*kw*/,
+  b_lean_obj_arg input,
+  b_lean_obj_arg weight
+) {
+  auto input_ = toTorchTensor(input);
+  auto weight_ = toTorchTensor(weight);
+  auto output_ = torch::conv2d(input_, weight_);
+  input_.unsafeReleaseTensorImpl();
+  weight_.unsafeReleaseTensorImpl();
+  return fromTorchTensor(output_);
+}
+
 }

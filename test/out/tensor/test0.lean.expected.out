@@ -1,0 +1,9 @@
+ 1  1  1
+ 1  1  1
+[ CPUFloatType{2,3} ]
+ 0  0  0
+ 0  0  0
+[ CPUFloatType{2,3} ]
+torch.T #[2, 3] : Type
+
+
