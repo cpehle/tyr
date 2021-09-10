@@ -161,6 +161,8 @@ UNOP_FUN(relu)
 UNOP_FUN(relu6)
 UNOP_FUN(rrelu)
 UNOP_FUN(selu)
+UNOP_FUN(sigmoid)
+UNOP_FUN(tanh)
 #undef UNOP_FUN
 
 lean_object* lean_torch_tensor_grad(lean_obj_arg /* s */, lean_obj_arg /* s' */, b_lean_obj_arg output, b_lean_obj_arg input, b_lean_obj_arg grad_output) {

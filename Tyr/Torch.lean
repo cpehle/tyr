@@ -5,7 +5,6 @@ namespace torch
 -- | Tensor Creation API
 -- arange: Returns a tensor with a sequence of integers,
 @[extern "lean_torch_arange"] constant arange (start : UInt64) (stop : UInt64) (step : UInt64 := 1) : T #[(stop - start)/step]
--- empty: Returns a tensor with uninitialized values,
 -- eye: Returns an identity matrix,
 -- full: Returns a tensor filled with a single value,
 -- linspace: Returns a tensor with values linearly spaced in some interval,
@@ -38,35 +37,6 @@ instance {shape : Shape} : Mul (T shape) where
 
 @[extern "lean_torch_get"] constant T.getOp {s : Shape} (self : @& T s) (idx : Int) : T (s[1:].toArray)
 @[extern "lean_torch_to"] constant T.to {s : Shape} (self : @& T s) (device : Device) : T s
-
-
-structure Conv2dOption where
-  in_channels : UInt64
-  out_channels : UInt64
-  kernel_size : UInt64 × UInt64
-  stride : UInt64 × UInt64 := (1,1)
-  padding : UInt64 × UInt64 := (0,0)
-  dilation : UInt64 × UInt64 := (1,1)
-  groups : UInt64 := 1
-  bias : Bool := true
-  deriving Repr
-
-def convOption : Conv2dOption := {
-  in_channels := 16, 
-  out_channels := 33,
-  kernel_size := (3,3)
-}
-
-def conv2dshape (copt:Conv2dOption) (s:Shape) : Shape :=
-  let (n, cIn, hin, win) := (s[0], s[1], s[2], s[3]);
-  let (px,py) := copt.padding;
-  let (sx,sy) := copt.stride;
-  let (dx,dy) := copt.dilation;
-  let (kx,ky) := copt.kernel_size;
-  let hout := (hin + 2 * px - dx * (kx-1) - 1)/sx + 1;
-  let wout := (win + 2 * py - dy * (ky-1) - 1)/sy + 1;
-  #[n, cIn, hout, wout]
-
 @[extern "lean_torch_linear"] constant linear {m n b : UInt64} (x : T #[b, m]) (M : T #[n,m]) : T #[b, n]
 @[extern "lean_torch_affine"] constant affine {m n b : UInt64} (x : T #[b, m]) (M : T #[n,m]) (bias : T #[n]) : T #[b, n]
 
@@ -76,7 +46,7 @@ def slicedShape (s : Array UInt64) (dim : Nat := 0)  (start : UInt64 := 0) (stop
   let d := (stop - start) / step;
   s' ++ #[d] ++ s''
 
-@[extern "lean_torch_slice "] constant T.slice {s : Shape} (self : @& T s) (dim : @& Nat := 0)  (start : UInt64 := 0) (stop : UInt64  := s[dim] ) (step : UInt64 := 1) 
+@[extern "lean_torch_slice "] constant T.slice {s : Shape} (self : @& T s) (dim : @& Nat := 0)  (start : UInt64 := 0) (stop : UInt64  := s[dim]-1 ) (step : UInt64 := 1) 
   (startPositive : start >= 0 := by simp)
   (dimInBounds : dim < s.size := by simp)
   (stopInBounds : stop <= s[dim] := by simp) : T (slicedShape s dim start stop step)
@@ -116,6 +86,9 @@ instance {n m : UInt64}: differentiable (@Affine n m) := ⟨@Affine n m, fun (a 
 end Affine
 
 
+def Affine.step {b n m : UInt64} (a : @torch.Affine n m) (input : torch.T #[b, m]) :  torch.T #[b, n] :=
+    @torch.affine b n m a.w a.b input
+
 structure LSTM {n m : UInt64} :=
     (w_i : @Affine n m)  
     (r_i : @Affine n n)
@@ -126,7 +99,6 @@ structure LSTM {n m : UInt64} :=
     (w_c : @Affine n m)
     (r_c : @Affine n n)
 
-namespace LSTM
 instance {n m : UInt64}: differentiable (@LSTM n m) := ⟨@LSTM n m, fun (a : LSTM) => ⟨
   differentiable.grad a.w_i, 
   differentiable.grad a.r_i, 
@@ -137,7 +109,8 @@ instance {n m : UInt64}: differentiable (@LSTM n m) := ⟨@LSTM n m, fun (a : LS
   differentiable.grad a.w_c, 
   differentiable.grad a.r_c⟩
 ⟩
-end LSTM
+
+
 
 
 -- def rjvp {a b : Type} [differentiable a] [differentiable b] (f : a → b) (x : a) : b × (differentiable.cotangent_space b → differentiable.cotangent_space a) :=
@@ -147,16 +120,6 @@ end LSTM
 
 
 namespace nn
-
-
-
-
-
--- torch::nn::functional::_interp_output_size
--- torch::nn::functional::_narrow_with_range
--- torch::nn::functional::_pad_circular
--- torch::nn::functional::_smooth_l1_loss
--- torch::nn::functional::_unpool_output_size
 -- torch::nn::functional::adaptive_avg_pool1d
 -- torch::nn::functional::adaptive_avg_pool2d
 -- torch::nn::functional::adaptive_avg_pool3d
@@ -254,6 +217,7 @@ namespace nn
 -- torch::nn::functional::rrelu
 -- torch::nn::functional::selu
 -- torch::nn::functional::silu
+@[extern "lean_torch_tensor_sigmoid"] constant sigmoid {s : Shape} (t : T s) : T s
 -- torch::nn::functional::smooth_l1_loss
 -- torch::nn::functional::soft_margin_loss
 -- torch::nn::functional::softmax
@@ -263,6 +227,7 @@ namespace nn
 -- torch::nn::functional::softshrink
 -- torch::nn::functional::softsign
 -- torch::nn::functional::tanhshrink
+@[extern "lean_torch_tensor_tanh"] constant tanh {s : Shape} (t : T s) : T s
 -- torch::nn::functional::threshold
 -- torch::nn::functional::triplet_margin_loss
 -- torch::nn::functional::triplet_margin_with_distance_loss
@@ -271,4 +236,23 @@ namespace nn
 
 end nn
 end torch
+
+
+
+def LSTM.step {b n m : UInt64} (tfm : @torch.LSTM n m) (x : torch.T #[b, m]) (h : torch.T #[b, m]) (c : torch.T #[b, m]) : torch.T #[b, n] × torch.T #[b, m] :=
+  let ix_t := tfm.w_i.step x;
+  let ih_t := tfm.r_i.step h;
+  let fx_t := tfm.w_f.step x;
+  let fh_t := tfm.r_f.step h;
+  let ox_t := tfm.w_o.step x;
+  let oh_t := tfm.r_o.step h;
+  let c'x_t := tfm.w_c.step x;
+  let c'c_t := tfm.r_c.step c;
+  let i_t := torch.nn.sigmoid (ix_t + ih_t);
+  let f_t := torch.nn.sigmoid (fx_t + fh_t);
+  let o_t := torch.nn.sigmoid (ox_t + fh_t);
+  let c'_t := torch.nn.tanh (c'x_t + c'c_t);
+  let c_t := f_t * c'_t + i_t * c'_t;
+  let h_t := oh_t * torch.nn.tanh c_t;
+  (h_t, c_t)
 

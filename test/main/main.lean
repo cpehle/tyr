@@ -1,5 +1,14 @@
 import Tyr
 
+
+structure MLP where
+  (fc1 : torch.T #[20,1])
+  (fc2 : torch.T #[10,2])
+
+instance : torch.differentiable MLP := ⟨ MLP, fun (m : MLP) => ⟨torch.differentiable.grad m.fc1, torch.differentiable.grad m.fc2⟩⟩
+
+
+
 def main : IO Unit := do
   let x <- torch.randn #[5,5]
   let y <- torch.rand #[5,5]
