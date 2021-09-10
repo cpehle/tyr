@@ -83,6 +83,11 @@ lean_object* lean_torch_zeros(lean_obj_arg s) {
   return fromTorchTensor(t);
 }
 
+lean_object* lean_torch_arange(int start, int stop, int step) {
+  auto t = torch::arange(start, stop, step);
+  return fromTorchTensor(t);
+}
+
 lean_object* lean_torch_get(lean_obj_arg /*s*/, b_lean_obj_arg self, int idx) {
   auto self_ = toTorchTensor(self);
   auto res = self_.index({idx});

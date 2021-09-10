@@ -25,6 +25,7 @@ instance (s : Shape) : Inhabited (T s) := {
 @[extern "lean_torch_tensor_print"] constant T.print {s : Shape} (t : @& T s) : IO Unit
 
 -- arange: Returns a tensor with a sequence of integers,
+@[extern "lean_torch_arange"] constant arange (start : UInt64) (stop : UInt64) (step : UInt64 := 1) : T #[(stop - start)/step]
 -- empty: Returns a tensor with uninitialized values,
 -- eye: Returns an identity matrix,
 -- full: Returns a tensor filled with a single value,
