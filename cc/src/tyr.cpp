@@ -1,14 +1,13 @@
 #include <iostream>
-#include <lean/io.h>
-#include <lean/object.h>
+#include <lean/lean.h>
 #include <torch/torch.h>
 #include <ATen/ATen.h>
 
 void trivialFinalize(void *p) { return; }
-void trivialForeach(void *p, lean::b_obj_arg a) { return; }
-static lean::external_object_class *getTrivialObjectClass() {
-  static lean::external_object_class *c(
-      lean::register_external_object_class(&trivialFinalize, &trivialForeach));
+void trivialForeach(void *p, b_lean_obj_arg a) { return; }
+static lean_external_class *getTrivialObjectClass() {
+  static lean_external_class *c(
+      lean_register_external_class(&trivialFinalize, &trivialForeach));
   return c;
 }
 template<typename T>
@@ -21,26 +20,26 @@ void decrefFinalize(void *p) {
 
 
 template<typename T>
-lean::external_object_class *registerDecRefClass() {
-  return lean::register_external_object_class(&decrefFinalize<T>, &trivialForeach);
+lean_external_class *registerDecRefClass() {
+  return lean_register_external_class(&decrefFinalize<T>, &trivialForeach);
 }
 
 template<typename T>
-lean::external_object_class *registerDeleteClass() {
-  return lean::register_external_object_class(&deleteFinalize<T>, &trivialForeach);
+lean_external_class *registerDeleteClass() {
+  return lean_register_external_class(&deleteFinalize<T>, &trivialForeach);
 }
 
 
 static
-lean::external_object_class* getTorchTensorImplClass() {
+lean_external_class* getTorchTensorImplClass() {
     // Use static thread to make this thread safe (hopefully).
-    static lean::external_object_class* c = registerDecRefClass<torch::TensorImpl>();
+    static lean_external_class* c = registerDecRefClass<torch::TensorImpl>();
     return c;
 }
 
-static inline torch::Tensor toTorchTensor(lean::b_obj_arg o) {
-    lean_assert(lean::external_class(o) == getTorchTensorImplClass());
-    auto impl = c10::intrusive_ptr<torch::TensorImpl>::reclaim(static_cast<torch::TensorImpl*>(lean::external_data(o)));
+static inline torch::Tensor toTorchTensor(b_lean_obj_arg o) {
+    // lean_assert(lean_external_class(o) == getTorchTensorImplClass());
+    auto impl = c10::intrusive_ptr<torch::TensorImpl>::reclaim(static_cast<torch::TensorImpl*>(lean_get_external_data(o)));
     return torch::Tensor(impl);
 }
 
@@ -53,8 +52,8 @@ extern "C" {
   
 std::vector<int64_t> getShape(lean_obj_arg s) {
   std::vector<int64_t> shape;  
-  for (size_t i = 0; i<lean::array_size(s); i++) {
-    shape.push_back(lean::unbox_uint64(lean::array_get(s, i)));
+  for (size_t i = 0; i<lean_array_size(s); i++) {
+    shape.push_back(lean_unbox_uint64(lean_array_get_core(s, i)));
   }
   return shape;
 }
@@ -72,11 +71,11 @@ lean_object* backward(lean_obj_arg /* shape */, b_lean_obj_arg output, b_lean_ob
 // tensor creation api
 lean_object* lean_torch_randn(lean_obj_arg s, int requires_grad) {
   auto t = torch::randn(getShape(s), torch::TensorOptions().requires_grad(requires_grad));
-  return lean::io_result_mk_ok(fromTorchTensor(t));
+  return lean_io_result_mk_ok(fromTorchTensor(t));
 }
 lean_object* lean_torch_rand(lean_obj_arg s, int requires_grad) {
   auto t = torch::rand(getShape(s), torch::TensorOptions().requires_grad(requires_grad));
-  return lean::io_result_mk_ok(fromTorchTensor(t));
+  return lean_io_result_mk_ok(fromTorchTensor(t));
 }
 
 lean_object* lean_torch_zeros(lean_obj_arg s, int requires_grad) {
@@ -223,14 +222,14 @@ extern "C" lean_object *lean_torch_to_string(lean_object /* s */, b_lean_obj_arg
   stream << tensor;
 
   tensor.unsafeReleaseTensorImpl();
-  return lean::mk_string(stream.str());
+  return lean_mk_string(stream.str().c_str());
 }
 
 extern "C" lean_object* lean_torch_tensor_print(lean_object /* s */, b_lean_obj_arg t) {
   auto tensor = toTorchTensor(t);
   std::cout << tensor << std::endl;
   tensor.unsafeReleaseTensorImpl();
-  return lean::io_result_mk_ok(lean_box(0));
+  return lean_io_result_mk_ok(lean_box(0));
 }
 
 lean_object* lean_torch_linear(
