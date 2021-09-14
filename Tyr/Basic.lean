@@ -1,6 +1,6 @@
 namespace torch
 
-def Shape := Array UInt64
+abbrev Shape := Array UInt64
 
 inductive DType where
 | UInt8
@@ -27,3 +27,8 @@ instance (s : Shape) : Inhabited (T s) := {
 
 instance {s : Shape} : ToString (T s) where
   toString t := t.toString
+
+constant T.shape {s : Shape} (t : T s) : Shape := s
+
+instance {S : Shape} : Repr (T s) where
+  reprPrec t _ := t.toString

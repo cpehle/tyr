@@ -7,12 +7,13 @@ namespace torch
 @[extern "lean_torch_arange"] constant arange (start : UInt64) (stop : UInt64) (step : UInt64 := 1) : T #[(stop - start)/step]
 -- eye: Returns an identity matrix,
 -- full: Returns a tensor filled with a single value,
+@[extern "lean_torch_full"] constant full (s : Shape) (value : Float) (requires_grad : Bool := false) : T s
 -- linspace: Returns a tensor with values linearly spaced in some interval,
 -- logspace: Returns a tensor with values logarithmically spaced in some interval,
--- ones: Returns a tensor filled with all ones,
-@[extern "lean_torch_ones"] constant ones (s : Shape) (requires_grad : Bool := false) : T s
 -- rand: Returns a tensor filled with values drawn from a uniform distribution on [0, 1).
 @[extern "lean_torch_rand"] constant rand (s : Shape) (requires_grad : Bool := false) : IO (T s)
+-- ones: Returns a tensor filled with all ones,
+@[extern "lean_torch_ones"] constant ones (s : Shape) (requires_grad : Bool := false) : T s
 -- randint: Returns a tensor with integers randomly drawn from an interval,
 -- zeros: Returns a tensor filled with all zeros
 @[extern "lean_torch_zeros"] constant zeros (s : Shape) (requires_grad : Bool := false) : T s
@@ -34,6 +35,13 @@ instance {shape : Shape} : Sub (T shape) where
   sub := sub
 instance {shape : Shape} : Mul (T shape) where
   mul := mul
+
+
+def uniform (s : Shape) (min : Float := 0.0) (max : Float := 1.0) : IO (T s) := do
+  let max := full s max;
+  let min := full s min;
+  let x ← rand s;
+  min + (max - min) * x
 
 @[extern "lean_torch_get"] constant T.getOp {s : Shape} (self : @& T s) (idx : Int) : T (s[1:].toArray)
 @[extern "lean_torch_to"] constant T.to {s : Shape} (self : @& T s) (device : Device) : T s
@@ -70,45 +78,6 @@ class differentiable (α : Type _) :=
 
 instance {s : Shape} : differentiable (torch.T s) := ⟨torch.T s, fun (t : (torch.T s)) => torch.autograd.grad_of t⟩
 
-structure Linear {n m : UInt64} :=
-    (w : T #[n, m])
-
-namespace Linear
-instance  {n m : UInt64} : differentiable (@Linear n m) := ⟨@Linear n m, fun (m : Linear) => ⟨differentiable.grad m.w⟩⟩
-end Linear
-
-structure Affine {n m : UInt64} :=
-    (w : T #[m, n])
-    (b : T #[n])
-
-namespace Affine
-instance {n m : UInt64}: differentiable (@Affine n m) := ⟨@Affine n m, fun (a : Affine) => ⟨differentiable.grad a.w, differentiable.grad a.b⟩⟩
-end Affine
-
-
-def Affine.step {b n m : UInt64} (a : @torch.Affine n m) (input : torch.T #[b, m]) :  torch.T #[b, n] :=
-    @torch.affine b n m a.w a.b input
-
-structure LSTM {n m : UInt64} :=
-    (w_i : @Affine n m)  
-    (r_i : @Affine n n)
-    (w_f : @Affine n m)
-    (r_f : @Affine n n)
-    (w_o : @Affine n m)
-    (r_o : @Affine n n)
-    (w_c : @Affine n m)
-    (r_c : @Affine n n)
-
-instance {n m : UInt64}: differentiable (@LSTM n m) := ⟨@LSTM n m, fun (a : LSTM) => ⟨
-  differentiable.grad a.w_i, 
-  differentiable.grad a.r_i, 
-  differentiable.grad a.w_f, 
-  differentiable.grad a.r_f, 
-  differentiable.grad a.w_o, 
-  differentiable.grad a.r_o, 
-  differentiable.grad a.w_c, 
-  differentiable.grad a.r_c⟩
-⟩
 
 
 
@@ -236,23 +205,4 @@ namespace nn
 
 end nn
 end torch
-
-
-
-def LSTM.step {b n m : UInt64} (tfm : @torch.LSTM n m) (x : torch.T #[b, m]) (h : torch.T #[b, m]) (c : torch.T #[b, m]) : torch.T #[b, n] × torch.T #[b, m] :=
-  let ix_t := tfm.w_i.step x;
-  let ih_t := tfm.r_i.step h;
-  let fx_t := tfm.w_f.step x;
-  let fh_t := tfm.r_f.step h;
-  let ox_t := tfm.w_o.step x;
-  let oh_t := tfm.r_o.step h;
-  let c'x_t := tfm.w_c.step x;
-  let c'c_t := tfm.r_c.step c;
-  let i_t := torch.nn.sigmoid (ix_t + ih_t);
-  let f_t := torch.nn.sigmoid (fx_t + fh_t);
-  let o_t := torch.nn.sigmoid (ox_t + fh_t);
-  let c'_t := torch.nn.tanh (c'x_t + c'c_t);
-  let c_t := f_t * c'_t + i_t * c'_t;
-  let h_t := oh_t * torch.nn.tanh c_t;
-  (h_t, c_t)
 

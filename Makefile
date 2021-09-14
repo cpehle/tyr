@@ -7,7 +7,7 @@ RMPATH := rm -rf
 LEANMAKEFILE := ${LEAN_HOME}/share/lean/lean.mk
 LEANMAKE := $(MAKE) -f $(LEANMAKEFILE)
 
-
+export LD_LIBRARY_PATH=$(PWD)/thirdparty/libtorch/lib
 LD_PRELOAD="$(PWD)/plugin/build/TyrPlugin.dll $(shell $(LEAN) --print-libdir)/libleanshared.so"
 
 all: plugin

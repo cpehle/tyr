@@ -78,6 +78,11 @@ lean_object* lean_torch_rand(lean_obj_arg s, int requires_grad) {
   return lean_io_result_mk_ok(fromTorchTensor(t));
 }
 
+lean_object* lean_torch_full(lean_obj_arg s, double value, int requires_grad) {
+  auto t = torch::full(getShape(s), value, torch::TensorOptions().requires_grad(requires_grad));
+  return fromTorchTensor(t);
+}
+
 lean_object* lean_torch_zeros(lean_obj_arg s, int requires_grad) {
   auto t = torch::zeros(getShape(s), torch::TensorOptions().requires_grad(requires_grad));
   return fromTorchTensor(t);
