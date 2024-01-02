@@ -1,0 +1,45 @@
+
+outpath = out
+libraries =
+librarypaths = 
+
+rule leano
+  command = LEAN_PATH=$outpath lean $in -o $out
+  description = compiling $in (.olean)
+
+rule leanc
+  command = LEAN_PATH=$outpath lean $in -c $out
+  description = compiling $in (.c)
+
+rule cobj
+  command = leanc -c $in -o $out -L out $librarypaths $libraries
+  description = compiling $in (.o)
+
+rule cexe
+  command = leanc $in -L out  $librarypaths $libraries -o $out 
+  description = linking $out
+
+rule ar
+  command = ar rcs $out $in
+  description = linking $out
+
+build out/Tyr/Basic.olean: leano ./Tyr/Basic.lean | 
+build out/c/Tyr/Basic.c: leanc ./Tyr/Basic.lean | 
+build out/o/Tyr/Basic.o: cobj out/c/Tyr/Basic.c
+build out/Tyr/Torch.olean: leano ./Tyr/Torch.lean |  out/Tyr/Basic.olean
+build out/c/Tyr/Torch.c: leanc ./Tyr/Torch.lean |  out/Tyr/Basic.olean
+build out/o/Tyr/Torch.o: cobj out/c/Tyr/Torch.c
+build out/Tyr.olean: leano ./Tyr.lean |  out/Tyr/Basic.olean out/Tyr/Torch.olean
+build out/c/Tyr.c: leanc ./Tyr.lean |  out/Tyr/Basic.olean out/Tyr/Torch.olean
+build out/o/Tyr.o: cobj out/c/Tyr.c
+build out/libTyr.a: ar  out/o/Tyr.o out/o/Tyr/Basic.o out/o/Tyr/Torch.o | 
+  libraries = 
+
+
+build out/Test.olean: leano ./Test.lean |  out/Tyr.olean
+build out/c/Test.c: leanc ./Test.lean |  out/Tyr.olean
+build out/o/Test.o: cobj out/c/Test.c
+build out/exe/test: cexe  out/o/Test.o |  out/libTyr.a
+  libraries =  -lTyr -ltorch -ltorch_cpu -lc10 -lTyrC
+  librarypaths = -L external/libtorch/lib -L cc/build/
+

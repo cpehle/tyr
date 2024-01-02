@@ -16,19 +16,18 @@ inductive Device where
 | CUDA : Nat → Device
 | CPU
 
-constant TSpec : PointedType
-def T (s : Shape) : Type :=  TSpec.type
-instance (s : Shape) : Inhabited (T s) := {
-  default := TSpec.val
-}
+opaque TSpec : NonemptyType
+def T (_ : Shape) : Type :=  TSpec.type
+instance (s : Shape) : Nonempty (T s) :=
+  TSpec.property
 
-@[extern "lean_torch_to_string"] constant T.toString {s : Shape} (t : @& T s) : String
-@[extern "lean_torch_tensor_print"] constant T.print {s : Shape} (t : @& T s) : IO Unit
+@[extern "lean_torch_to_string"] opaque T.toString {s : Shape} (t : @& T s) : String
+@[extern "lean_torch_tensor_print"] opaque T.print {s : Shape} (t : @& T s) : IO Unit
 
 instance {s : Shape} : ToString (T s) where
   toString t := t.toString
 
-constant T.shape {s : Shape} (t : T s) : Shape := s
+def T.shape {s : Shape} (t : T s) : Shape := s
 
 instance {S : Shape} : Repr (T s) where
   reprPrec t _ := t.toString

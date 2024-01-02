@@ -109,6 +109,22 @@ bool lean_torch_requires_grad(lean_obj_arg /* shape */, b_lean_obj_arg x) {
 
 //
 
+lean_object* lean_torch_reshape(lean_obj_arg /*s*/, b_lean_obj_arg self, b_lean_obj_arg shape) {
+  auto shape_ = getShape(shape);
+  auto self_ = toTorchTensor(self);
+  auto res = torch::reshape(self_, shape_);
+  self_.unsafeReleaseTensorImpl();
+  return fromTorchTensor(res);
+}
+
+lean_object* lean_torch_permute(lean_obj_arg /*s*/, b_lean_obj_arg self, b_lean_obj_arg permutation) {
+  auto permutation_ = getShape(permutation);
+  auto self_ = toTorchTensor(self);
+  auto res = torch::permute(self_, permutation_);
+  self_.unsafeReleaseTensorImpl();
+  return fromTorchTensor(res);
+}
+
 lean_object* lean_torch_get(lean_obj_arg /*s*/, b_lean_obj_arg self, int idx) {
   auto self_ = toTorchTensor(self);
   auto res = self_.index({idx});
@@ -195,6 +211,16 @@ lean_object* lean_torch_backward(lean_obj_arg /* shape */, b_lean_obj_arg output
   return output;
 }
 
+int lean_torch_allclose(lean_obj_arg /* shape */, b_lean_obj_arg a, b_lean_obj_arg b, double rtol, double atol) {
+  auto a_ = toTorchTensor(a);
+  auto b_ = toTorchTensor(b);
+  auto res_ = torch::allclose(a_, b_, rtol, atol);
+  a_.unsafeReleaseTensorImpl();
+  b_.unsafeReleaseTensorImpl();
+
+  return res_;
+}
+
 lean_object* lean_torch_grad_of(lean_obj_arg /* shape */, b_lean_obj_arg x) {
     auto out_ = toTorchTensor(x);
     auto grad_out_ = out_.grad();
@@ -221,7 +247,7 @@ lean_object* lean_torch_tensor_cross_entropy(lean_obj_arg s, b_lean_obj_arg a, b
 }
 
 
-extern "C" lean_object *lean_torch_to_string(lean_object /* s */, b_lean_obj_arg t) {
+lean_object *lean_torch_to_string(lean_object /* s */, b_lean_obj_arg t) {
   auto tensor = toTorchTensor(t);
   std::ostringstream stream;
   stream << tensor;
@@ -230,7 +256,7 @@ extern "C" lean_object *lean_torch_to_string(lean_object /* s */, b_lean_obj_arg
   return lean_mk_string(stream.str().c_str());
 }
 
-extern "C" lean_object* lean_torch_tensor_print(lean_object /* s */, b_lean_obj_arg t) {
+lean_object* lean_torch_tensor_print(lean_object /* s */, b_lean_obj_arg t) {
   auto tensor = toTorchTensor(t);
   std::cout << tensor << std::endl;
   tensor.unsafeReleaseTensorImpl();

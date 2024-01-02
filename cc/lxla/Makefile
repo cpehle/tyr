@@ -9,13 +9,10 @@ LEAN_INCLUDE := $(LEAN_HOME)/include
 
 # Detect LIBTORCH
 
-
-# TORCH FLAGS
-TORCHDIR=../external/libtorch
-TORCH_INC_FLAGS=-I$(TORCHDIR)/include -I$(TORCHDIR)/include/torch/csrc/api/include  -I$(TORCHDIR)/include/TH  -I$(TORCHDIR)/include/THC
-TORCH_LIBPATH=$(TORCHDIR)/lib/
-
-
+# XLA FLAGS
+XLADIR=../../external/xla_extension
+XLA_INC_FLAGS=-I$(XLADIR)/include
+XLA_LIBPATH=$(XLADIR)/lib/
 
 # Config
 
@@ -24,20 +21,22 @@ RMPATH := rm -rf
 
 AR := ar
 CXX := c++
-EXTRA_CXX_FLAGS := -fPIC -O3 -Wall -Wno-sign-compare \
-	 -Wno-unused-parameter -Wno-missing-field-initializers -Wno-comment -Winconsistent-missing-override
+EXTRA_CXX_FLAGS := -O3 -Wall -Wno-sign-compare \
+	 -Wno-unused-parameter -Wno-missing-field-initializers -Wno-comment \
+	 -w -DLLVM_ON_UNIX=1
 
 SRC_DIR := src
 HDR_DIR := include
 OUT_DIR := build
 
 HDRS := \
-	tyr.h\
+	lxla_client.h\
 
 SRCS := \
-	tyr.cpp\
+	lxla.cpp \
+	lxla_client.cpp\
 
-LIB_NAME := TyrC
+LIB_NAME := LXLA
 LIB := lib${LIB_NAME}.a
 
 OBJ_FILES := $(addprefix $(OUT_DIR)/,$(SRCS:.cpp=.o))
@@ -56,7 +55,7 @@ $(OUT_DIR)/$(LIB) : $(OBJ_FILES) | $(OUT_DIR)
 	${AR} rcs $@ $^
 
 $(OUT_DIR)/%.o : $(SRC_DIR)/%.cpp $(HDR_FILES) | $(OUT_DIR)
-	$(CXX) --std=c++17 -o $@ -c $< -I$(HDR_DIR) -I$(LEAN_INCLUDE) $(TORCH_INC_FLAGS) $(XLA_INC_FLAGS) $(EXTRA_CXX_FLAGS) -fPIC -rdynamic
+	$(CXX) --std=c++17 -o $@ -c $< -I$(HDR_DIR) -I$(LEAN_INCLUDE) $(XLA_INC_FLAGS) $(EXTRA_CXX_FLAGS) -fPIC -rdynamic
 
 clean:
 	$(RMPATH) $(OUT_DIR)

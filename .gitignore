@@ -1,6 +1,9 @@
-/thirdparty
+external/
 *.o
 *.a
 build/
 bak/
+out/
 *produced.out
+.ninja_log
+.DS_Store
