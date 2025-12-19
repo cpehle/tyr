@@ -30,16 +30,16 @@ def Config.gpt2_mini : Config :=
 def Config.gpt2_micro : Config :=
   { vocab_size := 50257, block_size := 128, n_embd := 128, n_head := 4, n_layer := 4 }
 
-/-- Tiny config for CPU training on Shakespeare (65 char vocab) -/
+/-- Tiny config for quick testing on Shakespeare (65 char vocab) -/
 def Config.tiny_shakespeare : Config :=
-  { vocab_size := 65, block_size := 64, n_embd := 64, n_head := 4, n_layer := 2 }
+  { vocab_size := 65, block_size := 64, n_embd := 64, n_head := 4, n_layer := 2, dropout := 0.0 }
 
-/-- Medium config for Shakespeare (scaled down nanoGPT with dropout) -/
-def Config.medium_shakespeare : Config :=
-  { vocab_size := 65, block_size := 128, n_embd := 192, n_head := 6, n_layer := 6, dropout := 0.2 }
+/-- nanoGPT CPU config for Shakespeare: 4 layers, 4 heads, 128 embd, no dropout -/
+def Config.nanogpt_cpu_shakespeare : Config :=
+  { vocab_size := 65, block_size := 64, n_embd := 128, n_head := 4, n_layer := 4, dropout := 0.0 }
 
-/-- Small config for Shakespeare (nanoGPT settings - requires GPU) -/
-def Config.small_shakespeare : Config :=
+/-- nanoGPT GPU config for Shakespeare: 6 layers, 6 heads, 384 embd, dropout 0.2 -/
+def Config.nanogpt_gpu_shakespeare : Config :=
   { vocab_size := 65, block_size := 256, n_embd := 384, n_head := 6, n_layer := 6, dropout := 0.2 }
 
 /-- Parameters for a single transformer block -/

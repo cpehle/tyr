@@ -25,15 +25,15 @@ namespace torch
 
 instance (shape : Shape) : Inhabited (T shape) := ⟨zeros shape⟩
 
-@[extern "lean_torch_tensor_add"] opaque add {s : Shape} (t t' : T s) : T s
-@[extern "lean_torch_tensor_sub"] opaque sub {s : Shape} (t t' : T s) : T s
-@[extern "lean_torch_tensor_mul"] opaque mul {s : Shape} (t t' : T s) : T s
+@[extern "lean_torch_tensor_add"] opaque add {s : Shape} (t t' : @& T s) : T s
+@[extern "lean_torch_tensor_sub"] opaque sub {s : Shape} (t t' : @& T s) : T s
+@[extern "lean_torch_tensor_mul"] opaque mul {s : Shape} (t t' : @& T s) : T s
 
 -- Scalar-tensor operations
-@[extern "lean_torch_mul_scalar"] opaque mul_scalar {s : Shape} (t : T s) (scalar : Float) : T s
-@[extern "lean_torch_div_scalar"] opaque div_scalar {s : Shape} (t : T s) (scalar : Float) : T s
-@[extern "lean_torch_add_scalar"] opaque add_scalar {s : Shape} (t : T s) (scalar : Float) : T s
-@[extern "lean_torch_sub_scalar"] opaque sub_scalar {s : Shape} (t : T s) (scalar : Float) : T s
+@[extern "lean_torch_mul_scalar"] opaque mul_scalar {s : Shape} (t : @& T s) (scalar : Float) : T s
+@[extern "lean_torch_div_scalar"] opaque div_scalar {s : Shape} (t : @& T s) (scalar : Float) : T s
+@[extern "lean_torch_add_scalar"] opaque add_scalar {s : Shape} (t : @& T s) (scalar : Float) : T s
+@[extern "lean_torch_sub_scalar"] opaque sub_scalar {s : Shape} (t : @& T s) (scalar : Float) : T s
 
 instance {shape : Shape} : Add (T shape) where
   add := add
@@ -59,98 +59,113 @@ def uniform (s : Shape) (min : Float := 0.0) (max : Float := 1.0) : IO (T s) := 
 
 @[extern "lean_torch_get"] opaque T.getOp {s : Shape} (self : @& T s) (idx : Int) : T (s[1:].toArray)
 @[extern "lean_torch_to"] opaque T.to {s : Shape} (self : @& T s) (device : Device) : T s
-@[extern "lean_torch_linear"] opaque linear {m n b : UInt64} (x : T #[b, m]) (M : T #[n,m]) : T #[b, n]
-@[extern "lean_torch_affine"] opaque affine {m n b : UInt64} (x : T #[b, m]) (M : T #[n,m]) (bias : T #[n]) : T #[b, n]
+@[extern "lean_torch_linear"] opaque linear {m n b : UInt64} (x : @& T #[b, m]) (M : @& T #[n,m]) : T #[b, n]
+@[extern "lean_torch_affine"] opaque affine {m n b : UInt64} (x : @& T #[b, m]) (M : @& T #[n,m]) (bias : @& T #[n]) : T #[b, n]
 
 /-- Linear projection for 3D input: [batch, seq, in] @ [out, in]^T -> [batch, seq, out] -/
 @[extern "lean_torch_linear3d"]
 opaque linear3d {batch seq in_dim out_dim : UInt64}
-    (x : T #[batch, seq, in_dim]) (weight : T #[out_dim, in_dim]) : T #[batch, seq, out_dim]
+    (x : @& T #[batch, seq, in_dim]) (weight : @& T #[out_dim, in_dim]) : T #[batch, seq, out_dim]
 
 /-- Affine (linear + bias) for 3D input -/
 @[extern "lean_torch_affine3d"]
 opaque affine3d {batch seq in_dim out_dim : UInt64}
-    (x : T #[batch, seq, in_dim]) (weight : T #[out_dim, in_dim]) (bias : T #[out_dim])
+    (x : @& T #[batch, seq, in_dim]) (weight : @& T #[out_dim, in_dim]) (bias : @& T #[out_dim])
     : T #[batch, seq, out_dim]
 
-def slicedShape (s : Array UInt64) (dim : Nat := 0)  (start : UInt64 := 0) (stop : UInt64  := s[dim]!) (step : UInt64 := 1) : Array UInt64 :=
-  let s' := s[:dim].toArray;
-  let s'' := s[dim+1:].toArray;
-  let d := (stop - start) / step;
-  s' ++ #[d] ++ s''
+/-- Compute output shape for slicing along a dimension -/
+def slicedShape (s : Shape) (dim : Nat) (start : UInt64) (stop : UInt64) (step : UInt64 := 1) : Shape :=
+  if dim < s.size then
+    let s' := s[:dim].toArray
+    let s'' := s[dim+1:].toArray
+    let d := (stop - start) / step
+    s' ++ #[d] ++ s''
+  else s
 
 def convOutputSize (input_size kernel_size : UInt64) (stride : UInt64 := 1) (padding : UInt64 := 0) (dilation : UInt64 := 1) : UInt64 :=
   (input_size + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1
 
-def conv1dShape (input_shape : Array UInt64) (weight_shape : Array UInt64) (stride : UInt64 := 1) (padding : UInt64 := 0) (dilation : UInt64 := 1) : Array UInt64 :=
-  let batch := input_shape[0]!
-  let out_channels := weight_shape[0]!
-  let input_length := input_shape[2]!
-  let kernel_size := weight_shape[2]!
+/-- Compute output shape for 1D convolution (safe version) -/
+def conv1dShape (input_shape weight_shape : Shape) (stride padding dilation : UInt64) : Shape :=
+  let batch := input_shape.getD 0 0
+  let out_channels := weight_shape.getD 0 0
+  let input_length := input_shape.getD 2 0
+  let kernel_size := weight_shape.getD 2 0
   let output_length := convOutputSize input_length kernel_size stride padding dilation
   #[batch, out_channels, output_length]
 
-def conv2dShape (input_shape : Array UInt64) (weight_shape : Array UInt64) (stride : Array UInt64 := #[1, 1]) (padding : Array UInt64 := #[0, 0]) (dilation : Array UInt64 := #[1, 1]) : Array UInt64 :=
-  let batch := input_shape[0]!
-  let out_channels := weight_shape[0]!
-  let input_height := input_shape[2]!
-  let input_width := input_shape[3]!
-  let kernel_height := weight_shape[2]!
-  let kernel_width := weight_shape[3]!
-  let output_height := convOutputSize input_height kernel_height stride[0]! padding[0]! dilation[0]!
-  let output_width := convOutputSize input_width kernel_width stride[1]! padding[1]! dilation[1]!
+/-- Compute output shape for 2D convolution (safe version) -/
+def conv2dShape (input_shape weight_shape : Shape) (stride padding dilation : Shape) : Shape :=
+  let batch := input_shape.getD 0 0
+  let out_channels := weight_shape.getD 0 0
+  let input_height := input_shape.getD 2 0
+  let input_width := input_shape.getD 3 0
+  let kernel_height := weight_shape.getD 2 0
+  let kernel_width := weight_shape.getD 3 0
+  let output_height := convOutputSize input_height kernel_height (stride.getD 0 1) (padding.getD 0 0) (dilation.getD 0 1)
+  let output_width := convOutputSize input_width kernel_width (stride.getD 1 1) (padding.getD 1 0) (dilation.getD 1 1)
   #[batch, out_channels, output_height, output_width]
 
-def conv3dShape (input_shape : Array UInt64) (weight_shape : Array UInt64) (stride : Array UInt64 := #[1, 1, 1]) (padding : Array UInt64 := #[0, 0, 0]) (dilation : Array UInt64 := #[1, 1, 1]) : Array UInt64 :=
-  let batch := input_shape[0]!
-  let out_channels := weight_shape[0]!
-  let input_depth := input_shape[2]!
-  let input_height := input_shape[3]!
-  let input_width := input_shape[4]!
-  let kernel_depth := weight_shape[2]!
-  let kernel_height := weight_shape[3]!
-  let kernel_width := weight_shape[4]!
-  let output_depth := convOutputSize input_depth kernel_depth stride[0]! padding[0]! dilation[0]!
-  let output_height := convOutputSize input_height kernel_height stride[1]! padding[1]! dilation[1]!
-  let output_width := convOutputSize input_width kernel_width stride[2]! padding[2]! dilation[2]!
+/-- Compute output shape for 3D convolution (safe version) -/
+def conv3dShape (input_shape weight_shape : Shape) (stride padding dilation : Shape) : Shape :=
+  let batch := input_shape.getD 0 0
+  let out_channels := weight_shape.getD 0 0
+  let input_depth := input_shape.getD 2 0
+  let input_height := input_shape.getD 3 0
+  let input_width := input_shape.getD 4 0
+  let kernel_depth := weight_shape.getD 2 0
+  let kernel_height := weight_shape.getD 3 0
+  let kernel_width := weight_shape.getD 4 0
+  let output_depth := convOutputSize input_depth kernel_depth (stride.getD 0 1) (padding.getD 0 0) (dilation.getD 0 1)
+  let output_height := convOutputSize input_height kernel_height (stride.getD 1 1) (padding.getD 1 0) (dilation.getD 1 1)
+  let output_width := convOutputSize input_width kernel_width (stride.getD 2 1) (padding.getD 2 0) (dilation.getD 2 1)
   #[batch, out_channels, output_depth, output_height, output_width]
 
 def poolOutputSize (input_size kernel_size : UInt64) (stride : UInt64 := 0) (padding : UInt64 := 0) : UInt64 :=
   let effective_stride := if stride = 0 then kernel_size else stride
   (input_size + 2 * padding - kernel_size) / effective_stride + 1
 
-def pool2dShape (input_shape : Array UInt64) (kernel_size : Array UInt64) (stride : Array UInt64 := #[]) (padding : Array UInt64 := #[0, 0]) : Array UInt64 :=
-  let batch := input_shape[0]!
-  let channels := input_shape[1]!
-  let input_height := input_shape[2]!
-  let input_width := input_shape[3]!
+/-- Compute output shape for 2D pooling (safe version) -/
+def pool2dShape (input_shape kernel_size : Shape) (stride padding : Shape) : Shape :=
+  let batch := input_shape.getD 0 0
+  let channels := input_shape.getD 1 0
+  let input_height := input_shape.getD 2 0
+  let input_width := input_shape.getD 3 0
   let effective_stride := if stride.size = 0 then kernel_size else stride
-  let output_height := poolOutputSize input_height kernel_size[0]! effective_stride[0]! padding[0]!
-  let output_width := poolOutputSize input_width kernel_size[1]! effective_stride[1]! padding[1]!
+  let output_height := poolOutputSize input_height (kernel_size.getD 0 0) (effective_stride.getD 0 0) (padding.getD 0 0)
+  let output_width := poolOutputSize input_width (kernel_size.getD 1 0) (effective_stride.getD 1 0) (padding.getD 1 0)
   #[batch, channels, output_height, output_width]
 
-@[extern "lean_torch_slice"] opaque T.slice {s : Shape} (self : @& T s) (dim : Nat := 0) (start : Int := 0) (stop : Int := -1) (step : Int := 1) : T s
+@[extern "lean_torch_slice"] opaque T.slice {s : Shape} (self : @& T s) (dim : Nat := 0) (start : Int64 := 0) (stop : Int64 := -1) (step : Int64 := 1) : T s
 --
 --
 namespace autograd
 
-@[extern "lean_torch_tensor_grad"] opaque grad {sx sy : Shape} (y : (T sy)) (x : (T sx)) (dy : (T sy)) : (T sx)
+@[extern "lean_torch_tensor_grad"] opaque grad {sx sy : Shape} (y : (@& T sy)) (x : (@& T sx)) (dy : (@& T sy)) : (T sx)
 
 def pullback {sx sy : Shape} (f : T sx → T sy) (x : T sx) (dy : T sy) : T sx :=
     grad (f x) x dy
 
-@[extern "lean_torch_grad_of"] opaque grad_of {s : Shape} (x : T s) : T s
-@[extern "lean_torch_zero_grad"] opaque zero_grad {s : Shape} (x : T s) : T s
-@[extern "lean_torch_set_requires_grad"] opaque set_requires_grad {s : Shape} (x : T s) (requires_grad : Bool) : T s
-@[extern "lean_torch_detach"] opaque detach {s : Shape} (x : T s) : T s
-@[extern "lean_torch_clone"] opaque clone {s : Shape} (x : T s) : T s
-@[extern "lean_torch_retain_grad"] opaque retain_grad {s : Shape} (x : T s) : T s
+@[extern "lean_torch_grad_of"] opaque grad_of {s : Shape} (x : @& T s) : T s
+@[extern "lean_torch_zero_grad"] opaque zero_grad {s : Shape} (x : @& T s) : T s
+@[extern "lean_torch_set_requires_grad"] opaque set_requires_grad {s : Shape} (x : @& T s) (requires_grad : Bool) : T s
+@[extern "lean_torch_detach"] opaque detach {s : Shape} (x : @& T s) : T s
+@[extern "lean_torch_clone"] opaque clone {s : Shape} (x : @& T s) : T s
+@[extern "lean_torch_retain_grad"] opaque retain_grad {s : Shape} (x : @& T s) : T s
 @[extern "lean_torch_is_leaf"] opaque is_leaf {s : Shape} (x : @& T s) : Bool
 @[extern "lean_torch_has_grad_fn"] opaque has_grad_fn {s : Shape} (x : @& T s) : Bool
-@[extern "lean_torch_accumulate_grad"] opaque accumulate_grad {s : Shape} (x : T s) (grad : T s) : T s
-@[extern "lean_torch_set_grad"] opaque set_grad {s : Shape} (x : T s) (grad : T s) : T s
+@[extern "lean_torch_accumulate_grad"] opaque accumulate_grad {s : Shape} (x : @& T s) (grad : @& T s) : T s
+@[extern "lean_torch_set_grad"] opaque set_grad {s : Shape} (x : @& T s) (grad : @& T s) : T s
 @[extern "lean_torch_set_grad_enabled"] opaque set_grad_enabled (enabled : Bool) : Unit
-@[extern "lean_torch_grad_grad"] opaque grad_grad {sx sy sz : Shape} (y : T sy) (x : T sx) (grad_x : T sx) : T sz
+@[extern "lean_torch_grad_grad"] opaque grad_grad {sx sy sz : Shape} (y : @& T sy) (x : @& T sx) (grad_x : @& T sx) : T sz
+
+/-- Run an IO action with gradient computation disabled.
+    This prevents building computation graphs for validation/inference. -/
+def no_grad {α : Type} (action : IO α) : IO α := do
+  let _ := set_grad_enabled false
+  let result ← action
+  let _ := set_grad_enabled true
+  return result
 
 end autograd
 --
@@ -175,25 +190,21 @@ end autograd
 
 --
 
-def permuteShape (s : Array UInt64) (permutation : Array UInt64) : Array UInt64 := Id.run do
-  let mut res := #[]
+/-- Compute output shape for permute operation (safe version) -/
+def permuteShape (s : Shape) (permutation : Array UInt64) : Shape :=
+  permutation.map fun p => s.getD p.toNat 0
 
-  for p in permutation do
-    res := res.push s[p.toUSize]!
-
-  return res
-
-@[extern "lean_torch_permute"] opaque permute {s : Shape} (t : T s) (permutation : Array UInt64) : T (permuteShape s permutation)
-@[extern "lean_torch_reshape"] opaque reshape {s : Shape} (t : T s) (s' : Shape) : T s'
-@[extern "lean_torch_permute"] opaque T.permute {s : Shape} (self : T s) (permutation : Array UInt64) : T (permuteShape s permutation)
-@[extern "lean_torch_reshape"] opaque T.reshape {s : Shape} (self : T s) (s' : Shape) : T s'
+@[extern "lean_torch_permute"] opaque permute {s : Shape} (t : @& T s) (permutation : Array UInt64) : T (permuteShape s permutation)
+@[extern "lean_torch_reshape"] opaque reshape {s : Shape} (t : @& T s) (s' : Shape) : T s'
+@[extern "lean_torch_permute"] opaque T.permute {s : Shape} (self : @& T s) (permutation : Array UInt64) : T (permuteShape s permutation)
+@[extern "lean_torch_reshape"] opaque T.reshape {s : Shape} (self : @& T s) (s' : Shape) : T s'
 
 -- comparison
-@[extern "lean_torch_allclose"] opaque allclose {s : Shape} (a b : T s) (rtol : Float := 1e-05) (atol : Float := 1e-08): Bool
+@[extern "lean_torch_allclose"] opaque allclose {s : Shape} (a b : @& T s) (rtol : Float := 1e-05) (atol : Float := 1e-08): Bool
 
 namespace nn
 -- torch::nn::functional::adaptive_avg_pool1d
-@[extern "lean_torch_adaptive_avg_pool2d"] opaque adaptive_avg_pool2d {input_shape : Shape} (input : T input_shape) (output_size : Array UInt64) : T (#[input_shape[0]!, input_shape[1]!] ++ output_size)
+@[extern "lean_torch_adaptive_avg_pool2d"] opaque adaptive_avg_pool2d {input_shape : Shape} (input : @& T input_shape) (output_size : Array UInt64) : T (#[input_shape.getD 0 0, input_shape.getD 1 0] ++ output_size)
 -- torch::nn::functional::adaptive_avg_pool3d
 -- torch::nn::functional::adaptive_max_pool1d
 -- torch::nn::functional::adaptive_max_pool2d
@@ -203,38 +214,38 @@ namespace nn
 -- torch::nn::functional::affine_grid
 -- torch::nn::functional::alpha_dropout
 -- torch::nn::functional::avg_pool1d
-@[extern "lean_torch_avg_pool2d"] opaque avg_pool2d {input_shape : Shape} (input : T input_shape) (kernel_size : Array UInt64) (stride : Array UInt64 := #[]) (padding : Array UInt64 := #[0, 0]) : T (pool2dShape input_shape kernel_size stride padding)
+@[extern "lean_torch_avg_pool2d"] opaque avg_pool2d {input_shape : Shape} (input : @& T input_shape) (kernel_size : Array UInt64) (stride : Array UInt64 := #[]) (padding : Array UInt64 := #[0, 0]) : T (pool2dShape input_shape kernel_size stride padding)
 -- torch::nn::functional::avg_pool3d
-@[extern "lean_torch_batch_norm"] opaque batch_norm {s : Shape} (input : T s) (weight : Option (T s)) (bias : Option (T s)) (running_mean : Option (T s)) (running_var : Option (T s)) (training : Bool := true) (momentum : Float := 0.1) (eps : Float := 1e-5) : T s
+@[extern "lean_torch_batch_norm"] opaque batch_norm {s : Shape} (input : @& T s) (weight : Option (T s)) (bias : Option (T s)) (running_mean : Option (T s)) (running_var : Option (T s)) (training : Bool := true) (momentum : Float := 0.1) (eps : Float := 1e-5) : T s
 -- torch::nn::functional::bilinear
-@[extern "lean_torch_binary_cross_entropy"] opaque binary_cross_entropy {s : Shape} (input : T s) (target : T s) (weight : Option (T s) := none) (reduction : String := "mean") : T #[]
+@[extern "lean_torch_binary_cross_entropy"] opaque binary_cross_entropy {s : Shape} (input : @& T s) (target : @& T s) (weight : Option (T s) := none) (reduction : String := "mean") : T #[]
 -- torch::nn::functional::binary_cross_entropy_with_logits
 -- torch::nn::functional::celu
-@[extern "lean_torch_conv1d"] opaque conv1d {input_shape weight_shape : Shape} (input : T input_shape) (weight : T weight_shape) (stride : UInt64 := 1) (padding : UInt64 := 0) (dilation : UInt64 := 1) : T (conv1dShape input_shape weight_shape stride padding dilation)
+@[extern "lean_torch_conv1d"] opaque conv1d {input_shape weight_shape : Shape} (input : @& T input_shape) (weight : @& T weight_shape) (stride : UInt64 := 1) (padding : UInt64 := 0) (dilation : UInt64 := 1) : T (conv1dShape input_shape weight_shape stride padding dilation)
 -- torch::nn::functional::conv2d
-@[extern "lean_torch_conv2d"] opaque conv2d {input_shape weight_shape : Shape} (input : T input_shape) (weight : T weight_shape) (stride : Array UInt64 := #[1, 1]) (padding : Array UInt64 := #[0, 0]) (dilation : Array UInt64 := #[1, 1]) : T (conv2dShape input_shape weight_shape stride padding dilation)
-@[extern "lean_torch_conv3d"] opaque conv3d {input_shape weight_shape : Shape} (input : T input_shape) (weight : T weight_shape) (stride : Array UInt64 := #[1, 1, 1]) (padding : Array UInt64 := #[0, 0, 0]) (dilation : Array UInt64 := #[1, 1, 1]) : T (conv3dShape input_shape weight_shape stride padding dilation)
+@[extern "lean_torch_conv2d"] opaque conv2d {input_shape weight_shape : Shape} (input : @& T input_shape) (weight : @& T weight_shape) (stride : Array UInt64 := #[1, 1]) (padding : Array UInt64 := #[0, 0]) (dilation : Array UInt64 := #[1, 1]) : T (conv2dShape input_shape weight_shape stride padding dilation)
+@[extern "lean_torch_conv3d"] opaque conv3d {input_shape weight_shape : Shape} (input : @& T input_shape) (weight : @& T weight_shape) (stride : Array UInt64 := #[1, 1, 1]) (padding : Array UInt64 := #[0, 0, 0]) (dilation : Array UInt64 := #[1, 1, 1]) : T (conv3dShape input_shape weight_shape stride padding dilation)
 -- torch::nn::functional::conv_transpose1d
 -- torch::nn::functional::conv_transpose2d
 -- torch::nn::functional::conv_transpose3d
 -- torch::nn::functional::cosine_embedding_loss
 -- torch::nn::functional::cosine_similarity
 -- torch::nn::functional::cross_entropy
-@[extern "lean_torch_tensor_cross_entropy"] opaque cross_entropy' {s : Shape} (t t' : T s) : T s
+@[extern "lean_torch_tensor_cross_entropy"] opaque cross_entropy' {s : Shape} (t t' : @& T s) : T s
 
 /-- Shape-aware cross entropy: logits [N, C] + targets [N] -> scalar loss -/
 @[extern "lean_torch_cross_entropy_2d"]
-opaque cross_entropy {n c : UInt64} (logits : T #[n, c]) (targets : T #[n]) : T #[]
+opaque cross_entropy {n c : UInt64} (logits : @& T #[n, c]) (targets : @& T #[n]) : T #[]
 -- torch::nn::functional::ctc_loss
-@[extern "lean_torch_dropout"] opaque dropout {s : Shape} (input : T s) (p : Float := 0.5) (training : Bool := true) : IO (T s)
+@[extern "lean_torch_dropout"] opaque dropout {s : Shape} (input : @& T s) (p : Float := 0.5) (training : Bool := true) : IO (T s)
 -- torch::nn::functional::dropout2d
 -- torch::nn::functional::dropout3d
 -- torch::nn::functional::elu
-@[extern "lean_torch_tensor_elu"] opaque elu {s : Shape} (t : T s) : T s
+@[extern "lean_torch_tensor_elu"] opaque elu {s : Shape} (t : @& T s) : T s
 /-- Embedding lookup: input [batch, seq] + weight [vocab, embed] -> [batch, seq, embed] -/
 @[extern "lean_torch_embedding"]
 opaque embedding {batch seq vocab embed : UInt64}
-    (input : T #[batch, seq]) (weight : T #[vocab, embed])
+    (input : @& T #[batch, seq]) (weight : @& T #[vocab, embed])
     (padding_idx : Option Int := none) (max_norm : Option Float := none)
     (norm_type : Float := 2.0) (scale_grad_by_freq : Bool := false)
     (sparse : Bool := false) : T #[batch, seq, embed]
@@ -242,7 +253,7 @@ opaque embedding {batch seq vocab embed : UInt64}
 /-- Embedding lookup for 1D input: input [seq] + weight [vocab, embed] -> [seq, embed] -/
 @[extern "lean_torch_embedding_1d"]
 opaque embedding1d {seq vocab embed : UInt64}
-    (input : T #[seq]) (weight : T #[vocab, embed])
+    (input : @& T #[seq]) (weight : @& T #[vocab, embed])
     (padding_idx : Option Int := none) (max_norm : Option Float := none)
     (norm_type : Float := 2.0) (scale_grad_by_freq : Bool := false)
     (sparse : Bool := false) : T #[seq, embed]
@@ -254,39 +265,39 @@ opaque embedding1d {seq vocab embed : UInt64}
 -- torch::nn::functional::fractional_max_pool3d
 -- torch::nn::functional::fractional_max_pool3d_with_indices
 -- torch::nn::functional::gelu
-@[extern "lean_torch_tensor_gelu"] opaque gelu {s : Shape} (t : T s) : T s
+@[extern "lean_torch_tensor_gelu"] opaque gelu {s : Shape} (t : @& T s) : T s
 -- torch::nn::functional::glu
 -- torch::nn::functional::grid_sample
-@[extern "lean_torch_group_norm"] opaque group_norm {s : Shape} (input : T s) (num_groups : UInt64) (weight : Option (T s) := none) (bias : Option (T s) := none) (eps : Float := 1e-5) : T s
+@[extern "lean_torch_group_norm"] opaque group_norm {s : Shape} (input : @& T s) (num_groups : UInt64) (weight : Option (T s) := none) (bias : Option (T s) := none) (eps : Float := 1e-5) : T s
 -- torch::nn::functional::gumbel_softmax
 -- torch::nn::functional::hardshrink
 -- torch::nn::functional::hardtanh
 -- torch::nn::functional::hinge_embedding_loss
 -- torch::nn::functional::huber_loss
-@[extern "lean_torch_instance_norm"] opaque instance_norm {s : Shape} (input : T s) (running_mean : Option (T s) := none) (running_var : Option (T s) := none) (weight : Option (T s) := none) (bias : Option (T s) := none) (use_input_stats : Bool := true) (momentum : Float := 0.1) (eps : Float := 1e-5) : T s
+@[extern "lean_torch_instance_norm"] opaque instance_norm {s : Shape} (input : @& T s) (running_mean : Option (T s) := none) (running_var : Option (T s) := none) (weight : Option (T s) := none) (bias : Option (T s) := none) (use_input_stats : Bool := true) (momentum : Float := 0.1) (eps : Float := 1e-5) : T s
 -- torch::nn::functional::interpolate
 -- torch::nn::functional::kl_div
-@[extern "lean_torch_l1_loss"] opaque l1_loss {s : Shape} (input : T s) (target : T s) (reduction : String := "mean") : T #[]
-@[extern "lean_torch_layer_norm"] opaque layer_norm' {s : Shape} (input : T s) (normalized_shape : Array UInt64) (weight : Option (T s) := none) (bias : Option (T s) := none) (eps : Float := 1e-5) : T s
+@[extern "lean_torch_l1_loss"] opaque l1_loss {s : Shape} (input : @& T s) (target : @& T s) (reduction : String := "mean") : T #[]
+@[extern "lean_torch_layer_norm"] opaque layer_norm' {s : Shape} (input : @& T s) (normalized_shape : Array UInt64) (weight : Option (T s) := none) (bias : Option (T s) := none) (eps : Float := 1e-5) : T s
 
 /-- Shape-aware layer norm for 3D tensors: normalizes over last dimension -/
 @[extern "lean_torch_layer_norm_3d"]
 opaque layer_norm {batch seq n : UInt64}
-    (input : T #[batch, seq, n])
-    (weight : T #[n])
-    (bias : T #[n])
+    (input : @& T #[batch, seq, n])
+    (weight : @& T #[n])
+    (bias : @& T #[n])
     (eps : Float := 1e-5) : T #[batch, seq, n]
-@[extern "lean_torch_leaky_relu"] opaque leaky_relu {s : Shape} (input : T s) (negative_slope : Float := 0.01) : T s
+@[extern "lean_torch_leaky_relu"] opaque leaky_relu {s : Shape} (input : @& T s) (negative_slope : Float := 0.01) : T s
 -- torch::nn::functional::linear
 -- torch::nn::functional::local_response_norm
-@[extern "lean_torch_log_softmax"] opaque log_softmax {s : Shape} (input : T s) (dim : Int := -1) : T s
+@[extern "lean_torch_log_softmax"] opaque log_softmax {s : Shape} (input : @& T s) (dim : Int := -1) : T s
 -- torch::nn::functional::logsigmoid
 -- torch::nn::functional::lp_pool1d
 -- torch::nn::functional::lp_pool2d
 -- torch::nn::functional::margin_ranking_loss
 -- torch::nn::functional::max_pool1d
 -- torch::nn::functional::max_pool1d_with_indices
-@[extern "lean_torch_max_pool2d"] opaque max_pool2d {input_shape : Shape} (input : T input_shape) (kernel_size : Array UInt64) (stride : Array UInt64 := #[]) (padding : Array UInt64 := #[0, 0]) : T (pool2dShape input_shape kernel_size stride padding)
+@[extern "lean_torch_max_pool2d"] opaque max_pool2d {input_shape : Shape} (input : @& T input_shape) (kernel_size : Array UInt64) (stride : Array UInt64 := #[]) (padding : Array UInt64 := #[0, 0]) : T (pool2dShape input_shape kernel_size stride padding)
 -- torch::nn::functional::max_pool2d_with_indices
 -- torch::nn::functional::max_pool3d
 -- torch::nn::functional::max_pool3d_with_indices
@@ -294,7 +305,7 @@ opaque layer_norm {batch seq n : UInt64}
 -- torch::nn::functional::max_unpool2d
 -- torch::nn::functional::max_unpool3d
 -- torch::nn::functional::mish
-@[extern "lean_torch_mse_loss"] opaque mse_loss {s : Shape} (input : T s) (target : T s) (reduction : String := "mean") : T #[]
+@[extern "lean_torch_mse_loss"] opaque mse_loss {s : Shape} (input : @& T s) (target : @& T s) (reduction : String := "mean") : T #[]
 -- torch::nn::functional::multi_head_attention_forward
 -- torch::nn::functional::multi_margin_loss
 -- torch::nn::functional::multilabel_margin_loss
@@ -310,46 +321,63 @@ opaque layer_norm {batch seq n : UInt64}
 -- torch::nn::functional::poisson_nll_loss
 -- torch::nn::functional::prelu
 -- torch::nn::functional::relu
-@[extern "lean_torch_tensor_relu"] opaque relu {s : Shape} (t : T s) : T s
-@[extern "lean_torch_tensor_relu6"] opaque relu6 {s : Shape} (t : T s) : T s
+@[extern "lean_torch_tensor_relu"] opaque relu {s : Shape} (t : @& T s) : T s
+@[extern "lean_torch_tensor_relu6"] opaque relu6 {s : Shape} (t : @& T s) : T s
 -- torch::nn::functional::rrelu
-@[extern "lean_torch_tensor_selu"] opaque selu {s : Shape} (t : T s) : T s
-@[extern "lean_torch_tensor_silu"] opaque silu {s : Shape} (t : T s) : T s
-@[extern "lean_torch_tensor_sigmoid"] opaque sigmoid {s : Shape} (t : T s) : T s
-@[extern "lean_torch_smooth_l1_loss"] opaque smooth_l1_loss {s : Shape} (input : T s) (target : T s) (reduction : String := "mean") (beta : Float := 1.0) : T #[]
+@[extern "lean_torch_tensor_selu"] opaque selu {s : Shape} (t : @& T s) : T s
+@[extern "lean_torch_tensor_silu"] opaque silu {s : Shape} (t : @& T s) : T s
+@[extern "lean_torch_tensor_sigmoid"] opaque sigmoid {s : Shape} (t : @& T s) : T s
+@[extern "lean_torch_smooth_l1_loss"] opaque smooth_l1_loss {s : Shape} (input : @& T s) (target : @& T s) (reduction : String := "mean") (beta : Float := 1.0) : T #[]
 -- torch::nn::functional::soft_margin_loss
 -- torch::nn::functional::softmax
-@[extern "lean_torch_tensor_softmax"] opaque softmax {s : Shape} (t : T s) : T s
+@[extern "lean_torch_tensor_softmax"] opaque softmax {s : Shape} (t : @& T s) : T s
 -- torch::nn::functional::softmin
 -- torch::nn::functional::softplus
 -- torch::nn::functional::softshrink
 -- torch::nn::functional::softsign
 -- torch::nn::functional::tanhshrink
-@[extern "lean_torch_tensor_tanh"] opaque tanh {s : Shape} (t : T s) : T s
+@[extern "lean_torch_tensor_tanh"] opaque tanh {s : Shape} (t : @& T s) : T s
 
--- New transformer-related functions
-@[extern "lean_torch_matmul"] opaque matmul' {s1 s2 : Shape} (a : T s1) (b : T s2) : T #[] -- shape depends on input dimensions
-@[extern "lean_torch_bmm"] opaque bmm {b m n k : UInt64} (input : T #[b, m, k]) (mat2 : T #[b, k, n]) : T #[b, m, n]
-@[extern "lean_torch_mm"] opaque mm {m n k : UInt64} (input : T #[m, k]) (mat2 : T #[k, n]) : T #[m, n]
-@[extern "lean_torch_transpose"] opaque transpose' {s : Shape} (input : T s) (dim0 : Int) (dim1 : Int) : T s
+-- Matrix multiplication (generic shape-aware version)
+@[extern "lean_torch_matmul"] private opaque matmul_impl {s1 s2 : Shape} (a : @& T s1) (b : @& T s2) : T #[]
+
+/-- Generic matrix multiplication with shape inference following PyTorch broadcasting rules.
+    - 1D @ 1D: dot product -> scalar
+    - 2D @ 2D: [m,k] @ [k,n] -> [m,n]
+    - 1D @ 2D: [k] @ [k,n] -> [n]
+    - 2D @ 1D: [m,k] @ [k] -> [m]
+    - ND @ ND: broadcast batch dims, matmul last 2 dims -/
+def matmul {s1 s2 : Shape} (a : T s1) (b : T s2) : T (matmulShape s1 s2) :=
+  reshape (matmul_impl a b) (matmulShape s1 s2)
+
+-- Specialized matmul for common cases (more efficient, no reshape needed)
+@[extern "lean_torch_bmm"] opaque bmm {b m n k : UInt64} (input : @& T #[b, m, k]) (mat2 : @& T #[b, k, n]) : T #[b, m, n]
+@[extern "lean_torch_mm"] opaque mm {m n k : UInt64} (input : @& T #[m, k]) (mat2 : @& T #[k, n]) : T #[m, n]
+
+@[extern "lean_torch_transpose"] opaque transpose {s : Shape} (input : @& T s) (dim0 : Nat) (dim1 : Nat) : T (transposeShape s dim0 dim1)
 
 /-- Shape-aware matmul for 3D @ 2D: [batch, seq, k] @ [k, n] -> [batch, seq, n] -/
 @[extern "lean_torch_matmul3d_2d"]
 opaque matmul3d {batch seq k n : UInt64}
-    (a : T #[batch, seq, k]) (b : T #[k, n]) : T #[batch, seq, n]
+    (a : @& T #[batch, seq, k]) (b : @& T #[k, n]) : T #[batch, seq, n]
 
 /-- Shape-aware matmul for 2D tensors: [m, k] @ [k, n] -> [m, n] -/
 def matmul2d {m k n : UInt64}
     (a : T #[m, k]) (b : T #[k, n]) : T #[m, n] :=
   mm a b
 
+/-- 4D batched matmul for attention: [b, h, m, k] @ [b, h, k, n] -> [b, h, m, n] -/
+def bmm4d {b h m k n : UInt64}
+    (a : T #[b, h, m, k]) (x : T #[b, h, k, n]) : T #[b, h, m, n] :=
+  matmul a x
+
 /-- Transpose last two dimensions of a 2D tensor -/
 @[extern "lean_torch_transpose_2d"]
-opaque transpose2d {m n : UInt64} (input : T #[m, n]) : T #[n, m]
+opaque transpose2d {m n : UInt64} (input : @& T #[m, n]) : T #[n, m]
 
 /-- Transpose for 3D tensors: swap dims 1 and 2 -/
 @[extern "lean_torch_transpose3d_12"]
-opaque transpose3d_12 {a b c : UInt64} (input : T #[a, b, c]) : T #[a, c, b]
+opaque transpose3d_12 {a b c : UInt64} (input : @& T #[a, b, c]) : T #[a, c, b]
 
 /-- Reshape 3D to 4D: [batch, seq, n_head * head_dim] -> [batch, seq, n_head, head_dim] -/
 def reshape_to_heads {batch seq n_head head_dim : UInt64}
@@ -364,23 +392,23 @@ def reshape_from_heads {batch seq n_head head_dim : UInt64}
 /-- Transpose [batch, seq, n_head, head_dim] -> [batch, n_head, seq, head_dim] -/
 @[extern "lean_torch_transpose_for_attention"]
 opaque transpose_for_attention {batch seq n_head head_dim : UInt64}
-    (x : T #[batch, seq, n_head, head_dim]) : T #[batch, n_head, seq, head_dim]
+    (x : @& T #[batch, seq, n_head, head_dim]) : T #[batch, n_head, seq, head_dim]
 
 /-- Transpose [batch, n_head, seq, head_dim] -> [batch, seq, n_head, head_dim] -/
 @[extern "lean_torch_transpose_from_attention"]
 opaque transpose_from_attention {batch n_head seq head_dim : UInt64}
-    (x : T #[batch, n_head, seq, head_dim]) : T #[batch, seq, n_head, head_dim]
+    (x : @& T #[batch, n_head, seq, head_dim]) : T #[batch, seq, n_head, head_dim]
 
-@[extern "lean_torch_softmax_dim"] opaque softmax_dim {s : Shape} (input : T s) (dim : Int) : T s
-@[extern "lean_torch_sqrt"] opaque sqrt {s : Shape} (input : T s) : T s
-@[extern "lean_torch_rsqrt"] opaque rsqrt {s : Shape} (input : T s) : T s
-@[extern "lean_torch_div"] opaque div {s : Shape} (input : T s) (other : T s) : T s
-@[extern "lean_torch_pow"] opaque pow {s : Shape} (input : T s) (exponent : Float) : T s
-@[extern "lean_torch_unsqueeze"] opaque unsqueeze {s : Shape} (input : T s) (dim : Int) : T s
-@[extern "lean_torch_squeeze"] opaque squeeze {s : Shape} (input : T s) (dim : Int) : T s
-@[extern "lean_torch_masked_fill"] opaque masked_fill {s : Shape} (input : T s) (mask : T s) (value : Float) : T s
-@[extern "lean_torch_expand"] opaque expand' {s : Shape} (input : T s) (size : Array UInt64) : T s
-@[extern "lean_torch_repeat"] opaque tensor_repeat {s : Shape} (input : T s) (repeats : Array UInt64) : T s
+@[extern "lean_torch_softmax_dim"] opaque softmax_dim {s : Shape} (input : @& T s) (dim : Int) : T s
+@[extern "lean_torch_sqrt"] opaque sqrt {s : Shape} (input : @& T s) : T s
+@[extern "lean_torch_rsqrt"] opaque rsqrt {s : Shape} (input : @& T s) : T s
+@[extern "lean_torch_div"] opaque div {s : Shape} (input : @& T s) (other : @& T s) : T s
+@[extern "lean_torch_pow"] opaque pow {s : Shape} (input : @& T s) (exponent : Float) : T s
+@[extern "lean_torch_unsqueeze"] opaque unsqueeze {s : Shape} (input : @& T s) (dim : Nat) : T (unsqueezeShape s dim)
+@[extern "lean_torch_squeeze"] opaque squeeze {s : Shape} (input : @& T s) (dim : Nat) : T (squeezeShape s dim)
+@[extern "lean_torch_masked_fill"] opaque masked_fill {s : Shape} (input : @& T s) (mask : @& T s) (value : Float) : T s
+@[extern "lean_torch_expand"] opaque expand' {s : Shape} (input : @& T s) (size : Array UInt64) : T s
+@[extern "lean_torch_repeat"] opaque tensor_repeat {s : Shape} (input : @& T s) (repeats : Array UInt64) : T s
 
 /-- Expand tensor to target shape (typed version) -/
 def expand {s : Shape} (input : T s) (targetShape : Shape) : T targetShape :=
@@ -395,7 +423,7 @@ def expand {s : Shape} (input : T s) (targetShape : Shape) : T targetShape :=
 -- Attention mechanism (with causal masking support)
 @[extern "lean_torch_scaled_dot_product_attention"]
 opaque scaled_dot_product_attention' {s : Shape}
-  (query : T s) (key : T s) (value : T s)
+  (query : @& T s) (key : @& T s) (value : @& T s)
   (attn_mask : Option (T s) := none)
   (dropout_p : Float := 0.0)
   (is_causal : Bool := false) : T s
@@ -404,39 +432,53 @@ opaque scaled_dot_product_attention' {s : Shape}
     Q, K, V: [batch, n_head, seq, head_dim] -> output: [batch, n_head, seq, head_dim] -/
 @[extern "lean_torch_sdpa_4d"]
 opaque scaled_dot_product_attention {batch n_head seq head_dim : UInt64}
-    (query : T #[batch, n_head, seq, head_dim])
-    (key : T #[batch, n_head, seq, head_dim])
-    (value : T #[batch, n_head, seq, head_dim])
+    (query : @& T #[batch, n_head, seq, head_dim])
+    (key : @& T #[batch, n_head, seq, head_dim])
+    (value : @& T #[batch, n_head, seq, head_dim])
     (dropout_p : Float := 0.0)
     (is_causal : Bool := true) : T #[batch, n_head, seq, head_dim]
 
 -- Lower triangular (for manual causal masking)
-@[extern "lean_torch_tril"] opaque tril {s : Shape} (t : T s) (diagonal : Int := 0) : T s
+@[extern "lean_torch_tril"] opaque tril {s : Shape} (t : @& T s) (diagonal : Int := 0) : T s
 
--- Reductions
-@[extern "lean_torch_sum"] opaque sum {s : Shape} (t : T s) (dim : Option (Array UInt64) := none) (keepdim : Bool := false) : T #[]
-@[extern "lean_torch_mean"] opaque mean {s : Shape} (t : T s) (dim : Option (Array UInt64) := none) (keepdim : Bool := false) : T #[]
+-- Reductions (internal, uses Option for dim)
+@[extern "lean_torch_sum"] private opaque sum_impl {s : Shape} (t : @& T s) (dim : Option (Array UInt64)) (keepdim : Bool) : T #[]
+@[extern "lean_torch_mean"] private opaque mean_impl {s : Shape} (t : @& T s) (dim : Option (Array UInt64)) (keepdim : Bool) : T #[]
+
+-- Reductions to scalar (all elements)
+def sumAll {s : Shape} (t : T s) : T #[] := sum_impl t none false
+def meanAll {s : Shape} (t : T s) : T #[] := mean_impl t none false
+
+-- Reductions along a dimension (shape-aware versions)
+-- Note: These use reshape internally since C++ doesn't track shapes
+def sumDim {s : Shape} (t : T s) (dim : Nat) (keepdim : Bool := false) : T (reduceShape s dim keepdim) :=
+  let result := sum_impl t (some #[dim.toUInt64]) keepdim
+  reshape result (reduceShape s dim keepdim)
+
+def meanDim {s : Shape} (t : T s) (dim : Nat) (keepdim : Bool := false) : T (reduceShape s dim keepdim) :=
+  let result := mean_impl t (some #[dim.toUInt64]) keepdim
+  reshape result (reduceShape s dim keepdim)
 
 -- Sampling operations
-@[extern "lean_torch_topk_values"] opaque topk_values {s : Shape} (t : T s) (k : UInt64) (dim : Int := -1) : T #[]
-@[extern "lean_torch_multinomial"] opaque multinomial {s : Shape} (probs : T s) (num_samples : UInt64) (replacement : Bool := false) : IO (T #[])
+@[extern "lean_torch_topk_values"] opaque topk_values {s : Shape} (t : @& T s) (k : UInt64) (dim : Nat) : T (replaceAtDim s dim k)
+@[extern "lean_torch_multinomial"] opaque multinomial {s : Shape} (probs : @& T s) (num_samples : UInt64) (replacement : Bool := false) : IO (T (replaceAtDim s (s.size - 1) num_samples))
 
--- Argmax
-@[extern "lean_torch_argmax"] opaque argmax {s : Shape} (t : T s) (dim : Int64 := -1) : T #[]
+-- Argmax (returns indices along dimension, removing that dimension)
+@[extern "lean_torch_argmax"] opaque argmax {s : Shape} (t : @& T s) (dim : Nat) : T (reduceShape s dim false)
 
 -- Scalar extraction
 @[extern "lean_torch_item"] opaque item {s : Shape} (t : @& T s) : Float
 @[extern "lean_torch_item_int"] opaque itemInt {s : Shape} (t : @& T s) : Int64
 
 -- Gradient clipping
-@[extern "lean_torch_clip_grad_norm_"] opaque clip_grad_norm_ {s : Shape} (param : T s) (max_norm : Float) : IO Float
+@[extern "lean_torch_clip_grad_norm_"] opaque clip_grad_norm_ {s : Shape} (param : @& T s) (max_norm : Float) : IO Float
 
 end nn
 
 -- Extended autograd operations
 namespace autograd
 
-@[extern "lean_torch_backward_unit"] opaque backward {s : Shape} (output : T s) (grad_output : T s) : IO Unit
+@[extern "lean_torch_backward_unit"] opaque backward {s : Shape} (output : @& T s) (grad_output : @& T s) : IO Unit
 
 end autograd
 
@@ -465,27 +507,25 @@ structure AdamWState (s : Shape) where
 def AdamWState.init (s : Shape) : AdamWState s :=
   { m := torch.zeros s, v := torch.zeros s, step := 0 }
 
-/-- Pure functional AdamW update - returns new (param, state) pair -/
+/-- AdamW update computed under `torch.autograd.no_grad` to avoid graph buildup. -/
 def adamw {s : Shape} (config : AdamWConfig)
-    (param : T s) (grad : T s) (state : AdamWState s) : T s × AdamWState s :=
-  let step := state.step + 1
-  let { lr, beta1, beta2, eps, weight_decay } := config
-  -- Decoupled weight decay: param' = param * (1 - lr * wd)
-  let param' := mul_scalar param (1.0 - lr * weight_decay)
-  -- EMA updates: m' = beta1*m + (1-beta1)*g, v' = beta2*v + (1-beta2)*g^2
-  let m' := add (mul_scalar state.m beta1) (mul_scalar grad (1.0 - beta1))
-  let v' := add (mul_scalar state.v beta2) (mul_scalar (mul grad grad) (1.0 - beta2))
-  -- Bias-corrected estimates
-  let bc1 := 1.0 - Float.pow beta1 step.toFloat
-  let bc2 := 1.0 - Float.pow beta2 step.toFloat
-  let m_hat := div_scalar m' bc1
-  let v_hat := div_scalar v' bc2
-  -- Update: param'' = param' - lr * m_hat / (sqrt(v_hat) + eps)
-  let update := nn.div m_hat (add_scalar (nn.sqrt v_hat) eps)
-  let param'' := sub param' (mul_scalar update lr)
-  -- Make param'' a leaf tensor with requires_grad for next iteration
-  let param_new := autograd.set_requires_grad (autograd.detach param'') true
-  (param_new, { m := m', v := v', step := step })
+    (param : T s) (grad : T s) (state : AdamWState s) : IO (T s × AdamWState s) :=
+  autograd.no_grad do
+    let step := state.step + 1
+    let { lr, beta1, beta2, eps, weight_decay } := config
+    let param_d := autograd.detach param
+    let grad_d := autograd.detach grad
+    let param' := mul_scalar param_d (1.0 - lr * weight_decay)
+    let m' := add (mul_scalar state.m beta1) (mul_scalar grad_d (1.0 - beta1))
+    let v' := add (mul_scalar state.v beta2) (mul_scalar (mul grad_d grad_d) (1.0 - beta2))
+    let bc1 := 1.0 - Float.pow beta1 step.toFloat
+    let bc2 := 1.0 - Float.pow beta2 step.toFloat
+    let m_hat := div_scalar m' bc1
+    let v_hat := div_scalar v' bc2
+    let update := nn.div m_hat (add_scalar (nn.sqrt v_hat) eps)
+    let param'' := sub param' (mul_scalar update lr)
+    let param_new := autograd.set_requires_grad param'' true
+    return (param_new, { m := m', v := v', step := step })
 
 end optim
 
@@ -506,7 +546,7 @@ opaque fromInt64Array (arr : @& Array Int64) : T #[]
 
 /-- Slice a 1D tensor: data[start:end] (shape-erased) -/
 @[extern "lean_torch_slice_1d"]
-opaque slice1d' {n : UInt64} (data : T #[n]) (start : Int64) (stop : Int64) : T #[]
+opaque slice1d' {n : UInt64} (data : @& T #[n]) (start : Int64) (stop : Int64) : T #[]
 
 /-- Slice with known output size -/
 def slice1d {n m : UInt64} (data : T #[n]) (start : Int64) (stop : Int64) : T #[m] :=
@@ -518,7 +558,24 @@ opaque stack1d (tensors : Array (T #[n])) (dim : Int64 := 0) : T #[k, n]
 
 /-- Convert tensor to Long (int64) dtype -/
 @[extern "lean_torch_to_long"]
-opaque toLong {s : Shape} (t : T s) : T s
+opaque toLong {s : Shape} (t : @& T s) : T s
+
+/-- Index select: gather elements along a dimension using indices
+    For 1D: data[indices] where indices is 1D tensor of positions -/
+@[extern "lean_torch_index_select"]
+opaque indexSelect {n k : UInt64} (data : @& T #[n]) (dim : Int64) (indices : @& T #[k]) : T #[k]
+
+/-- Save tensor to a file -/
+@[extern "lean_torch_save_tensor"]
+opaque saveTensor {s : Shape} (t : @& T s) (path : @& String) : IO Unit
+
+/-- Load tensor from a file with expected shape -/
+@[extern "lean_torch_load_tensor"]
+opaque loadTensor (s : Shape) (path : @& String) : IO (T s)
+
+/-- Check if a file exists -/
+@[extern "lean_torch_file_exists"]
+opaque fileExists (path : @& String) : IO Bool
 
 end data
 
@@ -527,8 +584,10 @@ namespace autograd
 
 /-- Backward pass from scalar loss (gradient = 1.0) -/
 @[extern "lean_torch_backward_loss"]
-opaque backwardLoss {s : Shape} (loss : T s) : IO Unit
-
+opaque backwardLoss {s : Shape} (loss : @& T s) : IO Unit
 end autograd
+
+@[extern "lean_torch_get_live_tensors"]
+opaque get_live_tensors : IO UInt64
 
 end torch

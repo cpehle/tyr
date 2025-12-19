@@ -16,7 +16,7 @@ rule cobj
   description = compiling $in (.o)
 
 rule cexe
-  command = leanc $in -L out  $librarypaths $libraries -o $out 
+  command = clang++ $in -L out $librarypaths $libraries -L /Users/pehle/dev/lean4/build/release/stage1/lib/lean -lleancpp -lInit -lStd -lLean -lleanrt /opt/homebrew/lib/libgmp.dylib -L/opt/homebrew/Cellar/libuv/1.50.0/lib -luv -lc++ -o $out
   description = linking $out
 
 rule ar
@@ -29,17 +29,33 @@ build out/o/Tyr/Basic.o: cobj out/c/Tyr/Basic.c
 build out/Tyr/Torch.olean: leano ./Tyr/Torch.lean |  out/Tyr/Basic.olean
 build out/c/Tyr/Torch.c: leanc ./Tyr/Torch.lean |  out/Tyr/Basic.olean
 build out/o/Tyr/Torch.o: cobj out/c/Tyr/Torch.c
-build out/Tyr.olean: leano ./Tyr.lean |  out/Tyr/Basic.olean out/Tyr/Torch.olean
-build out/c/Tyr.c: leanc ./Tyr.lean |  out/Tyr/Basic.olean out/Tyr/Torch.olean
+build out/Tyr/GPT.olean: leano ./Tyr/GPT.lean |  out/Tyr/Torch.olean
+build out/c/Tyr/GPT.c: leanc ./Tyr/GPT.lean |  out/Tyr/Torch.olean
+build out/o/Tyr/GPT.o: cobj out/c/Tyr/GPT.c
+build out/Tyr/Train.olean: leano ./Tyr/Train.lean |  out/Tyr/Torch.olean out/Tyr/GPT.olean
+build out/c/Tyr/Train.c: leanc ./Tyr/Train.lean |  out/Tyr/Torch.olean out/Tyr/GPT.olean
+build out/o/Tyr/Train.o: cobj out/c/Tyr/Train.c
+build out/Tyr/Checkpoint.olean: leano ./Tyr/Checkpoint.lean |  out/Tyr/Train.olean
+build out/c/Tyr/Checkpoint.c: leanc ./Tyr/Checkpoint.lean |  out/Tyr/Train.olean
+build out/o/Tyr/Checkpoint.o: cobj out/c/Tyr/Checkpoint.c
+build out/Tyr.olean: leano ./Tyr.lean |  out/Tyr/Basic.olean out/Tyr/Torch.olean out/Tyr/GPT.olean out/Tyr/Train.olean out/Tyr/Checkpoint.olean
+build out/c/Tyr.c: leanc ./Tyr.lean |  out/Tyr/Basic.olean out/Tyr/Torch.olean out/Tyr/GPT.olean out/Tyr/Train.olean out/Tyr/Checkpoint.olean
 build out/o/Tyr.o: cobj out/c/Tyr.c
-build out/libTyr.a: ar  out/o/Tyr.o out/o/Tyr/Basic.o out/o/Tyr/Torch.o | 
-  libraries = 
+build out/libTyr.a: ar  out/o/Tyr.o out/o/Tyr/Basic.o out/o/Tyr/Torch.o out/o/Tyr/GPT.o out/o/Tyr/Train.o out/o/Tyr/Checkpoint.o |
+  libraries =
 
 
 build out/Test.olean: leano ./Test.lean |  out/Tyr.olean
 build out/c/Test.c: leanc ./Test.lean |  out/Tyr.olean
 build out/o/Test.o: cobj out/c/Test.c
 build out/exe/test: cexe  out/o/Test.o |  out/libTyr.a
+  libraries =  -lTyr -ltorch -ltorch_cpu -lc10 -lTyrC
+  librarypaths = -L external/libtorch/lib -L cc/build/
+
+build out/TrainGPT.olean: leano ./TrainGPT.lean |  out/Tyr.olean out/Tyr/Train.olean
+build out/c/TrainGPT.c: leanc ./TrainGPT.lean |  out/Tyr.olean out/Tyr/Train.olean
+build out/o/TrainGPT.o: cobj out/c/TrainGPT.c
+build out/exe/TrainGPT: cexe  out/o/TrainGPT.o |  out/libTyr.a
   libraries =  -lTyr -ltorch -ltorch_cpu -lc10 -lTyrC
   librarypaths = -L external/libtorch/lib -L cc/build/
 

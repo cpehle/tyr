@@ -5,11 +5,11 @@
   Uses the same data format as nanoGPT.
 -/
 import Tyr
-import Tyr.Train
 
 open torch
 open torch.gpt
 open torch.train
+open torch.checkpoint
 
 -- Shakespeare character vocabulary (65 chars)
 -- This must match the prepare.py encoding
@@ -30,7 +30,7 @@ def encode (s : String) : Array Int64 :=
 def decode (tokens : Array Int64) : String :=
   String.mk (tokens.toList.map intToChar)
 
-/-- Train with data of known size -/
+/-- Train with data of known size (legacy, no validation) -/
 def runTraining {n : UInt64} (modelCfg : Config) (trainCfg : TrainConfig)
     (trainData : T #[n]) : IO (GPTParams modelCfg) := do
   IO.println ""
@@ -47,45 +47,94 @@ def runTraining {n : UInt64} (modelCfg : Config) (trainCfg : TrainConfig)
   IO.println ""
   return finalParams
 
+/-- Train with validation data and checkpointing -/
+def runTrainingWithVal {nTrain nVal : UInt64} (modelCfg : Config) (trainCfg : TrainConfig)
+    (trainData : T #[nTrain]) (valData : T #[nVal])
+    (checkpointDir : Option String := none) : IO (GPTParams modelCfg) := do
+  IO.println ""
+  IO.println "Initializing model..."
+  let params ← GPTParams.init modelCfg
+  let optState := GPTOptState.init modelCfg
+
+  IO.println s!"Model initialized with {modelCfg.n_layer} layers"
+  IO.println ""
+
+  -- Train with validation
+  let (finalParams, bestValLoss) ← trainLoopWithVal trainCfg params optState trainData valData
+
+  -- Save final checkpoint if directory specified
+  if let some dir := checkpointDir then
+    saveCheckpoint finalParams trainCfg.maxIters bestValLoss 0.0 dir
+
+  IO.println ""
+  return finalParams
+
 def main : IO Unit := do
   IO.println "Starting..."
   IO.println "=== Tyr GPT Training ==="
   IO.println ""
+  (← IO.getStdout).flush
 
-  -- Configuration - scaled down nanoGPT for CPU
-  -- Same architecture (6 layers, 6 heads) but smaller dimensions
-  let modelCfg := Config.medium_shakespeare
-  IO.println s!"Model config: vocab={modelCfg.vocab_size}, block={modelCfg.block_size}, embd={modelCfg.n_embd}, heads={modelCfg.n_head}, layers={modelCfg.n_layer}"
+  -- nanoGPT CPU configuration for Shakespeare character-level training
+  -- https://github.com/karpathy/nanoGPT/blob/master/config/train_shakespeare_char.py
+  -- CPU command: python train.py config/train_shakespeare_char.py --device=cpu --compile=False
+  --              --eval_iters=20 --log_interval=1 --block_size=64 --batch_size=12
+  --              --n_layer=4 --n_head=4 --n_embd=128 --max_iters=2000 --lr_decay_iters=2000 --dropout=0.0
+  let modelCfg := Config.nanogpt_cpu_shakespeare
+  IO.println s!"Model config: vocab={modelCfg.vocab_size}, block={modelCfg.block_size}, embd={modelCfg.n_embd}, heads={modelCfg.n_head}, layers={modelCfg.n_layer}, dropout={modelCfg.dropout}"
 
   let trainCfg : TrainConfig := {
-    maxIters := 1000
-    logInterval := 100
+    maxIters := 300
+    evalInterval := 300  -- Evaluate every 200 iterations
+    logInterval := 50
     learningRate := 1e-3
+    minLr := 1e-4
     warmupIters := 100
-    batchSize := 8
+    lrDecayIters := 2000
+    gradClip := 1.0      -- Enable gradient clipping
+    batchSize := 12
     blockSize := modelCfg.block_size
   }
 
   -- Try to load Shakespeare data, fall back to random data
   IO.println ""
   IO.println "Loading data..."
+  (← IO.getStdout).flush
 
-  -- Try to load real data first
-  let fileExists ← do
+  -- Check if training data exists
+  let trainFileExists ← do
     try
       let _ ← data.binFileTokenCount "data/shakespeare_char/train.bin"
       pure true
     catch _ =>
       pure false
 
-  let trainedParams ← if fileExists then
-    IO.println "File exists, getting token count..."
-    let n ← data.binFileTokenCount "data/shakespeare_char/train.bin"
-    IO.println s!"Found {n} tokens in Shakespeare data"
-    IO.println "Loading tokens..."
-    let tokens ← data.loadU16Bin n "data/shakespeare_char/train.bin"
-    IO.println "Loaded Shakespeare training data!"
-    runTraining modelCfg trainCfg tokens
+  -- Check if validation data exists
+  let valFileExists ← do
+    try
+      let _ ← data.binFileTokenCount "data/shakespeare_char/val.bin"
+      pure true
+    catch _ =>
+      pure false
+
+  let trainedParams ← if trainFileExists then
+    IO.println "Found Shakespeare data..."
+
+    -- Load training data
+    let nTrain ← data.binFileTokenCount "data/shakespeare_char/train.bin"
+    IO.println s!"Training set: {nTrain} tokens"
+    let trainData ← data.loadU16Bin nTrain "data/shakespeare_char/train.bin"
+
+    -- Use validation if available
+    if valFileExists then
+      let nVal ← data.binFileTokenCount "data/shakespeare_char/val.bin"
+      IO.println s!"Validation set: {nVal} tokens"
+      let valData ← data.loadU16Bin nVal "data/shakespeare_char/val.bin"
+      IO.println "Training with validation..."
+      runTrainingWithVal modelCfg trainCfg trainData valData (some "checkpoints/gpt")
+    else
+      IO.println "No validation data found, training without validation..."
+      runTraining modelCfg trainCfg trainData
   else
     IO.println "Shakespeare data not found, using random tokens for testing..."
     let numTokens : UInt64 := 10000
