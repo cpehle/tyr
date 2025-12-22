@@ -4,6 +4,8 @@
   Minimal viable training loop for nanoGPT-style training.
 -/
 import Tyr.Torch
+import Tyr.TensorStruct
+import Tyr.Optim
 import Tyr.GPT
 
 namespace torch.train
@@ -93,140 +95,17 @@ def clipGPTGrads {cfg : Config} (params : GPTParams cfg) (maxNorm : Float) : IO 
   let _ ← nn.clip_grad_norm_ params.ln_f_weight maxNorm
   let _ ← nn.clip_grad_norm_ params.ln_f_bias maxNorm
 
-/-- Zero gradients for all block parameters -/
-def zeroBlockGrads {n_embd : UInt64} (params : BlockParams n_embd) : BlockParams n_embd :=
-  {
-    ln1_weight := autograd.zero_grad params.ln1_weight
-    ln1_bias := autograd.zero_grad params.ln1_bias
-    q_proj := autograd.zero_grad params.q_proj
-    k_proj := autograd.zero_grad params.k_proj
-    v_proj := autograd.zero_grad params.v_proj
-    c_proj := autograd.zero_grad params.c_proj
-    c_proj_bias := autograd.zero_grad params.c_proj_bias
-    ln2_weight := autograd.zero_grad params.ln2_weight
-    ln2_bias := autograd.zero_grad params.ln2_bias
-    mlp_fc := autograd.zero_grad params.mlp_fc
-    mlp_fc_bias := autograd.zero_grad params.mlp_fc_bias
-    mlp_proj := autograd.zero_grad params.mlp_proj
-    mlp_proj_bias := autograd.zero_grad params.mlp_proj_bias
-  }
-
-/-- Zero gradients for all GPT parameters -/
-def zeroGPTGrads {cfg : Config} (params : GPTParams cfg) : GPTParams cfg :=
-  {
-    wte := autograd.zero_grad params.wte
-    wpe := autograd.zero_grad params.wpe
-    blocks := params.blocks.map zeroBlockGrads
-    ln_f_weight := autograd.zero_grad params.ln_f_weight
-    ln_f_bias := autograd.zero_grad params.ln_f_bias
-  }
-
-/-- Update a single parameter with AdamW under `torch.no_grad`. -/
-def updateParam {s : Shape} (cfg : optim.AdamWConfig)
-    (param : T s) (state : optim.AdamWState s) : IO (T s × optim.AdamWState s) := do
-  let grad := autograd.grad_of param
-  optim.adamw cfg param grad state
-
-/-- Update block parameters -/
-def updateBlockParams {n_embd : UInt64} (cfg : optim.AdamWConfig)
-    (params : BlockParams n_embd)
-    (optState : BlockOptState n_embd)
-    : IO (BlockParams n_embd × BlockOptState n_embd) := do
-  let (ln1_weight', ln1_weight_opt') ← updateParam cfg params.ln1_weight optState.ln1_weight
-  let (ln1_bias', ln1_bias_opt') ← updateParam cfg params.ln1_bias optState.ln1_bias
-  let (q_proj', q_proj_opt') ← updateParam cfg params.q_proj optState.q_proj
-  let (k_proj', k_proj_opt') ← updateParam cfg params.k_proj optState.k_proj
-  let (v_proj', v_proj_opt') ← updateParam cfg params.v_proj optState.v_proj
-  let (c_proj', c_proj_opt') ← updateParam cfg params.c_proj optState.c_proj
-  let (c_proj_bias', c_proj_bias_opt') ← updateParam cfg params.c_proj_bias optState.c_proj_bias
-  let (ln2_weight', ln2_weight_opt') ← updateParam cfg params.ln2_weight optState.ln2_weight
-  let (ln2_bias', ln2_bias_opt') ← updateParam cfg params.ln2_bias optState.ln2_bias
-  let (mlp_fc', mlp_fc_opt') ← updateParam cfg params.mlp_fc optState.mlp_fc
-  let (mlp_fc_bias', mlp_fc_bias_opt') ← updateParam cfg params.mlp_fc_bias optState.mlp_fc_bias
-  let (mlp_proj', mlp_proj_opt') ← updateParam cfg params.mlp_proj optState.mlp_proj
-  let (mlp_proj_bias', mlp_proj_bias_opt') ← updateParam cfg params.mlp_proj_bias optState.mlp_proj_bias
-
-  let params' : BlockParams n_embd := {
-    ln1_weight := ln1_weight'
-    ln1_bias := ln1_bias'
-    q_proj := q_proj'
-    k_proj := k_proj'
-    v_proj := v_proj'
-    c_proj := c_proj'
-    c_proj_bias := c_proj_bias'
-    ln2_weight := ln2_weight'
-    ln2_bias := ln2_bias'
-    mlp_fc := mlp_fc'
-    mlp_fc_bias := mlp_fc_bias'
-    mlp_proj := mlp_proj'
-    mlp_proj_bias := mlp_proj_bias'
-  }
-
-  let optState' : BlockOptState n_embd := {
-    ln1_weight := ln1_weight_opt'
-    ln1_bias := ln1_bias_opt'
-    q_proj := q_proj_opt'
-    k_proj := k_proj_opt'
-    v_proj := v_proj_opt'
-    c_proj := c_proj_opt'
-    c_proj_bias := c_proj_bias_opt'
-    ln2_weight := ln2_weight_opt'
-    ln2_bias := ln2_bias_opt'
-    mlp_fc := mlp_fc_opt'
-    mlp_fc_bias := mlp_fc_bias_opt'
-    mlp_proj := mlp_proj_opt'
-    mlp_proj_bias := mlp_proj_bias_opt'
-  }
-
-  return (params', optState')
-
-/-- Update all GPT parameters with AdamW -/
-def updateGPTParams {cfg : Config} (adamCfg : optim.AdamWConfig)
-    (params : GPTParams cfg)
-    (optState : GPTOptState cfg)
-    : IO (GPTParams cfg × GPTOptState cfg) := do
-  let (wte', wte_opt') ← updateParam adamCfg params.wte optState.wte
-  let (wpe', wpe_opt') ← updateParam adamCfg params.wpe optState.wpe
-
-  let mut blocks' : Array (BlockParams cfg.n_embd) := #[]
-  let mut blockOpts' : Array (BlockOptState cfg.n_embd) := #[]
-  for (bp, bo) in params.blocks.zip optState.blocks do
-    let (block', blockOpt') ← updateBlockParams adamCfg bp bo
-    blocks' := blocks'.push block'
-    blockOpts' := blockOpts'.push blockOpt'
-
-  let (ln_f_weight', ln_f_weight_opt') ← updateParam adamCfg params.ln_f_weight optState.ln_f_weight
-  let (ln_f_bias', ln_f_bias_opt') ← updateParam adamCfg params.ln_f_bias optState.ln_f_bias
-
-  let params' : GPTParams cfg := {
-    wte := wte'
-    wpe := wpe'
-    blocks := blocks'
-    ln_f_weight := ln_f_weight'
-    ln_f_bias := ln_f_bias'
-  }
-
-  let optState' : GPTOptState cfg := {
-    wte := wte_opt'
-    wpe := wpe_opt'
-    blocks := blockOpts'
-    ln_f_weight := ln_f_weight_opt'
-    ln_f_bias := ln_f_bias_opt'
-  }
-
-  return (params', optState')
-
-/-- Single training step -/
+/-- Single training step using Optax-style optimizer -/
 def trainStep {modelCfg : Config} {batch seq : UInt64}
     (trainCfg : TrainConfig)
     (params : GPTParams modelCfg)
-    (optState : GPTOptState modelCfg)
+    (optState : Optim.AdamWState (GPTParams modelCfg))
     (x : T #[batch, seq])
     (y : T #[batch, seq])
     (lr : Float)
-    : IO (GPTParams modelCfg × GPTOptState modelCfg × Float) := do
+    : IO (GPTParams modelCfg × Optim.AdamWState (GPTParams modelCfg) × Float) := do
   -- Zero gradients BEFORE forward/backward to prevent gradient accumulation
-  let params := zeroGPTGrads params
+  let params := TensorStruct.zeroGrads params
 
   -- Forward pass: compute loss (training=true enables dropout)
   let lossT ← gpt.loss params x y true
@@ -245,9 +124,12 @@ def trainStep {modelCfg : Config} {batch seq : UInt64}
   -- Get loss value for logging
   let lossVal := nn.item lossT
 
-  -- Update parameters with AdamW
-  let adamCfg : optim.AdamWConfig := { optim.AdamWConfig.default with lr := lr }
-  let (params', optState') ← updateGPTParams adamCfg params optState
+  -- Extract gradients from parameters
+  let grads := TensorStruct.grads params
+
+  -- Update parameters with AdamW using Optax-style step
+  let opt := Optim.adamw (lr := lr)
+  let (params', optState') := Optim.step opt params grads optState
 
   return (params', optState', lossVal)
 
@@ -276,7 +158,7 @@ def evalLoss {modelCfg : Config}
 def trainLoop {modelCfg : Config}
     (trainCfg : TrainConfig)
     (initParams : GPTParams modelCfg)
-    (initOptState : GPTOptState modelCfg)
+    (initOptState : Optim.AdamWState (GPTParams modelCfg))
     (trainData : T #[n])
     : IO (GPTParams modelCfg) := do
   let mut params := initParams
@@ -318,7 +200,7 @@ def trainLoop {modelCfg : Config}
 def trainLoopWithVal {modelCfg : Config}
     (trainCfg : TrainConfig)
     (initParams : GPTParams modelCfg)
-    (initOptState : GPTOptState modelCfg)
+    (initOptState : Optim.AdamWState (GPTParams modelCfg))
     (trainData : T #[nTrain])
     (valData : T #[nVal])
     (evalBatches : Nat := 10)

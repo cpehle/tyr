@@ -36,7 +36,9 @@ def runTraining {n : UInt64} (modelCfg : Config) (trainCfg : TrainConfig)
   IO.println ""
   IO.println "Initializing model..."
   let params ← GPTParams.init modelCfg
-  let optState := GPTOptState.init modelCfg
+  -- Initialize optimizer state using Optax-style API
+  let opt := Optim.adamw (lr := trainCfg.learningRate)
+  let optState := opt.init params
 
   IO.println s!"Model initialized with {modelCfg.n_layer} layers"
   IO.println ""
@@ -54,7 +56,9 @@ def runTrainingWithVal {nTrain nVal : UInt64} (modelCfg : Config) (trainCfg : Tr
   IO.println ""
   IO.println "Initializing model..."
   let params ← GPTParams.init modelCfg
-  let optState := GPTOptState.init modelCfg
+  -- Initialize optimizer state using Optax-style API
+  let opt := Optim.adamw (lr := trainCfg.learningRate)
+  let optState := opt.init params
 
   IO.println s!"Model initialized with {modelCfg.n_layer} layers"
   IO.println ""
@@ -84,8 +88,8 @@ def main : IO Unit := do
   IO.println s!"Model config: vocab={modelCfg.vocab_size}, block={modelCfg.block_size}, embd={modelCfg.n_embd}, heads={modelCfg.n_head}, layers={modelCfg.n_layer}, dropout={modelCfg.dropout}"
 
   let trainCfg : TrainConfig := {
-    maxIters := 300
-    evalInterval := 300  -- Evaluate every 200 iterations
+    maxIters := 10000
+    evalInterval := 500  -- Evaluate every 200 iterations
     logInterval := 50
     learningRate := 1e-3
     minLr := 1e-4

@@ -5,6 +5,10 @@
   Shapes are tracked at compile time to catch dimension mismatches.
 -/
 import Tyr.Torch
+import Tyr.TensorStruct
+import Tyr.Module.Core
+import Tyr.Module.Derive
+import Tyr.Optim
 
 namespace torch.gpt
 
@@ -65,6 +69,7 @@ structure BlockParams (n_embd : UInt64) where
   -- mlp_proj: 4*n_embd -> n_embd, weight shape [out, in] = [n_embd, 4*n_embd]
   mlp_proj : T #[n_embd, 4 * n_embd]
   mlp_proj_bias : T #[n_embd]
+  deriving TensorStruct
 
 /-- Full GPT model parameters -/
 structure GPTParams (cfg : Config) where
@@ -77,30 +82,7 @@ structure GPTParams (cfg : Config) where
   ln_f_weight : T #[cfg.n_embd]
   ln_f_bias : T #[cfg.n_embd]
   -- Note: lm_head shares weights with wte (weight tying)
-
-/-- Optimizer state for a single block -/
-structure BlockOptState (n_embd : UInt64) where
-  ln1_weight : optim.AdamWState #[n_embd]
-  ln1_bias : optim.AdamWState #[n_embd]
-  q_proj : optim.AdamWState #[n_embd, n_embd]
-  k_proj : optim.AdamWState #[n_embd, n_embd]
-  v_proj : optim.AdamWState #[n_embd, n_embd]
-  c_proj : optim.AdamWState #[n_embd, n_embd]
-  c_proj_bias : optim.AdamWState #[n_embd]
-  ln2_weight : optim.AdamWState #[n_embd]
-  ln2_bias : optim.AdamWState #[n_embd]
-  mlp_fc : optim.AdamWState #[4 * n_embd, n_embd]
-  mlp_fc_bias : optim.AdamWState #[4 * n_embd]
-  mlp_proj : optim.AdamWState #[n_embd, 4 * n_embd]
-  mlp_proj_bias : optim.AdamWState #[n_embd]
-
-/-- Full optimizer state for GPT -/
-structure GPTOptState (cfg : Config) where
-  wte : optim.AdamWState #[cfg.vocab_size, cfg.n_embd]
-  wpe : optim.AdamWState #[cfg.block_size, cfg.n_embd]
-  blocks : Array (BlockOptState cfg.n_embd)
-  ln_f_weight : optim.AdamWState #[cfg.n_embd]
-  ln_f_bias : optim.AdamWState #[cfg.n_embd]
+  deriving TensorStruct
 
 /-- Helper to create a leaf parameter tensor: detach then set requires_grad -/
 def makeLeafParam {s : Shape} (t : T s) : T s :=
@@ -132,24 +114,6 @@ def BlockParams.init (n_embd : UInt64) (scale : Float := 0.02) : IO (BlockParams
     mlp_proj_bias := makeLeafParam (zeros #[n_embd])
   }
 
-/-- Initialize optimizer state for a block -/
-def BlockOptState.init (n_embd : UInt64) : BlockOptState n_embd :=
-  {
-    ln1_weight := optim.AdamWState.init #[n_embd]
-    ln1_bias := optim.AdamWState.init #[n_embd]
-    q_proj := optim.AdamWState.init #[n_embd, n_embd]
-    k_proj := optim.AdamWState.init #[n_embd, n_embd]
-    v_proj := optim.AdamWState.init #[n_embd, n_embd]
-    c_proj := optim.AdamWState.init #[n_embd, n_embd]
-    c_proj_bias := optim.AdamWState.init #[n_embd]
-    ln2_weight := optim.AdamWState.init #[n_embd]
-    ln2_bias := optim.AdamWState.init #[n_embd]
-    mlp_fc := optim.AdamWState.init #[4 * n_embd, n_embd]
-    mlp_fc_bias := optim.AdamWState.init #[4 * n_embd]
-    mlp_proj := optim.AdamWState.init #[n_embd, 4 * n_embd]
-    mlp_proj_bias := optim.AdamWState.init #[n_embd]
-  }
-
 /-- Initialize full GPT model -/
 def GPTParams.init (cfg : Config) : IO (GPTParams cfg) := do
   let wte ← randn #[cfg.vocab_size, cfg.n_embd] false
@@ -164,16 +128,6 @@ def GPTParams.init (cfg : Config) : IO (GPTParams cfg) := do
     blocks := blocks
     ln_f_weight := makeLeafParam (ones #[cfg.n_embd])
     ln_f_bias := makeLeafParam (zeros #[cfg.n_embd])
-  }
-
-/-- Initialize optimizer state for full model -/
-def GPTOptState.init (cfg : Config) : GPTOptState cfg :=
-  {
-    wte := optim.AdamWState.init #[cfg.vocab_size, cfg.n_embd]
-    wpe := optim.AdamWState.init #[cfg.block_size, cfg.n_embd]
-    blocks := Array.replicate cfg.n_layer.toNat (BlockOptState.init cfg.n_embd)
-    ln_f_weight := optim.AdamWState.init #[cfg.n_embd]
-    ln_f_bias := optim.AdamWState.init #[cfg.n_embd]
   }
 
 /-- Forward pass through a single transformer block with multi-head attention and dropout -/
@@ -251,18 +205,19 @@ def loss {cfg : Config} {batch seq : UInt64}
   let targets_flat := reshape targets #[batch * seq]
   return nn.cross_entropy logits_flat targets_flat
 
-/-- Training state -/
+/-- Training state using Optax-style optimizer -/
 structure TrainState (cfg : Config) where
   params : GPTParams cfg
-  optState : GPTOptState cfg
+  optState : Optim.AdamWState (GPTParams cfg)
   step : Nat
 
 /-- Initialize training state -/
 def TrainState.init (cfg : Config) : IO (TrainState cfg) := do
   let params ← GPTParams.init cfg
+  let opt := Optim.adamw (lr := 1e-3)
   return {
     params := params
-    optState := GPTOptState.init cfg
+    optState := opt.init params
     step := 0
   }
 

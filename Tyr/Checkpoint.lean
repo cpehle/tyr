@@ -5,6 +5,7 @@
   Enables training resumption and model export.
 -/
 import Tyr.Train
+import Tyr.TensorStruct
 
 namespace torch.checkpoint
 
@@ -36,36 +37,23 @@ def saveBlockParams {n_embd : UInt64} (params : BlockParams n_embd) (dir : Strin
   data.saveTensor params.mlp_proj (pfx ++ "mlp_proj.pt")
   data.saveTensor params.mlp_proj_bias (pfx ++ "mlp_proj_bias.pt")
 
-/-- Load a single BlockParams from a directory -/
-def loadBlockParams (n_embd : UInt64) (dir : String) (blockIdx : Nat) : IO (BlockParams n_embd) := do
+/-- Load a single BlockParams from a directory (without making leaf params) -/
+private def loadBlockParamsRaw (n_embd : UInt64) (dir : String) (blockIdx : Nat) : IO (BlockParams n_embd) := do
   let pfx := s!"{dir}/block_{blockIdx}_"
-  let ln1_weight ← data.loadTensor #[n_embd] (pfx ++ "ln1_weight.pt")
-  let ln1_bias ← data.loadTensor #[n_embd] (pfx ++ "ln1_bias.pt")
-  let q_proj ← data.loadTensor #[n_embd, n_embd] (pfx ++ "q_proj.pt")
-  let k_proj ← data.loadTensor #[n_embd, n_embd] (pfx ++ "k_proj.pt")
-  let v_proj ← data.loadTensor #[n_embd, n_embd] (pfx ++ "v_proj.pt")
-  let c_proj ← data.loadTensor #[n_embd, n_embd] (pfx ++ "c_proj.pt")
-  let c_proj_bias ← data.loadTensor #[n_embd] (pfx ++ "c_proj_bias.pt")
-  let ln2_weight ← data.loadTensor #[n_embd] (pfx ++ "ln2_weight.pt")
-  let ln2_bias ← data.loadTensor #[n_embd] (pfx ++ "ln2_bias.pt")
-  let mlp_fc ← data.loadTensor #[4 * n_embd, n_embd] (pfx ++ "mlp_fc.pt")
-  let mlp_fc_bias ← data.loadTensor #[4 * n_embd] (pfx ++ "mlp_fc_bias.pt")
-  let mlp_proj ← data.loadTensor #[n_embd, 4 * n_embd] (pfx ++ "mlp_proj.pt")
-  let mlp_proj_bias ← data.loadTensor #[n_embd] (pfx ++ "mlp_proj_bias.pt")
   return {
-    ln1_weight := makeLeafParam ln1_weight
-    ln1_bias := makeLeafParam ln1_bias
-    q_proj := makeLeafParam q_proj
-    k_proj := makeLeafParam k_proj
-    v_proj := makeLeafParam v_proj
-    c_proj := makeLeafParam c_proj
-    c_proj_bias := makeLeafParam c_proj_bias
-    ln2_weight := makeLeafParam ln2_weight
-    ln2_bias := makeLeafParam ln2_bias
-    mlp_fc := makeLeafParam mlp_fc
-    mlp_fc_bias := makeLeafParam mlp_fc_bias
-    mlp_proj := makeLeafParam mlp_proj
-    mlp_proj_bias := makeLeafParam mlp_proj_bias
+    ln1_weight := ← data.loadTensor #[n_embd] (pfx ++ "ln1_weight.pt")
+    ln1_bias := ← data.loadTensor #[n_embd] (pfx ++ "ln1_bias.pt")
+    q_proj := ← data.loadTensor #[n_embd, n_embd] (pfx ++ "q_proj.pt")
+    k_proj := ← data.loadTensor #[n_embd, n_embd] (pfx ++ "k_proj.pt")
+    v_proj := ← data.loadTensor #[n_embd, n_embd] (pfx ++ "v_proj.pt")
+    c_proj := ← data.loadTensor #[n_embd, n_embd] (pfx ++ "c_proj.pt")
+    c_proj_bias := ← data.loadTensor #[n_embd] (pfx ++ "c_proj_bias.pt")
+    ln2_weight := ← data.loadTensor #[n_embd] (pfx ++ "ln2_weight.pt")
+    ln2_bias := ← data.loadTensor #[n_embd] (pfx ++ "ln2_bias.pt")
+    mlp_fc := ← data.loadTensor #[4 * n_embd, n_embd] (pfx ++ "mlp_fc.pt")
+    mlp_fc_bias := ← data.loadTensor #[4 * n_embd] (pfx ++ "mlp_fc_bias.pt")
+    mlp_proj := ← data.loadTensor #[n_embd, 4 * n_embd] (pfx ++ "mlp_proj.pt")
+    mlp_proj_bias := ← data.loadTensor #[n_embd] (pfx ++ "mlp_proj_bias.pt")
   }
 
 /-- Save GPT model parameters to a directory -/
@@ -91,19 +79,21 @@ def loadGPTParams (cfg : Config) (dir : String) : IO (GPTParams cfg) := do
   -- Load blocks
   let mut blocks : Array (BlockParams cfg.n_embd) := #[]
   for i in [:cfg.n_layer.toNat] do
-    let block ← loadBlockParams cfg.n_embd dir i
+    let block ← loadBlockParamsRaw cfg.n_embd dir i
     blocks := blocks.push block
   -- Load final layer norm
   let ln_f_weight ← data.loadTensor #[cfg.n_embd] (dir ++ "/ln_f_weight.pt")
   let ln_f_bias ← data.loadTensor #[cfg.n_embd] (dir ++ "/ln_f_bias.pt")
   IO.println s!"Model loaded from {dir}"
-  return {
-    wte := makeLeafParam wte
-    wpe := makeLeafParam wpe
+  -- Apply makeLeafParams to top-level tensors (blocks already processed)
+  let model : GPTParams cfg := {
+    wte := wte
+    wpe := wpe
     blocks := blocks
-    ln_f_weight := makeLeafParam ln_f_weight
-    ln_f_bias := makeLeafParam ln_f_bias
+    ln_f_weight := ln_f_weight
+    ln_f_bias := ln_f_bias
   }
+  return TensorStruct.makeLeafParams model
 
 /-- Save checkpoint metadata to a file -/
 def saveCheckpointMeta (m : CheckpointMeta) (path : String) : IO Unit := do
