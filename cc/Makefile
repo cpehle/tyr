@@ -36,6 +36,8 @@ HDRS := \
 
 SRCS := \
 	tyr.cpp\
+	tyr_distributed.cpp\
+	tyr_polar.cpp\
 
 LIB_NAME := TyrC
 LIB := lib${LIB_NAME}.a
