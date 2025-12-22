@@ -410,6 +410,22 @@ opaque transpose_from_attention {batch n_head seq head_dim : UInt64}
 @[extern "lean_torch_expand"] opaque expand' {s : Shape} (input : @& T s) (size : Array UInt64) : T s
 @[extern "lean_torch_repeat"] opaque tensor_repeat {s : Shape} (input : @& T s) (repeats : Array UInt64) : T s
 
+/-- Concatenate tensors along a dimension (untyped FFI) -/
+@[extern "lean_torch_cat"] opaque cat_impl {s : Shape} (tensors : @& Array (T s)) (dim : Int) : T #[]
+
+/-- Compute the output shape when concatenating two shapes along dimension `dim`.
+    The shapes must match in all dimensions except `dim`, where they are summed. -/
+def catShape (s1 s2 : Shape) (dim : Nat) : Shape :=
+  s1.set! dim (s1.getD dim 0 + s2.getD dim 0)
+
+/-- Type-safe concatenation along any dimension.
+    Given tensors of shapes s1 and s2 that match in all dimensions except `dim`,
+    produces a tensor where dimension `dim` is the sum of the input dimensions.
+
+    Example: cat #[2,3] #[2,5] 1 produces shape #[2, 8] -/
+def cat {s1 s2 : Shape} (t1 : T s1) (t2 : T s2) (dim : Nat) : T (catShape s1 s2 dim) :=
+  reshape (cat_impl #[reshape t1 #[], reshape t2 #[]] dim) (catShape s1 s2 dim)
+
 /-- Expand tensor to target shape (typed version) -/
 def expand {s : Shape} (input : T s) (targetShape : Shape) : T targetShape :=
   let result := expand' input targetShape
@@ -445,9 +461,19 @@ opaque scaled_dot_product_attention {batch n_head seq head_dim : UInt64}
 @[extern "lean_torch_sum"] private opaque sum_impl {s : Shape} (t : @& T s) (dim : Option (Array UInt64)) (keepdim : Bool) : T #[]
 @[extern "lean_torch_mean"] private opaque mean_impl {s : Shape} (t : @& T s) (dim : Option (Array UInt64)) (keepdim : Bool) : T #[]
 
+-- Element-wise absolute value
+@[extern "lean_torch_abs"] opaque abs {s : Shape} (t : @& T s) : T s
+
 -- Reductions to scalar (all elements)
 def sumAll {s : Shape} (t : T s) : T #[] := sum_impl t none false
 def meanAll {s : Shape} (t : T s) : T #[] := mean_impl t none false
+
+-- Max/Min reductions
+@[extern "lean_torch_max_all"] private opaque max_all_impl {s : Shape} (t : @& T s) : T #[]
+@[extern "lean_torch_min_all"] private opaque min_all_impl {s : Shape} (t : @& T s) : T #[]
+
+def maxAll {s : Shape} (t : T s) : T #[] := max_all_impl t
+def minAll {s : Shape} (t : T s) : T #[] := min_all_impl t
 
 -- Reductions along a dimension (shape-aware versions)
 -- Note: These use reshape internally since C++ doesn't track shapes
@@ -481,53 +507,6 @@ namespace autograd
 @[extern "lean_torch_backward_unit"] opaque backward {s : Shape} (output : @& T s) (grad_output : @& T s) : IO Unit
 
 end autograd
-
--- Optimizer namespace
-namespace optim
-
-/-- AdamW hyperparameters -/
-structure AdamWConfig where
-  lr : Float := 6e-4
-  beta1 : Float := 0.9
-  beta2 : Float := 0.95
-  eps : Float := 1e-8
-  weight_decay : Float := 0.1
-  deriving Repr, Inhabited
-
-def AdamWConfig.default : AdamWConfig := {}
-
-/-- Optimizer state for a single parameter -/
-structure AdamWState (s : Shape) where
-  m : T s       -- first moment estimate
-  v : T s       -- second moment estimate
-  step : Nat
-  deriving Inhabited
-
-/-- Initialize optimizer state with zeros -/
-def AdamWState.init (s : Shape) : AdamWState s :=
-  { m := torch.zeros s, v := torch.zeros s, step := 0 }
-
-/-- AdamW update computed under `torch.autograd.no_grad` to avoid graph buildup. -/
-def adamw {s : Shape} (config : AdamWConfig)
-    (param : T s) (grad : T s) (state : AdamWState s) : IO (T s × AdamWState s) :=
-  autograd.no_grad do
-    let step := state.step + 1
-    let { lr, beta1, beta2, eps, weight_decay } := config
-    let param_d := autograd.detach param
-    let grad_d := autograd.detach grad
-    let param' := mul_scalar param_d (1.0 - lr * weight_decay)
-    let m' := add (mul_scalar state.m beta1) (mul_scalar grad_d (1.0 - beta1))
-    let v' := add (mul_scalar state.v beta2) (mul_scalar (mul grad_d grad_d) (1.0 - beta2))
-    let bc1 := 1.0 - Float.pow beta1 step.toFloat
-    let bc2 := 1.0 - Float.pow beta2 step.toFloat
-    let m_hat := div_scalar m' bc1
-    let v_hat := div_scalar v' bc2
-    let update := nn.div m_hat (add_scalar (nn.sqrt v_hat) eps)
-    let param'' := sub param' (mul_scalar update lr)
-    let param_new := autograd.set_requires_grad param'' true
-    return (param_new, { m := m', v := v', step := step })
-
-end optim
 
 -- Data loading utilities
 namespace data

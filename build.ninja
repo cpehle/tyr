@@ -44,9 +44,37 @@ build out/o/Tyr/Torch.o: cobj out/c/Tyr/Torch.c
 build out/Tyr/TensorStruct.olean: leano ./Tyr/TensorStruct.lean |  out/Tyr/Torch.olean
 build out/c/Tyr/TensorStruct.c: leanc ./Tyr/TensorStruct.lean |  out/Tyr/Torch.olean
 build out/o/Tyr/TensorStruct.o: cobj out/c/Tyr/TensorStruct.c
-build out/Tyr/Module/Linear.olean: leano ./Tyr/Module/Linear.lean |  out/Tyr/Torch.olean
-build out/c/Tyr/Module/Linear.c: leanc ./Tyr/Module/Linear.lean |  out/Tyr/Torch.olean
+build out/Tyr/Distributed.olean: leano ./Tyr/Distributed.lean |  out/Tyr/Torch.olean
+build out/c/Tyr/Distributed.c: leanc ./Tyr/Distributed.lean |  out/Tyr/Torch.olean
+build out/o/Tyr/Distributed.o: cobj out/c/Tyr/Distributed.c
+build out/Tyr/Sharding.olean: leano ./Tyr/Sharding.lean |  out/Tyr/Torch.olean out/Tyr/TensorStruct.olean out/Tyr/Distributed.olean
+build out/c/Tyr/Sharding.c: leanc ./Tyr/Sharding.lean |  out/Tyr/Torch.olean out/Tyr/TensorStruct.olean out/Tyr/Distributed.olean
+build out/o/Tyr/Sharding.o: cobj out/c/Tyr/Sharding.c
+build out/Tyr/Optim.olean: leano ./Tyr/Optim.lean |  out/Tyr/TensorStruct.olean
+build out/c/Tyr/Optim.c: leanc ./Tyr/Optim.lean |  out/Tyr/TensorStruct.olean
+build out/o/Tyr/Optim.o: cobj out/c/Tyr/Optim.c
+build out/o/plugin/Tyr/Optim.o: cobj_plugin out/c/Tyr/Optim.c
+build out/Tyr/Optim/PolarExpress.olean: leano ./Tyr/Optim/PolarExpress.lean |  out/Tyr/Torch.olean out/Tyr/Distributed.olean
+build out/c/Tyr/Optim/PolarExpress.c: leanc ./Tyr/Optim/PolarExpress.lean |  out/Tyr/Torch.olean out/Tyr/Distributed.olean
+build out/o/Tyr/Optim/PolarExpress.o: cobj out/c/Tyr/Optim/PolarExpress.c
+build out/Tyr/Optim/NorMuon.olean: leano ./Tyr/Optim/NorMuon.lean |  out/Tyr/Torch.olean out/Tyr/TensorStruct.olean out/Tyr/Distributed.olean out/Tyr/Optim/PolarExpress.olean
+build out/c/Tyr/Optim/NorMuon.c: leanc ./Tyr/Optim/NorMuon.lean |  out/Tyr/Torch.olean out/Tyr/TensorStruct.olean out/Tyr/Distributed.olean out/Tyr/Optim/PolarExpress.olean
+build out/o/Tyr/Optim/NorMuon.o: cobj out/c/Tyr/Optim/NorMuon.c
+build out/Tyr/Optim/DistAdam.olean: leano ./Tyr/Optim/DistAdam.lean |  out/Tyr/Torch.olean out/Tyr/TensorStruct.olean out/Tyr/Distributed.olean
+build out/c/Tyr/Optim/DistAdam.c: leanc ./Tyr/Optim/DistAdam.lean |  out/Tyr/Torch.olean out/Tyr/TensorStruct.olean out/Tyr/Distributed.olean
+build out/o/Tyr/Optim/DistAdam.o: cobj out/c/Tyr/Optim/DistAdam.c
+build out/Tyr/Module/Core.olean: leano ./Tyr/Module/Core.lean |  out/Tyr/TensorStruct.olean
+build out/c/Tyr/Module/Core.c: leanc ./Tyr/Module/Core.lean |  out/Tyr/TensorStruct.olean
+build out/o/Tyr/Module/Core.o: cobj out/c/Tyr/Module/Core.c
+build out/Tyr/Module/Derive.olean: leano ./Tyr/Module/Derive.lean |  out/Tyr/TensorStruct.olean
+build out/c/Tyr/Module/Derive.c: leanc ./Tyr/Module/Derive.lean |  out/Tyr/TensorStruct.olean
+build out/o/Tyr/Module/Derive.o: cobj out/c/Tyr/Module/Derive.c
+build out/Tyr/Module/Linear.olean: leano ./Tyr/Module/Linear.lean |  out/Tyr/TensorStruct.olean out/Tyr/Module/Core.olean out/Tyr/Widget.olean
+build out/c/Tyr/Module/Linear.c: leanc ./Tyr/Module/Linear.lean |  out/Tyr/TensorStruct.olean out/Tyr/Module/Core.olean out/Tyr/Widget.olean
 build out/o/Tyr/Module/Linear.o: cobj out/c/Tyr/Module/Linear.c
+build out/Tyr/Module/LayerNorm.olean: leano ./Tyr/Module/LayerNorm.lean |  out/Tyr/Torch.olean out/Tyr/TensorStruct.olean out/Tyr/Module/Core.olean out/Tyr/Widget.olean
+build out/c/Tyr/Module/LayerNorm.c: leanc ./Tyr/Module/LayerNorm.lean |  out/Tyr/Torch.olean out/Tyr/TensorStruct.olean out/Tyr/Module/Core.olean out/Tyr/Widget.olean
+build out/o/Tyr/Module/LayerNorm.o: cobj out/c/Tyr/Module/LayerNorm.c
 build out/Tyr/Module/Affine.olean: leano ./Tyr/Module/Affine.lean |  out/Tyr/Torch.olean
 build out/c/Tyr/Module/Affine.c: leanc ./Tyr/Module/Affine.lean |  out/Tyr/Torch.olean
 build out/o/Tyr/Module/Affine.o: cobj out/c/Tyr/Module/Affine.c
@@ -56,11 +84,11 @@ build out/o/Tyr/Module/LSTM.o: cobj out/c/Tyr/Module/LSTM.c
 build out/Tyr/Module/Conv2d.olean: leano ./Tyr/Module/Conv2d.lean |  out/Tyr/Torch.olean
 build out/c/Tyr/Module/Conv2d.c: leanc ./Tyr/Module/Conv2d.lean |  out/Tyr/Torch.olean
 build out/o/Tyr/Module/Conv2d.o: cobj out/c/Tyr/Module/Conv2d.c
-build out/Tyr/Module.olean: leano ./Tyr/Module.lean |  out/Tyr/Module/Linear.olean out/Tyr/Module/Affine.olean out/Tyr/Module/LSTM.olean out/Tyr/Module/Conv2d.olean
-build out/c/Tyr/Module.c: leanc ./Tyr/Module.lean |  out/Tyr/Module/Linear.olean out/Tyr/Module/Affine.olean out/Tyr/Module/LSTM.olean out/Tyr/Module/Conv2d.olean
+build out/Tyr/Module.olean: leano ./Tyr/Module.lean |  out/Tyr/Module/Core.olean out/Tyr/Module/Derive.olean out/Tyr/Module/Linear.olean out/Tyr/Module/LayerNorm.olean out/Tyr/Module/Affine.olean out/Tyr/Module/LSTM.olean out/Tyr/Module/Conv2d.olean
+build out/c/Tyr/Module.c: leanc ./Tyr/Module.lean |  out/Tyr/Module/Core.olean out/Tyr/Module/Derive.olean out/Tyr/Module/Linear.olean out/Tyr/Module/LayerNorm.olean out/Tyr/Module/Affine.olean out/Tyr/Module/LSTM.olean out/Tyr/Module/Conv2d.olean
 build out/o/Tyr/Module.o: cobj out/c/Tyr/Module.c
-build out/Tyr/GPT.olean: leano ./Tyr/GPT.lean |  out/Tyr/Torch.olean
-build out/c/Tyr/GPT.c: leanc ./Tyr/GPT.lean |  out/Tyr/Torch.olean
+build out/Tyr/GPT.olean: leano ./Tyr/GPT.lean |  out/Tyr/Torch.olean out/Tyr/TensorStruct.olean out/Tyr/Module/Core.olean out/Tyr/Module/Derive.olean out/Tyr/Optim.olean
+build out/c/Tyr/GPT.c: leanc ./Tyr/GPT.lean |  out/Tyr/Torch.olean out/Tyr/TensorStruct.olean out/Tyr/Module/Core.olean out/Tyr/Module/Derive.olean out/Tyr/Optim.olean
 build out/o/Tyr/GPT.o: cobj out/c/Tyr/GPT.c
 build out/Tyr/NanoProof.olean: leano ./Tyr/NanoProof.lean |  out/Tyr/Torch.olean
 build out/c/Tyr/NanoProof.c: leanc ./Tyr/NanoProof.lean |  out/Tyr/Torch.olean
@@ -95,22 +123,31 @@ build out/o/Tyr/MCTS.o: cobj out/c/Tyr/MCTS.c
 build out/Tyr/Prover.olean: leano ./Tyr/Prover.lean |  out/Tyr/MCTS.olean
 build out/c/Tyr/Prover.c: leanc ./Tyr/Prover.lean |  out/Tyr/MCTS.olean
 build out/o/Tyr/Prover.o: cobj out/c/Tyr/Prover.c
-build out/Tyr/Train.olean: leano ./Tyr/Train.lean |  out/Tyr/Torch.olean out/Tyr/GPT.olean
-build out/c/Tyr/Train.c: leanc ./Tyr/Train.lean |  out/Tyr/Torch.olean out/Tyr/GPT.olean
+build out/Tyr/Train.olean: leano ./Tyr/Train.lean |  out/Tyr/Torch.olean out/Tyr/TensorStruct.olean out/Tyr/Optim.olean out/Tyr/GPT.olean
+build out/c/Tyr/Train.c: leanc ./Tyr/Train.lean |  out/Tyr/Torch.olean out/Tyr/TensorStruct.olean out/Tyr/Optim.olean out/Tyr/GPT.olean
 build out/o/Tyr/Train.o: cobj out/c/Tyr/Train.c
+build out/Tyr/DataLoader.olean: leano ./Tyr/DataLoader.lean |  out/Tyr/Torch.olean out/Tyr/Distributed.olean
+build out/c/Tyr/DataLoader.c: leanc ./Tyr/DataLoader.lean |  out/Tyr/Torch.olean out/Tyr/Distributed.olean
+build out/o/Tyr/DataLoader.o: cobj out/c/Tyr/DataLoader.c
+build out/Tyr/ModdedGPT.olean: leano ./Tyr/ModdedGPT.lean |  out/Tyr/Torch.olean out/Tyr/TensorStruct.olean
+build out/c/Tyr/ModdedGPT.c: leanc ./Tyr/ModdedGPT.lean |  out/Tyr/Torch.olean out/Tyr/TensorStruct.olean
+build out/o/Tyr/ModdedGPT.o: cobj out/c/Tyr/ModdedGPT.c
+build out/Tyr/ModdedTrain.olean: leano ./Tyr/ModdedTrain.lean |  out/Tyr/Torch.olean out/Tyr/TensorStruct.olean out/Tyr/Distributed.olean out/Tyr/ModdedGPT.olean out/Tyr/DataLoader.olean out/Tyr/Optim/NorMuon.olean out/Tyr/Optim/DistAdam.olean
+build out/c/Tyr/ModdedTrain.c: leanc ./Tyr/ModdedTrain.lean |  out/Tyr/Torch.olean out/Tyr/TensorStruct.olean out/Tyr/Distributed.olean out/Tyr/ModdedGPT.olean out/Tyr/DataLoader.olean out/Tyr/Optim/NorMuon.olean out/Tyr/Optim/DistAdam.olean
+build out/o/Tyr/ModdedTrain.o: cobj out/c/Tyr/ModdedTrain.c
 build out/Tyr/RLTrain.olean: leano ./Tyr/RLTrain.lean |  out/Tyr/MCTS.olean out/Tyr/Prover.olean out/Tyr/Train.olean
 build out/c/Tyr/RLTrain.c: leanc ./Tyr/RLTrain.lean |  out/Tyr/MCTS.olean out/Tyr/Prover.olean out/Tyr/Train.olean
 build out/o/Tyr/RLTrain.o: cobj out/c/Tyr/RLTrain.c
-build out/Tyr/Checkpoint.olean: leano ./Tyr/Checkpoint.lean |  out/Tyr/Train.olean
-build out/c/Tyr/Checkpoint.c: leanc ./Tyr/Checkpoint.lean |  out/Tyr/Train.olean
+build out/Tyr/Checkpoint.olean: leano ./Tyr/Checkpoint.lean |  out/Tyr/Train.olean out/Tyr/TensorStruct.olean
+build out/c/Tyr/Checkpoint.c: leanc ./Tyr/Checkpoint.lean |  out/Tyr/Train.olean out/Tyr/TensorStruct.olean
 build out/o/Tyr/Checkpoint.o: cobj out/c/Tyr/Checkpoint.c
-build out/Tyr/Widget.olean: leano ./Tyr/Widget.lean |  out/Tyr/Basic.olean
-build out/c/Tyr/Widget.c: leanc ./Tyr/Widget.lean |  out/Tyr/Basic.olean
+build out/Tyr/Widget.olean: leano ./Tyr/Widget.lean |  out/Tyr/Basic.olean out/Tyr/TensorStruct.olean
+build out/c/Tyr/Widget.c: leanc ./Tyr/Widget.lean |  out/Tyr/Basic.olean out/Tyr/TensorStruct.olean
 build out/o/Tyr/Widget.o: cobj out/c/Tyr/Widget.c
-build out/Tyr.olean: leano ./Tyr.lean |  out/Tyr/Basic.olean out/Tyr/Module.olean out/Tyr/Torch.olean out/Tyr/TensorStruct.olean out/Tyr/GPT.olean out/Tyr/NanoProof.olean out/Tyr/Tokenizer.olean out/Tyr/MCTS.olean out/Tyr/Prover.olean out/Tyr/Train.olean out/Tyr/RLTrain.olean out/Tyr/Checkpoint.olean out/Tyr/Widget.olean
-build out/c/Tyr.c: leanc ./Tyr.lean |  out/Tyr/Basic.olean out/Tyr/Module.olean out/Tyr/Torch.olean out/Tyr/TensorStruct.olean out/Tyr/GPT.olean out/Tyr/NanoProof.olean out/Tyr/Tokenizer.olean out/Tyr/MCTS.olean out/Tyr/Prover.olean out/Tyr/Train.olean out/Tyr/RLTrain.olean out/Tyr/Checkpoint.olean out/Tyr/Widget.olean
+build out/Tyr.olean: leano ./Tyr.lean |  out/Tyr/Basic.olean out/Tyr/Module.olean out/Tyr/Torch.olean out/Tyr/TensorStruct.olean out/Tyr/Sharding.olean out/Tyr/Distributed.olean out/Tyr/Optim.olean out/Tyr/GPT.olean out/Tyr/NanoProof.olean out/Tyr/Tokenizer.olean out/Tyr/MCTS.olean out/Tyr/Prover.olean out/Tyr/Train.olean out/Tyr/RLTrain.olean out/Tyr/Checkpoint.olean out/Tyr/Widget.olean
+build out/c/Tyr.c: leanc ./Tyr.lean |  out/Tyr/Basic.olean out/Tyr/Module.olean out/Tyr/Torch.olean out/Tyr/TensorStruct.olean out/Tyr/Sharding.olean out/Tyr/Distributed.olean out/Tyr/Optim.olean out/Tyr/GPT.olean out/Tyr/NanoProof.olean out/Tyr/Tokenizer.olean out/Tyr/MCTS.olean out/Tyr/Prover.olean out/Tyr/Train.olean out/Tyr/RLTrain.olean out/Tyr/Checkpoint.olean out/Tyr/Widget.olean
 build out/o/Tyr.o: cobj out/c/Tyr.c
-build out/libTyr.a: ar  out/o/Tyr.o out/o/Tyr/Basic.o out/o/Tyr/Torch.o out/o/Tyr/TensorStruct.o out/o/Tyr/Module.o out/o/Tyr/Module/Linear.o out/o/Tyr/Module/Affine.o out/o/Tyr/Module/LSTM.o out/o/Tyr/Module/Conv2d.o out/o/Tyr/GPT.o out/o/Tyr/NanoProof.o out/o/Tyr/Tokenizer.o out/o/Tyr/Tokenizer/Types.o out/o/Tyr/Tokenizer/ByteLevel.o out/o/Tyr/Tokenizer/Pretokenize.o out/o/Tyr/Tokenizer/Encode.o out/o/Tyr/Tokenizer/Decode.o out/o/Tyr/Tokenizer/SpecialTokens.o out/o/Tyr/Tokenizer/IO.o out/o/Tyr/MCTS.o out/o/Tyr/Prover.o out/o/Tyr/Train.o out/o/Tyr/RLTrain.o out/o/Tyr/Checkpoint.o out/o/Tyr/Widget.o |
+build out/libTyr.a: ar  out/o/Tyr.o out/o/Tyr/Basic.o out/o/Tyr/Torch.o out/o/Tyr/TensorStruct.o out/o/Tyr/Sharding.o out/o/Tyr/Distributed.o out/o/Tyr/Optim.o out/o/Tyr/Module.o out/o/Tyr/Module/Core.o out/o/Tyr/Module/Derive.o out/o/Tyr/Module/Linear.o out/o/Tyr/Module/LayerNorm.o out/o/Tyr/Module/Affine.o out/o/Tyr/Module/LSTM.o out/o/Tyr/Module/Conv2d.o out/o/Tyr/GPT.o out/o/Tyr/NanoProof.o out/o/Tyr/Tokenizer.o out/o/Tyr/Tokenizer/Types.o out/o/Tyr/Tokenizer/ByteLevel.o out/o/Tyr/Tokenizer/Pretokenize.o out/o/Tyr/Tokenizer/Encode.o out/o/Tyr/Tokenizer/Decode.o out/o/Tyr/Tokenizer/SpecialTokens.o out/o/Tyr/Tokenizer/IO.o out/o/Tyr/MCTS.o out/o/Tyr/Prover.o out/o/Tyr/Train.o out/o/Tyr/RLTrain.o out/o/Tyr/Checkpoint.o out/o/Tyr/Widget.o |
   libraries =
 
 # Plugin object files with LEAN_EXPORTING for symbol visibility
@@ -119,7 +156,10 @@ build out/o/plugin/Tyr/Basic.o: cobj_plugin out/c/Tyr/Basic.c
 build out/o/plugin/Tyr/Torch.o: cobj_plugin out/c/Tyr/Torch.c
 build out/o/plugin/Tyr/TensorStruct.o: cobj_plugin out/c/Tyr/TensorStruct.c
 build out/o/plugin/Tyr/Module.o: cobj_plugin out/c/Tyr/Module.c
+build out/o/plugin/Tyr/Module/Core.o: cobj_plugin out/c/Tyr/Module/Core.c
+build out/o/plugin/Tyr/Module/Derive.o: cobj_plugin out/c/Tyr/Module/Derive.c
 build out/o/plugin/Tyr/Module/Linear.o: cobj_plugin out/c/Tyr/Module/Linear.c
+build out/o/plugin/Tyr/Module/LayerNorm.o: cobj_plugin out/c/Tyr/Module/LayerNorm.c
 build out/o/plugin/Tyr/Module/Affine.o: cobj_plugin out/c/Tyr/Module/Affine.c
 build out/o/plugin/Tyr/Module/LSTM.o: cobj_plugin out/c/Tyr/Module/LSTM.c
 build out/o/plugin/Tyr/Module/Conv2d.o: cobj_plugin out/c/Tyr/Module/Conv2d.c
@@ -135,6 +175,8 @@ build out/o/plugin/Tyr/Tokenizer/SpecialTokens.o: cobj_plugin out/c/Tyr/Tokenize
 build out/o/plugin/Tyr/Tokenizer/IO.o: cobj_plugin out/c/Tyr/Tokenizer/IO.c
 build out/o/plugin/Tyr/MCTS.o: cobj_plugin out/c/Tyr/MCTS.c
 build out/o/plugin/Tyr/Prover.o: cobj_plugin out/c/Tyr/Prover.c
+build out/o/plugin/Tyr/Sharding.o: cobj_plugin out/c/Tyr/Sharding.c
+build out/o/plugin/Tyr/Distributed.o: cobj_plugin out/c/Tyr/Distributed.c
 build out/o/plugin/Tyr/Train.o: cobj_plugin out/c/Tyr/Train.c
 build out/o/plugin/Tyr/RLTrain.o: cobj_plugin out/c/Tyr/RLTrain.c
 build out/o/plugin/Tyr/Checkpoint.o: cobj_plugin out/c/Tyr/Checkpoint.c
@@ -142,7 +184,7 @@ build out/o/plugin/Tyr/Widget.o: cobj_plugin out/c/Tyr/Widget.c
 
 # Plugin shared library for language server #eval support
 # All files compiled with LEAN_EXPORTING for symbol visibility
-build out/libTyr.dylib: dylib out/o/plugin/Tyr.o out/o/plugin/Tyr/Basic.o out/o/plugin/Tyr/Torch.o out/o/plugin/Tyr/TensorStruct.o out/o/plugin/Tyr/Module.o out/o/plugin/Tyr/Module/Linear.o out/o/plugin/Tyr/Module/Affine.o out/o/plugin/Tyr/Module/LSTM.o out/o/plugin/Tyr/Module/Conv2d.o out/o/plugin/Tyr/GPT.o out/o/plugin/Tyr/NanoProof.o out/o/plugin/Tyr/Tokenizer.o out/o/plugin/Tyr/Tokenizer/Types.o out/o/plugin/Tyr/Tokenizer/ByteLevel.o out/o/plugin/Tyr/Tokenizer/Pretokenize.o out/o/plugin/Tyr/Tokenizer/Encode.o out/o/plugin/Tyr/Tokenizer/Decode.o out/o/plugin/Tyr/Tokenizer/SpecialTokens.o out/o/plugin/Tyr/Tokenizer/IO.o out/o/plugin/Tyr/MCTS.o out/o/plugin/Tyr/Prover.o out/o/plugin/Tyr/Train.o out/o/plugin/Tyr/RLTrain.o out/o/plugin/Tyr/Checkpoint.o out/o/plugin/Tyr/Widget.o cc/build/libTyrC.a |
+build out/libTyr.dylib: dylib out/o/plugin/Tyr.o out/o/plugin/Tyr/Basic.o out/o/plugin/Tyr/Torch.o out/o/plugin/Tyr/TensorStruct.o out/o/plugin/Tyr/Sharding.o out/o/plugin/Tyr/Distributed.o out/o/plugin/Tyr/Optim.o out/o/plugin/Tyr/Module.o out/o/plugin/Tyr/Module/Core.o out/o/plugin/Tyr/Module/Derive.o out/o/plugin/Tyr/Module/Linear.o out/o/plugin/Tyr/Module/LayerNorm.o out/o/plugin/Tyr/Module/Affine.o out/o/plugin/Tyr/Module/LSTM.o out/o/plugin/Tyr/Module/Conv2d.o out/o/plugin/Tyr/GPT.o out/o/plugin/Tyr/NanoProof.o out/o/plugin/Tyr/Tokenizer.o out/o/plugin/Tyr/Tokenizer/Types.o out/o/plugin/Tyr/Tokenizer/ByteLevel.o out/o/plugin/Tyr/Tokenizer/Pretokenize.o out/o/plugin/Tyr/Tokenizer/Encode.o out/o/plugin/Tyr/Tokenizer/Decode.o out/o/plugin/Tyr/Tokenizer/SpecialTokens.o out/o/plugin/Tyr/Tokenizer/IO.o out/o/plugin/Tyr/MCTS.o out/o/plugin/Tyr/Prover.o out/o/plugin/Tyr/Train.o out/o/plugin/Tyr/RLTrain.o out/o/plugin/Tyr/Checkpoint.o out/o/plugin/Tyr/Widget.o cc/build/libTyrC.a |
   libraries = -ltorch -ltorch_cpu -lc10
   librarypaths = -L external/libtorch/lib -L cc/build/ -Wl,-rpath,/Users/pehle/dev/tyr/external/libtorch/lib -Wl,-rpath,/opt/homebrew/opt/libomp/lib
 
@@ -162,4 +204,22 @@ build out/o/TrainGPT.o: cobj out/c/TrainGPT.c
 build out/exe/TrainGPT: cexe  out/o/TrainGPT.o |  out/libTyr.a
   libraries =  -lTyr -ltorch -ltorch_cpu -lc10 -lTyrC
   librarypaths = -L external/libtorch/lib -L cc/build/
+
+build out/ModdedTrainGPT.olean: leano ./ModdedTrainGPT.lean |  out/Tyr.olean out/Tyr/Distributed.olean out/Tyr/Sharding.olean out/Tyr/ModdedGPT.olean out/Tyr/DataLoader.olean out/Tyr/ModdedTrain.olean out/Tyr/Optim/NorMuon.olean out/Tyr/Optim/DistAdam.olean
+build out/c/ModdedTrainGPT.c: leanc ./ModdedTrainGPT.lean |  out/Tyr.olean out/Tyr/Distributed.olean out/Tyr/Sharding.olean out/Tyr/ModdedGPT.olean out/Tyr/DataLoader.olean out/Tyr/ModdedTrain.olean out/Tyr/Optim/NorMuon.olean out/Tyr/Optim/DistAdam.olean
+build out/o/ModdedTrainGPT.o: cobj out/c/ModdedTrainGPT.c
+build out/exe/ModdedTrainGPT: cexe  out/o/ModdedTrainGPT.o out/o/Tyr/Distributed.o out/o/Tyr/Sharding.o out/o/Tyr/ModdedGPT.o out/o/Tyr/DataLoader.o out/o/Tyr/ModdedTrain.o out/o/Tyr/Optim/PolarExpress.o out/o/Tyr/Optim/NorMuon.o out/o/Tyr/Optim/DistAdam.o |  out/libTyr.a
+  libraries =  -lTyr -ltorch -ltorch_cpu -lc10 -lTyrC
+  librarypaths = -L external/libtorch/lib -L cc/build/
+
+build modded: phony out/exe/ModdedTrainGPT
+
+build out/TestModdedGPT.olean: leano ./TestModdedGPT.lean |  out/Tyr.olean out/Tyr/Distributed.olean out/Tyr/Sharding.olean out/Tyr/ModdedGPT.olean out/Tyr/DataLoader.olean out/Tyr/ModdedTrain.olean out/Tyr/Optim/PolarExpress.olean out/Tyr/Optim/NorMuon.olean out/Tyr/Optim/DistAdam.olean
+build out/c/TestModdedGPT.c: leanc ./TestModdedGPT.lean |  out/Tyr.olean out/Tyr/Distributed.olean out/Tyr/Sharding.olean out/Tyr/ModdedGPT.olean out/Tyr/DataLoader.olean out/Tyr/ModdedTrain.olean out/Tyr/Optim/PolarExpress.olean out/Tyr/Optim/NorMuon.olean out/Tyr/Optim/DistAdam.olean
+build out/o/TestModdedGPT.o: cobj out/c/TestModdedGPT.c
+build out/exe/TestModdedGPT: cexe  out/o/TestModdedGPT.o out/o/Tyr/Distributed.o out/o/Tyr/Sharding.o out/o/Tyr/ModdedGPT.o out/o/Tyr/DataLoader.o out/o/Tyr/ModdedTrain.o out/o/Tyr/Optim/PolarExpress.o out/o/Tyr/Optim/NorMuon.o out/o/Tyr/Optim/DistAdam.o |  out/libTyr.a
+  libraries =  -lTyr -ltorch -ltorch_cpu -lc10 -lTyrC
+  librarypaths = -L external/libtorch/lib -L cc/build/
+
+build test-modded: phony out/exe/TestModdedGPT
 

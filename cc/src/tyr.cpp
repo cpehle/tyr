@@ -48,7 +48,7 @@ lean_external_class* getTorchTensorImplClass() {
 // Increments refcount so both Lean and C++ have shared ownership.
 // When the returned tensor goes out of scope, refcount is decremented automatically.
 // No manual unsafeReleaseTensorImpl() needed!
-static inline torch::Tensor borrowTensor(b_lean_obj_arg o) {
+torch::Tensor borrowTensor(b_lean_obj_arg o) {
     auto impl = static_cast<torch::TensorImpl*>(lean_get_external_data(o));
     // unsafe_reclaim_from_nonowning increments the refcount
     return torch::Tensor(c10::intrusive_ptr<torch::TensorImpl>::unsafe_reclaim_from_nonowning(impl));
@@ -56,13 +56,13 @@ static inline torch::Tensor borrowTensor(b_lean_obj_arg o) {
 
 // Transfer ownership of a new tensor to Lean.
 // The tensor's refcount is transferred to Lean's finalizer.
-static inline lean_object *giveTensor(torch::Tensor t) {
+lean_object *giveTensor(torch::Tensor t) {
   g_live_lean_tensors++; // Increment when a new tensor is given to Lean
   return lean_alloc_external(getTorchTensorImplClass(), t.unsafeReleaseTensorImpl());
 }
 
 // Alias for backward compatibility
-static inline lean_object *fromTorchTensor(torch::Tensor t) {
+lean_object *fromTorchTensor(torch::Tensor t) {
   return giveTensor(t);
 }
 
@@ -1257,7 +1257,7 @@ lean_object* lean_torch_sum(lean_obj_arg /*s*/, b_lean_obj_arg input, lean_obj_a
 lean_object* lean_torch_mean(lean_obj_arg /*s*/, b_lean_obj_arg input, lean_obj_arg dim, uint8_t keepdim) {
   auto input_ = borrowTensor(input);
   torch::Tensor result_;
-  
+
   if (lean_is_scalar(dim)) {
     // Mean of all elements
     result_ = torch::mean(input_);
@@ -1266,7 +1266,25 @@ lean_object* lean_torch_mean(lean_obj_arg /*s*/, b_lean_obj_arg input, lean_obj_
     auto dims = getShape(dim); lean_dec(dim);
     result_ = torch::mean(input_, c10::IntArrayRef(dims.data(), dims.size()), keepdim);
   }
-  
+
+  return fromTorchTensor(result_);
+}
+
+lean_object* lean_torch_abs(lean_obj_arg /*s*/, b_lean_obj_arg input) {
+  auto input_ = borrowTensor(input);
+  auto result_ = torch::abs(input_);
+  return fromTorchTensor(result_);
+}
+
+lean_object* lean_torch_max_all(lean_obj_arg /*s*/, b_lean_obj_arg input) {
+  auto input_ = borrowTensor(input);
+  auto result_ = torch::max(input_);
+  return fromTorchTensor(result_);
+}
+
+lean_object* lean_torch_min_all(lean_obj_arg /*s*/, b_lean_obj_arg input) {
+  auto input_ = borrowTensor(input);
+  auto result_ = torch::min(input_);
   return fromTorchTensor(result_);
 }
 
