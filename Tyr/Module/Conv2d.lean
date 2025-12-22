@@ -23,7 +23,7 @@ def Conv2d.init (c : Conv2d) : IO Conv2d := do
   return { c with weight := weight }
 
 def Conv2d.outShape (c : Conv2d) (s : Shape) : Shape :=
-  let (n, cIn, hin, win) := (s[0], s[1], s[2], s[3]);
+  let (n, cIn, hin, win) := (s[0]!, s[1]!, s[2]!, s[3]!);
   let (px,py) := c.padding;
   let (sx,sy) := c.stride;
   let (dx,dy) := c.dilation;

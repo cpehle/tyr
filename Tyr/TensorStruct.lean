@@ -2,6 +2,48 @@ import Tyr.Torch
 
 namespace torch
 
+/-! ## Static and Frozen Wrappers
+
+These wrapper types control how fields are handled during tensor tree traversal:
+- `Static α`: Non-tensor data that should be completely skipped (e.g., config, hyperparameters)
+- `Frozen s`: Tensor that participates in forward pass but not in gradient updates
+-/
+
+/-- Non-tensor static data that should be skipped during traversal.
+    Use this for configuration, hyperparameters, or any non-tensor metadata. -/
+structure Static (α : Type) where
+  val : α
+  deriving Repr, BEq, Hashable
+
+instance [Inhabited α] : Inhabited (Static α) := ⟨⟨default⟩⟩
+
+/-- Coercion from α to Static α -/
+instance : Coe α (Static α) := ⟨Static.mk⟩
+
+/-- A frozen (non-trainable) tensor parameter.
+    Participates in forward pass but gradients are not tracked for optimization. -/
+structure Frozen (s : Shape) where
+  tensor : T s
+
+namespace Frozen
+
+def map {s : Shape} (f : T s → T s) (fr : Frozen s) : Frozen s :=
+  { tensor := f fr.tensor }
+
+def get {s : Shape} (fr : Frozen s) : T s := fr.tensor
+
+end Frozen
+
+/-- Coercion from T s to Frozen s -/
+instance {s : Shape} : Coe (T s) (Frozen s) := ⟨Frozen.mk⟩
+
+/-! ## TensorStruct Typeclass
+
+A typeclass for structures that contain tensors, enabling generic traversal
+and transformation of all tensors in the structure. This is similar to
+JAX's PyTree concept or Equinox's filtered transformations.
+-/
+
 /-- A typeclass for structures that contain tensors.
     Allows generic traversal and transformation of all tensors in the structure. -/
 class TensorStruct (α : Type) where
@@ -46,65 +88,115 @@ instance {α : Type} [TensorStruct α] : TensorStruct (Option α) where
     | some x => TensorStruct.fold f init x
     | none => init
 
-namespace optim
+/-- Static values are completely skipped during TensorStruct traversal -/
+instance {α : Type} [Inhabited α] : TensorStruct (Static α) where
+  map _ s := s
+  mapM _ s := pure s
+  zipWith _ s _ := s
+  fold _ init _ := init
 
-/-- Generic Optimizer State for any model structure α -/
-structure GenericAdamWState (α : Type) where
-  m : α       -- First moments
-  v : α       -- Second moments
-  step : Nat
-  deriving Inhabited
+/-- Frozen tensors are traversed (for forward pass) but can be filtered out for gradients -/
+instance {s : Shape} : TensorStruct (Frozen s) where
+  map f fr := { tensor := f fr.tensor }
+  mapM f fr := do pure { tensor := ← f fr.tensor }
+  zipWith f fr1 fr2 := { tensor := f fr1.tensor fr2.tensor }
+  fold f init fr := f fr.tensor init
 
-/-- Initialize generic optimizer state -/
-def GenericAdamWState.init [TensorStruct α] (model : α) : GenericAdamWState α :=
-  {
-    m := TensorStruct.map (fun _ => torch.zeros _) model
-    v := TensorStruct.map (fun _ => torch.zeros _) model
-    step := 0
-  }
+/-! ## TensorStruct Instances for Basic Types
 
-/-- Generic AdamW step
-    Updates the model parameters in-place (functionally) and returns new model + new state. -/
-def generic_adamw [TensorStruct α] (config : AdamWConfig)
-    (params : α) (grads : α) (state : GenericAdamWState α) : IO (α × GenericAdamWState α) := do
-  let step := state.step + 1
-  let { lr, beta1, beta2, eps, weight_decay } := config
-  let bc1 := 1.0 - Float.pow beta1 step.toFloat
-  let bc2 := 1.0 - Float.pow beta2 step.toFloat
+Basic types contain no tensors, so they are passed through unchanged.
+This allows structures with mixed tensor and non-tensor fields to derive TensorStruct.
+-/
 
-  -- 1. Update first moment m
-  -- m_new = beta1 * m + (1 - beta1) * grad
-  let m_new := TensorStruct.zipWith (fun m g =>
-    let g_d := autograd.detach g
-    add (mul_scalar m beta1) (mul_scalar g_d (1.0 - beta1))
-  ) state.m grads
+instance : TensorStruct Bool where
+  map _ b := b
+  mapM _ b := pure b
+  zipWith _ b _ := b
+  fold _ init _ := init
 
-  -- 2. Update second moment v
-  -- v_new = beta2 * v + (1 - beta2) * (grad * grad)
-  let v_new := TensorStruct.zipWith (fun v g =>
-    let g_d := autograd.detach g
-    add (mul_scalar v beta2) (mul_scalar (mul g_d g_d) (1.0 - beta2))
-  ) state.v grads
+instance : TensorStruct Float where
+  map _ x := x
+  mapM _ x := pure x
+  zipWith _ x _ := x
+  fold _ init _ := init
 
-  -- 3. Compute step direction
-  -- update = (m_new / bc1) / (sqrt(v_new / bc2) + eps)
-  let step_dir := TensorStruct.zipWith (fun m v =>
-    let m_hat := div_scalar m bc1
-    let v_hat := div_scalar v bc2
-    nn.div m_hat (add_scalar (nn.sqrt v_hat) eps)
-  ) m_new v_new
+instance : TensorStruct UInt8 where
+  map _ x := x
+  mapM _ x := pure x
+  zipWith _ x _ := x
+  fold _ init _ := init
 
-  -- 4. Apply update to parameters
-  -- p_new = p - lr * (step_dir + weight_decay * p)
-  let params_new := TensorStruct.zipWith (fun p d =>
-    let p_d := autograd.detach p
-    let p_decayed := mul_scalar p_d (1.0 - lr * weight_decay)
-    let p_new := sub p_decayed (mul_scalar d lr)
-    autograd.set_requires_grad p_new true
-  ) params step_dir
+instance : TensorStruct UInt64 where
+  map _ x := x
+  mapM _ x := pure x
+  zipWith _ x _ := x
+  fold _ init _ := init
 
-  return (params_new, { m := m_new, v := v_new, step := step })
+instance : TensorStruct Nat where
+  map _ x := x
+  mapM _ x := pure x
+  zipWith _ x _ := x
+  fold _ init _ := init
 
-end optim
+instance : TensorStruct Int where
+  map _ x := x
+  mapM _ x := pure x
+  zipWith _ x _ := x
+  fold _ init _ := init
+
+instance : TensorStruct String where
+  map _ s := s
+  mapM _ s := pure s
+  zipWith _ s _ := s
+  fold _ init _ := init
+
+/-! ## TensorStruct Utility Methods
+
+Convenient operations for common tensor tree manipulations.
+-/
+
+namespace TensorStruct
+
+/-- Count the number of tensor leaves in the structure -/
+def count [TensorStruct α] (model : α) : Nat :=
+  fold (fun _ n => n + 1) 0 model
+
+/-- Get gradients for all tensors in the structure -/
+def grads [TensorStruct α] (model : α) : α :=
+  map autograd.grad_of model
+
+/-- Zero all gradients in the structure -/
+def zeroGrads [TensorStruct α] (model : α) : α :=
+  map autograd.zero_grad model
+
+/-- Detach all tensors from the computation graph -/
+def detach [TensorStruct α] (model : α) : α :=
+  map autograd.detach model
+
+/-- Set requires_grad on all tensors -/
+def requiresGrad [TensorStruct α] (model : α) (b : Bool) : α :=
+  map (fun t => autograd.set_requires_grad t b) model
+
+/-- Make a tensor a trainable leaf parameter (detach and set requires_grad) -/
+private def _makeLeafParam {s : Shape} (t : T s) : T s :=
+  autograd.set_requires_grad (autograd.detach t) true
+
+/-- Make all tensors trainable leaf parameters -/
+def makeLeafParams [TensorStruct α] (model : α) : α :=
+  map _makeLeafParam model
+
+/-- Apply a scalar multiplication to all tensors -/
+def scale [TensorStruct α] (model : α) (s : Float) : α :=
+  map (fun t => mul_scalar t s) model
+
+/-- Element-wise addition of two structures -/
+def add [TensorStruct α] (a b : α) : α :=
+  zipWith torch.add a b
+
+/-- Element-wise subtraction of two structures -/
+def sub [TensorStruct α] (a b : α) : α :=
+  zipWith torch.sub a b
+
+end TensorStruct
 
 end torch
