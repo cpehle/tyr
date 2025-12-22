@@ -3,7 +3,9 @@ import Lean.Widget.InteractiveCode
 import Lean.Widget.Commands
 import Lean.Elab.Command
 import Lean.Elab.Tactic
+import Lean.Elab.Deriving
 import Tyr.Basic
+import Tyr.TensorStruct
 
 namespace torch
 
@@ -33,6 +35,7 @@ structure TensorDisplayProps where
 inductive ModuleNode where
   | tensor : TensorDisplayProps → ModuleNode
   | group : String → Array (String × ModuleNode) → ModuleNode  -- name, children
+  | static : String → String → ModuleNode  -- name, value as string (for Static fields)
   deriving ToJson, FromJson, Server.RpcEncodable
 
 /-- Props for the full module widget -/
@@ -340,6 +343,20 @@ function ModuleNodeView({ node, name, depth = 0, theme }) {
     );
   }
 
+  // Static field (configuration/hyperparameter) - display as simple label
+  if (node.static) {
+    const [staticName, value] = node.static;
+    return e('div', {
+      style: {
+        marginLeft: depth * 12,
+        fontFamily: 'monospace',
+        fontSize: 10,
+        color: theme?.textMuted || '#666',
+        padding: '2px 0'
+      }
+    }, `${name || staticName}: ${value}`);
+  }
+
   return null;
 }
 
@@ -574,6 +591,60 @@ def tensorToPropsNamed {s : Shape} (t : T s) (name : String) (axisNames : Array 
   let base := tensorToProps t
   { base with name := some name, axisNames := if axisNames.isEmpty then none else some axisNames }
 
+/-! ## ToModuleDisplay Typeclass
+
+Automatically convert structures with tensors to ModuleDisplayProps for visualization.
+Works with any type that has a TensorStruct instance.
+-/
+
+/-- Typeclass for converting values to ModuleNode for visualization -/
+class ToModuleDisplay (α : Type) where
+  /-- Convert a value to a ModuleNode with the given name -/
+  toModuleNode : α → String → ModuleNode
+
+/-- Convert any ToModuleDisplay to full props -/
+def toModuleDisplayProps [ToModuleDisplay α] (value : α) (name : String := "root") : ModuleDisplayProps :=
+  { root := ToModuleDisplay.toModuleNode value name }
+
+/-- Instance for single tensors -/
+instance {s : Shape} : ToModuleDisplay (T s) where
+  toModuleNode t name :=
+    let props := tensorToPropsNamed t name
+    ModuleNode.tensor props
+
+/-- Instance for Optional values -/
+instance [ToModuleDisplay α] : ToModuleDisplay (Option α) where
+  toModuleNode opt name :=
+    match opt with
+    | some x => ToModuleDisplay.toModuleNode x name
+    | none => ModuleNode.group s!"{name} (none)" #[]
+
+/-- Instance for Arrays -/
+instance [ToModuleDisplay α] : ToModuleDisplay (Array α) where
+  toModuleNode arr name :=
+    let children := arr.mapIdx fun i x =>
+      (s!"[{i}]", ToModuleDisplay.toModuleNode x s!"{name}[{i}]")
+    ModuleNode.group s!"{name} [{arr.size}]" children
+
+/-- Instance for Lists -/
+instance [ToModuleDisplay α] : ToModuleDisplay (List α) where
+  toModuleNode lst name :=
+    let children := lst.toArray.mapIdx fun i x =>
+      (s!"[{i}]", ToModuleDisplay.toModuleNode x s!"{name}[{i}]")
+    ModuleNode.group s!"{name} [{lst.length}]" children
+
+/-- Instance for tuples -/
+instance [ToModuleDisplay α] [ToModuleDisplay β] : ToModuleDisplay (α × β) where
+  toModuleNode pair name :=
+    ModuleNode.group name #[
+      ("fst", ToModuleDisplay.toModuleNode pair.1 "fst"),
+      ("snd", ToModuleDisplay.toModuleNode pair.2 "snd")
+    ]
+
+/-- Instance for Static (configuration/hyperparameters) - displays value as label -/
+instance [ToString α] : ToModuleDisplay (Static α) where
+  toModuleNode s name := ModuleNode.static name (toString s.val)
+
 /-- Evaluate an IO expression that produces TensorDisplayProps -/
 private unsafe def evalTensorPropsIO (e : Expr) : TermElabM TensorDisplayProps := do
   let type ← Meta.inferType e
@@ -653,5 +724,85 @@ elab "#module " t:term : command => do
       evalModulePropsSafe e
   let propsJson := Server.RpcEncodable.rpcEncode props
   liftCoreM <| Widget.savePanelWidgetInfo (hash TensorWidget.javascript) propsJson t
+
+/-! ## Deriving Handler for ToModuleDisplay -/
+
+open Lean Elab Command Term Meta in
+/-- Generate ToModuleDisplay instance for a structure -/
+private def mkToModuleDisplayInstanceCmd (typeName : Name) : CommandElabM Unit := do
+  let env ← getEnv
+
+  -- Get structure info
+  let some structInfo := getStructureInfo? env typeName
+    | throwError "{typeName} is not a structure"
+
+  -- Get the inductive info to find parameters
+  let some (.inductInfo indInfo) := env.find? typeName
+    | throwError "{typeName} is not an inductive type"
+
+  let fieldNames := structInfo.fieldNames
+
+  -- Build field entries: (name, toModuleNode x.field name)
+  let fieldEntries : Array (TSyntax `term) ← fieldNames.mapM fun fname => do
+    let fnameStr := toString fname
+    `(term| ($(Lean.quote fnameStr), ToModuleDisplay.toModuleNode x.$(mkIdent fname) $(Lean.quote fnameStr)))
+
+  let fieldsArray ← `(term| #[$[$fieldEntries],*])
+
+  -- Get the type parameters by analyzing the inductive type
+  let numParams := indInfo.numParams
+
+  if numParams == 0 then
+    -- No parameters - simple instance
+    let instCmd ← `(command|
+      instance : ToModuleDisplay $(mkIdent typeName) where
+        toModuleNode x name := ModuleNode.group name $fieldsArray
+    )
+    elabCommand instCmd
+  else
+    -- Has parameters - need to build binders
+    -- Build the syntax in TermElabM, then elaborate in CommandElabM
+    let instCmd ← liftTermElabM do
+      Meta.forallTelescopeReducing indInfo.type fun params _ => do
+        -- Take only the actual parameters (not indices)
+        let paramBinders := params[:numParams]
+
+        -- Build implicit binder syntax for each parameter
+        let binderStxs ← paramBinders.toArray.mapM fun param => do
+          let paramDecl ← param.fvarId!.getDecl
+          let paramName := paramDecl.userName
+          let paramType ← Meta.inferType param
+          let paramTypeStx ← PrettyPrinter.delab paramType
+          `(bracketedBinder| {$(mkIdent paramName) : $paramTypeStx})
+
+        -- Build the applied type (e.g., Linear in_dim out_dim)
+        let paramIdents ← paramBinders.toArray.mapM fun param => do
+          let paramDecl ← param.fvarId!.getDecl
+          pure (mkIdent paramDecl.userName)
+
+        let appliedType ← `($(mkIdent typeName) $paramIdents*)
+
+        -- Generate instance command with binders
+        `(command|
+          instance $[$binderStxs]* : ToModuleDisplay $appliedType where
+            toModuleNode x name := ModuleNode.group name $fieldsArray
+        )
+
+    elabCommand instCmd
+
+open Lean Elab Deriving in
+/-- Deriving handler for ToModuleDisplay -/
+def mkToModuleDisplayHandler (typeNames : Array Name) : CommandElabM Bool := do
+  if typeNames.isEmpty then return false
+
+  for typeName in typeNames do
+    mkToModuleDisplayInstanceCmd typeName
+
+  return true
+
+-- Register the deriving handler
+open Lean Elab Deriving in
+initialize
+  registerDerivingHandler ``ToModuleDisplay mkToModuleDisplayHandler
 
 end torch
