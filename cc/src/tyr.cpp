@@ -90,6 +90,95 @@ lean_object* lean_torch_get_live_tensors(lean_object* /* w */) {
     return lean_io_result_mk_ok(lean_box_uint64(static_cast<uint64_t>(g_live_lean_tensors.load())));
 }
 
+// ============================================================================
+// Tensor metadata extraction for visualization widgets
+// ============================================================================
+
+// Get runtime shape as Lean Array UInt64
+lean_object* lean_torch_get_shape(lean_obj_arg /*s*/, b_lean_obj_arg t) {
+    auto tensor = borrowTensor(t);
+    auto sizes = tensor.sizes();
+
+    lean_object* arr = lean_alloc_array(sizes.size(), sizes.size());
+    for (size_t i = 0; i < sizes.size(); i++) {
+        lean_array_set_core(arr, i, lean_box_uint64(static_cast<uint64_t>(sizes[i])));
+    }
+    return arr;
+}
+
+// Get dtype as string
+lean_object* lean_torch_get_dtype(lean_obj_arg /*s*/, b_lean_obj_arg t) {
+    auto tensor = borrowTensor(t);
+    std::string dtype_str;
+
+    auto dtype = tensor.dtype();
+    if (dtype == torch::kFloat32) dtype_str = "Float32";
+    else if (dtype == torch::kFloat64) dtype_str = "Float64";
+    else if (dtype == torch::kFloat16) dtype_str = "Float16";
+    else if (dtype == torch::kBFloat16) dtype_str = "BFloat16";
+    else if (dtype == torch::kInt64) dtype_str = "Int64";
+    else if (dtype == torch::kInt32) dtype_str = "Int32";
+    else if (dtype == torch::kInt16) dtype_str = "Int16";
+    else if (dtype == torch::kInt8) dtype_str = "Int8";
+    else if (dtype == torch::kUInt8) dtype_str = "UInt8";
+    else if (dtype == torch::kBool) dtype_str = "Bool";
+    else dtype_str = "Unknown";
+
+    return lean_mk_string(dtype_str.c_str());
+}
+
+// Get device as string
+lean_object* lean_torch_get_device(lean_obj_arg /*s*/, b_lean_obj_arg t) {
+    auto tensor = borrowTensor(t);
+    auto device = tensor.device();
+
+    std::ostringstream stream;
+    stream << device;
+    return lean_mk_string(stream.str().c_str());
+}
+
+// Get tensor values as flat Array Float (up to max_elements)
+lean_object* lean_torch_get_values(lean_obj_arg /*s*/, b_lean_obj_arg t, uint64_t max_elements) {
+    auto tensor = borrowTensor(t);
+
+    // Move to CPU if needed and convert to float
+    auto cpu_tensor = tensor.cpu().to(torch::kFloat32).contiguous();
+    auto flat = cpu_tensor.flatten();
+
+    size_t num_elements = std::min(static_cast<size_t>(flat.numel()),
+                                   static_cast<size_t>(max_elements));
+
+    // Use FloatArray for efficiency
+    lean_object* arr = lean_alloc_sarray(sizeof(double), num_elements, num_elements);
+    double* data = reinterpret_cast<double*>(lean_sarray_cptr(arr));
+
+    auto accessor = flat.accessor<float, 1>();
+    for (size_t i = 0; i < num_elements; i++) {
+        data[i] = static_cast<double>(accessor[i]);
+    }
+
+    return arr;
+}
+
+// Get tensor statistics as JSON string
+lean_object* lean_torch_get_stats(lean_obj_arg /*s*/, b_lean_obj_arg t) {
+    auto tensor = borrowTensor(t);
+    auto cpu_tensor = tensor.cpu().to(torch::kFloat32);
+
+    double min_val = cpu_tensor.min().item<double>();
+    double max_val = cpu_tensor.max().item<double>();
+    double mean_val = cpu_tensor.mean().item<double>();
+    double std_val = cpu_tensor.std().item<double>();
+
+    std::ostringstream stream;
+    stream << "{\"min\":" << min_val
+           << ",\"max\":" << max_val
+           << ",\"mean\":" << mean_val
+           << ",\"std\":" << std_val << "}";
+
+    return lean_mk_string(stream.str().c_str());
+}
+
 
 // --
 // tensor creation api
@@ -1421,6 +1510,35 @@ lean_object* lean_torch_slice_1d(
   return fromTorchTensor(result_);
 }
 
+// Slice a tensor along a specified dimension: data.slice(dim, start, start+len)
+// Fully dependently typed - output shape is computed from input shape and slice params
+lean_object* lean_torch_slice_along_dim(
+  lean_obj_arg /*s*/,
+  b_lean_obj_arg input,
+  uint64_t dim,
+  uint64_t start,
+  uint64_t len
+) {
+  auto input_ = borrowTensor(input);
+  auto result_ = input_.slice(static_cast<int64_t>(dim),
+                               static_cast<int64_t>(start),
+                               static_cast<int64_t>(start + len));
+  return fromTorchTensor(result_);
+}
+
+// Slice a 2D tensor along dimension 0: data[start:start+len, :]
+lean_object* lean_torch_slice_2d(
+  b_lean_obj_arg input,
+  uint64_t start,
+  uint64_t len
+) {
+  auto input_ = borrowTensor(input);
+  auto result_ = input_.slice(0,
+                               static_cast<int64_t>(start),
+                               static_cast<int64_t>(start + len));
+  return fromTorchTensor(result_);
+}
+
 // Stack multiple 1D tensors into 2D
 lean_object* lean_torch_stack_1d(
   lean_obj_arg tensors,
@@ -1643,6 +1761,143 @@ lean_object* lean_torch_file_exists(b_lean_obj_arg path_obj, lean_object* w) {
   const char* path = lean_string_cstr(path_obj);
   std::ifstream file(path);
   return lean_io_result_mk_ok(lean_box(file.good() ? 1 : 0));
+}
+
+// ============================================================================
+// NanoProof FFI bindings
+// ============================================================================
+
+// RMSNorm: x / sqrt(mean(x^2) + eps) - no learnable parameters
+lean_object* lean_torch_rms_norm(lean_obj_arg /*s*/, b_lean_obj_arg input, double eps) {
+  auto input_ = borrowTensor(input);
+  // Compute RMSNorm: x * rsqrt(mean(x^2) + eps)
+  auto variance = input_.pow(2).mean(-1, /*keepdim=*/true);
+  auto result_ = input_ * torch::rsqrt(variance + eps);
+  return fromTorchTensor(result_);
+}
+
+// ReLU squared activation: relu(x)^2
+lean_object* lean_torch_relu_squared(lean_obj_arg /*s*/, b_lean_obj_arg input) {
+  auto input_ = borrowTensor(input);
+  auto result_ = torch::relu(input_).square();
+  return fromTorchTensor(result_);
+}
+
+// Logit softcap: cap * tanh(x / cap)
+lean_object* lean_torch_softcap(lean_obj_arg /*s*/, b_lean_obj_arg input, double cap) {
+  auto input_ = borrowTensor(input);
+  auto result_ = cap * torch::tanh(input_ / cap);
+  return fromTorchTensor(result_);
+}
+
+// Precompute rotary embedding frequencies
+// Returns (cos, sin) tensors of shape [seq_len, head_dim/2]
+lean_object* lean_torch_compute_rotary_freqs(
+  uint64_t seq_len,
+  uint64_t head_dim,
+  double base,
+  lean_object* w
+) {
+  auto device = torch::kCPU;
+
+  // inv_freq = 1.0 / (base ** (arange(0, head_dim, 2) / head_dim))
+  auto channel_range = torch::arange(0, static_cast<int64_t>(head_dim), 2,
+    torch::TensorOptions().dtype(torch::kFloat32).device(device));
+  auto inv_freq = 1.0 / torch::pow(base, channel_range / static_cast<double>(head_dim));
+
+  // t = arange(seq_len)
+  auto t = torch::arange(static_cast<int64_t>(seq_len),
+    torch::TensorOptions().dtype(torch::kFloat32).device(device));
+
+  // freqs = outer(t, inv_freq) -> [seq_len, head_dim/2]
+  auto freqs = torch::outer(t, inv_freq);
+  auto cos = freqs.cos();
+  auto sin = freqs.sin();
+
+  // Return as Lean pair (Product type, ctor 0 with 2 fields)
+  lean_object* result = lean_alloc_ctor(0, 2, 0);
+  lean_ctor_set(result, 0, fromTorchTensor(cos));
+  lean_ctor_set(result, 1, fromTorchTensor(sin));
+  return lean_io_result_mk_ok(result);
+}
+
+// Apply rotary embeddings to Q or K
+// x: [batch, seq, n_head, head_dim]
+// cos, sin: [seq, head_dim/2] (will be broadcast)
+lean_object* lean_torch_apply_rotary_emb(
+  lean_obj_arg /*batch*/,
+  lean_obj_arg /*seq*/,
+  lean_obj_arg /*n_head*/,
+  lean_obj_arg /*head_dim*/,
+  b_lean_obj_arg x,
+  b_lean_obj_arg cos,
+  b_lean_obj_arg sin
+) {
+  auto x_ = borrowTensor(x);
+  auto cos_ = borrowTensor(cos);
+  auto sin_ = borrowTensor(sin);
+
+  int64_t d = x_.size(3) / 2;
+  auto x1 = x_.slice(3, 0, d);
+  auto x2 = x_.slice(3, d, 2*d);
+
+  // Broadcast cos/sin: [seq, d] -> [1, seq, 1, d]
+  auto cos_b = cos_.unsqueeze(0).unsqueeze(2);
+  auto sin_b = sin_.unsqueeze(0).unsqueeze(2);
+
+  // Apply rotation
+  auto y1 = x1 * cos_b + x2 * sin_b;
+  auto y2 = x1 * (-sin_b) + x2 * cos_b;
+  auto result_ = torch::cat({y1, y2}, 3);
+
+  // Ensure output dtype matches input
+  result_ = result_.to(x_.dtype());
+
+  return fromTorchTensor(result_);
+}
+
+// Scaled dot-product attention with Group-Query Attention (GQA) support
+// Q: [batch, n_head, seq, head_dim]
+// K, V: [batch, n_kv_head, seq, head_dim]
+lean_object* lean_torch_sdpa_gqa(
+  lean_obj_arg /*batch*/,
+  lean_obj_arg n_head_arg,
+  lean_obj_arg n_kv_head_arg,
+  lean_obj_arg /*seq*/,
+  lean_obj_arg /*head_dim*/,
+  b_lean_obj_arg query,
+  b_lean_obj_arg key,
+  b_lean_obj_arg value,
+  double dropout_p,
+  uint8_t is_causal,
+  uint8_t enable_gqa
+) {
+  auto q = borrowTensor(query);
+  auto k = borrowTensor(key);
+  auto v = borrowTensor(value);
+
+  // Handle GQA by expanding KV heads to match Q heads
+  if (enable_gqa) {
+    auto n_head = lean_unbox_uint64(n_head_arg);
+    auto n_kv_head = lean_unbox_uint64(n_kv_head_arg);
+
+    if (n_head != n_kv_head && n_kv_head > 0) {
+      // Repeat KV heads: [batch, n_kv_head, seq, head_dim] -> [batch, n_head, seq, head_dim]
+      auto repeat_factor = n_head / n_kv_head;
+      // Use repeat_interleave along dim 1 (head dimension)
+      k = k.repeat_interleave(repeat_factor, 1);
+      v = v.repeat_interleave(repeat_factor, 1);
+    }
+  }
+
+  auto result_ = torch::scaled_dot_product_attention(
+    q, k, v,
+    c10::nullopt,  // attn_mask
+    dropout_p,
+    is_causal
+  );
+
+  return fromTorchTensor(result_);
 }
 
 }

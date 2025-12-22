@@ -171,11 +171,11 @@ end autograd
 --
 --
 --
--- class differentiable (α : Type _) where
---     (cotangent_space : Type _)
---     (grad : α → cotangent_space)
---
--- instance {s : Shape} : differentiable (torch.T s) := ⟨torch.T s, fun (t : (torch.T s)) => torch.autograd.grad_of t⟩
+class differentiable (α : Type _) where
+    cotangent_space : Type _
+    grad : α → cotangent_space
+
+instance {s : Shape} : differentiable (torch.T s) := ⟨torch.T s, fun (t : (torch.T s)) => torch.autograd.grad_of t⟩
 --
 --
 --
@@ -552,6 +552,19 @@ opaque slice1d' {n : UInt64} (data : @& T #[n]) (start : Int64) (stop : Int64) :
 def slice1d {n m : UInt64} (data : T #[n]) (start : Int64) (stop : Int64) : T #[m] :=
   reshape (slice1d' data start stop) #[m]
 
+/-- Compute the output shape after slicing along a dimension -/
+def sliceShape (s : Shape) (dim : UInt64) (len : UInt64) : Shape :=
+  s.set! dim.toNat len
+
+/-- Slice a tensor along a specified dimension: data.slice(dim, start, start+len) -/
+@[extern "lean_torch_slice_along_dim"]
+opaque slice {s : Shape} (data : @& T s) (dim : UInt64 := 0) (start len : UInt64)
+    : T (sliceShape s dim len)
+
+/-- Slice a 2D tensor along dimension 0: data[start:start+len, :] -/
+@[extern "lean_torch_slice_2d"]
+opaque slice2d {n d : UInt64} (data : @& T #[n, d]) (start len : UInt64) : T #[len, d]
+
 /-- Stack an array of 1D tensors into a 2D tensor -/
 @[extern "lean_torch_stack_1d"]
 opaque stack1d (tensors : Array (T #[n])) (dim : Int64 := 0) : T #[k, n]
@@ -589,5 +602,67 @@ end autograd
 
 @[extern "lean_torch_get_live_tensors"]
 opaque get_live_tensors : IO UInt64
+
+-- ============================================================================
+-- NanoProof operations
+-- ============================================================================
+
+namespace nanoproof
+
+/-- RMSNorm without learnable parameters: x / sqrt(mean(x^2) + eps)
+    Normalizes over the last dimension. -/
+@[extern "lean_torch_rms_norm"]
+opaque rmsNorm {s : Shape} (input : @& T s) (eps : Float := 1e-6) : T s
+
+/-- ReLU squared activation: relu(x)^2
+    Used in nanoproof MLP instead of GELU. -/
+@[extern "lean_torch_relu_squared"]
+opaque reluSquared {s : Shape} (input : @& T s) : T s
+
+/-- Logit softcap: cap * tanh(x / cap)
+    Prevents logits from growing too large. -/
+@[extern "lean_torch_softcap"]
+opaque softcap {s : Shape} (input : @& T s) (cap : Float := 15.0) : T s
+
+end nanoproof
+
+namespace rotary
+
+/-- Precompute rotary embedding frequencies.
+    Returns (cos, sin) tensors of shape [seqLen, headDim/2]. -/
+@[extern "lean_torch_compute_rotary_freqs"]
+opaque computeFreqs (seqLen headDim : UInt64) (base : Float := 10000.0)
+    : IO (T #[seqLen, headDim / 2] × T #[seqLen, headDim / 2])
+
+/-- Apply rotary embeddings to queries or keys.
+    x: [batch, seq, n_head, head_dim]
+    cos, sin: [seq, head_dim/2] (broadcast to match x) -/
+@[extern "lean_torch_apply_rotary_emb"]
+opaque applyRotaryEmb {batch seq n_head head_dim : UInt64}
+    (x : @& T #[batch, seq, n_head, head_dim])
+    (cos : @& T #[seq, head_dim / 2])
+    (sin : @& T #[seq, head_dim / 2])
+    : T #[batch, seq, n_head, head_dim]
+
+end rotary
+
+namespace nn
+
+/-- Scaled dot-product attention with Group-Query Attention (GQA) support.
+    Q: [batch, n_head, seq, head_dim]
+    K, V: [batch, n_kv_head, seq, head_dim]
+    When enable_gqa=true, K/V heads are automatically repeated to match Q heads. -/
+@[extern "lean_torch_sdpa_gqa"]
+opaque scaledDotProductAttentionGQA
+    {batch n_head n_kv_head seq head_dim : UInt64}
+    (query : @& T #[batch, n_head, seq, head_dim])
+    (key : @& T #[batch, n_kv_head, seq, head_dim])
+    (value : @& T #[batch, n_kv_head, seq, head_dim])
+    (dropout_p : Float := 0.0)
+    (is_causal : Bool := true)
+    (enable_gqa : Bool := false)
+    : T #[batch, n_head, seq, head_dim]
+
+end nn
 
 end torch
