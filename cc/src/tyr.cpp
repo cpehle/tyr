@@ -1,3 +1,58 @@
+/*
+ * tyr.cpp - Lean 4 ↔ LibTorch FFI Bindings
+ *
+ * ============================================================================
+ * REFERENCE COUNTING CONVENTIONS
+ * ============================================================================
+ *
+ * This file bridges Lean's reference counting with LibTorch's intrusive_ptr.
+ * Understanding these conventions is critical for memory safety.
+ *
+ * ## Parameter Types
+ *
+ * - `lean_obj_arg` (owned): Caller receives ownership. MUST call `lean_dec()`
+ *   after extracting data. Used for temporary parameters like shape arrays.
+ *   Example:
+ *     lean_object* lean_torch_randn(lean_obj_arg s, ...) {
+ *       auto shape = getShape(s);
+ *       lean_dec(s);  // REQUIRED: we own s, must release it
+ *       ...
+ *     }
+ *
+ * - `b_lean_obj_arg` (borrowed): Caller does NOT own the object. Must NOT
+ *   call `lean_dec()`. Use `borrowTensor()` to get a C++ tensor with shared
+ *   ownership that auto-decrements when it goes out of scope.
+ *   Example:
+ *     lean_object* lean_torch_add(b_lean_obj_arg x, b_lean_obj_arg y) {
+ *       auto x_ = borrowTensor(x);  // Shared ownership, no manual cleanup
+ *       auto y_ = borrowTensor(y);  // Same
+ *       return giveTensor(x_ + y_); // Transfer new tensor to Lean
+ *     }
+ *
+ * ## Key Functions
+ *
+ * - `borrowTensor(b_lean_obj_arg)`: Get C++ tensor with shared ownership.
+ *   When the returned torch::Tensor goes out of scope, refcount is
+ *   automatically decremented. No manual cleanup needed.
+ *
+ * - `giveTensor(torch::Tensor)`: Transfer ownership to Lean. Lean's finalizer
+ *   will decrement the refcount when the Lean object is garbage collected.
+ *   Increments g_live_lean_tensors counter.
+ *
+ * ## Memory Lifecycle
+ *
+ * 1. Tensor created in C++ → giveTensor() → Lean owns it
+ * 2. Lean passes tensor to C++ → borrowTensor() → shared ownership
+ * 3. Lean GC finalizes tensor → decrefFinalize() → releases C++ memory
+ *
+ * ## Debugging
+ *
+ * g_live_lean_tensors tracks outstanding tensors. If this grows unboundedly,
+ * there's a memory leak. Query via lean_torch_get_live_tensors().
+ *
+ * ============================================================================
+ */
+
 #include <iostream>
 #include <fstream>
 #include <atomic>
@@ -495,6 +550,15 @@ lean_object* lean_torch_tensor_cross_entropy(lean_obj_arg s, b_lean_obj_arg a, b
   auto b_ = borrowTensor(b);
   auto c_ = torch::nn::functional::cross_entropy(a_, b_);
   return fromTorchTensor(c_);
+}
+
+// Cross entropy with no reduction (per-element loss)
+lean_object* lean_torch_cross_entropy_none(lean_obj_arg /*n*/, lean_obj_arg /*c*/, b_lean_obj_arg logits, b_lean_obj_arg targets) {
+  auto logits_ = borrowTensor(logits);
+  auto targets_ = borrowTensor(targets);
+  auto options = torch::nn::functional::CrossEntropyFuncOptions().reduction(torch::kNone);
+  auto result_ = torch::nn::functional::cross_entropy(logits_, targets_, options);
+  return fromTorchTensor(result_);
 }
 
 
@@ -1074,6 +1138,23 @@ lean_object* lean_torch_bmm(lean_obj_arg /*s*/, b_lean_obj_arg input, b_lean_obj
   return fromTorchTensor(result_);
 }
 
+// 4D batched matmul for multi-head attention: [b,h,m,k] @ [b,h,k,n] -> [b,h,m,n]
+lean_object* lean_torch_bmm4d(
+    lean_obj_arg /*b*/,
+    lean_obj_arg /*h*/,
+    lean_obj_arg /*m*/,
+    lean_obj_arg /*k*/,
+    lean_obj_arg /*n*/,
+    b_lean_obj_arg input,
+    b_lean_obj_arg mat2
+) {
+  auto input_ = borrowTensor(input);
+  auto mat2_ = borrowTensor(mat2);
+  // torch::matmul handles 4D broadcasting correctly
+  auto result_ = torch::matmul(input_, mat2_);
+  return fromTorchTensor(result_);
+}
+
 lean_object* lean_torch_mm(lean_obj_arg /*s*/, b_lean_obj_arg input, b_lean_obj_arg mat2) {
   auto input_ = borrowTensor(input);
   auto mat2_ = borrowTensor(mat2);
@@ -1097,6 +1178,20 @@ lean_object* lean_torch_cat(lean_obj_arg /*s*/, lean_obj_arg tensors, int dim) {
   lean_dec(tensors); // Decrement array
   auto result_ = torch::cat(tensor_list, dim);
   // tensor_list tensors are auto-released when vector goes out of scope
+  return fromTorchTensor(result_);
+}
+
+// Direct 2-tensor concatenation without intermediate reshapes
+lean_object* lean_torch_cat2(
+    lean_obj_arg /*s1*/,
+    lean_obj_arg /*s2*/,
+    b_lean_obj_arg t1,
+    b_lean_obj_arg t2,
+    int dim
+) {
+  auto t1_ = borrowTensor(t1);
+  auto t2_ = borrowTensor(t2);
+  auto result_ = torch::cat({t1_, t2_}, dim);
   return fromTorchTensor(result_);
 }
 
@@ -1682,6 +1777,95 @@ lean_object* lean_torch_layer_norm_3d(
   return fromTorchTensor(output_);
 }
 
+// ============================================================================
+// Fused layer_norm + activation operations
+// These avoid intermediate tensor allocation between layer_norm and activation
+// ============================================================================
+
+// Fused layer_norm + GELU for transformer attention/MLP
+lean_object* lean_torch_layer_norm_gelu(
+  lean_obj_arg /*batch*/,
+  lean_obj_arg /*seq*/,
+  lean_obj_arg /*n*/,
+  b_lean_obj_arg input,
+  b_lean_obj_arg weight,
+  b_lean_obj_arg bias,
+  double eps
+) {
+  auto input_ = borrowTensor(input);
+  auto weight_ = borrowTensor(weight);
+  auto bias_ = borrowTensor(bias);
+
+  int64_t n = weight_.size(0);
+  std::vector<int64_t> normalized_shape = {n};
+
+  auto normed = torch::layer_norm(
+    input_,
+    c10::IntArrayRef(normalized_shape.data(), normalized_shape.size()),
+    weight_,
+    bias_,
+    eps
+  );
+
+  return fromTorchTensor(torch::gelu(normed));
+}
+
+// Fused layer_norm + ReLU
+lean_object* lean_torch_layer_norm_relu(
+  lean_obj_arg /*batch*/,
+  lean_obj_arg /*seq*/,
+  lean_obj_arg /*n*/,
+  b_lean_obj_arg input,
+  b_lean_obj_arg weight,
+  b_lean_obj_arg bias,
+  double eps
+) {
+  auto input_ = borrowTensor(input);
+  auto weight_ = borrowTensor(weight);
+  auto bias_ = borrowTensor(bias);
+
+  int64_t n = weight_.size(0);
+  std::vector<int64_t> normalized_shape = {n};
+
+  auto normed = torch::layer_norm(
+    input_,
+    c10::IntArrayRef(normalized_shape.data(), normalized_shape.size()),
+    weight_,
+    bias_,
+    eps
+  );
+
+  return fromTorchTensor(torch::relu(normed));
+}
+
+// Fused layer_norm + SiLU (for SwiGLU MLP)
+lean_object* lean_torch_layer_norm_silu(
+  lean_obj_arg /*batch*/,
+  lean_obj_arg /*seq*/,
+  lean_obj_arg /*n*/,
+  b_lean_obj_arg input,
+  b_lean_obj_arg weight,
+  b_lean_obj_arg bias,
+  double eps
+) {
+  auto input_ = borrowTensor(input);
+  auto weight_ = borrowTensor(weight);
+  auto bias_ = borrowTensor(bias);
+
+  int64_t n = weight_.size(0);
+  std::vector<int64_t> normalized_shape = {n};
+
+  auto normed = torch::layer_norm(
+    input_,
+    c10::IntArrayRef(normalized_shape.data(), normalized_shape.size()),
+    weight_,
+    bias_,
+    eps
+  );
+
+  return fromTorchTensor(torch::silu(normed));
+}
+
 // Cross entropy for 2D logits: [N, C] + targets [N] -> scalar
 lean_object* lean_torch_cross_entropy_2d(
   lean_obj_arg /*n*/,
@@ -1779,6 +1963,89 @@ lean_object* lean_torch_file_exists(b_lean_obj_arg path_obj, lean_object* w) {
   const char* path = lean_string_cstr(path_obj);
   std::ifstream file(path);
   return lean_io_result_mk_ok(lean_box(file.good() ? 1 : 0));
+}
+
+// Find positions of BOS tokens in a 1D tensor
+// Returns a 1D int64 tensor containing indices where tokens == bos_token
+lean_object* lean_torch_find_bos_positions(
+    lean_obj_arg /*n*/,
+    b_lean_obj_arg tokens,
+    int64_t bos_token,
+    lean_object* w
+) {
+  auto tokens_ = borrowTensor(tokens);
+
+  // Create mask where tokens == bos_token
+  auto mask = tokens_ == bos_token;
+
+  // Get indices where mask is true
+  auto positions = torch::nonzero(mask);
+
+  // nonzero returns [N, 1] for 1D input, squeeze to get [N]
+  if (positions.dim() > 1) {
+    positions = positions.squeeze(1);
+  }
+
+  // Ensure int64 dtype
+  positions = positions.to(torch::kInt64);
+
+  return lean_io_result_mk_ok(fromTorchTensor(positions));
+}
+
+// Convert a 1D int64 tensor to a Lean Array UInt64
+lean_object* lean_torch_tensor_to_uint64_array(
+    lean_obj_arg /*n*/,
+    b_lean_obj_arg tensor,
+    lean_object* w
+) {
+  auto t = borrowTensor(tensor);
+
+  // Ensure tensor is on CPU and contiguous
+  t = t.to(torch::kCPU).contiguous().to(torch::kInt64);
+
+  // Get number of elements
+  int64_t numel = t.numel();
+
+  // Create Lean array
+  lean_object* arr = lean_mk_empty_array();
+
+  // Get data pointer
+  auto* ptr = t.data_ptr<int64_t>();
+
+  // Push each element
+  for (int64_t i = 0; i < numel; i++) {
+    arr = lean_array_push(arr, lean_box_uint64(static_cast<uint64_t>(ptr[i])));
+  }
+
+  return lean_io_result_mk_ok(arr);
+}
+
+// Convert a dynamically-shaped int64 tensor to a Lean Array UInt64
+// (Same implementation, but without the n parameter for shape-erased tensors)
+lean_object* lean_torch_tensor_to_uint64_array_dynamic(
+    b_lean_obj_arg tensor,
+    lean_object* w
+) {
+  auto t = borrowTensor(tensor);
+
+  // Ensure tensor is on CPU and contiguous
+  t = t.to(torch::kCPU).contiguous().to(torch::kInt64);
+
+  // Get number of elements
+  int64_t numel = t.numel();
+
+  // Create Lean array
+  lean_object* arr = lean_mk_empty_array();
+
+  // Get data pointer
+  auto* ptr = t.data_ptr<int64_t>();
+
+  // Push each element
+  for (int64_t i = 0; i < numel; i++) {
+    arr = lean_array_push(arr, lean_box_uint64(static_cast<uint64_t>(ptr[i])));
+  }
+
+  return lean_io_result_mk_ok(arr);
 }
 
 // ============================================================================
@@ -1916,6 +2183,128 @@ lean_object* lean_torch_sdpa_gqa(
   );
 
   return fromTorchTensor(result_);
+}
+
+// ============================================================================
+// Comparison and conditional operations for diffusion
+// ============================================================================
+
+// Less than comparison: returns a boolean tensor
+lean_object* lean_torch_lt(lean_obj_arg /*s*/, b_lean_obj_arg a, b_lean_obj_arg b) {
+  auto a_ = borrowTensor(a);
+  auto b_ = borrowTensor(b);
+  auto result_ = torch::lt(a_, b_);
+  return fromTorchTensor(result_);
+}
+
+// Less than scalar comparison
+lean_object* lean_torch_lt_scalar(lean_obj_arg /*s*/, b_lean_obj_arg input, double scalar) {
+  auto input_ = borrowTensor(input);
+  auto result_ = input_ < scalar;
+  return fromTorchTensor(result_);
+}
+
+// Greater than comparison
+lean_object* lean_torch_gt(lean_obj_arg /*s*/, b_lean_obj_arg a, b_lean_obj_arg b) {
+  auto a_ = borrowTensor(a);
+  auto b_ = borrowTensor(b);
+  auto result_ = torch::gt(a_, b_);
+  return fromTorchTensor(result_);
+}
+
+// Greater than or equal comparison
+lean_object* lean_torch_ge(lean_obj_arg /*s*/, b_lean_obj_arg a, b_lean_obj_arg b) {
+  auto a_ = borrowTensor(a);
+  auto b_ = borrowTensor(b);
+  auto result_ = torch::ge(a_, b_);
+  return fromTorchTensor(result_);
+}
+
+// Equality comparison: returns a boolean tensor
+lean_object* lean_torch_eq(lean_obj_arg /*s*/, b_lean_obj_arg a, b_lean_obj_arg b) {
+  auto a_ = borrowTensor(a);
+  auto b_ = borrowTensor(b);
+  auto result_ = torch::eq(a_, b_);
+  return fromTorchTensor(result_);
+}
+
+// Equality with scalar comparison
+lean_object* lean_torch_eq_scalar(lean_obj_arg /*s*/, b_lean_obj_arg input, int64_t scalar) {
+  auto input_ = borrowTensor(input);
+  auto result_ = input_ == scalar;
+  return fromTorchTensor(result_);
+}
+
+// Full tensor with given shape and scalar value (int64 version for token ids)
+lean_object* lean_torch_full_int(lean_obj_arg s, int64_t value) {
+  auto shape = getShape(s);
+  auto result_ = torch::full(shape, value, torch::kInt64);
+  return fromTorchTensor(result_);
+}
+
+// Maximum along dimension with indices
+lean_object* lean_torch_max_dim(lean_obj_arg /*s*/, b_lean_obj_arg input, uint64_t dim) {
+  auto input_ = borrowTensor(input);
+  auto [values, indices] = torch::max(input_, static_cast<int64_t>(dim));
+  // Return as Lean pair
+  lean_object* result = lean_alloc_ctor(0, 2, 0);
+  lean_ctor_set(result, 0, fromTorchTensor(values));
+  lean_ctor_set(result, 1, fromTorchTensor(indices));
+  return result;
+}
+
+// Boolean any (returns true if any element is true)
+uint8_t lean_torch_any(lean_obj_arg /*s*/, b_lean_obj_arg input) {
+  auto input_ = borrowTensor(input);
+  return input_.any().item<bool>();
+}
+
+// Logical NOT for boolean tensors
+lean_object* lean_torch_logical_not(lean_obj_arg /*s*/, b_lean_obj_arg input) {
+  auto input_ = borrowTensor(input);
+  auto result_ = torch::logical_not(input_);
+  return fromTorchTensor(result_);
+}
+
+// Logical AND for boolean tensors
+lean_object* lean_torch_logical_and(lean_obj_arg /*s*/, b_lean_obj_arg a, b_lean_obj_arg b) {
+  auto a_ = borrowTensor(a);
+  auto b_ = borrowTensor(b);
+  auto result_ = torch::logical_and(a_, b_);
+  return fromTorchTensor(result_);
+}
+
+// Convert to float dtype
+lean_object* lean_torch_to_float(lean_obj_arg /*s*/, b_lean_obj_arg input) {
+  auto input_ = borrowTensor(input);
+  auto result_ = input_.to(torch::kFloat32);
+  return fromTorchTensor(result_);
+}
+
+// Index select for 1D indexing into first dimension
+lean_object* lean_torch_index_select_1d(lean_obj_arg /*s*/, b_lean_obj_arg input, b_lean_obj_arg indices) {
+  auto input_ = borrowTensor(input);
+  auto indices_ = borrowTensor(indices);
+  auto result_ = input_.index_select(0, indices_);
+  return fromTorchTensor(result_);
+}
+
+// Clamp values to a range
+lean_object* lean_torch_clamp(lean_obj_arg /*s*/, b_lean_obj_arg input, int64_t min_val, int64_t max_val) {
+  auto input_ = borrowTensor(input);
+  auto result_ = torch::clamp(input_, min_val, max_val);
+  return fromTorchTensor(result_);
+}
+
+// Top-k values and indices
+lean_object* lean_torch_topk(lean_obj_arg /*s*/, b_lean_obj_arg input, uint64_t k, uint64_t dim) {
+  auto input_ = borrowTensor(input);
+  auto [values, indices] = torch::topk(input_, k, dim);
+  // Return as Lean pair
+  lean_object* result = lean_alloc_ctor(0, 2, 0);
+  lean_ctor_set(result, 0, fromTorchTensor(values));
+  lean_ctor_set(result, 1, fromTorchTensor(indices));
+  return result;
 }
 
 }
