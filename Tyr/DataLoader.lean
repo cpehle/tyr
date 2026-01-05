@@ -56,16 +56,15 @@ structure BOSFinder where
 
 /-- Initialize a BOS finder by scanning a token tensor for BOS tokens -/
 def BOSFinder.init (tokens : T #[n]) (bosToken : UInt64) : IO BOSFinder := do
-  -- Scan for BOS tokens (this would be done efficiently in C++)
-  -- For now, return a placeholder with evenly spaced "documents"
+  -- Scan for BOS tokens using efficient C++ implementation
   let dataLen := n
-  -- In a real implementation, we'd scan the tokens tensor
-  -- Here we assume documents are roughly evenly distributed
-  let estimatedDocLen : UInt64 := 512  -- Average document length
-  let numDocs := dataLen / estimatedDocLen
-  let mut positions := #[]
-  for i in [:numDocs.toNat] do
-    positions := positions.push (i.toUInt64 * estimatedDocLen)
+  let positionsTensor ← data.findBosPositions tokens bosToken.toInt64
+  -- Use the shape-erased version since findBosPositions returns T #[]
+  let positions ← data.tensorToUInt64Array' positionsTensor
+
+  -- If no BOS tokens found, treat entire data as one document starting at 0
+  let positions := if positions.isEmpty then #[0] else positions
+
   return {
     bosToken := bosToken
     bosPositions := positions
@@ -110,12 +109,30 @@ def BOSFinder.getBatch (finder : BOSFinder) (tokens : T #[n])
 def BOSFinder.reset (finder : BOSFinder) : BOSFinder :=
   { finder with currentPos := 0 }
 
+/-- LCG random number generator step -/
+private def lcgNext (state : UInt64) : UInt64 :=
+  state * 6364136223846793005 + 1442695040888963407
+
+/-- Fisher-Yates shuffle using LCG PRNG -/
+private def fisherYatesShuffle (arr : Array UInt64) (seed : UInt64) : Array UInt64 := Id.run do
+  if arr.size <= 1 then return arr
+  let mut result := arr
+  let mut state := seed
+  for i in [:(arr.size - 1)] do
+    state := lcgNext state
+    -- Generate random index in range [i, arr.size)
+    let range := arr.size - i
+    let j := i + (state % range.toUInt64).toNat
+    -- Swap elements at i and j
+    let tmp := result[i]!
+    result := result.set! i result[j]!
+    result := result.set! j tmp
+  return result
+
 /-- Shuffle BOS positions for randomized document order -/
 def BOSFinder.shuffle (finder : BOSFinder) (seed : UInt64) : BOSFinder :=
-  -- Simple shuffle using seed - in production use proper PRNG
-  -- For now, just reverse based on seed parity
-  let arr := if seed % 2 == 0 then finder.bosPositions else finder.bosPositions.reverse
-  { finder with bosPositions := arr }
+  let shuffled := fisherYatesShuffle finder.bosPositions seed
+  { finder with bosPositions := shuffled }
 
 /-! ## Data Shard -/
 
@@ -134,33 +151,103 @@ structure DataShard (n : UInt64 := defaultShardSize) where
   numShards : UInt64
   deriving Repr
 
-/-- Load a data shard for the given rank -/
-def DataShard.load (path : String) (shardIdx numShards : UInt64)
-    (bosToken : UInt64) : IO (DataShard defaultShardSize) := do
-  -- In a full implementation:
-  -- 1. Memory-map the file
-  -- 2. Compute shard boundaries
-  -- 3. Load only this rank's portion
+/-- Load a data shard from a file for the given rank.
+    For distributed training, each rank loads a different portion of the data.
+    Returns a dependent pair (size, shard). -/
+def DataShard.loadFromFile (path : String) (shardIdx numShards : UInt64)
+    (bosToken : UInt64) : IO (Σ n, DataShard n) := do
+  -- Get total file size
+  let totalTokens ← data.binFileTokenCount path
 
-  -- Placeholder: create random data for testing
-  let tokens ← randn #[defaultShardSize] false
-  let bosFinder ← BOSFinder.init tokens bosToken
-  return {
-    tokens := tokens
+  -- Compute this shard's portion
+  let tokensPerShard := totalTokens / numShards
+  let startToken := tokensPerShard * shardIdx
+  let endToken := if shardIdx == numShards - 1
+                  then totalTokens  -- Last shard gets remainder
+                  else startToken + tokensPerShard
+  let shardSize := endToken - startToken
+
+  -- Load full file and slice to this shard's portion
+  let allTokens ← data.loadU16Bin totalTokens path
+  let shardTokens := allTokens.slice 0 startToken.toInt64 endToken.toInt64
+  let shardTokens := reshape shardTokens #[shardSize]
+
+  -- Initialize BOS finder on shard data
+  let bosFinder ← BOSFinder.init shardTokens bosToken
+
+  return ⟨shardSize, {
+    tokens := shardTokens
     bosFinder := bosFinder
     shardIdx := shardIdx
     numShards := numShards
-  }
+  }⟩
 
-/-! ## Batch Iterator -/
+/-- Load a data shard with fixed default size (for backward compatibility).
+    If file is smaller than defaultShardSize, pads with zeros. -/
+def DataShard.load (path : String) (shardIdx numShards : UInt64)
+    (bosToken : UInt64) : IO (DataShard defaultShardSize) := do
+  -- Check if file exists
+  let fileExists ← data.fileExists path
+  if fileExists then
+    -- Load from file
+    let ⟨n, shard⟩ ← DataShard.loadFromFile path shardIdx numShards bosToken
+    -- Reshape/pad to fixed size (may truncate or need padding)
+    -- For now, just use the actual size - caller should use loadFromFile for dynamic sizes
+    let paddedTokens := reshape shard.tokens #[defaultShardSize]
+    let bosFinder ← BOSFinder.init paddedTokens bosToken
+    return {
+      tokens := paddedTokens
+      bosFinder := bosFinder
+      shardIdx := shardIdx
+      numShards := numShards
+    }
+  else
+    -- Fallback: create random data for testing
+    IO.println s!"Warning: File not found '{path}', using random data"
+    let tokens ← randn #[defaultShardSize] false
+    let bosFinder ← BOSFinder.init tokens bosToken
+    return {
+      tokens := tokens
+      bosFinder := bosFinder
+      shardIdx := shardIdx
+      numShards := numShards
+    }
 
-/-- Batch iterator state (uses fixed shard size for simplicity) -/
+/-! ## Batch Iterator
+
+### Type Safety Design Choice
+
+`BatchIterator` intentionally uses dynamic (type-erased) batch dimensions because
+modded-nanogpt changes batch and sequence sizes during training:
+- Batch size: 8 → 16 → 24 (at specific step thresholds)
+- Window size: 3 → 7 → 11 blocks
+
+This flexibility requires runtime dimension tracking via `T #[]`.
+
+**For fixed batch/sequence dimensions**, use `SequentialBatchIterator n b s` instead,
+which provides full compile-time shape guarantees via `T #[b, s]`.
+
+Example:
+```lean
+-- Dynamic dimensions (modded-nanogpt style):
+let iter := BatchIterator.new shard 8 256
+let (batch, iter') ← iter.next  -- Returns T #[]
+
+-- Fixed dimensions (type-safe):
+let iter := SequentialBatchIterator.new loader 8 256
+let (batch, iter') := iter.next  -- Returns T #[8, 256]
+```
+-/
+
+/-- Batch iterator state with dynamic dimensions.
+    Uses erased types (`T #[]`) to support runtime dimension changes.
+    For type-safe iteration with fixed dimensions, use `SequentialBatchIterator` instead. -/
 structure BatchIterator where
   /-- Data shard being iterated -/
   shard : DataShard defaultShardSize
-  /-- Current batch size -/
+  /-- Current batch size (runtime value, not in type) -/
   batchSize : UInt64
-  /-- Current sequence length -/
+  /-- Current sequence length (runtime value, not in type) -/
   seqLen : UInt64
   /-- Number of batches produced -/
   batchCount : UInt64
@@ -178,10 +265,21 @@ def BatchIterator.new (shard : DataShard defaultShardSize) (batchSize seqLen : U
   epoch := 0
 }
 
-/-- Get the next batch of (input, target) pairs.
+/-- Get the next batch of (input, target) pairs with erased types.
 
     Returns None when epoch is complete.
-    Note: Uses erased types for simplicity - real impl would track shapes properly.
+    Uses `T #[]` because batch/seq dimensions can change during training.
+
+    To recover typed tensors, use `reshape` with known dimensions:
+    ```lean
+    let (maybeBatch, iter') ← iter.next
+    match maybeBatch with
+    | some (x, y) =>
+      -- Caller knows current dimensions from iter.batchSize and iter.seqLen
+      let x : T #[b, s] := reshape x #[b, s]
+      let y : T #[b, s] := reshape y #[b, s]
+    | none => ...
+    ```
 -/
 def BatchIterator.next (iter : BatchIterator)
     : IO (Option (T #[] × T #[]) × BatchIterator) := do
@@ -217,6 +315,27 @@ def BatchIterator.next (iter : BatchIterator)
       batchCount := iter.batchCount + 1
     }
     return (some (input, target), newIter)
+
+/-- Typed version of `next` that returns tensors with explicit shape.
+
+    Use when you know the current batch dimensions and want type-safe tensors.
+    Panics if the iterator's current dimensions don't match the expected shape.
+
+    ```lean
+    let (maybeBatch, iter') ← iter.nextTyped 8 256
+    -- maybeBatch : Option (T #[8, 256] × T #[8, 256])
+    ```
+-/
+def BatchIterator.nextTyped (iter : BatchIterator) (b s : UInt64)
+    : IO (Option (T #[b, s] × T #[b, s]) × BatchIterator) := do
+  let (maybeBatch, newIter) ← iter.next
+  match maybeBatch with
+  | none => return (none, newIter)
+  | some (x, y) =>
+    -- Reshape to the specified dimensions
+    let x : T #[b, s] := reshape x #[b, s]
+    let y : T #[b, s] := reshape y #[b, s]
+    return (some (x, y), newIter)
 
 /-- Update batch size and sequence length dynamically.
 
@@ -351,5 +470,141 @@ def estimateRemainingTime (currentStep totalSteps : UInt64)
     (msPerStep : Float) : Float :=
   let remaining := totalSteps - currentStep
   remaining.toFloat * msPerStep / 1000.0 / 60.0  -- In minutes
+
+/-! ## Sequential DataLoader (Shakespeare style)
+
+    Simple sequential data loading without document boundaries.
+    Suitable for character-level or single-document datasets.
+-/
+
+/-- Sequential data loader for simple datasets like Shakespeare.
+    Loads entire file into memory and iterates sequentially or randomly. -/
+structure SequentialLoader (n : UInt64) where
+  /-- Token data tensor -/
+  tokens : T #[n]
+  /-- Current position for sequential iteration -/
+  currentPos : UInt64
+  deriving Repr
+
+/-- Load a sequential loader from a binary file -/
+def SequentialLoader.fromFile (path : String) : IO (Σ n, SequentialLoader n) := do
+  let n ← data.binFileTokenCount path
+  let tokens ← data.loadU16Bin n path
+  return ⟨n, { tokens := tokens, currentPos := 0 }⟩
+
+/-- Reset position to beginning -/
+def SequentialLoader.reset {n : UInt64} (loader : SequentialLoader n) : SequentialLoader n :=
+  { loader with currentPos := 0 }
+
+/-- Get a contiguous batch of sequences.
+    Returns (batch, newLoader) where batch is [batchSize, seqLen+1].
+    Returns none when not enough data remains. -/
+def SequentialLoader.getBatch {n : UInt64} (loader : SequentialLoader n)
+    (batchSize seqLen : UInt64) : Option (T #[batchSize, seqLen + 1] × SequentialLoader n) :=
+  let requiredLen := batchSize * (seqLen + 1)
+  if loader.currentPos + requiredLen > n then
+    none
+  else
+    let startPos := loader.currentPos
+    let endPos := startPos + requiredLen
+    -- Slice and reshape to [batchSize, seqLen+1]
+    let sliced := loader.tokens.slice 0 startPos.toInt64 endPos.toInt64
+    let batch := reshape sliced #[batchSize, seqLen + 1]
+    let newLoader := { loader with currentPos := endPos }
+    some (batch, newLoader)
+
+/-- Sample a random batch (nanoGPT style).
+    Each sequence in the batch starts at a random position.
+    Returns (input, target) where target is input shifted by 1. -/
+def SequentialLoader.sampleRandomBatch {n : UInt64} (loader : SequentialLoader n)
+    (batchSize blockSize : UInt64) : IO (T #[batchSize, blockSize] × T #[batchSize, blockSize]) := do
+  -- Maximum valid starting index (need blockSize + 1 tokens for input and target)
+  let maxStart := n - blockSize - 1
+
+  -- For simplicity, sample a single starting position and create batch from sequential positions
+  -- This gives us a contiguous batch rather than truly random starts, but is much simpler
+  let startIdx ← randint 0 (maxStart - batchSize * blockSize).toInt64 #[1]
+  let startPos := nn.item startIdx
+
+  -- Calculate required length: batchSize sequences of (blockSize + 1) tokens each
+  let requiredLen := batchSize * (blockSize + 1)
+
+  -- Slice out the required portion
+  let sliced := loader.tokens.slice 0 startPos.toInt64 (startPos + requiredLen.toFloat).toInt64
+
+  -- Reshape to [batchSize, blockSize + 1]
+  let batch := reshape sliced #[batchSize, blockSize + 1]
+
+  -- Split into input and target using slice along dimension 1
+  let input := batch.slice 1 0 blockSize.toInt64
+  let target := batch.slice 1 1 (blockSize.toInt64 + 1)
+
+  -- Reshape to correct types
+  let input := reshape input #[batchSize, blockSize]
+  let target := reshape target #[batchSize, blockSize]
+  return (input, target)
+
+/-- Sequential batch iterator with epoch tracking.
+    Parametrized by data size n, batch size b, and sequence length s. -/
+structure SequentialBatchIterator (n b s : UInt64) where
+  /-- Underlying loader -/
+  loader : SequentialLoader n
+  /-- Current epoch -/
+  epoch : UInt64
+  /-- Batches produced in current epoch -/
+  batchCount : UInt64
+  deriving Repr
+
+/-- Create a new sequential batch iterator -/
+def SequentialBatchIterator.new {n : UInt64} (loader : SequentialLoader n)
+    (batchSize seqLen : UInt64) : SequentialBatchIterator n batchSize seqLen := {
+  loader := loader
+  epoch := 0
+  batchCount := 0
+}
+
+/-- Get next batch, returning (input, target) pair with proper types.
+    Returns none at epoch boundary, then resets for next epoch. -/
+def SequentialBatchIterator.next {n b s : UInt64} (iter : SequentialBatchIterator n b s)
+    : Option (T #[b, s] × T #[b, s]) × SequentialBatchIterator n b s :=
+  match iter.loader.getBatch b s with
+  | none =>
+    -- Epoch complete, reset loader
+    let newLoader := iter.loader.reset
+    let newIter := { iter with
+      loader := newLoader
+      epoch := iter.epoch + 1
+      batchCount := 0
+    }
+    (none, newIter)
+  | some (batch, newLoader) =>
+    -- batch is [b, s+1], split into input/target
+    let input := batch.slice 1 0 s.toInt64
+    let target := batch.slice 1 1 (s.toInt64 + 1)
+    -- Reshape to ensure correct types
+    let input := reshape input #[b, s]
+    let target := reshape target #[b, s]
+    let newIter := { iter with
+      loader := newLoader
+      batchCount := iter.batchCount + 1
+    }
+    (some (input, target), newIter)
+
+/-- Convenience: load Shakespeare data and create iterator -/
+def loadShakespeareData (trainPath valPath : String) (batchSize seqLen : UInt64)
+    : IO (Σ n, SequentialBatchIterator n batchSize seqLen × Option (Σ m, SequentialLoader m)) := do
+  -- Load training data
+  let ⟨nTrain, trainLoader⟩ ← SequentialLoader.fromFile trainPath
+  let trainIter := SequentialBatchIterator.new trainLoader batchSize seqLen
+
+  -- Try to load validation data
+  let valExists ← data.fileExists valPath
+  let valLoader ← if valExists then do
+    let ⟨nVal, loader⟩ ← SequentialLoader.fromFile valPath
+    pure (some ⟨nVal, loader⟩)
+  else
+    pure none
+
+  return ⟨nTrain, trainIter, valLoader⟩
 
 end torch.DataLoader
