@@ -1,3 +1,14 @@
+# =============================================================================
+# DEPRECATED: This file is kept for reference only.
+# Use `lake build` instead of `ninja` for building.
+#
+# Lake commands:
+#   lake build              - Build all targets
+#   lake build test         - Build test executable
+#   lake build TrainGPT     - Build training executable
+#   lake script run         - Show how to run test
+#   lake script train       - Show how to run TrainGPT
+# =============================================================================
 
 outpath = out
 libraries =
