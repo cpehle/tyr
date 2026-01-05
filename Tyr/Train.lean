@@ -25,6 +25,8 @@ structure TrainConfig where
   gradClip : Float := 1.0
   batchSize : UInt64 := 4
   blockSize : UInt64 := 64
+  /-- Number of gradient accumulation steps (effective batch = batchSize * gradAccumSteps) -/
+  gradAccumSteps : Nat := 1
   deriving Repr, Inhabited
 
 /-- Cosine learning rate schedule with warmup -/
@@ -132,6 +134,53 @@ def trainStep {modelCfg : Config} {batch seq : UInt64}
   let (params', optState') := Optim.step opt params grads optState
 
   return (params', optState', lossVal)
+
+/-- Training step with gradient accumulation support.
+    Accumulates gradients over multiple micro-batches before updating parameters.
+    This enables training with larger effective batch sizes on limited memory. -/
+def trainStepWithAccum {modelCfg : Config} {batch seq : UInt64}
+    (trainCfg : TrainConfig)
+    (params : GPTParams modelCfg)
+    (optState : Optim.AdamWState (GPTParams modelCfg))
+    (getBatchFn : IO (T #[batch, seq] × T #[batch, seq]))
+    (lr : Float)
+    : IO (GPTParams modelCfg × Optim.AdamWState (GPTParams modelCfg) × Float) := do
+  let accumSteps := trainCfg.gradAccumSteps
+  let lossScale := 1.0 / accumSteps.toFloat
+
+  -- Zero gradients at the start of accumulation window
+  let params := TensorStruct.zeroGrads params
+  let mut totalLoss : Float := 0.0
+
+  -- Accumulate gradients over multiple micro-batches
+  for _ in [:accumSteps] do
+    let (x, y) ← getBatchFn
+
+    -- Forward pass
+    let lossT ← gpt.loss params x y true
+
+    -- Scale loss for averaging (backward will scale gradients accordingly)
+    let scaledLoss := mul_scalar lossT lossScale
+
+    -- Backward pass (gradients accumulate since we didn't zero them)
+    autograd.backwardLoss scaledLoss
+
+    totalLoss := totalLoss + nn.item lossT
+
+  -- Gradient clipping after accumulation
+  if trainCfg.gradClip > 0 then
+    let _ ← clipGPTGrads params trainCfg.gradClip
+    pure ()
+
+  -- Extract accumulated gradients
+  let grads := TensorStruct.grads params
+
+  -- Update parameters
+  let opt := Optim.adamw (lr := lr)
+  let (params', optState') := Optim.step opt params grads optState
+
+  -- Return average loss over accumulation steps
+  return (params', optState', totalLoss / accumSteps.toFloat)
 
 /-- Compute perplexity from cross-entropy loss -/
 def perplexity (loss : Float) : Float := Float.exp loss

@@ -236,6 +236,10 @@ namespace nn
 /-- Shape-aware cross entropy: logits [N, C] + targets [N] -> scalar loss -/
 @[extern "lean_torch_cross_entropy_2d"]
 opaque cross_entropy {n c : UInt64} (logits : @& T #[n, c]) (targets : @& T #[n]) : T #[]
+
+/-- Cross entropy with no reduction: logits [N, C] + targets [N] -> per-element loss [N] -/
+@[extern "lean_torch_cross_entropy_none"]
+opaque cross_entropy_none {n c : UInt64} (logits : @& T #[n, c]) (targets : @& T #[n]) : T #[n]
 -- torch::nn::functional::ctc_loss
 @[extern "lean_torch_dropout"] opaque dropout {s : Shape} (input : @& T s) (p : Float := 0.5) (training : Bool := true) : IO (T s)
 -- torch::nn::functional::dropout2d
@@ -287,6 +291,31 @@ opaque layer_norm {batch seq n : UInt64}
     (weight : @& T #[n])
     (bias : @& T #[n])
     (eps : Float := 1e-5) : T #[batch, seq, n]
+
+/-- Fused layer_norm + GELU - saves memory bandwidth in transformer blocks -/
+@[extern "lean_torch_layer_norm_gelu"]
+opaque layer_norm_gelu {batch seq n : UInt64}
+    (input : @& T #[batch, seq, n])
+    (weight : @& T #[n])
+    (bias : @& T #[n])
+    (eps : Float := 1e-5) : T #[batch, seq, n]
+
+/-- Fused layer_norm + ReLU -/
+@[extern "lean_torch_layer_norm_relu"]
+opaque layer_norm_relu {batch seq n : UInt64}
+    (input : @& T #[batch, seq, n])
+    (weight : @& T #[n])
+    (bias : @& T #[n])
+    (eps : Float := 1e-5) : T #[batch, seq, n]
+
+/-- Fused layer_norm + SiLU (for SwiGLU MLP) -/
+@[extern "lean_torch_layer_norm_silu"]
+opaque layer_norm_silu {batch seq n : UInt64}
+    (input : @& T #[batch, seq, n])
+    (weight : @& T #[n])
+    (bias : @& T #[n])
+    (eps : Float := 1e-5) : T #[batch, seq, n]
+
 @[extern "lean_torch_leaky_relu"] opaque leaky_relu {s : Shape} (input : @& T s) (negative_slope : Float := 0.01) : T s
 -- torch::nn::functional::linear
 -- torch::nn::functional::local_response_norm
@@ -354,6 +383,11 @@ def matmul {s1 s2 : Shape} (a : T s1) (b : T s2) : T (matmulShape s1 s2) :=
 @[extern "lean_torch_bmm"] opaque bmm {b m n k : UInt64} (input : @& T #[b, m, k]) (mat2 : @& T #[b, k, n]) : T #[b, m, n]
 @[extern "lean_torch_mm"] opaque mm {m n k : UInt64} (input : @& T #[m, k]) (mat2 : @& T #[k, n]) : T #[m, n]
 
+/-- 4D batched matmul for multi-head attention: [b,h,m,k] @ [b,h,k,n] -> [b,h,m,n] -/
+@[extern "lean_torch_bmm4d"]
+opaque bmm4d_impl {b h m k n : UInt64}
+    (input : @& T #[b, h, m, k]) (mat2 : @& T #[b, h, k, n]) : T #[b, h, m, n]
+
 @[extern "lean_torch_transpose"] opaque transpose {s : Shape} (input : @& T s) (dim0 : Nat) (dim1 : Nat) : T (transposeShape s dim0 dim1)
 
 /-- Shape-aware matmul for 3D @ 2D: [batch, seq, k] @ [k, n] -> [batch, seq, n] -/
@@ -366,10 +400,11 @@ def matmul2d {m k n : UInt64}
     (a : T #[m, k]) (b : T #[k, n]) : T #[m, n] :=
   mm a b
 
-/-- 4D batched matmul for attention: [b, h, m, k] @ [b, h, k, n] -> [b, h, m, n] -/
+/-- 4D batched matmul for attention: [b, h, m, k] @ [b, h, k, n] -> [b, h, m, n]
+    Uses typed FFI to avoid shape erasure -/
 def bmm4d {b h m k n : UInt64}
     (a : T #[b, h, m, k]) (x : T #[b, h, k, n]) : T #[b, h, m, n] :=
-  matmul a x
+  bmm4d_impl a x
 
 /-- Transpose last two dimensions of a 2D tensor -/
 @[extern "lean_torch_transpose_2d"]
@@ -410,8 +445,12 @@ opaque transpose_from_attention {batch n_head seq head_dim : UInt64}
 @[extern "lean_torch_expand"] opaque expand' {s : Shape} (input : @& T s) (size : Array UInt64) : T s
 @[extern "lean_torch_repeat"] opaque tensor_repeat {s : Shape} (input : @& T s) (repeats : Array UInt64) : T s
 
-/-- Concatenate tensors along a dimension (untyped FFI) -/
+/-- Concatenate tensors along a dimension (untyped FFI, requires same-typed array) -/
 @[extern "lean_torch_cat"] opaque cat_impl {s : Shape} (tensors : @& Array (T s)) (dim : Int) : T #[]
+
+/-- Direct 2-tensor concatenation (no intermediate reshapes) -/
+@[extern "lean_torch_cat2"] private opaque cat2_impl {s1 s2 : Shape}
+    (t1 : @& T s1) (t2 : @& T s2) (dim : Int) : T #[]
 
 /-- Compute the output shape when concatenating two shapes along dimension `dim`.
     The shapes must match in all dimensions except `dim`, where they are summed. -/
@@ -424,7 +463,7 @@ def catShape (s1 s2 : Shape) (dim : Nat) : Shape :=
 
     Example: cat #[2,3] #[2,5] 1 produces shape #[2, 8] -/
 def cat {s1 s2 : Shape} (t1 : T s1) (t2 : T s2) (dim : Nat) : T (catShape s1 s2 dim) :=
-  reshape (cat_impl #[reshape t1 #[], reshape t2 #[]] dim) (catShape s1 s2 dim)
+  reshape (cat2_impl t1 t2 dim) (catShape s1 s2 dim)
 
 /-- Expand tensor to target shape (typed version) -/
 def expand {s : Shape} (input : T s) (targetShape : Shape) : T targetShape :=
@@ -569,6 +608,21 @@ opaque loadTensor (s : Shape) (path : @& String) : IO (T s)
 @[extern "lean_torch_file_exists"]
 opaque fileExists (path : @& String) : IO Bool
 
+/-- Find positions of a specific token (e.g., BOS) in a 1D tensor.
+    Returns a 1D tensor of indices where tokens == tokenId. -/
+@[extern "lean_torch_find_bos_positions"]
+opaque findBosPositions {n : UInt64} (tokens : @& T #[n]) (tokenId : Int64) : IO (T #[])
+
+/-- Convert a 1D int64 tensor to a Lean Array UInt64.
+    Useful for extracting positions for Lean-side processing. -/
+@[extern "lean_torch_tensor_to_uint64_array"]
+opaque tensorToUInt64Array {n : UInt64} (t : @& T #[n]) : IO (Array UInt64)
+
+/-- Convert a dynamically-shaped tensor to a Lean Array UInt64.
+    Works with shape-erased tensors (T #[]). -/
+@[extern "lean_torch_tensor_to_uint64_array_dynamic"]
+opaque tensorToUInt64Array' (t : @& T #[]) : IO (Array UInt64)
+
 end data
 
 -- Autograd utilities
@@ -643,5 +697,73 @@ opaque scaledDotProductAttentionGQA
     : T #[batch, n_head, seq, head_dim]
 
 end nn
+
+-- ============================================================================
+-- Comparison and conditional operations (for diffusion)
+-- ============================================================================
+
+/-- Less than comparison: a < b element-wise, returns boolean tensor -/
+@[extern "lean_torch_lt"]
+opaque lt {s : Shape} (a : @& T s) (b : @& T s) : T s
+
+/-- Less than scalar comparison: input < scalar -/
+@[extern "lean_torch_lt_scalar"]
+opaque lt_scalar {s : Shape} (input : @& T s) (scalar : Float) : T s
+
+/-- Greater than comparison: a > b element-wise -/
+@[extern "lean_torch_gt"]
+opaque gt {s : Shape} (a : @& T s) (b : @& T s) : T s
+
+/-- Greater than or equal comparison: a >= b element-wise -/
+@[extern "lean_torch_ge"]
+opaque ge {s : Shape} (a : @& T s) (b : @& T s) : T s
+
+/-- Equality comparison: a == b element-wise, returns boolean tensor -/
+@[extern "lean_torch_eq"]
+opaque eq {s : Shape} (a : @& T s) (b : @& T s) : T s
+
+/-- Equality with scalar comparison: input == scalar -/
+@[extern "lean_torch_eq_scalar"]
+opaque eq_scalar {s : Shape} (input : @& T s) (scalar : Int64) : T s
+
+/-- Conditional selection: where condition is true, select x, else y -/
+@[extern "lean_torch_where"]
+opaque where_ {s : Shape} (condition : @& T s) (x : @& T s) (y : @& T s) : T s
+
+/-- Create int64 tensor filled with given value -/
+@[extern "lean_torch_full_int"]
+opaque full_int (s : Shape) (value : Int64) : T s
+
+/-- Maximum along dimension, returns (values, indices) -/
+@[extern "lean_torch_max_dim"]
+opaque max_dim {s : Shape} (input : @& T s) (dim : UInt64) : T s × T s
+
+/-- Boolean any: returns true if any element is true -/
+@[extern "lean_torch_any"]
+opaque any {s : Shape} (input : @& T s) : Bool
+
+/-- Logical NOT for boolean tensors -/
+@[extern "lean_torch_logical_not"]
+opaque logical_not {s : Shape} (input : @& T s) : T s
+
+/-- Logical AND for boolean tensors -/
+@[extern "lean_torch_logical_and"]
+opaque logical_and {s : Shape} (a : @& T s) (b : @& T s) : T s
+
+/-- Convert to float32 dtype -/
+@[extern "lean_torch_to_float"]
+opaque toFloat' {s : Shape} (input : @& T s) : T s
+
+/-- Index select on first dimension -/
+@[extern "lean_torch_index_select_1d"]
+opaque index_select_1d {n m : UInt64} (input : @& T #[n]) (indices : @& T #[m]) : T #[m]
+
+/-- Clamp values to a range -/
+@[extern "lean_torch_clamp"]
+opaque clamp {s : Shape} (input : @& T s) (min_val max_val : Int64) : T s
+
+/-- Top-k values and indices along dimension -/
+@[extern "lean_torch_topk"]
+opaque topk {s : Shape} (input : @& T s) (k : UInt64) (dim : UInt64) : T s × T s
 
 end torch

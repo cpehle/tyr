@@ -12,6 +12,7 @@
   - No bias in linear layers
 -/
 import Tyr.Torch
+import Tyr.TensorStruct
 
 namespace torch.nanoproof
 
@@ -80,10 +81,41 @@ structure BlockParams (n_embd n_head n_kv_head : UInt64) where
   attn : AttentionParams n_embd n_head n_kv_head
   mlp : MLPParams n_embd
 
+/-! ## TensorStruct Instances -/
+
+instance {n_embd n_head n_kv_head : UInt64} : TensorStruct (AttentionParams n_embd n_head n_kv_head) where
+  map f p := { c_q := f p.c_q, c_k := f p.c_k, c_v := f p.c_v, c_proj := f p.c_proj }
+  mapM f p := do
+    pure { c_q := ← f p.c_q, c_k := ← f p.c_k, c_v := ← f p.c_v, c_proj := ← f p.c_proj }
+  zipWith f p1 p2 := {
+    c_q := f p1.c_q p2.c_q, c_k := f p1.c_k p2.c_k, c_v := f p1.c_v p2.c_v, c_proj := f p1.c_proj p2.c_proj
+  }
+  fold f init p := f p.c_proj (f p.c_v (f p.c_k (f p.c_q init)))
+
+instance {n_embd : UInt64} : TensorStruct (MLPParams n_embd) where
+  map f p := { c_fc := f p.c_fc, c_proj := f p.c_proj }
+  mapM f p := do pure { c_fc := ← f p.c_fc, c_proj := ← f p.c_proj }
+  zipWith f p1 p2 := { c_fc := f p1.c_fc p2.c_fc, c_proj := f p1.c_proj p2.c_proj }
+  fold f init p := f p.c_proj (f p.c_fc init)
+
+instance {n_embd n_head n_kv_head : UInt64} : TensorStruct (BlockParams n_embd n_head n_kv_head) where
+  map f p := { attn := TensorStruct.map f p.attn, mlp := TensorStruct.map f p.mlp }
+  mapM f p := do pure { attn := ← TensorStruct.mapM f p.attn, mlp := ← TensorStruct.mapM f p.mlp }
+  zipWith f p1 p2 := {
+    attn := TensorStruct.zipWith f p1.attn p2.attn, mlp := TensorStruct.zipWith f p1.mlp p2.mlp
+  }
+  fold f init p := TensorStruct.fold f (TensorStruct.fold f init p.attn) p.mlp
+
 /-- Parameters for value head (for RL training) -/
 structure ValueHeadParams (n_embd num_bins : UInt64) where
   c_fc : T #[4 * n_embd, n_embd]
   c_proj : T #[num_bins, 4 * n_embd]
+
+instance {n_embd num_bins : UInt64} : TensorStruct (ValueHeadParams n_embd num_bins) where
+  map f p := { c_fc := f p.c_fc, c_proj := f p.c_proj }
+  mapM f p := do pure { c_fc := ← f p.c_fc, c_proj := ← f p.c_proj }
+  zipWith f p1 p2 := { c_fc := f p1.c_fc p2.c_fc, c_proj := f p1.c_proj p2.c_proj }
+  fold f init p := f p.c_proj (f p.c_fc init)
 
 /-- Full NanoProof model parameters -/
 structure NanoProofParams (cfg : Config) where
@@ -95,6 +127,37 @@ structure NanoProofParams (cfg : Config) where
   lm_head : T #[cfg.vocab_size, cfg.n_embd]
   -- Value head (optional, for RL)
   value_head : Option (ValueHeadParams cfg.n_embd cfg.num_value_bins)
+
+instance {cfg : Config} : TensorStruct (NanoProofParams cfg) where
+  map f p := {
+    wte := f p.wte
+    blocks := p.blocks.map (TensorStruct.map f)
+    lm_head := f p.lm_head
+    value_head := p.value_head.map (TensorStruct.map f)
+  }
+  mapM f p := do
+    let wte ← f p.wte
+    let blocks ← p.blocks.mapM (TensorStruct.mapM f)
+    let lm_head ← f p.lm_head
+    let value_head ← match p.value_head with
+      | some v => pure (some (← TensorStruct.mapM f v))
+      | none => pure none
+    pure { wte, blocks, lm_head, value_head }
+  zipWith f p1 p2 := {
+    wte := f p1.wte p2.wte
+    blocks := Array.zipWith (TensorStruct.zipWith f) p1.blocks p2.blocks
+    lm_head := f p1.lm_head p2.lm_head
+    value_head := match p1.value_head, p2.value_head with
+      | some v1, some v2 => some (TensorStruct.zipWith f v1 v2)
+      | _, _ => none
+  }
+  fold f init p :=
+    let acc := f p.wte init
+    let acc := p.blocks.foldl (fun acc b => TensorStruct.fold f acc b) acc
+    let acc := f p.lm_head acc
+    match p.value_head with
+    | some v => TensorStruct.fold f acc v
+    | none => acc
 
 /-- Helper to create a leaf parameter tensor -/
 def makeLeafParam {s : Shape} (t : T s) : T s :=
@@ -285,21 +348,36 @@ def attentionMinimal {batch seq n_embd n_head n_kv_head : UInt64}
   let qBack := linear3d q params.c_proj
   qBack
 
+/-- MLP-only block forward (workaround for attention FFI bug) -/
+def blockForwardMlpOnly {batch seq n_embd n_head n_kv_head : UInt64}
+    (params : BlockParams n_embd n_head n_kv_head)
+    (x : T #[batch, seq, n_embd])
+    : T #[batch, seq, n_embd] :=
+  -- MLP with residual (pre-norm) - skip attention for now
+  x + mlpForward params.mlp (norm x)
+
 /-- Full model forward pass -/
 def forward {cfg : Config} (batch seq : UInt64)
     (params : NanoProofParams cfg)
     (_rotaryCache : RotaryCache rotaryLen cfg.headDim)
     (idx : T #[batch, seq])
     : IO (ModelOutput batch seq cfg.vocab_size cfg.num_value_bins) := do
-  -- Step 1: Embedding + norm
+  -- Token embedding + norm
   let x := nn.embedding idx params.wte
   let x := norm x
 
-  -- No blocks at all
+  -- Transformer blocks (MLP-only for now - attention has FFI bug)
+  let x := params.blocks.foldl (init := x) fun x block =>
+    blockForwardMlpOnly block x
 
-  -- Project to vocab_size for output
+  -- Final norm
+  let x := norm x
+
+  -- Policy logits (lm_head)
   let logits := linear3d x params.lm_head
+  let logits := nanoproof.softcap logits cfg.softcap
 
+  -- Value logits - skip for now (computeValueLogits also uses match)
   pure { policy_logits := logits, value_logits := none }
 
 /-- Compute combined loss for policy + value heads -/
