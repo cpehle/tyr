@@ -208,7 +208,7 @@ build out/exe/TrainGPT: cexe  out/o/TrainGPT.o |  out/libTyr.a
 build out/ModdedTrainGPT.olean: leano ./ModdedTrainGPT.lean |  out/Tyr.olean out/Tyr/Distributed.olean out/Tyr/Sharding.olean out/Tyr/ModdedGPT.olean out/Tyr/DataLoader.olean out/Tyr/ModdedTrain.olean out/Tyr/Optim/NorMuon.olean out/Tyr/Optim/DistAdam.olean
 build out/c/ModdedTrainGPT.c: leanc ./ModdedTrainGPT.lean |  out/Tyr.olean out/Tyr/Distributed.olean out/Tyr/Sharding.olean out/Tyr/ModdedGPT.olean out/Tyr/DataLoader.olean out/Tyr/ModdedTrain.olean out/Tyr/Optim/NorMuon.olean out/Tyr/Optim/DistAdam.olean
 build out/o/ModdedTrainGPT.o: cobj out/c/ModdedTrainGPT.c
-build out/exe/ModdedTrainGPT: cexe  out/o/ModdedTrainGPT.o out/o/Tyr/Distributed.o out/o/Tyr/Sharding.o out/o/Tyr/ModdedGPT.o out/o/Tyr/DataLoader.o out/o/Tyr/ModdedTrain.o out/o/Tyr/Optim/PolarExpress.o out/o/Tyr/Optim/NorMuon.o out/o/Tyr/Optim/DistAdam.o |  out/libTyr.a
+build out/exe/ModdedTrainGPT: cexe  out/o/ModdedTrainGPT.o out/o/Tyr/ModdedGPT.o out/o/Tyr/DataLoader.o out/o/Tyr/ModdedTrain.o out/o/Tyr/Optim/PolarExpress.o out/o/Tyr/Optim/NorMuon.o out/o/Tyr/Optim/DistAdam.o |  out/libTyr.a
   libraries = -ltorch -ltorch_cpu -lc10 -lTyrC
   librarypaths = -L external/libtorch/lib -L cc/build/
 
@@ -217,7 +217,7 @@ build modded: phony out/exe/ModdedTrainGPT
 build out/TestModdedGPT.olean: leano ./TestModdedGPT.lean |  out/Tyr.olean out/Tyr/Distributed.olean out/Tyr/Sharding.olean out/Tyr/ModdedGPT.olean out/Tyr/DataLoader.olean out/Tyr/ModdedTrain.olean out/Tyr/Optim/PolarExpress.olean out/Tyr/Optim/NorMuon.olean out/Tyr/Optim/DistAdam.olean
 build out/c/TestModdedGPT.c: leanc ./TestModdedGPT.lean |  out/Tyr.olean out/Tyr/Distributed.olean out/Tyr/Sharding.olean out/Tyr/ModdedGPT.olean out/Tyr/DataLoader.olean out/Tyr/ModdedTrain.olean out/Tyr/Optim/PolarExpress.olean out/Tyr/Optim/NorMuon.olean out/Tyr/Optim/DistAdam.olean
 build out/o/TestModdedGPT.o: cobj out/c/TestModdedGPT.c
-build out/exe/TestModdedGPT: cexe  out/o/TestModdedGPT.o out/o/Tyr/Distributed.o out/o/Tyr/Sharding.o out/o/Tyr/ModdedGPT.o out/o/Tyr/DataLoader.o out/o/Tyr/ModdedTrain.o out/o/Tyr/Optim/PolarExpress.o out/o/Tyr/Optim/NorMuon.o out/o/Tyr/Optim/DistAdam.o |  out/libTyr.a
+build out/exe/TestModdedGPT: cexe  out/o/TestModdedGPT.o out/o/Tyr/ModdedGPT.o out/o/Tyr/DataLoader.o out/o/Tyr/ModdedTrain.o out/o/Tyr/Optim/PolarExpress.o out/o/Tyr/Optim/NorMuon.o out/o/Tyr/Optim/DistAdam.o |  out/libTyr.a
   libraries = -ltorch -ltorch_cpu -lc10 -lTyrC
   librarypaths = -L external/libtorch/lib -L cc/build/
 
