@@ -1,3 +1,5 @@
 {
-    "lean4.executablePath": "./leanWithPlugin.sh"
+    "lean4.serverArgs": [
+      "--plugin=/Users/pehle/dev/tyr/out/libTyr.dylib"
+    ]
 }
