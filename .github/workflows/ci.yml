@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: macos-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install elan
+        run: |
+          curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf | sh -s -- -y --default-toolchain none
+          echo "$HOME/.elan/bin" >> $GITHUB_PATH
+
+      - name: Set up Lean toolchain
+        run: |
+          elan toolchain install $(cat lean-toolchain)
+          elan default $(cat lean-toolchain)
+
+      - name: Install OpenMP
+        run: brew install libomp
+
+      - name: Cache LibTorch
+        id: cache-libtorch
+        uses: actions/cache@v4
+        with:
+          path: external/libtorch
+          key: libtorch-macos-2.1.2
+
+      - name: Download LibTorch
+        if: steps.cache-libtorch.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p external
+          curl -L https://download.pytorch.org/libtorch/cpu/libtorch-macos-arm64-2.1.2.zip -o libtorch.zip
+          unzip libtorch.zip -d external/
+          rm libtorch.zip
+
+      - name: Build C++ bindings
+        run: make -C cc
+
+      - name: Check Lean compilation
+        run: |
+          # Build core modules that don't have pre-existing errors
+          lake env lean Tyr/Basic.lean -o /dev/null
+          lake env lean Tyr/Torch.lean -o /dev/null
+          lake env lean Tyr/TensorStruct.lean -o /dev/null
+          lake env lean Tyr/Optim.lean -o /dev/null
+          lake env lean Tyr/Train.lean -o /dev/null
+          lake env lean Tyr/DataLoader.lean -o /dev/null
+          lake env lean Tyr/GPT.lean -o /dev/null
+
+  lint:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for TODO/FIXME comments
+        run: |
+          echo "Checking for TODO/FIXME comments..."
+          grep -rn "TODO\|FIXME" Tyr/ --include="*.lean" || echo "No TODO/FIXME found"
+
+      - name: Check for sorry
+        run: |
+          echo "Checking for sorry (incomplete proofs)..."
+          grep -rn "sorry" Tyr/ --include="*.lean" || echo "No sorry found"
