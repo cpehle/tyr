@@ -114,6 +114,12 @@ lean_exe TrainDiffusion where
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
+/-- Diffusion tests executable -/
+lean_exe TestDiffusion where
+  root := `TestDiffusion
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
 /-- DataLoader test executable -/
 lean_exe TestDataLoader where
   root := `TestDataLoader

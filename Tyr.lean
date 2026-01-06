@@ -15,4 +15,5 @@ import Tyr.Checkpoint
 import Tyr.Diffusion
 import Tyr.DiffusionSchedule
 import Tyr.DiffusionTrain
+import Tyr.DiffusionCheckpoint
 import Tyr.Metrics
