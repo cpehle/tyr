@@ -9,6 +9,7 @@ import Tyr.Optim
 import Tyr.NanoProof
 import Tyr.Diffusion
 import Tyr.DiffusionSchedule
+import Tyr.DiffusionCheckpoint
 
 namespace torch.diffusion.train
 
@@ -28,6 +29,8 @@ structure TrainConfig where
   gradClip : Float := 1.0
   batchSize : UInt64 := 32
   weightDecay : Float := 0.01
+  checkpointInterval : Nat := 1000  -- Save checkpoint every N iterations
+  checkpointDir : Option String := none  -- Directory for checkpoints
   deriving Repr, Inhabited
 
 /-- Cosine learning rate schedule with warmup -/
@@ -91,75 +94,34 @@ def trainStep {modelCfg : Config} {batch seq num_timesteps : UInt64}
     (x_0 : T #[batch, seq])  -- Clean tokens
     (rotaryCache : RotaryCache rotaryLen modelCfg.headDim)
     (lr : Float)
-    (debug : Bool := false)
     : IO (DiffusionParams modelCfg × Optim.AdamWState (DiffusionParams modelCfg) × Float) := do
-  if debug then
-    IO.println "    trainStep: zero grads..."
-    (← IO.getStdout).flush
-
   -- Zero gradients BEFORE forward/backward
   let params := TensorStruct.zeroGrads params
-
-  if debug then
-    IO.println "    trainStep: sampling timesteps..."
-    (← IO.getStdout).flush
 
   -- Sample random timesteps for each sample in batch
   let t ← randint 0 num_timesteps.toInt64 #[batch]
 
-  if debug then
-    IO.println "    trainStep: adding masks..."
-    (← IO.getStdout).flush
-
   -- Add masks to get noisy input
   let x_t ← schedule.addMasks x_0 t
-
-  if debug then
-    IO.println "    trainStep: forward..."
-    (← IO.getStdout).flush
 
   -- Forward pass
   let logits := forward params x_t t rotaryCache
 
-  if debug then
-    IO.println "    trainStep: loss..."
-    (← IO.getStdout).flush
-
   -- Compute masked loss (only on masked positions)
   let lossT := maskedCrossEntropyLoss logits x_0 x_t schedule.mask_token_id
 
-  if debug then
-    IO.println "    trainStep: backward..."
-    (← IO.getStdout).flush
-
   -- Backward pass
   autograd.backwardLoss lossT
-
-  if debug then
-    IO.println "    trainStep: grad clip..."
-    (← IO.getStdout).flush
 
   -- Gradient clipping
   if trainCfg.gradClip > 0 then
     clipDiffusionGrads params trainCfg.gradClip
 
-  if debug then
-    IO.println "    trainStep: get loss val..."
-    (← IO.getStdout).flush
-
   -- Get loss value for logging
   let lossVal := nn.item lossT
 
-  if debug then
-    IO.println "    trainStep: extract grads..."
-    (← IO.getStdout).flush
-
   -- Extract gradients from parameters
   let grads := TensorStruct.grads params
-
-  if debug then
-    IO.println "    trainStep: optimizer..."
-    (← IO.getStdout).flush
 
   -- Update parameters with AdamW
   let opt := Optim.adamw (lr := lr) (weight_decay := trainCfg.weightDecay)
@@ -211,31 +173,14 @@ def trainLoop {modelCfg : Config} {num_timesteps : UInt64}
   (← IO.getStdout).flush
 
   for iterNum in [:trainCfg.maxIters] do
-    if iterNum == 0 then
-      IO.println "Starting first iteration..."
-      (← IO.getStdout).flush
-
     -- Get learning rate with schedule
     let lr := getLr trainCfg iterNum
-
-    if iterNum == 0 then
-      IO.println s!"  Got lr={lr}"
-      (← IO.getStdout).flush
 
     -- Get batch of clean tokens
     let x_0 ← getBatch trainData trainCfg.batchSize modelCfg.seq_len
 
-    if iterNum == 0 then
-      IO.println "  Got batch"
-      (← IO.getStdout).flush
-
     -- Training step
-    let debug := iterNum == 0
-    let (params', optState', lossVal) ← trainStep trainCfg params optState schedule x_0 rotaryCache lr debug
-
-    if iterNum == 0 then
-      IO.println s!"  Training step done, loss={lossVal}"
-      (← IO.getStdout).flush
+    let (params', optState', lossVal) ← trainStep trainCfg params optState schedule x_0 rotaryCache lr
 
     params := params'
     optState := optState'
@@ -256,12 +201,25 @@ def trainLoop {modelCfg : Config} {num_timesteps : UInt64}
       if valLoss < bestValLoss then
         bestValLoss := valLoss
         IO.println s!"  [new best val_loss!]"
+        -- Save best checkpoint
+        if let some dir := trainCfg.checkpointDir then
+          checkpoint.saveFullCheckpoint params optState iterNum bestValLoss totalLoss (dir ++ "/best")
       (← IO.getStdout).flush
+
+    -- Periodic checkpoint
+    if let some dir := trainCfg.checkpointDir then
+      if iterNum % trainCfg.checkpointInterval == 0 && iterNum > 0 then
+        checkpoint.saveFullCheckpoint params optState iterNum bestValLoss totalLoss (dir ++ "/latest")
 
   -- Final validation
   let finalValLoss ← evalLoss params schedule valData trainCfg.batchSize modelCfg.seq_len rotaryCache evalBatches
   IO.println s!"Training complete! Final val_loss={finalValLoss}"
   IO.println s!"Best val_loss={bestValLoss}"
+
+  -- Save final checkpoint
+  if let some dir := trainCfg.checkpointDir then
+    checkpoint.saveFullCheckpoint params optState trainCfg.maxIters finalValLoss 0.0 (dir ++ "/final")
+
   return (params, bestValLoss)
 
 end torch.diffusion.train

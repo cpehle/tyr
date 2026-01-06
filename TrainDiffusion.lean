@@ -96,16 +96,16 @@ def main : IO Unit := do
   IO.println s!"  diffusion_steps={modelCfg.diffusion_steps}, context_len={modelCfg.context_len}"
 
   let trainCfg : TrainConfig := {
-    maxIters := 1000
+    maxIters := 2000
     evalInterval := 500
     logInterval := 100
-    learningRate := 3e-4
-    minLr := 1e-5
-    warmupIters := 100
-    lrDecayIters := 1000
+    learningRate := 1e-2
+    minLr := 1e-4
+    warmupIters := 200
+    lrDecayIters := 2000
     gradClip := 1.0
     batchSize := 64
-    weightDecay := 0.01
+    weightDecay := 0.0
   }
 
   -- Try to load Shakespeare data
@@ -153,9 +153,9 @@ def main : IO Unit := do
   -- Initialize rotary cache for generation (exact seq_len)
   let rotaryCache ← RotaryCache.init modelCfg.seq_len modelCfg.headDim
 
-  -- Generate a batch of 1
-  IO.println "Generating with confidence-aware decoding..."
-  let generated ← sampleConfidence (batch := 1) trainedParams rotaryCache 0.3 0.8 256 none
+  -- Generate a batch of 1 using top-k decoding (decode k=4 tokens per step)
+  IO.println "Generating with top-k decoding (k=4)..."
+  let generated ← sampleTopK (batch := 1) trainedParams rotaryCache 4 0.8 256
 
   -- Extract first sequence and decode
   let genFlat := reshape generated #[modelCfg.seq_len]
