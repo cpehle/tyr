@@ -229,12 +229,17 @@ def sampleConfidence {cfg : Config} {batch : UInt64}
   -- Start with all mask tokens
   let mut x := full_int #[batch, cfg.seq_len] cfg.mask_token_id.toInt64
 
-  -- If context tokens provided, set them
-  if let some _ctx := contextTokens then
-    -- Copy context tokens to first context_len positions
-    -- For now, we'll skip this and just start from all masks
-    -- TODO: implement proper context copying
-    pure ()
+  -- If context tokens provided, set them in first context_len positions
+  if let some ctx := contextTokens then
+    -- Create position mask: true for positions < context_len
+    let positions := arange 0 cfg.seq_len 1
+    let contextMask := lt_scalar positions cfg.context_len.toFloat
+    let contextMaskBatch := nn.expand (nn.unsqueeze contextMask 0) #[batch, cfg.seq_len]
+    -- Pad ctx to full seq_len with mask tokens
+    let padding := full_int #[batch, cfg.seq_len - cfg.context_len] cfg.mask_token_id.toInt64
+    let ctxPadded := nn.cat ctx padding 1
+    -- Blend: context positions get ctx, rest stays masked
+    x := where_ contextMaskBatch ctxPadded x
 
   -- Track which positions are still masked
   let mut maskedPositions := getMaskedPositions' x cfg.mask_token_id
@@ -247,9 +252,11 @@ def sampleConfidence {cfg : Config} {batch : UInt64}
         IO.println s!"  All tokens decoded at step {step}"
       break
 
-    -- Create timestep tensor (use step directly, matching tiny-diffusion)
-    let stepClamped := min step (cfg.diffusion_steps.toNat - 1)
-    let t := full_int #[batch] stepClamped.toUInt64.toInt64
+    -- Create timestep tensor: start at T-1 (fully masked) and decrease toward 0
+    -- During training: t=T-1 means high masking, t=0 means low masking
+    -- During sampling: we start fully masked, so use t=T-1 and decrease
+    let tVal := (cfg.diffusion_steps.toNat - 1 - step).max 0
+    let t := full_int #[batch] tVal.toUInt64.toInt64
 
     -- Predict tokens
     let logits := forward params x t rotaryCache
@@ -259,7 +266,7 @@ def sampleConfidence {cfg : Config} {batch : UInt64}
     let probs := nn.softmax scaledLogits  -- [batch, seq, vocab]
 
     -- Get max probability and predicted token per position
-    let (confidences, predictedTokens) := max_dim probs 2  -- along vocab dim
+    let (confidences, predictedTokens) := max_dim_3d probs 2  -- along vocab dim
 
     if step < 3 then
       -- Debug: show first few predicted tokens and their confidences
@@ -272,13 +279,20 @@ def sampleConfidence {cfg : Config} {batch : UInt64}
     let selectMask := logical_and aboveThreshold maskedPositions
 
     -- Ensure at least one token decoded per step if any remain
-    -- If no positions above threshold, decode the highest confidence masked token
+    -- If no positions above threshold, use top-k fallback (decode k=1 position)
     let anyAbove := any selectMask
     let selectMask := if anyAbove then
       selectMask
     else
-      -- Fallback: decode all remaining masked positions
-      maskedPositions
+      -- Fallback: decode top-1 most confident masked position using scatter
+      let negInf := full #[batch, cfg.seq_len] (-1e10 : Float)
+      let maskedConf := where_ maskedPositions confidences negInf
+      let (_, topkIdx) := topk_2d maskedConf 1 1  -- [batch, 1]
+      let topkIdxLong := data.toLong topkIdx
+      let oneHot := zeros #[batch, cfg.seq_len]
+      let onesK := ones #[batch, 1]
+      let scattered := scatter_2d oneHot 1 topkIdxLong onesK
+      gt scattered (zeros #[batch, cfg.seq_len])
 
     -- Update x where selectMask is true
     let predictedLong := data.toLong predictedTokens
@@ -310,9 +324,9 @@ def sampleTopK {cfg : Config} {batch : UInt64}
     if !(any maskedPositions) then
       break
 
-    -- Create timestep tensor
-    let stepClamped := min step (cfg.diffusion_steps.toNat - 1)
-    let t := full_int #[batch] stepClamped.toUInt64.toInt64
+    -- Create timestep tensor: start at T-1 (fully masked) and decrease toward 0
+    let tVal := (cfg.diffusion_steps.toNat - 1 - step).max 0
+    let t := full_int #[batch] tVal.toUInt64.toInt64
 
     -- Predict tokens
     let logits := forward params x t rotaryCache
@@ -322,25 +336,28 @@ def sampleTopK {cfg : Config} {batch : UInt64}
     let probs := nn.softmax scaledLogits
 
     -- Get max probability and predicted token per position
-    let (confidences, predictedTokens) := max_dim probs 2
+    let (confidences, predictedTokens) := max_dim_3d probs 2
 
     -- Mask out already-decoded positions (set confidence to -inf)
-    let _maskFloat := toFloat' maskedPositions
     let negInf := full #[batch, cfg.seq_len] (-1e10)
     let maskedConfidences := where_ maskedPositions confidences negInf
 
-    -- Get top-k positions (simplified: process first batch element)
-    -- TODO: proper per-batch top-k selection
-    let (_, _topkIndices) := topk maskedConfidences k 1  -- dim 1 = seq
+    -- Get top-k positions per batch (properly typed)
+    let (_, topkIndices) := topk_2d maskedConfidences k 1  -- [batch, k]
 
-    -- For now, just decode k tokens by selecting from top confidences
-    -- This is a simplified version - full version needs scatter
-    let selectMask := ge confidences (full #[batch, cfg.seq_len] 0.0)
-    let selectMaskMasked := logical_and selectMask maskedPositions
+    -- Create selection mask using scatter: scatter 1s at topk positions
+    let selectMask := zeros #[batch, cfg.seq_len]
+    let ones := ones #[batch, k]
+    let topkIndicesLong := data.toLong topkIndices  -- scatter expects int64 indices
+    let selectMaskScattered := scatter_2d selectMask 1 topkIndicesLong ones
+    let selectMaskBool := gt selectMaskScattered (zeros #[batch, cfg.seq_len])
+
+    -- Only update positions in top-k AND still masked
+    let finalMask := logical_and selectMaskBool maskedPositions
 
     -- Update x
     let predictedLong := data.toLong predictedTokens
-    x := where_ selectMaskMasked predictedLong x
+    x := where_ finalMask predictedLong x
 
     -- Update masked positions
     maskedPositions := getMaskedPositions' x cfg.mask_token_id
