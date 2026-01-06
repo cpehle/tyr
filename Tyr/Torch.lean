@@ -416,7 +416,7 @@ opaque nll_loss_none {n c : UInt64}
 @[extern "lean_torch_smooth_l1_loss"] opaque smooth_l1_loss {s : Shape} (input : @& T s) (target : @& T s) (reduction : String := "mean") (beta : Float := 1.0) : T #[]
 -- torch::nn::functional::soft_margin_loss
 -- torch::nn::functional::softmax
-@[extern "lean_torch_tensor_softmax"] opaque softmax {s : Shape} (t : @& T s) : T s
+@[extern "lean_torch_tensor_softmax"] opaque softmax {s : Shape} (t : @& T s) (dim : Int32 := -1) : T s
 -- torch::nn::functional::softmin
 -- torch::nn::functional::softplus
 -- torch::nn::functional::softshrink
@@ -796,9 +796,17 @@ opaque where_ {s : Shape} (condition : @& T s) (x : @& T s) (y : @& T s) : T s
 @[extern "lean_torch_full_int"]
 opaque full_int (s : Shape) (value : Int64) : T s
 
-/-- Maximum along dimension, returns (values, indices) -/
+/-- Maximum along dimension, returns (values, indices).
+    WARNING: This signature is incorrect - the output shape should have dim removed.
+    Use max_dim_3d for 3D tensors instead. -/
 @[extern "lean_torch_max_dim"]
 opaque max_dim {s : Shape} (input : @& T s) (dim : UInt64) : T s × T s
+
+/-- Maximum along last dimension for 3D tensors [batch, seq, vocab] -> [batch, seq].
+    Returns (max_values, argmax_indices). -/
+@[extern "lean_torch_max_dim_3d"]
+opaque max_dim_3d {d0 d1 d2 : UInt64} (input : @& T #[d0, d1, d2]) (dim : UInt64)
+    : T #[d0, d1] × T #[d0, d1]
 
 /-- Boolean any: returns true if any element is true -/
 @[extern "lean_torch_any"]
@@ -850,6 +858,17 @@ opaque scatter_add {s : Shape}
     (src : @& T s)
     : T s
 
+/-- Scatter with different shapes: scatter k values into seq positions.
+    Useful for top-k style operations where indices/src have fewer elements.
+    input: [batch, seq], indices: [batch, k], src: [batch, k] -> [batch, seq] -/
+@[extern "lean_torch_scatter_2d"]
+opaque scatter_2d {batch seq k : UInt64}
+    (input : @& T #[batch, seq])
+    (dim : Int64)
+    (indices : @& T #[batch, k])
+    (src : @& T #[batch, k])
+    : T #[batch, seq]
+
 /-- Einstein summation: general tensor contraction using index notation.
     Example: "ij,jk->ik" for matrix multiplication
     Returns shape-erased tensor (use reshape if needed). -/
@@ -891,6 +910,13 @@ opaque clamp {s : Shape} (input : @& T s) (min_val max_val : Int64) : T s
 /-- Top-k values and indices along dimension -/
 @[extern "lean_torch_topk"]
 opaque topk {s : Shape} (input : @& T s) (k : UInt64) (dim : UInt64) : T s × T s
+
+/-- Top-k values and indices for 2D tensors with proper output shape.
+    input: [d1, d2], dim=1 -> output: [d1, k] for both values and indices -/
+@[extern "lean_torch_topk_2d"]
+opaque topk_2d {d1 d2 : UInt64}
+    (input : @& T #[d1, d2]) (k : UInt64) (dim : UInt64)
+    : T #[d1, k] × T #[d1, k]
 
 -- ============================================================================
 -- High-level loss functions (defined after nn namespace for access to helpers)

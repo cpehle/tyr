@@ -587,9 +587,9 @@ lean_object* lean_torch_grad_grad(lean_obj_arg /* sx */, lean_obj_arg /* sy */, 
 
 
 
-lean_object* lean_torch_tensor_softmax(lean_obj_arg /**/, b_lean_obj_arg a) {
+lean_object* lean_torch_tensor_softmax(lean_obj_arg /**/, b_lean_obj_arg a, int32_t dim) {
   auto a_ = borrowTensor(a);
-  auto c_ = torch::softmax(a_, 0);
+  auto c_ = torch::softmax(a_, dim);
   return fromTorchTensor(c_);
 }
 
@@ -2299,6 +2299,19 @@ lean_object* lean_torch_max_dim(lean_obj_arg /*s*/, b_lean_obj_arg input, uint64
   return result;
 }
 
+// Maximum along dimension for 3D tensors with proper output shape
+// d0, d1, d2 are implicit type parameters
+lean_object* lean_torch_max_dim_3d(uint64_t /*d0*/, uint64_t /*d1*/, uint64_t /*d2*/,
+    b_lean_obj_arg input, uint64_t dim) {
+  auto input_ = borrowTensor(input);
+  auto [values, indices] = torch::max(input_, static_cast<int64_t>(dim));
+  // Return as Lean pair
+  lean_object* result = lean_alloc_ctor(0, 2, 0);
+  lean_ctor_set(result, 0, fromTorchTensor(values));
+  lean_ctor_set(result, 1, fromTorchTensor(indices));
+  return result;
+}
+
 // Boolean any (returns true if any element is true)
 uint8_t lean_torch_any(lean_obj_arg /*s*/, b_lean_obj_arg input) {
   auto input_ = borrowTensor(input);
@@ -2344,6 +2357,19 @@ lean_object* lean_torch_clamp(lean_obj_arg /*s*/, b_lean_obj_arg input, int64_t 
 
 // Top-k values and indices
 lean_object* lean_torch_topk(lean_obj_arg /*s*/, b_lean_obj_arg input, uint64_t k, uint64_t dim) {
+  auto input_ = borrowTensor(input);
+  auto [values, indices] = torch::topk(input_, k, dim);
+  // Return as Lean pair
+  lean_object* result = lean_alloc_ctor(0, 2, 0);
+  lean_ctor_set(result, 0, fromTorchTensor(values));
+  lean_ctor_set(result, 1, fromTorchTensor(indices));
+  return result;
+}
+
+// Top-k for 2D tensors with proper output shape
+// d1, d2 are the implicit shape parameters
+lean_object* lean_torch_topk_2d(uint64_t /*d1*/, uint64_t /*d2*/,
+    b_lean_obj_arg input, uint64_t k, uint64_t dim) {
   auto input_ = borrowTensor(input);
   auto [values, indices] = torch::topk(input_, k, dim);
   // Return as Lean pair
@@ -2477,6 +2503,18 @@ lean_object* lean_torch_scatter_add(
   auto indices_ = borrowTensor(indices);
   auto src_ = borrowTensor(src);
   auto result_ = input_.clone().scatter_add_(dim, indices_, src_);
+  return fromTorchTensor(result_);
+}
+
+// Scatter with different shapes (for top-k style operations)
+// input: [batch, seq], indices: [batch, k], src: [batch, k] -> [batch, seq]
+// batch, seq, k are the implicit shape parameters
+lean_object* lean_torch_scatter_2d(uint64_t /*batch*/, uint64_t /*seq*/, uint64_t /*k*/,
+    b_lean_obj_arg input, int64_t dim, b_lean_obj_arg indices, b_lean_obj_arg src) {
+  auto input_ = borrowTensor(input);
+  auto indices_ = borrowTensor(indices);
+  auto src_ = borrowTensor(src);
+  auto result_ = input_.clone().scatter_(dim, indices_, src_);
   return fromTorchTensor(result_);
 }
 
