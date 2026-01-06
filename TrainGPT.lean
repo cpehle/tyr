@@ -35,7 +35,8 @@ def runTraining {n : UInt64} (modelCfg : Config) (trainCfg : TrainConfig)
     (trainData : T #[n]) : IO (GPTParams modelCfg) := do
   IO.println ""
   IO.println "Initializing model..."
-  let params ← GPTParams.init modelCfg
+  -- Create model directly on target device
+  let params ← GPTParams.init modelCfg trainCfg.device
   -- Initialize optimizer state using Optax-style API
   let opt := Optim.adamw (lr := trainCfg.learningRate)
   let optState := opt.init params
@@ -55,7 +56,8 @@ def runTrainingWithVal {nTrain nVal : UInt64} (modelCfg : Config) (trainCfg : Tr
     (checkpointDir : Option String := none) : IO (GPTParams modelCfg) := do
   IO.println ""
   IO.println "Initializing model..."
-  let params ← GPTParams.init modelCfg
+  -- Create model directly on target device
+  let params ← GPTParams.init modelCfg trainCfg.device
   -- Initialize optimizer state using Optax-style API
   let opt := Optim.adamw (lr := trainCfg.learningRate)
   let optState := opt.init params
@@ -79,6 +81,15 @@ def main : IO Unit := do
   IO.println ""
   (← IO.getStdout).flush
 
+  -- Select device - use MPS on Apple Silicon, CUDA on NVIDIA, otherwise CPU
+  let device ← getBestDevice
+  let deviceName := match device with
+    | Device.MPS => "MPS (Apple Silicon)"
+    | Device.CUDA n => s!"CUDA:{n}"
+    | Device.CPU => "CPU"
+  IO.println s!"Using device: {deviceName}"
+  IO.println ""
+
   -- nanoGPT CPU configuration for Shakespeare character-level training
   -- https://github.com/karpathy/nanoGPT/blob/master/config/train_shakespeare_char.py
   -- CPU command: python train.py config/train_shakespeare_char.py --device=cpu --compile=False
@@ -88,8 +99,8 @@ def main : IO Unit := do
   IO.println s!"Model config: vocab={modelCfg.vocab_size}, block={modelCfg.block_size}, embd={modelCfg.n_embd}, heads={modelCfg.n_head}, layers={modelCfg.n_layer}, dropout={modelCfg.dropout}"
 
   let trainCfg : TrainConfig := {
-    maxIters := 10000
-    evalInterval := 500  -- Evaluate every 200 iterations
+    maxIters := 200  -- BENCHMARK: reduced for timing
+    evalInterval := 500
     logInterval := 50
     learningRate := 1e-3
     minLr := 1e-4
@@ -98,6 +109,7 @@ def main : IO Unit := do
     gradClip := 1.0      -- Enable gradient clipping
     batchSize := 12
     blockSize := modelCfg.block_size
+    device := device     -- Use selected device (MPS/CUDA/CPU)
   }
 
   -- Try to load Shakespeare data, fall back to random data

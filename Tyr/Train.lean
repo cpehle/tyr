@@ -27,7 +27,14 @@ structure TrainConfig where
   blockSize : UInt64 := 64
   /-- Number of gradient accumulation steps (effective batch = batchSize * gradAccumSteps) -/
   gradAccumSteps : Nat := 1
+  /-- Device to train on (CPU, CUDA, or MPS) -/
+  device : Device := Device.CPU
   deriving Repr, Inhabited
+
+/-- Move a tensor tree to a device, preserving leaf tensor status.
+    NOTE: This is now a no-op since tensors should be created directly on
+    the target device. Kept for backwards compatibility. -/
+def toDevice [TensorStruct α] (x : α) (_device : Device) : α := x
 
 /-- Cosine learning rate schedule with warmup -/
 def getLr (cfg : TrainConfig) (iterNum : Nat) : Float :=
@@ -47,7 +54,7 @@ def getLr (cfg : TrainConfig) (iterNum : Nat) : Float :=
 /-- Get a random batch of data from token array
     Returns (x, y) where y = x shifted by 1 position
     Uses a random starting position with batchSize consecutive sequences -/
-def getBatch (trainData : T #[n]) (batchSize blockSize : UInt64) : IO (T #[batchSize, blockSize] × T #[batchSize, blockSize]) := do
+def getBatch (trainData : T #[n]) (batchSize blockSize : UInt64) (device : Device := Device.CPU) : IO (T #[batchSize, blockSize] × T #[batchSize, blockSize]) := do
   -- Pick a random starting position
   -- We need batchSize consecutive sequences of length blockSize+1
   let totalTokens := batchSize * (blockSize + 1)
@@ -70,7 +77,13 @@ def getBatch (trainData : T #[n]) (batchSize blockSize : UInt64) : IO (T #[batch
   let x := reshape xRaw #[batchSize, blockSize]
   let y := reshape yRaw #[batchSize, blockSize]
 
-  return (x, y)
+  -- Move to target device
+  match device with
+  | Device.CPU => return (x, y)
+  | _ =>
+    let x_dev := autograd.clone (x.to device)
+    let y_dev := autograd.clone (y.to device)
+    return (x_dev, y_dev)
 
 /-- Clip gradients for a single block's parameters -/
 def clipBlockGrads {n_embd : UInt64} (params : BlockParams n_embd) (maxNorm : Float) : IO Unit := do
@@ -193,10 +206,11 @@ def evalLoss {modelCfg : Config}
     (valData : T #[n])
     (batchSize blockSize : UInt64)
     (numBatches : Nat)
+    (device : Device := Device.CPU)
     : IO Float := autograd.no_grad do
   let mut totalLoss : Float := 0.0
   for _ in [:numBatches] do
-    let (x, y) ← getBatch valData batchSize blockSize
+    let (x, y) ← getBatch valData batchSize blockSize device
     -- Forward pass with training=false (disables dropout)
     let lossT ← gpt.loss params x y false
     let lossVal := nn.item lossT
@@ -210,11 +224,17 @@ def trainLoop {modelCfg : Config}
     (initOptState : Optim.AdamWState (GPTParams modelCfg))
     (trainData : T #[n])
     : IO (GPTParams modelCfg) := do
-  let mut params := initParams
-  let mut optState := initOptState
+  let device := trainCfg.device
+  -- Move model and optimizer state to device
+  let mut params := toDevice initParams device
+  let mut optState := toDevice initOptState device
   let mut totalLoss : Float := 0.0
 
-  IO.println s!"Starting training for {trainCfg.maxIters} iterations..."
+  let deviceName := match device with
+    | Device.MPS => "MPS"
+    | Device.CUDA n => s!"CUDA:{n}"
+    | Device.CPU => "CPU"
+  IO.println s!"Starting training for {trainCfg.maxIters} iterations on {deviceName}..."
   IO.println s!"  batch_size={trainCfg.batchSize}, block_size={trainCfg.blockSize}"
   IO.println s!"  lr={trainCfg.learningRate}, warmup={trainCfg.warmupIters}"
   (← IO.getStdout).flush
@@ -223,8 +243,8 @@ def trainLoop {modelCfg : Config}
     -- Get learning rate with schedule
     let lr := getLr trainCfg iterNum
 
-    -- Get batch (for now, just use sequential data)
-    let (x, y) ← getBatch trainData trainCfg.batchSize trainCfg.blockSize
+    -- Get batch on target device
+    let (x, y) ← getBatch trainData trainCfg.batchSize trainCfg.blockSize device
 
     -- Training step
     let (params', optState', lossVal) ← trainStep trainCfg params optState x y lr
@@ -254,12 +274,18 @@ def trainLoopWithVal {modelCfg : Config}
     (valData : T #[nVal])
     (evalBatches : Nat := 10)
     : IO (GPTParams modelCfg × Float) := do
-  let mut params := initParams
-  let mut optState := initOptState
+  let device := trainCfg.device
+  -- Move model and optimizer state to device
+  let mut params := toDevice initParams device
+  let mut optState := toDevice initOptState device
   let mut totalLoss : Float := 0.0
   let mut bestValLoss : Float := 1e10  -- Use large value instead of inf
 
-  IO.println s!"Starting training for {trainCfg.maxIters} iterations..."
+  let deviceName := match device with
+    | Device.MPS => "MPS"
+    | Device.CUDA n => s!"CUDA:{n}"
+    | Device.CPU => "CPU"
+  IO.println s!"Starting training for {trainCfg.maxIters} iterations on {deviceName}..."
   IO.println s!"  batch_size={trainCfg.batchSize}, block_size={trainCfg.blockSize}"
   IO.println s!"  lr={trainCfg.learningRate}, warmup={trainCfg.warmupIters}"
   IO.println s!"  grad_clip={trainCfg.gradClip}, eval_interval={trainCfg.evalInterval}"
@@ -269,8 +295,8 @@ def trainLoopWithVal {modelCfg : Config}
     -- Get learning rate with schedule
     let lr := getLr trainCfg iterNum
 
-    -- Get batch
-    let (x, y) ← getBatch trainData trainCfg.batchSize trainCfg.blockSize
+    -- Get batch on target device
+    let (x, y) ← getBatch trainData trainCfg.batchSize trainCfg.blockSize device
 
     -- Training step
     let (params', optState', lossVal) ← trainStep trainCfg params optState x y lr
@@ -289,7 +315,7 @@ def trainLoopWithVal {modelCfg : Config}
 
     -- Validation at evalInterval
     if iterNum % trainCfg.evalInterval == 0 && iterNum > 0 then
-      let valLoss ← evalLoss params valData trainCfg.batchSize trainCfg.blockSize evalBatches
+      let valLoss ← evalLoss params valData trainCfg.batchSize trainCfg.blockSize evalBatches device
       let valPpl := perplexity valLoss
       IO.println s!"  val_loss={valLoss}, val_ppl={valPpl}"
       if valLoss < bestValLoss then
@@ -298,7 +324,7 @@ def trainLoopWithVal {modelCfg : Config}
       (← IO.getStdout).flush
 
   -- Final validation
-  let finalValLoss ← evalLoss params valData trainCfg.batchSize trainCfg.blockSize evalBatches
+  let finalValLoss ← evalLoss params valData trainCfg.batchSize trainCfg.blockSize evalBatches device
   let finalValPpl := perplexity finalValLoss
   IO.println s!"Training complete! Final val_loss={finalValLoss}, val_ppl={finalValPpl}"
   IO.println s!"Best val_loss={bestValLoss}"

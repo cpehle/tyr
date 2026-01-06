@@ -89,45 +89,45 @@ def makeLeafParam {s : Shape} (t : T s) : T s :=
   autograd.set_requires_grad (autograd.detach t) true
 
 /-- Initialize block parameters with scaled random weights -/
-def BlockParams.init (n_embd : UInt64) (scale : Float := 0.02) : IO (BlockParams n_embd) := do
-  -- Create scaled random tensors as leaf tensors
+def BlockParams.init (n_embd : UInt64) (scale : Float := 0.02) (device : Device := Device.CPU) : IO (BlockParams n_embd) := do
+  -- Create scaled random tensors as leaf tensors on target device
   -- randn * scale creates a non-leaf, so we detach and set requires_grad
-  let q_proj ← randn #[n_embd, n_embd] false
-  let k_proj ← randn #[n_embd, n_embd] false
-  let v_proj ← randn #[n_embd, n_embd] false
-  let c_proj ← randn #[n_embd, n_embd] false
-  let mlp_fc ← randn #[4*n_embd, n_embd] false
-  let mlp_proj ← randn #[n_embd, 4*n_embd] false
+  let q_proj ← randn #[n_embd, n_embd] false device
+  let k_proj ← randn #[n_embd, n_embd] false device
+  let v_proj ← randn #[n_embd, n_embd] false device
+  let c_proj ← randn #[n_embd, n_embd] false device
+  let mlp_fc ← randn #[4*n_embd, n_embd] false device
+  let mlp_proj ← randn #[n_embd, 4*n_embd] false device
   return {
-    ln1_weight := makeLeafParam (ones #[n_embd])
-    ln1_bias := makeLeafParam (zeros #[n_embd])
+    ln1_weight := makeLeafParam (ones #[n_embd] false device)
+    ln1_bias := makeLeafParam (zeros #[n_embd] false device)
     q_proj := makeLeafParam (q_proj * scale)
     k_proj := makeLeafParam (k_proj * scale)
     v_proj := makeLeafParam (v_proj * scale)
     c_proj := makeLeafParam (c_proj * scale)
-    c_proj_bias := makeLeafParam (zeros #[n_embd])
-    ln2_weight := makeLeafParam (ones #[n_embd])
-    ln2_bias := makeLeafParam (zeros #[n_embd])
+    c_proj_bias := makeLeafParam (zeros #[n_embd] false device)
+    ln2_weight := makeLeafParam (ones #[n_embd] false device)
+    ln2_bias := makeLeafParam (zeros #[n_embd] false device)
     mlp_fc := makeLeafParam (mlp_fc * scale)
-    mlp_fc_bias := makeLeafParam (zeros #[4*n_embd])
+    mlp_fc_bias := makeLeafParam (zeros #[4*n_embd] false device)
     mlp_proj := makeLeafParam (mlp_proj * scale)
-    mlp_proj_bias := makeLeafParam (zeros #[n_embd])
+    mlp_proj_bias := makeLeafParam (zeros #[n_embd] false device)
   }
 
 /-- Initialize full GPT model -/
-def GPTParams.init (cfg : Config) : IO (GPTParams cfg) := do
-  let wte ← randn #[cfg.vocab_size, cfg.n_embd] false
-  let wpe ← randn #[cfg.block_size, cfg.n_embd] false
+def GPTParams.init (cfg : Config) (device : Device := Device.CPU) : IO (GPTParams cfg) := do
+  let wte ← randn #[cfg.vocab_size, cfg.n_embd] false device
+  let wpe ← randn #[cfg.block_size, cfg.n_embd] false device
   let mut blocks := #[]
   for _ in [:cfg.n_layer.toNat] do
-    let block ← BlockParams.init cfg.n_embd
+    let block ← BlockParams.init cfg.n_embd 0.02 device
     blocks := blocks.push block
   return {
     wte := makeLeafParam (mul_scalar wte 0.02)
     wpe := makeLeafParam (mul_scalar wpe 0.02)
     blocks := blocks
-    ln_f_weight := makeLeafParam (ones #[cfg.n_embd])
-    ln_f_bias := makeLeafParam (zeros #[cfg.n_embd])
+    ln_f_weight := makeLeafParam (ones #[cfg.n_embd] false device)
+    ln_f_bias := makeLeafParam (zeros #[cfg.n_embd] false device)
   }
 
 /-- Forward pass through a single transformer block with multi-head attention and dropout -/
@@ -176,7 +176,8 @@ def forward {cfg : Config} {batch seq : UInt64}
   -- Token embeddings: [batch, seq] -> [batch, seq, n_embd]
   let tok_emb := nn.embedding idx params.wte
   -- Position embeddings (create position indices): [seq] -> [seq, n_embd]
-  let positions := arange 0 seq 1
+  -- Move positions to the same device as the embedding weights
+  let positions := (arange 0 seq 1).to params.wpe.device
   let pos_emb := nn.embedding1d positions params.wpe
   -- Expand pos_emb to match batch: [seq, n_embd] -> [batch, seq, n_embd]
   let pos_emb_expanded := nn.expand pos_emb #[batch, seq, cfg.n_embd]
@@ -237,10 +238,10 @@ def generate {cfg : Config}
     let startIdx := tokens.size - ctxLen
     let ctx := tokens[startIdx:].toArray
 
-    -- Create input tensor [1, seq] from token array
+    -- Create input tensor [1, seq] from token array and move to model's device
     let seq : UInt64 := ctxLen.toUInt64
     let inputFlat := torch.data.fromInt64Array ctx
-    let inputTensor := reshape inputFlat #[1, seq]
+    let inputTensor := (reshape inputFlat #[1, seq]).to params.wte.device
 
     -- Forward pass to get logits [1, seq, vocab] (training=false disables dropout)
     let logits ← forward params inputTensor false

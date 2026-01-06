@@ -15,6 +15,8 @@ inductive DType where
 inductive Device where
 | CUDA : Nat → Device
 | CPU
+| MPS  -- Metal Performance Shaders for Apple Silicon
+  deriving Repr, Inhabited, BEq
 
 opaque TSpec : NonemptyType
 def T (_ : Shape) : Type :=  TSpec.type
@@ -118,9 +120,13 @@ opaque T.runtimeShape {s : Shape} (t : @& T s) : Array UInt64
 @[extern "lean_torch_get_dtype"]
 opaque T.dtype {s : Shape} (t : @& T s) : String
 
-/-- Get the device of a tensor as a string (e.g., "cpu", "cuda:0") -/
+/-- Get the device of a tensor as a Device enum -/
+@[extern "lean_torch_get_device_enum"]
+opaque T.device {s : Shape} (t : @& T s) : Device
+
+/-- Get the device of a tensor as a string (e.g., "cpu", "cuda:0", "mps") -/
 @[extern "lean_torch_get_device"]
-opaque T.device {s : Shape} (t : @& T s) : String
+opaque T.deviceStr {s : Shape} (t : @& T s) : String
 
 /-- Get tensor values as a flat array of floats (up to maxElements).
     Values are converted to Float for uniform access. -/

@@ -36,6 +36,51 @@ structure ChainState (S1 S2 : Type) where
   fst : S1
   snd : S2
 
+/-! ## TensorStruct instances for optimizer states -/
+
+instance : TensorStruct EmptyState where
+  map _ s := s
+  mapM _ s := pure s
+  zipWith _ s _ := s
+  fold _ acc _ := acc
+
+instance [TensorStruct α] : TensorStruct (ScaleByAdamState α) where
+  map f s := { count := s.count, mu := TensorStruct.map f s.mu, nu := TensorStruct.map f s.nu }
+  mapM f s := do
+    let mu' ← TensorStruct.mapM f s.mu
+    let nu' ← TensorStruct.mapM f s.nu
+    pure { count := s.count, mu := mu', nu := nu' }
+  zipWith f s1 s2 := {
+    count := s1.count
+    mu := TensorStruct.zipWith f s1.mu s2.mu
+    nu := TensorStruct.zipWith f s1.nu s2.nu
+  }
+  fold f acc s :=
+    let acc' := TensorStruct.fold f acc s.mu
+    TensorStruct.fold f acc' s.nu
+
+instance [TensorStruct α] : TensorStruct (TraceState α) where
+  map f s := { trace := TensorStruct.map f s.trace }
+  mapM f s := do
+    let trace' ← TensorStruct.mapM f s.trace
+    pure { trace := trace' }
+  zipWith f s1 s2 := { trace := TensorStruct.zipWith f s1.trace s2.trace }
+  fold f acc s := TensorStruct.fold f acc s.trace
+
+instance [TensorStruct S1] [TensorStruct S2] : TensorStruct (ChainState S1 S2) where
+  map f s := { fst := TensorStruct.map f s.fst, snd := TensorStruct.map f s.snd }
+  mapM f s := do
+    let fst' ← TensorStruct.mapM f s.fst
+    let snd' ← TensorStruct.mapM f s.snd
+    pure { fst := fst', snd := snd' }
+  zipWith f s1 s2 := {
+    fst := TensorStruct.zipWith f s1.fst s2.fst
+    snd := TensorStruct.zipWith f s1.snd s2.snd
+  }
+  fold f acc s :=
+    let acc' := TensorStruct.fold f acc s.fst
+    TensorStruct.fold f acc' s.snd
+
 /-! ## Gradient Transformation
 
 A gradient transformation consists of:
@@ -66,8 +111,9 @@ def scale_by_adam [TensorStruct α] (b1 : Float := 0.9) (b2 : Float := 0.999) (e
     : GradientTransformation α (ScaleByAdamState α) where
   init model := {
     count := 0
-    mu := TensorStruct.map (fun _ => torch.zeros _) model
-    nu := TensorStruct.map (fun _ => torch.zeros _) model
+    -- Use zeros_like to create state tensors on same device as model
+    mu := TensorStruct.map torch.zeros_like model
+    nu := TensorStruct.map torch.zeros_like model
   }
   update _params grads state :=
     let count := state.count + 1
@@ -104,7 +150,7 @@ def add_decayed_weights [TensorStruct α] (decay : Float) : GradientTransformati
 
 /-- Accumulate momentum trace: trace = decay * trace + g -/
 def trace [TensorStruct α] (decay : Float) : GradientTransformation α (TraceState α) where
-  init model := { trace := TensorStruct.map (fun _ => torch.zeros _) model }
+  init model := { trace := TensorStruct.map torch.zeros_like model }
   update _params grads state :=
     let new_trace := TensorStruct.zipWith (fun t g =>
       add (mul_scalar t decay) g

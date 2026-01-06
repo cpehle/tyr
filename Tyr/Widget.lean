@@ -582,7 +582,7 @@ export default function Widget(props) {
 def tensorToProps {s : Shape} (t : T s) : TensorDisplayProps :=
   let shape := t.runtimeShape
   let dtype := t.dtype
-  let device := t.device
+  let device := t.deviceStr
   let values := t.getValues 10000  -- Get up to 10k values
   { shape, dtype, device, values := values.toList.toArray }
 
