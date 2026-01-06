@@ -230,7 +230,7 @@ def sampleConfidence {cfg : Config} {batch : UInt64}
   let mut x := full_int #[batch, cfg.seq_len] cfg.mask_token_id.toInt64
 
   -- If context tokens provided, set them
-  if let some ctx := contextTokens then
+  if let some _ctx := contextTokens then
     -- Copy context tokens to first context_len positions
     -- For now, we'll skip this and just start from all masks
     -- TODO: implement proper context copying
@@ -325,13 +325,13 @@ def sampleTopK {cfg : Config} {batch : UInt64}
     let (confidences, predictedTokens) := max_dim probs 2
 
     -- Mask out already-decoded positions (set confidence to -inf)
-    let maskFloat := toFloat' maskedPositions
+    let _maskFloat := toFloat' maskedPositions
     let negInf := full #[batch, cfg.seq_len] (-1e10)
     let maskedConfidences := where_ maskedPositions confidences negInf
 
     -- Get top-k positions (simplified: process first batch element)
     -- TODO: proper per-batch top-k selection
-    let (_, topkIndices) := topk maskedConfidences k 1  -- dim 1 = seq
+    let (_, _topkIndices) := topk maskedConfidences k 1  -- dim 1 = seq
 
     -- For now, just decode k tokens by selecting from top confidences
     -- This is a simplified version - full version needs scatter

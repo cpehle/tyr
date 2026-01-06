@@ -246,7 +246,7 @@ def loadAdamWState (cfg : Config) (dir : String) : IO (AdamWState (GPTParams cfg
   let pfx := dir ++ "/optim_"
   -- Load count
   let countStr ← IO.FS.readFile (pfx ++ "count.txt")
-  let count := countStr.trim.toNat!
+  let count := countStr.trimAscii.toString.toNat!
   -- Load embedding mu/nu
   let mu_wte ← data.loadTensor #[cfg.vocab_size, cfg.n_embd] (pfx ++ "mu_wte.pt")
   let mu_wpe ← data.loadTensor #[cfg.block_size, cfg.n_embd] (pfx ++ "mu_wpe.pt")

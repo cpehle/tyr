@@ -907,7 +907,7 @@ def focal_loss {batch num_classes : UInt64}
     (logits : T #[batch, num_classes])
     (targets : T #[batch])
     (alpha : Float := 0.25)
-    (gamma : Float := 2.0)
+    (_gamma : Float := 2.0)
     : T #[] :=
   -- Standard cross-entropy: -log(softmax(logits)[target])
   let ce_loss := nn.cross_entropy logits targets

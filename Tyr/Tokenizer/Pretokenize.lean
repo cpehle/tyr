@@ -92,7 +92,7 @@ def pretokenize (text : String) : Array String := Id.run do
         -- End current token, start new one
         if !current.isEmpty then
           result := result.push current
-        current := leadingSpaces ++ String.mk [c]
+        current := leadingSpaces ++ String.ofList [c]
         leadingSpaces := ""
         currentType := some charType
 
@@ -111,7 +111,7 @@ def contractions : Array String :=
 def splitContraction (word : String) : Array String := Id.run do
   for contr in contractions do
     if word.endsWith contr && word.length > contr.length then
-      let pre := word.dropRight contr.length
+      let pre := (word.dropEnd contr.length).toString
       return #[pre, contr]
   return #[word]
 

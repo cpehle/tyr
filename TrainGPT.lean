@@ -17,18 +17,18 @@ def shakespeareChars : String :=
   "\n !$&',-.3:;?ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
 
 def charToInt (c : Char) : Int64 :=
-  match shakespeareChars.data.findIdx? (· == c) with
+  match shakespeareChars.toList.findIdx? (· == c) with
   | some idx => idx.toInt64
   | none => 0  -- fallback to newline
 
 def intToChar (i : Int64) : Char :=
-  shakespeareChars.data.getD i.toUInt64.toNat '\n'
+  shakespeareChars.toList.getD i.toUInt64.toNat '\n'
 
 def encode (s : String) : Array Int64 :=
-  s.data.toArray.map charToInt
+  s.toList.toArray.map charToInt
 
 def decode (tokens : Array Int64) : String :=
-  String.mk (tokens.toList.map intToChar)
+  String.ofList (tokens.toList.map intToChar)
 
 /-- Train with data of known size (legacy, no validation) -/
 def runTraining {n : UInt64} (modelCfg : Config) (trainCfg : TrainConfig)
@@ -99,7 +99,7 @@ def main : IO Unit := do
   IO.println s!"Model config: vocab={modelCfg.vocab_size}, block={modelCfg.block_size}, embd={modelCfg.n_embd}, heads={modelCfg.n_head}, layers={modelCfg.n_layer}, dropout={modelCfg.dropout}"
 
   let trainCfg : TrainConfig := {
-    maxIters := 200  -- BENCHMARK: reduced for timing
+    maxIters := 5000
     evalInterval := 500
     logInterval := 50
     learningRate := 1e-3

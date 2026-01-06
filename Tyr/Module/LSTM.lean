@@ -4,15 +4,15 @@ import Tyr.Module.Affine
 
 namespace torch
 
-structure LSTM {n m : UInt64} :=
-    (w_i : @Affine n m)  
-    (r_i : @Affine n n)
-    (w_f : @Affine n m)
-    (r_f : @Affine n n)
-    (w_o : @Affine n m)
-    (r_o : @Affine n n)
-    (w_c : @Affine n m)
-    (r_c : @Affine n n)
+structure LSTM {n m : UInt64} where
+  w_i : @Affine n m
+  r_i : @Affine n n
+  w_f : @Affine n m
+  r_f : @Affine n n
+  w_o : @Affine n m
+  r_o : @Affine n n
+  w_c : @Affine n m
+  r_c : @Affine n n
 
 instance {n m : UInt64}: differentiable (@LSTM n m) := ⟨@LSTM n m, fun (a : LSTM) => ⟨
   differentiable.grad a.w_i, 
@@ -36,7 +36,7 @@ def LSTM.step {b n m : UInt64} (tfm : @torch.LSTM n m) (x : torch.T #[b, m]) (h 
   let c'c_t := tfm.r_c.step c;
   let i_t := torch.nn.sigmoid (ix_t + ih_t);
   let f_t := torch.nn.sigmoid (fx_t + fh_t);
-  let o_t := torch.nn.sigmoid (ox_t + fh_t);
+  let _o_t := torch.nn.sigmoid (ox_t + fh_t);
   let c'_t := torch.nn.tanh (c'x_t + c'c_t);
   let c_t := f_t * c'_t + i_t * c'_t;
   let h_t := oh_t * torch.nn.tanh c_t;
