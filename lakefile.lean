@@ -7,6 +7,8 @@ package tyr where
   buildDir := ".lake/build"
   moreServerArgs := #["-Dpp.unicode.fun=true"]
 
+require LeanTest from "../LeanTest"
+
 /-! ## Platform Detection
 
 Lake doesn't expose direct platform detection, so we use conditional compilation
@@ -88,11 +90,17 @@ lean_lib Tyr where
   -- Disable precompilation to avoid needing dylib at compile time
   precompileModules := false
 
+/-- Test library containing all tests -/
+lean_lib Tests where
+  roots := #[`Tests.Test, `Tests.TestDiffusion, `Tests.TestDataLoader, `Tests.TestModdedGPT]
+  precompileModules := false
+
 /-! ## Executables -/
 
-/-- Test executable -/
-lean_exe test where
-  root := `Test
+/-- Main test runner using LeanTest -/
+@[test_driver]
+lean_exe test_runner where
+  root := `Tests.RunTests
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
@@ -104,25 +112,25 @@ lean_exe memtest where
 
 /-- GPT training executable -/
 lean_exe TrainGPT where
-  root := `TrainGPT
+  root := `Examples.TrainGPT
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
 /-- Diffusion training executable -/
 lean_exe TrainDiffusion where
-  root := `TrainDiffusion
+  root := `Examples.TrainDiffusion
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
 /-- Diffusion tests executable -/
 lean_exe TestDiffusion where
-  root := `TestDiffusion
+  root := `Tests.TestDiffusion
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
 /-- DataLoader test executable -/
 lean_exe TestDataLoader where
-  root := `TestDataLoader
+  root := `Tests.TestDataLoader
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
@@ -132,7 +140,7 @@ lean_exe TestDataLoader where
     Usage: lake script run -/
 script run do
   let rootPath := (← getWorkspace).root.dir
-  let exe := rootPath / ".lake" / "build" / "bin" / "test"
+  let exe := rootPath / ".lake" / "build" / "bin" / "test_runner"
 
   -- Build library paths
   let libtorchPath := rootPath / "external" / "libtorch" / "lib"

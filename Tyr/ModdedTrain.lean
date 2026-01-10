@@ -90,7 +90,7 @@ def getTokensPerBatch (step : UInt64) (seqLen gradAccum worldSize : UInt64) : UI
     Short window is used for most attention heads,
     long window for a few "global" heads.
 -/
-def getWindowSizes (step : UInt64) (blockSize : UInt64 := 128) : (UInt64 × UInt64) :=
+def getWindowSizes (step : UInt64) (_blockSize : UInt64 := 128) : (UInt64 × UInt64) :=
   if step < 200 then (3, 3)
   else if step < 1000 then (3, 7)
   else (3, 11)
@@ -214,7 +214,7 @@ def trainStep {cfg : moddedGpt.Config} {batch seq : UInt64}
     (yarn : YarnRotary cfg.headDim cfg.maxSeqLen)
     (input : T #[batch, seq])
     (target : T #[batch, seq])
-    (optState : OptimizerState)
+    (_optState : OptimizerState)
     (wsShort wsLong : UInt64)
     : IO (ModdedGPTParams cfg × StepResult) := do
   let startTime ← IO.monoMsNow
@@ -419,7 +419,7 @@ def logProgress (state : TrainState cfg) (result : StepResult)
     IO.println s!"Step {state.step}: loss={result.loss} lr={lr} batch={batchSize} ws=({wsShort},{wsLong}) tok/s={tokensPerSec} time={result.timeMs}ms"
 
 /-- Run validation and log results -/
-def runValidation (state : TrainState cfg) (hp : Hyperparameters)
+def runValidation (state : TrainState cfg) (_hp : Hyperparameters)
     : IO (TrainState cfg) := do
   match state.valData with
   | none => return state

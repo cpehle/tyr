@@ -73,7 +73,7 @@ def State.init (cfg : Config) : State α := {
 }
 
 /-- Initialize parameter state with zeros -/
-def initParamState {s : Shape} (param : T s) : ParamState s := {
+def initParamState {s : Shape} (_param : T s) : ParamState s := {
   expAvg := zeros s
   expAvgSq := zeros s
   step := 0
@@ -156,7 +156,7 @@ def stepDistributed {s : Shape} (param : T s) (grad : T s) (state : ParamState s
   else
     -- Get distributed info
     let worldSize ← dist.getWorldSize
-    let rank ← dist.getRank
+    let _rank ← dist.getRank
 
     -- For simplicity, we use all-reduce instead of true reduce-scatter
     -- A full implementation would shard the parameters
@@ -180,7 +180,7 @@ def embeddingLrMul : Float := 75.0
 def scalarLrMul : Float := 5.0
 
 /-- Initialize a map of parameter states from a model structure -/
-def initParamStates [TensorStruct α] (model : α) : Array (ParamState #[]) :=
+def initParamStates [TensorStruct α] (_model : α) : Array (ParamState #[]) :=
   -- Simplified: in a full implementation, this would create states
   -- for each parameter in the model
   #[]

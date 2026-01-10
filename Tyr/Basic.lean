@@ -15,8 +15,8 @@ inductive DType where
 inductive Device where
 | CUDA : Nat → Device
 | CPU
-| MPS  -- Metal Performance Shaders for Apple Silicon
-  deriving Repr, Inhabited, BEq
+| MPS
+deriving Repr, Inhabited, BEq
 
 opaque TSpec : NonemptyType
 def T (_ : Shape) : Type :=  TSpec.type

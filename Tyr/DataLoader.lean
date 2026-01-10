@@ -190,7 +190,7 @@ def DataShard.load (path : String) (shardIdx numShards : UInt64)
   let fileExists ← data.fileExists path
   if fileExists then
     -- Load from file
-    let ⟨n, shard⟩ ← DataShard.loadFromFile path shardIdx numShards bosToken
+    let ⟨_, shard⟩ ← DataShard.loadFromFile path shardIdx numShards bosToken
     -- Reshape/pad to fixed size (may truncate or need padding)
     -- For now, just use the actual size - caller should use loadFromFile for dynamic sizes
     let paddedTokens := reshape shard.tokens #[defaultShardSize]
@@ -430,7 +430,7 @@ def DistributedDataGenerator.seqLen (gen : DistributedDataGenerator) : UInt64 :=
 /-! ## Validation Data -/
 
 /-- Load validation data (smaller, not sharded) -/
-def loadValidationData (path : String) (seqLen : UInt64) (bosToken : UInt64)
+def loadValidationData (path : String) (_seqLen : UInt64) (bosToken : UInt64)
     : IO DataShard := do
   -- Load full validation set (same on all ranks)
   DataShard.load path 0 1 bosToken
@@ -452,7 +452,7 @@ def validateBatch {batch seq vocab : UInt64}
 
     Based on modded-nanogpt hyperparameters.
 -/
-def getHyperparamsForStep (step : UInt64) (blockSize : UInt64 := 128)
+def getHyperparamsForStep (step : UInt64) (_blockSize : UInt64 := 128)
     : (UInt64 × UInt64 × UInt64) :=  -- (batchSize, wsShort, wsLong)
   if step < 200 then
     (8, 3, 3)  -- All short windows initially

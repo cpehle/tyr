@@ -95,7 +95,7 @@ def YarnRotary.init (headDim maxSeqLen : UInt64) (base : Float := 500000.0)
     rotary frequencies to maintain position information.
 -/
 def YarnRotary.applyExtension (yarn : YarnRotary headDim maxSeqLen)
-    (oldWindow newWindow : UInt64) : YarnRotary headDim maxSeqLen :=
+    (_oldWindow _newWindow : UInt64) : YarnRotary headDim maxSeqLen :=
   -- YaRN frequency interpolation would go here
   -- For now, return unchanged
   yarn
@@ -347,10 +347,10 @@ def ModdedGPTParams.init (cfg : Config) : IO (ModdedGPTParams cfg) := do
 -/
 def forward {cfg : Config} {batch seq : UInt64}
     (params : ModdedGPTParams cfg)
-    (yarn : YarnRotary cfg.headDim cfg.maxSeqLen)
+    (_yarn : YarnRotary cfg.headDim cfg.maxSeqLen)
     (inputSeq : T #[batch, seq])
-    (wsShort wsLong : UInt64)
-    (training : Bool := true)
+    (_wsShort _wsLong : UInt64)
+    (_training : Bool := true)
     : IO (T #[batch, seq, cfg.vocabSize]) := do
   -- 1. Token embedding
   let tokEmb := nn.embedding inputSeq params.embed

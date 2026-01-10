@@ -20,11 +20,21 @@ inductive Player
   | AND  -- Requires all children (universal: need all subgoals)
   deriving Repr, BEq, Inhabited
 
+instance : ToString Player where
+  toString := fun
+    | .OR => "OR"
+    | .AND => "AND"
+
 /-- Action in the proof search -/
 inductive Action
   | tactic (s : String)  -- Apply a tactic
   | focus (idx : Nat)    -- Focus on a specific goal
   deriving Repr, BEq, Inhabited
+
+instance : ToString Action where
+  toString := fun
+    | .tactic s => s!"tactic {s}"
+    | .focus idx => s!"focus {idx}"
 
 /-- Proof state representation -/
 structure ProofState where

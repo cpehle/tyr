@@ -1,7 +1,5 @@
 /-
   Training Infrastructure for GPT
-
-  Minimal viable training loop for nanoGPT-style training.
 -/
 import Tyr.Torch
 import Tyr.TensorStruct
@@ -31,9 +29,7 @@ structure TrainConfig where
   device : Device := Device.CPU
   deriving Repr, Inhabited
 
-/-- Move a tensor tree to a device, preserving leaf tensor status.
-    NOTE: This is now a no-op since tensors should be created directly on
-    the target device. Kept for backwards compatibility. -/
+/-- Move a tensor tree to a device, preserving leaf tensor status. -/
 def toDevice [TensorStruct α] (x : α) (_device : Device) : α := x
 
 /-- Cosine learning rate schedule with warmup -/

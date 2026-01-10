@@ -8,44 +8,39 @@
 -/
 import Tyr
 import Tyr.DataLoader
+import LeanTest
 
 open torch
 open torch.DataLoader
 
-/-- Test sequential loader: load Shakespeare data and verify basic operations -/
+@[test]
 def testSequentialLoader : IO Unit := do
-  IO.println "=== Testing Sequential Loader ==="
-
   let trainPath := "data/shakespeare_char/train.bin"
 
   -- Check if data exists
   let fileExists ← data.fileExists trainPath
   if !fileExists then
-    IO.println "  Skipping: Shakespeare data not found at data/shakespeare_char/"
-    IO.println "  Run prepare.py in data/shakespeare_char/ to generate test data"
+    -- IO.println "  Skipping: Shakespeare data not found at data/shakespeare_char/"
+    -- IO.println "  Run prepare.py in data/shakespeare_char/ to generate test data"
+    LeanTest.assertFalse false -- Placeholder to pass if skipped
     return
 
   -- Load the data
-  IO.println "  Loading training data..."
-  let ⟨n, loader⟩ ← SequentialLoader.fromFile trainPath
-  IO.println s!"  Loaded {n} tokens"
+  let ⟨n, _loader⟩ ← SequentialLoader.fromFile trainPath
 
   -- Verify we got reasonable data
   if n < 1000 then
-    IO.println "  ERROR: Expected at least 1000 tokens"
+    LeanTest.fail "Expected at least 1000 tokens"
     return
 
-  IO.println "  Sequential loader test passed!"
+  LeanTest.assertTrue true
 
-/-- Test random batch sampling -/
+@[test]
 def testRandomBatchSampling : IO Unit := do
-  IO.println "=== Testing Random Batch Sampling ==="
-
   let trainPath := "data/shakespeare_char/train.bin"
 
   let fileExists ← data.fileExists trainPath
   if !fileExists then
-    IO.println "  Skipping: Shakespeare data not found"
     return
 
   let ⟨_, loader⟩ ← SequentialLoader.fromFile trainPath
@@ -54,7 +49,6 @@ def testRandomBatchSampling : IO Unit := do
   let batchSize : UInt64 := 4
   let blockSize : UInt64 := 32
 
-  IO.println s!"  Sampling batch of size {batchSize} x {blockSize}..."
   let result ← loader.sampleRandomBatch batchSize blockSize
   let input : T #[4, 32] := result.1
   let target : T #[4, 32] := result.2
@@ -62,41 +56,31 @@ def testRandomBatchSampling : IO Unit := do
   -- Compute sum to verify we got valid tensors (mean requires float, tokens are int64)
   let inputSum := nn.itemInt (nn.sumAll input)
   let targetSum := nn.itemInt (nn.sumAll target)
-  IO.println s!"  Input sum: {inputSum}, Target sum: {targetSum}"
-  IO.println "  Random batch sampling test passed!"
+  
+  LeanTest.assertTrue (inputSum > 0) "Input sum positive"
+  LeanTest.assertTrue (targetSum > 0) "Target sum positive"
 
-/-- Test BOS finder initialization with Shakespeare data -/
+@[test]
 def testBosFinderInit : IO Unit := do
-  IO.println "=== Testing BOS Finder Init ==="
-
   let trainPath := "data/shakespeare_char/train.bin"
   let fileExists ← data.fileExists trainPath
   if !fileExists then
-    IO.println "  Skipping: Shakespeare data not found"
     return
 
-  let ⟨n, loader⟩ ← SequentialLoader.fromFile trainPath
+  let ⟨_, loader⟩ ← SequentialLoader.fromFile trainPath
 
   -- Use newline (token 0 in Shakespeare vocab) as BOS equivalent
   let bosToken : UInt64 := 0
   let finder ← BOSFinder.init loader.tokens bosToken
 
-  IO.println s!"  Found {finder.bosPositions.size} BOS positions in {n} tokens"
-  if finder.bosPositions.size > 0 then
-    let firstFew := finder.bosPositions.toList.take 5
-    IO.println s!"  First few positions: {firstFew}"
+  LeanTest.assertTrue (finder.bosPositions.size > 0) "Found BOS positions"
 
-  IO.println "  BOS finder init test passed!"
-
-/-- Test sequential batch iterator -/
+@[test]
 def testSequentialBatchIterator : IO Unit := do
-  IO.println "=== Testing Sequential Batch Iterator ==="
-
   let trainPath := "data/shakespeare_char/train.bin"
 
   let fileExists ← data.fileExists trainPath
   if !fileExists then
-    IO.println "  Skipping: Shakespeare data not found"
     return
 
   let ⟨_, loader⟩ ← SequentialLoader.fromFile trainPath
@@ -105,8 +89,6 @@ def testSequentialBatchIterator : IO Unit := do
   let seqLen : UInt64 := 32
   let iter := SequentialBatchIterator.new loader batchSize seqLen
 
-  IO.println s!"  Iterator created with batchSize={batchSize}, seqLen={seqLen}"
-
   -- Get a few batches
   let mut currentIter := iter
   let mut batchCount : Nat := 0
@@ -114,24 +96,19 @@ def testSequentialBatchIterator : IO Unit := do
     let (maybeBatch, nextIter) := currentIter.next
     match maybeBatch with
     | none =>
-      IO.println s!"  Epoch boundary reached after {batchCount} batches"
+      pure ()
     | some _ =>
       batchCount := batchCount + 1
     currentIter := nextIter
 
-  IO.println s!"  Got {batchCount} batches"
-  IO.println s!"  Current epoch: {currentIter.epoch}"
-  IO.println "  Sequential batch iterator test passed!"
+  LeanTest.assertEqual batchCount 5
 
-/-- Test epoch reset behavior -/
+@[test]
 def testEpochReset : IO Unit := do
-  IO.println "=== Testing Epoch Reset ==="
-
   let trainPath := "data/shakespeare_char/train.bin"
 
   let fileExists ← data.fileExists trainPath
   if !fileExists then
-    IO.println "  Skipping: Shakespeare data not found"
     return
 
   let ⟨_, loader⟩ ← SequentialLoader.fromFile trainPath
@@ -152,37 +129,28 @@ def testEpochReset : IO Unit := do
     match maybeBatch with
     | none =>
       sawEpochEnd := true
-      IO.println s!"  Epoch 0 complete after {batchCount} batches"
     | some _ =>
       batchCount := batchCount + 1
     currentIter := nextIter
 
   if !sawEpochEnd then
-    IO.println "  Warning: Did not see epoch end (data might be very large)"
+    LeanTest.fail "Did not see epoch end (data might be very large)"
   else
-    IO.println s!"  New epoch: {currentIter.epoch}"
     if currentIter.epoch != 1 then
-      IO.println "  ERROR: Expected epoch 1 after reset"
+      LeanTest.fail "Expected epoch 1 after reset"
     else
-      IO.println "  Epoch reset test passed!"
+      LeanTest.assertTrue true
 
-/-- Test document-aware loader (DataShard) -/
+@[test]
 def testDocumentAwareLoader : IO Unit := do
-  IO.println "=== Testing Document-Aware Loader ==="
-
   let trainPath := "data/shakespeare_char/train.bin"
 
   let fileExists ← data.fileExists trainPath
   if !fileExists then
-    IO.println "  Skipping: Shakespeare data not found"
     return
 
   -- Load shard (single process, so shard 0 of 1)
-  IO.println "  Loading data shard..."
-  let ⟨n, shard⟩ ← DataShard.loadFromFile trainPath 0 1 0  -- bosToken = 0 (newline)
-
-  IO.println s!"  Loaded shard with {n} tokens"
-  IO.println s!"  BOS positions found: {shard.bosFinder.bosPositions.size}"
+  let ⟨_, shard⟩ ← DataShard.loadFromFile trainPath 0 1 0  -- bosToken = 0 (newline)
 
   -- Test batch extraction
   let batchSize : UInt64 := 4
@@ -191,21 +159,16 @@ def testDocumentAwareLoader : IO Unit := do
   let (maybeBatch, _) ← shard.bosFinder.getBatch shard.tokens batchSize seqLen
   match maybeBatch with
   | none =>
-    IO.println "  Warning: Could not get batch (unexpected)"
+    LeanTest.fail "Could not get batch"
   | some _ =>
-    IO.println "  Successfully extracted batch"
+    LeanTest.assertTrue true
 
-  IO.println "  Document-aware loader test passed!"
-
-/-- Test shuffle determinism -/
+@[test]
 def testShuffleDeterminism : IO Unit := do
-  IO.println "=== Testing Shuffle Determinism ==="
-
   let trainPath := "data/shakespeare_char/train.bin"
 
   let fileExists ← data.fileExists trainPath
   if !fileExists then
-    IO.println "  Skipping: Shakespeare data not found"
     return
 
   let ⟨_, loader⟩ ← SequentialLoader.fromFile trainPath
@@ -221,41 +184,8 @@ def testShuffleDeterminism : IO Unit := do
   let match2 := shuffled2.bosPositions.toList.take 10
 
   if match1 == match2 then
-    IO.println "  Shuffle is deterministic (same seed gives same order)"
-    IO.println s!"  First 10 positions: {match1}"
-    IO.println "  Shuffle determinism test passed!"
+    LeanTest.assertTrue true
   else
-    IO.println "  ERROR: Shuffle not deterministic!"
-    IO.println s!"  First: {match1}"
-    IO.println s!"  Second: {match2}"
+    LeanTest.fail "Shuffle not deterministic!"
 
-def main : IO Unit := do
-  IO.println "========================================="
-  IO.println "         DataLoader Test Suite          "
-  IO.println "========================================="
-  IO.println ""
 
-  testSequentialLoader
-  IO.println ""
-
-  testRandomBatchSampling
-  IO.println ""
-
-  testBosFinderInit
-  IO.println ""
-
-  testSequentialBatchIterator
-  IO.println ""
-
-  testEpochReset
-  IO.println ""
-
-  testDocumentAwareLoader
-  IO.println ""
-
-  testShuffleDeterminism
-  IO.println ""
-
-  IO.println "========================================="
-  IO.println "         All Tests Complete             "
-  IO.println "========================================="

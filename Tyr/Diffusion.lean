@@ -312,9 +312,19 @@ def sampleTopK {cfg : Config} {batch : UInt64}
     (k : UInt64)
     (temperature : Float := 1.0)
     (maxSteps : Nat := 256)
+    (contextTokens : Option (T #[batch, cfg.context_len]) := none)
     : IO (T #[batch, cfg.seq_len]) := do
   -- Start with all mask tokens
   let mut x := full_int #[batch, cfg.seq_len] cfg.mask_token_id.toInt64
+
+  -- If context tokens provided, set them in first context_len positions
+  if let some ctx := contextTokens then
+    let positions := arange 0 cfg.seq_len 1
+    let contextMask := lt_scalar positions cfg.context_len.toFloat
+    let contextMaskBatch := nn.expand (nn.unsqueeze contextMask 0) #[batch, cfg.seq_len]
+    let padding := full_int #[batch, cfg.seq_len - cfg.context_len] cfg.mask_token_id.toInt64
+    let ctxPadded := nn.cat ctx padding 1
+    x := where_ contextMaskBatch ctxPadded x
 
   -- Track which positions are still masked
   let mut maskedPositions := getMaskedPositions' x cfg.mask_token_id
@@ -363,5 +373,49 @@ def sampleTopK {cfg : Config} {batch : UInt64}
     maskedPositions := getMaskedPositions' x cfg.mask_token_id
 
   return x
+
+/-- Generate multiple blocks in parallel using batched inference.
+    Each block is an independent sample from the diffusion model.
+    Returns tensor of shape [numBlocks, seq_len].
+-/
+def sampleMultiple {cfg : Config} (numBlocks : UInt64)
+    (params : DiffusionParams cfg)
+    (rotaryCache : RotaryCache rotaryLen cfg.headDim)
+    (k : UInt64)
+    (temperature : Float := 1.0)
+    (maxSteps : Nat := 256)
+    : IO (T #[numBlocks, cfg.seq_len]) := do
+  sampleTopK (batch := numBlocks) params rotaryCache k temperature maxSteps none
+
+/-- Generate multiple blocks with shared context prefix.
+    Each block starts with the same context tokens but generates different continuations.
+    contextTokens: [numBlocks, context_len] - can be same or different per block
+    Returns tensor of shape [numBlocks, seq_len].
+-/
+def sampleMultipleWithContext {cfg : Config} (numBlocks : UInt64)
+    (params : DiffusionParams cfg)
+    (rotaryCache : RotaryCache rotaryLen cfg.headDim)
+    (contextTokens : T #[numBlocks, cfg.context_len])
+    (k : UInt64)
+    (temperature : Float := 1.0)
+    (maxSteps : Nat := 256)
+    : IO (T #[numBlocks, cfg.seq_len]) := do
+  sampleTopK (batch := numBlocks) params rotaryCache k temperature maxSteps (some contextTokens)
+
+/-- Generate multiple blocks with the same prompt replicated across all blocks.
+    prompt: [context_len] - single prompt tensor replicated to all blocks
+    Returns tensor of shape [numBlocks, seq_len].
+-/
+def sampleMultipleWithPrompt {cfg : Config} (numBlocks : UInt64)
+    (params : DiffusionParams cfg)
+    (rotaryCache : RotaryCache rotaryLen cfg.headDim)
+    (prompt : T #[cfg.context_len])
+    (k : UInt64)
+    (temperature : Float := 1.0)
+    (maxSteps : Nat := 256)
+    : IO (T #[numBlocks, cfg.seq_len]) := do
+  -- Replicate prompt across all blocks: [context_len] -> [numBlocks, context_len]
+  let promptExpanded := nn.expand (nn.unsqueeze prompt 0) #[numBlocks, cfg.context_len]
+  sampleTopK (batch := numBlocks) params rotaryCache k temperature maxSteps (some promptExpanded)
 
 end torch.diffusion
