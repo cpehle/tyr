@@ -76,6 +76,36 @@ structure ParamState (s : Shape) where
   step : Nat := 0
   deriving Repr
 
+instance {s : Shape} : TensorStruct (ParamState s) where
+  map f ps := { ps with
+    momentumBuffer := ps.momentumBuffer.map f,
+    secondMoment := ps.secondMoment.map f
+  }
+  mapM f ps := do
+    let momentumBuffer ← match ps.momentumBuffer with
+      | some t => some <$> f t
+      | none => pure none
+    let secondMoment ← match ps.secondMoment with
+      | some t => some <$> f t
+      | none => pure none
+    return { ps with momentumBuffer, secondMoment }
+  zipWith f ps1 ps2 := {
+    momentumBuffer := match ps1.momentumBuffer, ps2.momentumBuffer with
+      | some t1, some t2 => some (f t1 t2)
+      | _, _ => none
+    secondMoment := match ps1.secondMoment, ps2.secondMoment with
+      | some t1, some t2 => some (f t1 t2)
+      | _, _ => none
+    step := ps1.step
+  }
+  fold f acc ps :=
+    let acc := match ps.momentumBuffer with
+      | some t => f t acc
+      | none => acc
+    match ps.secondMoment with
+      | some t => f t acc
+      | none => acc
+
 /-- Full NorMuon optimizer state -/
 structure State where
   /-- Configuration -/

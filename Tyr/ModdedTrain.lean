@@ -343,8 +343,14 @@ structure Checkpoint (cfg : moddedGpt.Config) where
 def saveCheckpoint {cfg : moddedGpt.Config} (ckpt : Checkpoint cfg) (path : String)
     : IO Unit := do
   -- In a full implementation, serialize to disk
-  -- For now, just log
+  -- For now, just log parameter statistics using TensorStruct
   IO.println s!"Saving checkpoint to {path} at step {ckpt.step}"
+  
+  let numParams := TensorStruct.fold (fun {s} _t acc => acc + s.numElements) 0 ckpt.params
+  let numTensors := TensorStruct.fold (fun {s} _t acc => acc + 1) 0 ckpt.params
+  
+  IO.println s!"  Parameters: {numTensors} tensors, {numParams} elements"
+  IO.println s!"  Best validation loss: {ckpt.bestValLoss}"
 
 /-- Load a checkpoint from disk -/
 def loadCheckpoint (cfg : moddedGpt.Config) (path : String)

@@ -79,6 +79,21 @@ def initParamState {s : Shape} (_param : T s) : ParamState s := {
   step := 0
 }
 
+instance {s : Shape} : TensorStruct (ParamState s) where
+  map f ps := { ps with expAvg := f ps.expAvg, expAvgSq := f ps.expAvgSq }
+  mapM f ps := do
+    let expAvg ← f ps.expAvg
+    let expAvgSq ← f ps.expAvgSq
+    return { ps with expAvg, expAvgSq }
+  zipWith f ps1 ps2 := {
+    expAvg := f ps1.expAvg ps2.expAvg
+    expAvgSq := f ps1.expAvgSq ps2.expAvgSq
+    step := ps1.step
+  }
+  fold f acc ps :=
+    let acc := f ps.expAvg acc
+    f ps.expAvgSq acc
+
 /-- Single Adam update step for one parameter.
 
     Standard Adam with bias correction:
