@@ -9,6 +9,7 @@
   - Distributed coordination (master-only logging)
   - Markdown report generation
   - Checkpointing and resume
+  - Failure recovery with retry and resume
 
   Example:
   ```lean
@@ -35,10 +36,38 @@
 -/
 import Tyr.Torch
 import Tyr.Distributed
+import Lean.Data.Json.Basic
+import Lean.Data.Json.Parser
+import Lean.Data.Json.Printer
+import Lean.Data.Json.FromToJson
 
 namespace torch.Pipeline
 
 open torch
+open Lean (Json)
+
+-- Re-export needed functions
+def toJson [Lean.ToJson α] (a : α) : Json := Lean.toJson a
+def fromJson? [Lean.FromJson α] (j : Json) : Except String α := Lean.fromJson? j
+
+/-! ## Retry Policy -/
+
+/-- Retry configuration for transient failures -/
+structure RetryPolicy where
+  /-- Maximum retry attempts -/
+  maxAttempts : Nat := 3
+  /-- Initial delay in milliseconds -/
+  initialDelayMs : Nat := 1000
+  /-- Exponential backoff multiplier -/
+  backoffMultiplier : Float := 2.0
+  /-- Maximum delay cap in milliseconds -/
+  maxDelayMs : Nat := 60000
+  deriving Repr, Inhabited
+
+/-- Calculate delay for a given attempt using exponential backoff -/
+def RetryPolicy.delayForAttempt (policy : RetryPolicy) (attempt : Nat) : Nat :=
+  let delay := policy.initialDelayMs.toFloat * (policy.backoffMultiplier ^ attempt.toFloat)
+  min policy.maxDelayMs delay.toUInt64.toNat
 
 /-! ## Pipeline Stage Tracking -/
 
@@ -49,6 +78,25 @@ inductive StageStatus where
   | completed
   | failed (error : String)
   deriving Repr, BEq, Inhabited
+
+instance : Lean.ToJson StageStatus where
+  toJson
+    | .pending => .str "pending"
+    | .running => .str "running"
+    | .completed => .str "completed"
+    | .failed err => .mkObj [("failed", .str err)]
+
+instance : Lean.FromJson StageStatus where
+  fromJson? json := do
+    match json with
+    | .str "pending" => pure .pending
+    | .str "running" => pure .running
+    | .str "completed" => pure .completed
+    | _ =>
+      -- Try to parse as failed with error message
+      match json.getObjValAs? String "failed" with
+      | .ok err => pure (.failed err)
+      | .error _ => throw "Invalid StageStatus"
 
 /-- Information about a pipeline stage -/
 structure StageInfo where
@@ -62,7 +110,27 @@ structure StageInfo where
   endTime : Option Nat := none
   /-- Metrics collected during this stage -/
   metrics : List (String × String) := []
+  /-- Number of retry attempts made -/
+  retryCount : Nat := 0
   deriving Repr, Inhabited
+
+instance : Lean.ToJson StageInfo where
+  toJson info := .mkObj [
+    ("name", .str info.name),
+    ("status", toJson info.status),
+    ("startTime", match info.startTime with | some t => .num t | none => .null),
+    ("endTime", match info.endTime with | some t => .num t | none => .null),
+    ("retryCount", .num info.retryCount)
+  ]
+
+instance : Lean.FromJson StageInfo where
+  fromJson? json := do
+    let name ← json.getObjValAs? String "name"
+    let status ← json.getObjValAs? StageStatus "status"
+    let startTime := (json.getObjValAs? Nat "startTime").toOption
+    let endTime := (json.getObjValAs? Nat "endTime").toOption
+    let retryCount := (json.getObjValAs? Nat "retryCount").toOption.getD 0
+    pure { name, status, startTime, endTime, metrics := [], retryCount }
 
 /-- Get stage duration in milliseconds -/
 def StageInfo.durationMs (info : StageInfo) : Option Nat :=
@@ -174,6 +242,61 @@ def Report.write (report : Report) (filename : String := "report.md") : IO Unit 
   IO.FS.writeFile ⟨path⟩ content
   IO.println s!"Report written to {path}"
 
+/-! ## Checkpoint Persistence -/
+
+/-- Checkpoint file structure for pipeline resume -/
+structure PipelineCheckpoint where
+  /-- Stage information for resume -/
+  stages : Array StageInfo
+  /-- Timestamp of checkpoint -/
+  timestamp : Nat
+  /-- Pipeline run identifier -/
+  runId : String
+  deriving Repr, Inhabited
+
+instance : Lean.ToJson PipelineCheckpoint where
+  toJson cp := .mkObj [
+    ("stages", .arr (cp.stages.map toJson)),
+    ("timestamp", .num cp.timestamp),
+    ("runId", .str cp.runId)
+  ]
+
+instance : Lean.FromJson PipelineCheckpoint where
+  fromJson? json := do
+    let stagesArr ← json.getObjValAs? (Array Json) "stages"
+    let stages ← stagesArr.mapM fromJson?
+    let timestamp ← json.getObjValAs? Nat "timestamp"
+    let runId := (json.getObjValAs? String "runId").toOption.getD ""
+    pure { stages, timestamp, runId }
+
+/-- Path for checkpoint file -/
+def checkpointPath (baseDir : String) : String :=
+  s!"{baseDir}/.pipeline_checkpoint.json"
+
+/-- Save checkpoint to disk -/
+def saveCheckpoint (baseDir : String) (stages : Array StageInfo) (runId : String) : IO Unit := do
+  let timestamp ← IO.monoMsNow
+  let checkpoint : PipelineCheckpoint := { stages, timestamp, runId }
+  let path := checkpointPath baseDir
+  IO.FS.writeFile ⟨path⟩ (toJson checkpoint).pretty
+
+/-- Load checkpoint from disk -/
+def loadCheckpoint (baseDir : String) : IO (Option PipelineCheckpoint) := do
+  let path := checkpointPath baseDir
+  if ← System.FilePath.pathExists ⟨path⟩ then
+    let content ← IO.FS.readFile ⟨path⟩
+    match Json.parse content >>= fromJson? with
+    | .ok checkpoint => return some checkpoint
+    | .error _ => return none
+  else
+    return none
+
+/-- Clear checkpoint file -/
+def clearCheckpoint (baseDir : String) : IO Unit := do
+  let path := checkpointPath baseDir
+  if ← System.FilePath.pathExists ⟨path⟩ then
+    IO.FS.removeFile ⟨path⟩
+
 /-! ## Pipeline State -/
 
 /-- Pipeline configuration -/
@@ -186,8 +309,16 @@ structure PipelineConfig where
   wandbRun : String := "dummy"
   /-- Number of GPUs -/
   numGpus : Nat := 1
-  /-- Resume from checkpoint -/
-  resumeFrom : Option String := none
+  /-- Resume from checkpoint if available -/
+  resumeFromCheckpoint : Bool := true
+  /-- Default retry policy for stages -/
+  retryPolicy : RetryPolicy := {}
+  /-- Checkpoint after each stage -/
+  checkpointAfterStage : Bool := true
+  /-- Fail fast: stop on first error -/
+  failFast : Bool := true
+  /-- Run identifier for this pipeline execution -/
+  runId : String := ""
   deriving Repr, Inhabited
 
 /-- Pipeline execution state -/
@@ -251,18 +382,26 @@ def logStageEnd (name : String) (durationMs : Nat) : PipelineM Unit := do
 
 /-! ## Stage Execution -/
 
-/-- Define and execute a pipeline stage -/
+/-- Log a stage failure -/
+def logStageFailed (name : String) (error : String) : PipelineM Unit := do
+  let state ← get
+  if state.isMaster then
+    IO.eprintln s!"[FAILED] Stage '{name}': {error}"
+
+/-- Define and execute a pipeline stage with error handling -/
 def stage (name : String) (action : PipelineM α) : PipelineM α := do
   let mut state ← get
+  let config := state.config
 
   -- Check if should skip (resume support)
   let existingStage := state.stages.find? (·.name == name)
   match existingStage with
   | some info =>
     if info.status == .completed then
-      log s!"Skipping completed stage: {name}"
-      -- Still run the action (could optimize to skip in future)
+      log s!"[SKIP] Already completed: {name}"
       return ← action
+    else if let .failed err := info.status then
+      log s!"[RESUME] Retrying previously failed stage: {name} (was: {err})"
   | none => pure ()
 
   -- Record stage start
@@ -277,22 +416,86 @@ def stage (name : String) (action : PipelineM α) : PipelineM α := do
 
   logStageStart name
 
-  -- Execute stage action
-  let result ← action
+  -- Execute stage action with exception handling
+  try
+    let result ← action
 
-  -- Record stage completion
-  let endTime ← IO.monoMsNow
-  let durationMs := endTime - startTime
-  state ← get
-  let stages := state.stages.map fun info =>
-    if info.name == name then
-      { info with status := .completed, endTime := some endTime }
-    else info
-  let report := state.report.logStage name s!"Duration: {formatDuration durationMs}"
-  set { state with stages := stages, report := report }
+    -- Record stage completion
+    let endTime ← IO.monoMsNow
+    let durationMs := endTime - startTime
+    state ← get
+    let stages := state.stages.map fun info =>
+      if info.name == name then
+        { info with status := .completed, endTime := some endTime }
+      else info
+    let report := state.report.logStage name s!"Duration: {formatDuration durationMs}"
+    set { state with stages := stages, report := report }
 
-  logStageEnd name durationMs
-  return result
+    -- Checkpoint on success
+    if config.checkpointAfterStage then
+      state ← get
+      let baseDir := config.baseDir.replace "~" (← IO.getEnv "HOME" |>.map (·.getD ""))
+      Pipeline.saveCheckpoint baseDir state.stages config.runId
+
+    logStageEnd name durationMs
+    return result
+
+  catch e =>
+    -- Record failure
+    let endTime ← IO.monoMsNow
+    state ← get
+    let errorMsg := toString e
+    let stages := state.stages.map fun info =>
+      if info.name == name then
+        { info with status := .failed errorMsg, endTime := some endTime }
+      else info
+    let report := state.report.logStage name s!"FAILED: {errorMsg}"
+    set { state with stages := stages, report := report }
+
+    -- Checkpoint failure state
+    if config.checkpointAfterStage then
+      state ← get
+      let baseDir := config.baseDir.replace "~" (← IO.getEnv "HOME" |>.map (·.getD ""))
+      Pipeline.saveCheckpoint baseDir state.stages config.runId
+
+    logStageFailed name errorMsg
+
+    if config.failFast then
+      throw e
+    else
+      throw e  -- For now, always propagate
+
+/-- Execute a stage with retry logic -/
+def stageWithRetry (name : String) (policy : RetryPolicy) (action : PipelineM α) : PipelineM α := do
+  let mut lastError := ""
+  for attempt in [:policy.maxAttempts] do
+    try
+      return ← stage name action
+    catch e =>
+      lastError := toString e
+      let state ← get
+
+      -- Log retry attempt
+      if state.isMaster then
+        IO.eprintln s!"[WARN] Stage '{name}' failed (attempt {attempt + 1}/{policy.maxAttempts}): {lastError}"
+
+      -- Update retry count in stage info
+      let stages := state.stages.map fun info =>
+        if info.name == name then
+          { info with retryCount := attempt + 1 }
+        else info
+      set { state with stages := stages }
+
+      if attempt + 1 < policy.maxAttempts then
+        let delayMs := policy.delayForAttempt attempt
+        if state.isMaster then
+          IO.println s!"[RETRY] Waiting {delayMs}ms before retry..."
+        IO.sleep delayMs.toUInt32
+      else
+        -- Final failure
+        throw e
+
+  throw (IO.userError s!"Stage '{name}' failed after {policy.maxAttempts} attempts: {lastError}")
 
 /-- Spawn a background task within the pipeline -/
 def background (description : String) (action : IO α) : PipelineM (BackgroundTask α) := do
@@ -303,6 +506,76 @@ def background (description : String) (action : IO α) : PipelineM (BackgroundTa
 def await (task : BackgroundTask α) : PipelineM α := do
   log s!"Waiting for: {task.description}"
   task.get
+
+/-! ## Tracked Background Tasks -/
+
+/-- Background task with error tracking -/
+structure TrackedTask (α : Type) where
+  /-- Underlying task -/
+  task : BackgroundTask (Except String α)
+  /-- Task description -/
+  description : String
+
+/-- Spawn a background task with error capture -/
+def backgroundTracked (description : String) (action : IO α) : PipelineM (TrackedTask α) := do
+  log s!"Spawning tracked background task: {description}"
+  let wrapped : IO (Except String α) := do
+    try
+      let result ← action
+      return .ok result
+    catch e =>
+      return .error (toString e)
+  let task ← spawnBackground description wrapped
+  return { task := task, description := description }
+
+/-- Await a tracked task with error handling -/
+def awaitTracked (task : TrackedTask α) (onError : String → PipelineM α) : PipelineM α := do
+  let result ← task.task.get
+  match result with
+  | .ok value => return value
+  | .error msg =>
+    log s!"[ERROR] Background task '{task.description}' failed: {msg}"
+    onError msg
+
+/-- Await a tracked task, throwing on error -/
+def awaitTrackedOrThrow (task : TrackedTask α) : PipelineM α := do
+  let result ← task.task.get
+  match result with
+  | .ok value => return value
+  | .error msg =>
+    throw (IO.userError s!"Background task '{task.description}' failed: {msg}")
+
+/-! ## Distributed Failure Coordination -/
+
+/-- Check if any stage has failed locally -/
+def hasLocalFailure : PipelineM Bool := do
+  let state ← get
+  return state.stages.any fun s =>
+    match s.status with
+    | .failed _ => true
+    | _ => false
+
+/-- Synchronize all ranks with a barrier -/
+def syncBarrier : PipelineM Unit := do
+  let state ← get
+  if state.worldSize > 1 then
+    dist.barrier
+
+/-- Check if all ranks are healthy (barrier with failure check).
+    Returns true if this rank has no failures.
+    Note: In distributed mode, each rank checks its own failure status. -/
+def checkAllRanksHealthy : PipelineM Bool := do
+  let state ← get
+  if state.worldSize == 1 then
+    return !(← hasLocalFailure)
+
+  -- Barrier to synchronize
+  dist.barrier
+  -- Check local failure status
+  let failed ← hasLocalFailure
+  if failed && state.isMaster then
+    IO.eprintln "[DISTRIBUTED] This rank has failures"
+  return !failed
 
 /-- Record metrics for the current stage -/
 def recordMetrics (metrics : List (String × String)) : PipelineM Unit := do
@@ -333,18 +606,43 @@ def initPipeline (config : PipelineConfig) : IO PipelineState := do
   -- Create report
   let report ← Report.create baseDir
 
+  -- Generate run ID if not provided
+  let runId ← if config.runId.isEmpty then do
+    let ts ← IO.monoMsNow
+    pure s!"run_{ts}"
+  else
+    pure config.runId
+
+  -- Try to load checkpoint for resume
+  let resumedStages ← if config.resumeFromCheckpoint then
+    match ← loadCheckpoint baseDir with
+    | some checkpoint =>
+      if rank == 0 then
+        IO.println s!"[RESUME] Loading checkpoint from {checkpointPath baseDir}"
+        IO.println s!"[RESUME] Found {checkpoint.stages.size} stages"
+      pure checkpoint.stages
+    | none =>
+      pure #[]
+  else
+    pure #[]
+
   if rank == 0 then
     IO.println "╔════════════════════════════════════════╗"
     IO.println "║         Tyr Training Pipeline          ║"
     IO.println "╚════════════════════════════════════════╝"
     IO.println s!"Base directory: {baseDir}"
     IO.println s!"World size: {worldSize}"
+    IO.println s!"Run ID: {runId}"
+    if resumedStages.size > 0 then
+      let completed := resumedStages.filter (·.status == .completed)
+      IO.println s!"[RESUME] {completed.size}/{resumedStages.size} stages already completed"
 
   return {
-    config := config
+    config := { config with runId := runId }
     report := report
     rank := rank
     worldSize := worldSize
+    stages := resumedStages
   }
 
 /-- Finalize pipeline and generate report -/
@@ -356,18 +654,37 @@ def finalizePipeline (state : PipelineState) : IO Unit := do
 
     -- Generate summary
     let completedStages := state.stages.filter (·.status == .completed)
+    let failedStages := state.stages.filter fun s =>
+      match s.status with | .failed _ => true | _ => false
     let totalDuration := completedStages.foldl (fun acc info =>
       acc + info.durationMs.getD 0) 0
 
     IO.println ""
-    IO.println "╔════════════════════════════════════════╗"
-    IO.println "║           Pipeline Complete            ║"
-    IO.println "╚════════════════════════════════════════╝"
+    if failedStages.size > 0 then
+      IO.println "╔════════════════════════════════════════╗"
+      IO.println "║         Pipeline Failed                ║"
+      IO.println "╚════════════════════════════════════════╝"
+      for s in failedStages do
+        match s.status with
+        | .failed err => IO.eprintln s!"  - {s.name}: {err}"
+        | _ => pure ()
+    else
+      IO.println "╔════════════════════════════════════════╗"
+      IO.println "║           Pipeline Complete            ║"
+      IO.println "╚════════════════════════════════════════╝"
+
     IO.println s!"Completed stages: {completedStages.size}/{state.stages.size}"
+    if failedStages.size > 0 then
+      IO.println s!"Failed stages: {failedStages.size}"
     IO.println s!"Total duration: {formatDuration totalDuration}"
 
     -- Write report
     state.report.write
+
+    -- Clear checkpoint on successful completion
+    if failedStages.size == 0 && state.config.checkpointAfterStage then
+      let baseDir := state.config.baseDir.replace "~" (← IO.getEnv "HOME" |>.map (·.getD ""))
+      clearCheckpoint baseDir
 
 /-- Run a pipeline action -/
 def runPipeline (config : PipelineConfig) (action : PipelineM α) : IO α := do
