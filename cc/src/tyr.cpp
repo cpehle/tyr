@@ -2231,6 +2231,81 @@ lean_object* lean_torch_sdpa_gqa(
   return fromTorchTensor(result_);
 }
 
+// Scaled dot-product attention with GQA and sliding window support
+// Each position can only attend to the previous window_size positions
+lean_object* lean_torch_sdpa_gqa_window(
+  lean_obj_arg /*batch*/,
+  lean_obj_arg n_head_arg,
+  lean_obj_arg n_kv_head_arg,
+  lean_obj_arg /*seq*/,
+  lean_obj_arg /*head_dim*/,
+  b_lean_obj_arg query,
+  b_lean_obj_arg key,
+  b_lean_obj_arg value,
+  double dropout_p,
+  uint8_t is_causal,
+  uint8_t enable_gqa,
+  lean_obj_arg window_size_arg
+) {
+  auto q = borrowTensor(query);
+  auto k = borrowTensor(key);
+  auto v = borrowTensor(value);
+  auto window_size = lean_unbox_uint64(window_size_arg);
+
+  // Handle GQA by expanding KV heads to match Q heads
+  if (enable_gqa) {
+    auto n_head = lean_unbox_uint64(n_head_arg);
+    auto n_kv_head = lean_unbox_uint64(n_kv_head_arg);
+
+    if (n_head != n_kv_head && n_kv_head > 0) {
+      auto repeat_factor = n_head / n_kv_head;
+      k = k.repeat_interleave(repeat_factor, 1);
+      v = v.repeat_interleave(repeat_factor, 1);
+    }
+  }
+
+  // Get sequence length from query shape: [batch, n_head, seq, head_dim]
+  auto seq_len = q.size(2);
+
+  // Create sliding window causal mask
+  // mask[i,j] = True if position j is NOT attended to by position i
+  // For sliding window: j is attended if (j <= i) AND (i - j < window_size)
+  auto options = torch::TensorOptions().dtype(torch::kBool).device(q.device());
+
+  // Create row indices [seq_len, 1] and col indices [1, seq_len]
+  auto row_idx = torch::arange(seq_len, torch::TensorOptions().dtype(torch::kLong).device(q.device())).unsqueeze(1);
+  auto col_idx = torch::arange(seq_len, torch::TensorOptions().dtype(torch::kLong).device(q.device())).unsqueeze(0);
+
+  // Causal mask: mask where col > row (future positions)
+  auto causal_mask = col_idx > row_idx;
+
+  // Sliding window mask: mask where (row - col) >= window_size (too far in the past)
+  auto window_mask = (row_idx - col_idx) >= static_cast<int64_t>(window_size);
+
+  // Combined mask: either future or too far in the past
+  auto combined_mask = causal_mask | window_mask;
+
+  // Convert boolean mask to attention mask format expected by SDPA
+  // SDPA expects: -inf for masked positions, 0 for unmasked
+  auto attn_mask = torch::where(
+    combined_mask,
+    torch::full({seq_len, seq_len}, -std::numeric_limits<float>::infinity(), q.options()),
+    torch::zeros({seq_len, seq_len}, q.options())
+  );
+
+  // Expand mask to [1, 1, seq, seq] for broadcasting over batch and heads
+  attn_mask = attn_mask.unsqueeze(0).unsqueeze(0);
+
+  auto result_ = torch::scaled_dot_product_attention(
+    q, k, v,
+    attn_mask,
+    dropout_p,
+    false  // is_causal=false since we're using explicit mask
+  );
+
+  return fromTorchTensor(result_);
+}
+
 // ============================================================================
 // Comparison and conditional operations for diffusion
 // ============================================================================
@@ -2615,6 +2690,85 @@ lean_object* lean_torch_clip_grad_value_(lean_obj_arg /*s*/, b_lean_obj_arg para
     param_.grad().clamp_(-clip_value, clip_value);
   }
   return lean_io_result_mk_ok(lean_box(0));
+}
+
+// ============================================================================
+// Sampling utilities for text generation
+// ============================================================================
+
+// Top-k filtering: set all logits outside top-k to -infinity
+// logits: [..., vocab_size], k: number of top logits to keep
+lean_object* lean_torch_topk_filter(
+    lean_obj_arg /*s*/,
+    b_lean_obj_arg logits,
+    uint64_t k
+) {
+  auto logits_ = borrowTensor(logits);
+
+  if (k == 0) {
+    return fromTorchTensor(logits_.clone());
+  }
+
+  // Get top-k values along last dimension
+  auto [topk_values, topk_indices] = logits_.topk(k, -1, true, true);
+
+  // Get the minimum value in top-k (threshold)
+  auto threshold = std::get<0>(topk_values.min(-1, true));
+
+  // Mask: set logits below threshold to -inf
+  auto mask = logits_ < threshold;
+  auto result_ = logits_.masked_fill(mask, -std::numeric_limits<float>::infinity());
+
+  return fromTorchTensor(result_);
+}
+
+// Top-p (nucleus) filtering: set logits outside cumulative probability p to -infinity
+// logits: [..., vocab_size], p: cumulative probability threshold
+lean_object* lean_torch_topp_filter(
+    lean_obj_arg /*s*/,
+    b_lean_obj_arg logits,
+    double p
+) {
+  auto logits_ = borrowTensor(logits);
+
+  if (p >= 1.0) {
+    return fromTorchTensor(logits_.clone());
+  }
+
+  // Sort logits in descending order
+  auto [sorted_logits, sorted_indices] = logits_.sort(-1, true);
+
+  // Compute cumulative softmax probabilities
+  auto softmax_sorted = torch::softmax(sorted_logits, -1);
+  auto cumulative_probs = softmax_sorted.cumsum(-1);
+
+  // Create mask for tokens to remove (cumulative prob > p, shifted by 1)
+  // We shift by 1 so we always keep at least one token
+  auto shifted_cumprobs = torch::zeros_like(cumulative_probs);
+  if (cumulative_probs.size(-1) > 1) {
+    shifted_cumprobs.slice(-1, 1) = cumulative_probs.slice(-1, 0, -1);
+  }
+  auto sorted_indices_to_remove = shifted_cumprobs > p;
+
+  // Scatter the remove mask back to original positions
+  auto indices_to_remove = torch::zeros_like(sorted_indices_to_remove);
+  indices_to_remove.scatter_(-1, sorted_indices, sorted_indices_to_remove);
+
+  // Set removed positions to -inf
+  auto result_ = logits_.masked_fill(indices_to_remove, -std::numeric_limits<float>::infinity());
+
+  return fromTorchTensor(result_);
+}
+
+// Squeeze tensor along a specific dimension (with negative index support)
+lean_object* lean_torch_squeeze_dim(
+    lean_obj_arg /*s*/,
+    b_lean_obj_arg input,
+    int64_t dim
+) {
+  auto input_ = borrowTensor(input);
+  auto result_ = input_.squeeze(dim);
+  return fromTorchTensor(result_);
 }
 
 }

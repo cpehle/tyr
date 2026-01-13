@@ -9,4 +9,6 @@ import Tyr.Tokenizer.Pretokenize
 import Tyr.Tokenizer.Encode
 import Tyr.Tokenizer.Decode
 import Tyr.Tokenizer.SpecialTokens
+import Tyr.Tokenizer.TokenBytes
+import Tyr.Tokenizer.Training
 import Tyr.Tokenizer.IO

@@ -5,6 +5,12 @@
   Uses the same data format as nanoGPT.
 -/
 import Tyr
+import Examples.GPT.GPT
+import Examples.GPT.Train
+import Examples.GPT.Checkpoint
+import Examples.GPT.GPTDataLoader
+
+namespace Examples.TrainGPT
 
 open torch
 open torch.gpt
@@ -175,3 +181,7 @@ def main : IO Unit := do
   IO.println "---"
   IO.println ""
   IO.println "Done!"
+
+end Examples.TrainGPT
+
+def main : IO Unit := Examples.TrainGPT.main

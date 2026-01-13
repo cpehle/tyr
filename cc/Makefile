@@ -15,6 +15,25 @@ TORCHDIR=../external/libtorch
 TORCH_INC_FLAGS=-I$(TORCHDIR)/include -I$(TORCHDIR)/include/torch/csrc/api/include  -I$(TORCHDIR)/include/TH  -I$(TORCHDIR)/include/THC
 TORCH_LIBPATH=$(TORCHDIR)/lib/
 
+# ARROW/PARQUET FLAGS
+# Apache Arrow installed via: brew install apache-arrow (macOS) or apt install libarrow-dev libparquet-dev (Linux)
+UNAME_S := $(shell uname -s)
+ifeq ($(UNAME_S),Darwin)
+    # macOS - check for Apple Silicon first, then Intel
+    ifneq ($(wildcard /opt/homebrew/include/arrow),)
+        ARROW_PREFIX := /opt/homebrew
+    else ifneq ($(wildcard /usr/local/include/arrow),)
+        ARROW_PREFIX := /usr/local
+    else
+        ARROW_PREFIX := /opt/homebrew
+    endif
+else
+    # Linux
+    ARROW_PREFIX := /usr
+endif
+ARROW_INC_FLAGS := -I$(ARROW_PREFIX)/include
+ARROW_LIBPATH := $(ARROW_PREFIX)/lib
+
 
 
 # Config
@@ -38,6 +57,8 @@ SRCS := \
 	tyr.cpp\
 	tyr_distributed.cpp\
 	tyr_polar.cpp\
+	tyr_parquet.cpp\
+	tyr_execution.cpp\
 
 LIB_NAME := TyrC
 LIB := lib${LIB_NAME}.a
@@ -58,7 +79,7 @@ $(OUT_DIR)/$(LIB) : $(OBJ_FILES) | $(OUT_DIR)
 	${AR} rcs $@ $^
 
 $(OUT_DIR)/%.o : $(SRC_DIR)/%.cpp $(HDR_FILES) | $(OUT_DIR)
-	$(CXX) --std=c++17 -o $@ -c $< -I$(HDR_DIR) -I$(LEAN_INCLUDE) $(TORCH_INC_FLAGS) $(XLA_INC_FLAGS) $(EXTRA_CXX_FLAGS) -fPIC -rdynamic
+	$(CXX) --std=c++17 -o $@ -c $< -I$(HDR_DIR) -I$(LEAN_INCLUDE) $(TORCH_INC_FLAGS) $(XLA_INC_FLAGS) $(ARROW_INC_FLAGS) $(EXTRA_CXX_FLAGS) -fPIC -rdynamic
 
 clean:
 	$(RMPATH) $(OUT_DIR)

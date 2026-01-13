@@ -4,7 +4,7 @@
   Provides save/load functionality for model parameters and optimizer state.
   Enables training resumption and model export.
 -/
-import Tyr.Train
+import Examples.GPT.Train
 import Tyr.TensorStruct
 
 namespace torch.checkpoint

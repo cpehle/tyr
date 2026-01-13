@@ -8,6 +8,7 @@
 -/
 import Tyr
 import Tyr.DataLoader
+import Examples.GPT.GPTDataLoader
 import LeanTest
 
 open torch

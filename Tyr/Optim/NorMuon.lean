@@ -185,13 +185,30 @@ def updateMomentum {s : Shape} (orthGrad : T s) (momentumBuffer : Option (T s))
     decayed + scaled
   | none => orthGrad
 
+/-- Compute aspect ratio scaling for a tensor shape.
+    For 2D matrices: sqrt(max(1, height/width))
+    For other tensors: 1.0
+
+    This scales the learning rate for tall matrices (more rows than columns),
+    following nanochat/modded-nanogpt's approach. -/
+def aspectRatioScale (shape : Shape) : Float :=
+  if shape.size >= 2 then
+    let height := shape[shape.size - 2]!.toFloat
+    let width := shape[shape.size - 1]!.toFloat
+    if height > width then
+      Float.sqrt (height / width)
+    else
+      1.0
+  else
+    1.0
+
 /-- Single NorMuon update step for one parameter.
 
     1. Orthogonalize gradient via Polar Express
     2. Apply variance reduction
     3. Apply cautious weight decay
     4. Update momentum buffer
-    5. Apply update to parameter
+    5. Apply update to parameter (with aspect ratio scaling)
 
     Returns: (new_param, new_state)
 -/
@@ -211,8 +228,9 @@ def stepSingle {s : Shape} (param : T s) (grad : T s) (state : ParamState s)
   -- 4. Update momentum
   let newMomentum := updateMomentum gradWithWd state.momentumBuffer cfg.momentum
 
-  -- 5. Apply update
-  let effectiveLr := cfg.lr * lrMul
+  -- 5. Apply update with aspect ratio scaling
+  let aspectScale := aspectRatioScale s
+  let effectiveLr := cfg.lr * lrMul * aspectScale
   let update := mul_scalar newMomentum effectiveLr
   let newParam := param - update
   let newParam := autograd.set_requires_grad (autograd.detach newParam) true

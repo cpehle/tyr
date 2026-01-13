@@ -5,10 +5,12 @@
   Uses masked diffusion with bidirectional attention.
 -/
 import Tyr
-import Tyr.Diffusion
-import Tyr.DiffusionSchedule
-import Tyr.DiffusionTrain
-import Tyr.DiffusionCheckpoint
+import Examples.Diffusion.Diffusion
+import Examples.Diffusion.DiffusionSchedule
+import Examples.Diffusion.DiffusionTrain
+import Examples.Diffusion.DiffusionCheckpoint
+
+namespace Examples.TrainDiffusion
 
 open torch
 open torch.diffusion
@@ -33,12 +35,12 @@ def ansiShowCursor : String := "\x1b[?25h"
 -- ASCII encoding/decoding (simple, like tiny-diffusion)
 -- Vocab is 0-127 where 0 is reserved as [MASK] token
 def asciiEncode (s : String) : Array Int64 :=
-  s.data.toArray.map fun c =>
+  s.toList.toArray.map fun c =>
     let code := c.toNat
     if code < 128 then code.toInt64 else 127  -- clamp to ASCII
 
 def asciiDecode (tokens : Array Int64) : String :=
-  String.mk <| tokens.toList.map fun t =>
+  String.ofList <| tokens.toList.map fun t =>
     let code := t.toUInt64.toNat
     if code == 0 then '[' -- Show mask token as [
     else if code < 128 then Char.ofNat code
@@ -92,8 +94,8 @@ def renderChar (c : Char) (conf : Float) : String :=
 /-- Progress bar -/
 def progressBar (current total : Nat) (width : Nat := 30) : String :=
   let filled := current * width / total
-  let bar := String.mk (List.replicate filled '=') ++ ">" ++
-             String.mk (List.replicate (width - filled) ' ')
+  let bar := String.ofList (List.replicate filled '=') ++ ">" ++
+             String.ofList (List.replicate (width - filled) ' ')
   s!"[{bar}]"
 
 /-- Move cursor to absolute position (1-indexed) -/
@@ -590,3 +592,7 @@ def main (args : List String) : IO Unit := do
 
   -- Generate after training
   runGeneration modelCfg trainedParams parsedArgs.prompt parsedArgs.numBlocks parsedArgs.temperature
+
+end Examples.TrainDiffusion
+
+def main (args : List String) : IO Unit := Examples.TrainDiffusion.main args

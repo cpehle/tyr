@@ -63,9 +63,40 @@ def leanTokens : Array String :=
    , "True", "False", "And", "Or", "Not", "Iff"
    ]
 
+/-- Tool invocation tokens for agentic generation.
+    Following nanochat's pattern for tool use:
+    - Generic tool markers
+    - Calculator tool for math expressions
+    - Prover tool for Lean proof checking
+    - Eval tool for Lean #eval execution -/
+def toolTokens : Array String :=
+  #[ "<|tool_start|>"       -- Generic tool invocation start
+   , "<|tool_end|>"         -- Generic tool invocation end
+   , "<|output_start|>"     -- Tool output injection start
+   , "<|output_end|>"       -- Tool output injection end
+   , "<|calc_start|>"       -- Calculator tool start
+   , "<|calc_end|>"         -- Calculator tool end
+   , "<|prover_start|>"     -- Lean prover tool start
+   , "<|prover_end|>"       -- Lean prover tool end
+   , "<|eval_start|>"       -- Lean eval tool start
+   , "<|eval_end|>"         -- Lean eval tool end
+   , "<|error|>"            -- Error marker for tool failures
+   , "<|success|>"          -- Success marker for tool completion
+   ]
+
+/-- Chat/conversation tokens for multi-turn dialogue -/
+def chatTokens : Array String :=
+  #[ "<|system|>"           -- System message marker
+   , "<|user|>"             -- User message marker
+   , "<|assistant|>"        -- Assistant message marker
+   , "<|eot|>"              -- End of turn
+   , "<|header_start|>"     -- Message header start
+   , "<|header_end|>"       -- Message header end
+   ]
+
 /-- All special tokens combined -/
 def allSpecialTokens : Array String :=
-  coreSpecialTokens ++ valueBinTokens ++ greekLetters ++ mathOperators ++ leanTokens
+  coreSpecialTokens ++ valueBinTokens ++ greekLetters ++ mathOperators ++ leanTokens ++ toolTokens ++ chatTokens
 
 /-- Standard token IDs for core tokens -/
 def padTokenId : TokenId := 0

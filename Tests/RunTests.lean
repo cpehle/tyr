@@ -1,9 +1,6 @@
 import LeanTest
 import Lean.Util.Path
-import Tests.Test
-import Tests.TestDiffusion
-import Tests.TestDataLoader
-import Tests.TestModdedGPT
+import Tests
 
 /-- Parse command line arguments into a RunConfig. -/
 def parseArgs (args : List String) : IO LeanTest.RunConfig := do
@@ -42,10 +39,7 @@ unsafe def main (args : List String) : IO UInt32 := do
 
   let env ← Lean.importModules #[
     { module := `LeanTest },
-    { module := `Tests.Test },
-    { module := `Tests.TestDiffusion },
-    { module := `Tests.TestDataLoader },
-    { module := `Tests.TestModdedGPT }
+    { module := `Tests }
   ] {}
   
   LeanTest.runTestsAndExit env {} config

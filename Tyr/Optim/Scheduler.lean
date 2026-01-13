@@ -179,6 +179,38 @@ def polynomialDecay (cfg : PolynomialConfig) (step : Nat) : Float :=
 /-- Constant learning rate (useful as baseline) -/
 def constant (lr : Float) (_step : Nat) : Float := lr
 
+/-! ## Weight Decay Scheduling
+
+nanochat uses linear decay to zero: wd = base_wd * (1 - step/total_steps)
+-/
+
+/-- Configuration for weight decay schedule -/
+structure WeightDecayConfig where
+  baseWd : Float        -- Base weight decay value
+  totalSteps : Nat      -- Total training steps
+  deriving Repr, Inhabited
+
+/-- Linear weight decay: decays from baseWd to 0 over training.
+    wd(step) = baseWd * (1 - step/totalSteps)
+    Following nanochat's approach where weight decay goes to zero. -/
+def linearWeightDecay (cfg : WeightDecayConfig) (step : Nat) : Float :=
+  if step >= cfg.totalSteps then
+    0.0
+  else
+    cfg.baseWd * (1.0 - step.toFloat / cfg.totalSteps.toFloat)
+
+/-- Cosine weight decay: smooth decay from baseWd to 0.
+    wd(step) = baseWd * 0.5 * (1 + cos(π * step/totalSteps)) -/
+def cosineWeightDecay (cfg : WeightDecayConfig) (step : Nat) : Float :=
+  if step >= cfg.totalSteps then
+    0.0
+  else
+    let progress := step.toFloat / cfg.totalSteps.toFloat
+    cfg.baseWd * 0.5 * (1.0 + Float.cos (pi * progress))
+
+/-- Constant weight decay (no scheduling) -/
+def constantWeightDecay (wd : Float) (_step : Nat) : Float := wd
+
 /-! ## Helper: Create schedule from config -/
 
 /-- Union type for schedule configurations -/

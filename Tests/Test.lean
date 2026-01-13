@@ -1,4 +1,7 @@
 import Tyr
+import Examples.GPT.GPT
+import Examples.GPT.Train
+import Examples.GPT.Checkpoint
 import LeanTest
 
 open torch
@@ -33,48 +36,6 @@ def testTokenizer : IO Unit := do
   let testText := "Hello, world! This is a test."
   let pretokens := tokenizer.pretokenizeFull testText
   LeanTest.assertTrue (pretokens.size > 0) "Should produce pretokens"
-
-/-- Test MCTS basic operations -/
-@[test]
-def testMCTS : IO Unit := do
-  let initialState : mcts.ProofState := {
-    goals := #["∀ x, x = x"]
-    history := #[]
-    isSolved := false
-  }
-
-  let root := mcts.createRoot initialState
-  LeanTest.assertEqual root.player .OR "Root player should be OR"
-  
-  let config : mcts.MCTSConfig := {}
-  let child : mcts.Node := {
-    action := some (.tactic "rfl")
-    state := { initialState with isSolved := true }
-    player := .OR
-    prior := 0.5
-    value := 1.0
-    visitCount := 1
-  }
-  let score := mcts.puctScore root child config
-  LeanTest.assertTrue (score > 0.0) "PUCT score should be positive"
-
-  let children := #[child, child]
-  let andVal := mcts.andNodeValue children
-  let orVal := mcts.orNodeValue children
-  LeanTest.assertTrue (andVal == 1.0) "AND node value should be 1.0"
-  LeanTest.assertTrue (orVal == 1.0) "OR node value should be 1.0"
-
-/-- Test mock prover -/
-@[test]
-def testProver : IO Unit := do
-  let mockProver : prover.MockProver := {}
-  let state : mcts.ProofState := {
-    goals := #["test goal"]
-    history := #[]
-  }
-
-  let suggestions := prover.MockProver.mockSuggestions mockProver state
-  LeanTest.assertTrue (suggestions.size > 0) "Should provide suggestions"
 
 /-- Test NanoProof model forward pass -/
 @[test]

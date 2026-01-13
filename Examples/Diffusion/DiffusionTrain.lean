@@ -7,9 +7,9 @@ import Tyr.Torch
 import Tyr.TensorStruct
 import Tyr.Optim
 import Tyr.NanoProof
-import Tyr.Diffusion
-import Tyr.DiffusionSchedule
-import Tyr.DiffusionCheckpoint
+import Examples.Diffusion.Diffusion
+import Examples.Diffusion.DiffusionSchedule
+import Examples.Diffusion.DiffusionCheckpoint
 
 namespace torch.diffusion.train
 

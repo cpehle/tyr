@@ -4,7 +4,7 @@
 import Tyr.Torch
 import Tyr.TensorStruct
 import Tyr.Optim
-import Tyr.GPT
+import Examples.GPT.GPT
 
 namespace torch.train
 

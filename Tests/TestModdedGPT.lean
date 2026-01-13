@@ -19,9 +19,9 @@
 import Tyr
 import Tyr.Distributed
 import Tyr.Sharding
-import Tyr.ModdedGPT
+import Examples.GPT.ModdedGPT
 import Tyr.DataLoader
-import Tyr.ModdedTrain
+import Examples.GPT.ModdedTrain
 import Tyr.Optim.PolarExpress
 import Tyr.Optim.NorMuon
 import Tyr.Optim.DistAdam
@@ -229,8 +229,8 @@ def testModdedGPTForward : IO Unit := do
   let seqLen : UInt64 := 32
   let input ← randint 0 cfg.vocabSize.toInt64 #[batchSize, seqLen]
 
-  -- Forward pass
-  let logits ← forward params yarn input 3 3
+  -- Forward pass (window pattern is in cfg)
+  let logits ← forward params yarn input
 
   -- Check output
   let logitsMean := nn.item (nn.meanAll logits)
@@ -265,8 +265,8 @@ def testLoss : IO Unit := do
   let input ← randint 0 cfg.vocabSize.toInt64 #[batchSize, seqLen]
   let targets ← randint 0 cfg.vocabSize.toInt64 #[batchSize, seqLen]
 
-  -- Compute loss
-  let lossT ← moddedGpt.loss params yarn input targets 3 3
+  -- Compute loss (window pattern is now in cfg)
+  let lossT ← moddedGpt.loss params yarn input targets
   let lossVal := nn.item lossT
 
   LeanTest.assertTrue (isFiniteFloat lossVal) "Loss should be finite"

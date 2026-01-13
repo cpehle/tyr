@@ -2,6 +2,9 @@
   Tests for Diffusion Model Implementation
 -/
 import Tyr
+import Examples.Diffusion.Diffusion
+import Examples.Diffusion.DiffusionSchedule
+import Examples.Diffusion.DiffusionTrain
 import LeanTest
 
 open torch
@@ -108,9 +111,10 @@ def testTrainStep : IO Unit := do
   LeanTest.assertTrue (not (Float.isNaN loss)) "Loss not NaN"
   LeanTest.assertTrue (loss > 0) "Loss positive"
   -- Verify parameters changed
-  let paramSum := nn.item (nn.sumAll params.token_emb)
-  let paramSum' := nn.item (nn.sumAll params'.token_emb)
+  let diffTensor := params.token_emb - params'.token_emb
+  let diffSum := nn.item (nn.sumAll (nn.abs diffTensor))
+  
   -- Parameters should change after training step
-  LeanTest.assertTrue (Float.abs (paramSum - paramSum') > 1e-6) "Parameters updated"
+  LeanTest.assertTrue (diffSum > 1e-6) s!"Parameters updated (diff={diffSum})"
 
 

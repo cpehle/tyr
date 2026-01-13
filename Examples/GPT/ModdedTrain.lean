@@ -16,8 +16,9 @@
 import Tyr.Torch
 import Tyr.TensorStruct
 import Tyr.Distributed
-import Tyr.ModdedGPT
+import Examples.GPT.ModdedGPT
 import Tyr.DataLoader
+import Examples.GPT.GPTDataLoader
 import Tyr.Optim.NorMuon
 import Tyr.Optim.DistAdam
 
@@ -215,12 +216,11 @@ def trainStep {cfg : moddedGpt.Config} {batch seq : UInt64}
     (input : T #[batch, seq])
     (target : T #[batch, seq])
     (_optState : OptimizerState)
-    (wsShort wsLong : UInt64)
     : IO (ModdedGPTParams cfg × StepResult) := do
   let startTime ← IO.monoMsNow
 
-  -- Forward pass
-  let lossT ← moddedGpt.loss params yarn input target wsShort wsLong true
+  -- Forward pass (window pattern is in cfg)
+  let lossT ← moddedGpt.loss params yarn input target true
 
   -- Backward pass
   autograd.backwardLoss lossT
@@ -259,13 +259,12 @@ def accumulateGradients {cfg : moddedGpt.Config} {batch seq : UInt64}
     (params : ModdedGPTParams cfg)
     (yarn : YarnRotary cfg.headDim cfg.maxSeqLen)
     (batches : Array (T #[batch, seq] × T #[batch, seq]))
-    (wsShort wsLong : UInt64)
     : IO Float := do
   let mut totalLoss := 0.0
   let numBatches := batches.size
 
   for (input, target) in batches do
-    let lossT ← moddedGpt.loss params yarn input target wsShort wsLong true
+    let lossT ← moddedGpt.loss params yarn input target true
     -- Scale loss for accumulation
     let scaledLoss := div_scalar lossT numBatches.toFloat
     autograd.backwardLoss scaledLoss
@@ -291,7 +290,6 @@ def validate {cfg : moddedGpt.Config}
     (yarn : YarnRotary cfg.headDim cfg.maxSeqLen)
     (valData : DataShard)
     (batchSize seqLen : UInt64)
-    (wsShort wsLong : UInt64)
     (numBatches : UInt64 := 10)
     : IO ValidationResult := do
   let startTime ← IO.monoMsNow
@@ -302,14 +300,14 @@ def validate {cfg : moddedGpt.Config}
   let mut iter := BatchIterator.new valData batchSize seqLen
 
   for _ in [:numBatches.toNat] do
-    let (maybeBatch, newIter) ← iter.next
+    let (maybeBatch, newIter) ← iter.nextGPT
     iter := newIter
     match maybeBatch with
     | some (inputDyn, targetDyn) =>
       -- Reshape dynamic tensors to expected shape
       let input := reshape inputDyn #[batchSize, seqLen]
       let target := reshape targetDyn #[batchSize, seqLen]
-      let lossT ← moddedGpt.loss params yarn input target wsShort wsLong false
+      let lossT ← moddedGpt.loss params yarn input target false
       totalLoss := totalLoss + nn.item lossT
       numValid := numValid + 1
     | none => break
@@ -346,8 +344,8 @@ def saveCheckpoint {cfg : moddedGpt.Config} (ckpt : Checkpoint cfg) (path : Stri
   -- For now, just log parameter statistics using TensorStruct
   IO.println s!"Saving checkpoint to {path} at step {ckpt.step}"
   
-  let numParams := TensorStruct.fold (fun {s} _t acc => acc + s.numElements) 0 ckpt.params
-  let numTensors := TensorStruct.fold (fun {s} _t acc => acc + 1) 0 ckpt.params
+  let numParams := TensorStruct.fold (fun {s} _t acc => acc + s.foldl (· * ·) 1) 0 ckpt.params
+  let numTensors := TensorStruct.fold (fun {_s} _t acc => acc + 1) 0 ckpt.params
   
   IO.println s!"  Parameters: {numTensors} tensors, {numParams} elements"
   IO.println s!"  Best validation loss: {ckpt.bestValLoss}"
@@ -432,9 +430,9 @@ def runValidation (state : TrainState cfg) (_hp : Hyperparameters)
   | some valData =>
     let batchSize := getBatchSize state.step
     let seqLen := getSeqLen state.step
-    let (wsShort, wsLong) := getWindowSizes state.step
+    let _windowSizes := getWindowSizes state.step  -- Kept for API compatibility
 
-    let valResult ← validate state.params state.yarn valData batchSize seqLen wsShort wsLong
+    let valResult ← validate state.params state.yarn valData batchSize seqLen
 
     IO.println s!"Validation: loss={valResult.loss} time={valResult.timeMs}ms"
 
@@ -464,10 +462,10 @@ def trainLoop (cfg : moddedGpt.Config) (hp : Hyperparameters)
     let optState := state.optState.updateForStep stepU hp
 
     -- Update data generator
-    let dataGen := state.dataGen.updateForStep stepU hp.blockSize
+    let dataGen := state.dataGen.updateForStepGPT stepU hp.blockSize
 
     -- Get next batch
-    let (maybeBatch, newDataGen) ← dataGen.nextBatch
+    let (maybeBatch, newDataGen) ← dataGen.nextBatchGPT
     match maybeBatch with
     | none =>
       IO.println s!"Epoch complete at step {stepU}"
@@ -477,9 +475,9 @@ def trainLoop (cfg : moddedGpt.Config) (hp : Hyperparameters)
       -- Reshape dynamic tensors to expected shape
       let input := reshape inputDyn #[batchSize, seqLen]
       let target := reshape targetDyn #[batchSize, seqLen]
-      -- Training step
+      -- Training step (window pattern is in cfg)
       let (newParams, result) ← trainStep state.params state.yarn
-        input target optState wsShort wsLong
+        input target optState
 
       -- Update state
       state := { state with

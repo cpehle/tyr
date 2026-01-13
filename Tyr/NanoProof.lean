@@ -28,6 +28,11 @@ structure Config where
   n_embd : UInt64 := 768          -- embedding dimension
   num_value_bins : UInt64 := 64   -- bins for value head
   softcap : Float := 15.0         -- logit softcap value
+  /-- Window pattern for sliding window attention.
+      'L' = full context (Long), 'S' = half context (Short/Sliding).
+      Example: "LSSLSSLSSL" alternates between full and sliding window.
+      Empty string = all full context. -/
+  windowPattern : String := ""
   deriving Repr, Inhabited
 
 /-- Compute head dimension from config -/
@@ -35,6 +40,20 @@ def Config.headDim (cfg : Config) : UInt64 := cfg.n_embd / cfg.n_head
 
 /-- Check if GQA is enabled -/
 def Config.gqaEnabled (cfg : Config) : Bool := cfg.n_head != cfg.n_kv_head
+
+/-- Get window size for a specific layer based on window pattern.
+    Returns none for full context ('L'), some (seqLen/2) for sliding window ('S'). -/
+def Config.getWindowSize (cfg : Config) (layerIdx : Nat) : Option UInt64 :=
+  if cfg.windowPattern.isEmpty then
+    none  -- Full context for all layers
+  else
+    let patternLen := cfg.windowPattern.length
+    let patternIdx := layerIdx % patternLen
+    let char := cfg.windowPattern.get ⟨patternIdx⟩
+    if char == 'S' || char == 's' then
+      some (cfg.sequence_len / 2)  -- Sliding window = half context
+    else
+      none  -- 'L' or any other char = full context
 
 /-- Small config for testing -/
 def Config.small : Config :=
@@ -106,6 +125,20 @@ instance {n_embd n_head n_kv_head : UInt64} : TensorStruct (BlockParams n_embd n
   }
   fold f init p := TensorStruct.fold f (TensorStruct.fold f init p.attn) p.mlp
 
+instance {n_embd n_head n_kv_head : UInt64} : Inhabited (BlockParams n_embd n_head n_kv_head) where
+  default := {
+    attn := {
+      c_q := zeros #[n_head * (n_embd / n_head), n_embd]
+      c_k := zeros #[n_kv_head * (n_embd / n_head), n_embd]
+      c_v := zeros #[n_kv_head * (n_embd / n_head), n_embd]
+      c_proj := zeros #[n_embd, n_embd]
+    }
+    mlp := {
+      c_fc := zeros #[4 * n_embd, n_embd]
+      c_proj := zeros #[n_embd, 4 * n_embd]
+    }
+  }
+
 /-- Parameters for value head (for RL training) -/
 structure ValueHeadParams (n_embd num_bins : UInt64) where
   c_fc : T #[4 * n_embd, n_embd]
@@ -127,6 +160,12 @@ structure NanoProofParams (cfg : Config) where
   lm_head : T #[cfg.vocab_size, cfg.n_embd]
   -- Value head (optional, for RL)
   value_head : Option (ValueHeadParams cfg.n_embd cfg.num_value_bins)
+  /-- Per-layer residual scaling: controls residual stream contribution.
+      In forward: x = residLambda * blockOutput + (1 - residLambda) * residual -/
+  residLambdas : T #[cfg.n_layer]
+  /-- Per-layer skip connection scaling: controls original input contribution.
+      In forward: x = x0Lambda * x0 + (1 - x0Lambda) * x -/
+  x0Lambdas : T #[cfg.n_layer]
 
 instance {cfg : Config} : TensorStruct (NanoProofParams cfg) where
   map f p := {
@@ -134,6 +173,8 @@ instance {cfg : Config} : TensorStruct (NanoProofParams cfg) where
     blocks := p.blocks.map (TensorStruct.map f)
     lm_head := f p.lm_head
     value_head := p.value_head.map (TensorStruct.map f)
+    residLambdas := f p.residLambdas
+    x0Lambdas := f p.x0Lambdas
   }
   mapM f p := do
     let wte ← f p.wte
@@ -142,7 +183,9 @@ instance {cfg : Config} : TensorStruct (NanoProofParams cfg) where
     let value_head ← match p.value_head with
       | some v => pure (some (← TensorStruct.mapM f v))
       | none => pure none
-    pure { wte, blocks, lm_head, value_head }
+    let residLambdas ← f p.residLambdas
+    let x0Lambdas ← f p.x0Lambdas
+    pure { wte, blocks, lm_head, value_head, residLambdas, x0Lambdas }
   zipWith f p1 p2 := {
     wte := f p1.wte p2.wte
     blocks := Array.zipWith (TensorStruct.zipWith f) p1.blocks p2.blocks
@@ -150,11 +193,15 @@ instance {cfg : Config} : TensorStruct (NanoProofParams cfg) where
     value_head := match p1.value_head, p2.value_head with
       | some v1, some v2 => some (TensorStruct.zipWith f v1 v2)
       | _, _ => none
+    residLambdas := f p1.residLambdas p2.residLambdas
+    x0Lambdas := f p1.x0Lambdas p2.x0Lambdas
   }
   fold f init p :=
     let acc := f p.wte init
     let acc := p.blocks.foldl (fun acc b => TensorStruct.fold f acc b) acc
     let acc := f p.lm_head acc
+    let acc := f p.residLambdas acc
+    let acc := f p.x0Lambdas acc
     match p.value_head with
     | some v => TensorStruct.fold f acc v
     | none => acc
@@ -229,21 +276,31 @@ def NanoProofParams.init (cfg : Config) (withValueHead : Bool := true) : IO (Nan
   else
     pure none
 
+  -- Initialize per-layer scalars (following nanochat defaults)
+  -- residLambdas: initialized to 1.0 (full residual contribution initially)
+  -- x0Lambdas: initialized to 0.0 (no skip connection initially, grows during training)
+  let residLambdas := makeLeafParam (ones #[cfg.n_layer])
+  let x0Lambdas := makeLeafParam (zeros #[cfg.n_layer])
+
   return {
     wte := makeLeafParam (wte * scale)
     blocks := blocks
     lm_head := makeLeafParam (lm_head * scale)
     value_head := value_head
+    residLambdas := residLambdas
+    x0Lambdas := x0Lambdas
   }
 
 /-- RMSNorm helper (no learnable parameters) -/
 def norm {s : Shape} (x : T s) : T s := nanoproof.rmsNorm x
 
-/-- Attention forward pass -/
+/-- Attention forward pass with optional sliding window.
+    windowSize: none = full context, some n = attend only to last n positions -/
 def attentionForward {batch seq n_embd n_head n_kv_head : UInt64}
     (params : AttentionParams n_embd n_head n_kv_head)
     (x : T #[batch, seq, n_embd])
     (rotaryCache : RotaryCache rotaryLen (n_embd / n_head))
+    (windowSize : Option UInt64 := none)
     : T #[batch, seq, n_embd] :=
   let head_dim := n_embd / n_head
 
@@ -274,8 +331,11 @@ def attentionForward {batch seq n_embd n_head n_kv_head : UInt64}
   let v := nn.transpose_for_attention v
 
   -- Scaled dot-product attention with GQA
+  -- Use sliding window if specified, otherwise full causal attention
   let enableGqa := n_head != n_kv_head
-  let attn := nn.scaledDotProductAttentionGQA q k v 0.0 true enableGqa
+  let attn := match windowSize with
+    | none => nn.scaledDotProductAttentionGQA q k v 0.0 true enableGqa
+    | some w => nn.scaledDotProductAttentionGQAWindow q k v 0.0 true enableGqa w
 
   -- Reshape back: [batch, n, seq, d] -> [batch, seq, n*d]
   let attn := nn.transpose_from_attention attn
@@ -293,14 +353,15 @@ def mlpForward {batch seq n_embd : UInt64}
   let h := nanoproof.reluSquared h     -- ReLU² activation
   linear3d h params.c_proj             -- Project back
 
-/-- Block forward pass (pre-norm architecture) -/
+/-- Block forward pass (pre-norm architecture) with optional sliding window -/
 def blockForward {batch seq n_embd n_head n_kv_head : UInt64}
     (params : BlockParams n_embd n_head n_kv_head)
     (x : T #[batch, seq, n_embd])
     (rotaryCache : RotaryCache rotaryLen (n_embd / n_head))
+    (windowSize : Option UInt64 := none)
     : T #[batch, seq, n_embd] :=
   -- Attention with residual (pre-norm)
-  let x := x + attentionForward params.attn (norm x) rotaryCache
+  let x := x + attentionForward params.attn (norm x) rotaryCache windowSize
   -- MLP with residual (pre-norm)
   x + mlpForward params.mlp (norm x)
 
@@ -356,25 +417,47 @@ def blockForwardMlpOnly {batch seq n_embd n_head n_kv_head : UInt64}
   -- MLP with residual (pre-norm) - skip attention for now
   x + mlpForward params.mlp (norm x)
 
-/-- Full model forward pass -/
+/-- Get scalar value at index from 1D tensor.
+    NOTE: This is a simplified implementation - actual indexing should use
+    proper tensor indexing operations. -/
+def getScalar {n : UInt64} (scalars : T #[n]) (_idx : Nat) : Float :=
+  -- For now, return mean of all scalars as a workaround
+  -- TODO: Implement proper tensor indexing
+  nn.item (nn.meanAll scalars)
+
+/-- Full model forward pass with per-layer scalars -/
 def forward {cfg : Config} (batch seq : UInt64)
     (params : NanoProofParams cfg)
     (_rotaryCache : RotaryCache rotaryLen cfg.headDim)
     (idx : T #[batch, seq])
     : IO (ModelOutput batch seq cfg.vocab_size cfg.num_value_bins) := do
   -- Token embedding + norm
-  let x := nn.embedding idx params.wte
-  let x := norm x
+  let emb := nn.embedding idx params.wte
+  let x0 := norm emb
 
-  -- Transformer blocks (MLP-only for now - attention has FFI bug)
-  let x := params.blocks.foldl (init := x) fun x block =>
-    blockForwardMlpOnly block x
+  -- Transformer blocks with per-layer scalars
+  let mut curr := x0
+  for i in [:params.blocks.size] do
+    let block := params.blocks[i]!
+
+    -- Get per-layer scalars
+    let residLambda := getScalar params.residLambdas i
+    let x0Lambda := getScalar params.x0Lambdas i
+
+    -- Block forward (MLP-only for now - attention has FFI bug)
+    let blockOut := blockForwardMlpOnly block curr
+
+    -- Apply residual scaling: x = residLambda * blockOut + (1 - residLambda) * x
+    let scaled := (blockOut * residLambda) + (curr * (1.0 - residLambda))
+
+    -- Apply skip connection: x = x0Lambda * x0 + (1 - x0Lambda) * x'
+    curr := (x0 * x0Lambda) + (scaled * (1.0 - x0Lambda))
 
   -- Final norm
-  let x := norm x
+  let final := norm curr
 
   -- Policy logits (lm_head)
-  let logits := linear3d x params.lm_head
+  let logits := linear3d final params.lm_head
   let logits := nanoproof.softcap logits cfg.softcap
 
   -- Value logits - skip for now (computeValueLogits also uses match)

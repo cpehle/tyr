@@ -45,10 +45,52 @@ structure Config where
   numValueEmbeds : Nat := 3
   /-- Softcap value for logits -/
   softcapValue : Float := 30.0
+  /-- Sliding window attention pattern string.
+      Characters: L=long (full context), S=short (half context)
+      Pattern is tiled across layers. Final layer always gets L.
+      Examples: "L"=all full context, "SL"=alternating, "LSS"=one long then two short -/
+  windowPattern : String := "L"
   deriving Repr, Inhabited
 
 /-- Default modded-nanogpt configuration -/
 def Config.default : Config := {}
+
+/-! ## Sliding Window Attention Helpers -/
+
+/-- Get window size for a specific layer based on the pattern string.
+    Returns `none` for full context (L) or `some windowSize` for sliding window (S).
+
+    Pattern characters:
+    - 'L' or 'l': full context (returns none)
+    - 'S' or 's': half context (returns some (seqLen / 2))
+
+    The pattern is tiled across layers. Final layer always gets full context.
+-/
+def getWindowSizeForLayer (pattern : String) (layerIdx : Nat) (nLayers : Nat) (seqLen : UInt64)
+    : Option UInt64 :=
+  -- Final layer always gets full context
+  if layerIdx == nLayers - 1 then
+    none
+  else if pattern.isEmpty then
+    none  -- Empty pattern = full context
+  else
+    -- Get character for this layer (tiled)
+    let charIdx := layerIdx % pattern.length
+    let c := pattern.get! ⟨charIdx⟩
+    if c == 'L' || c == 'l' then
+      none  -- Full context
+    else if c == 'S' || c == 's' then
+      some (seqLen / 2)  -- Half context sliding window
+    else
+      none  -- Unknown character = full context (safe default)
+
+/-- Compute window sizes for all layers in advance.
+    Returns array of Option UInt64 where none = full context. -/
+def computeWindowSizes (cfg : Config) : Array (Option UInt64) := Id.run do
+  let mut sizes : Array (Option UInt64) := #[]
+  for i in [:cfg.nLayer.toNat] do
+    sizes := sizes.push (getWindowSizeForLayer cfg.windowPattern i cfg.nLayer.toNat cfg.maxSeqLen)
+  return sizes
 
 /-! ## Rotary Embeddings with YaRN -/
 
@@ -158,30 +200,102 @@ def CastedLinear.forward {batch seq inDim outDim : UInt64}
 
 /-! ## Causal Self-Attention -/
 
-/-- Causal self-attention with merged QKVO weights and sparse gating.
+/-- Causal self-attention with separate Q, K, V, O projections.
 
     Features:
-    - Merged Q, K, V, O projections for efficiency
-    - Sparse attention gating (12-dim input -> num_heads gate logits)
-    - Variable window sizes for different layers
-    - Optional key shifting for induction heads
+    - QK normalization (nanochat style)
+    - Rotary embeddings via YaRN
+    - Variable window sizes for sliding window attention
+    - Zero-initialized output projection (modded-nanogpt style)
+
+    Weight shapes for linear3d: [out_dim, in_dim] since it computes x @ W.T
 -/
 structure CausalSelfAttention (dim headDim numHeads : UInt64) where
-  /-- Merged QKVO weights [4*dim, numHeads*headDim] -/
-  qkvoWeight : T #[4 * dim, numHeads * headDim]
-  /-- Attention gate [12, numHeads] -/
-  attnGate : CastedLinear 12 numHeads
+  /-- Query projection [numHeads * headDim, dim] -/
+  wQ : T #[numHeads * headDim, dim]
+  /-- Key projection [numHeads * headDim, dim] -/
+  wK : T #[numHeads * headDim, dim]
+  /-- Value projection [numHeads * headDim, dim] -/
+  wV : T #[numHeads * headDim, dim]
+  /-- Output projection [dim, numHeads * headDim] -/
+  wO : T #[dim, numHeads * headDim]
   deriving Repr, TensorStruct
 
-/-- Initialize CausalSelfAttention -/
+/-- Initialize CausalSelfAttention with proper initialization -/
 def CausalSelfAttention.init (dim headDim numHeads : UInt64)
     : IO (CausalSelfAttention dim headDim numHeads) := do
-  let qkvoWeight ← randn #[4 * dim, numHeads * headDim] false
-  let attnGate ← CastedLinear.init 12 numHeads 0.02
+  -- Uniform init with bound = sqrt(3) * (1/sqrt(dim)) for same std as normal
+  let s := Float.sqrt 3.0 / Float.sqrt dim.toFloat
+  -- Weight shapes: [out_dim, in_dim] for linear3d
+  let wQ ← randn #[numHeads * headDim, dim] false
+  let wQ := mul_scalar wQ s
+  let wK ← randn #[numHeads * headDim, dim] false
+  let wK := mul_scalar wK s
+  let wV ← randn #[numHeads * headDim, dim] false
+  let wV := mul_scalar wV s
+  -- Output projection initialized to zero (modded-nanogpt style)
+  let wO := zeros #[dim, numHeads * headDim]
   return {
-    qkvoWeight := autograd.set_requires_grad (autograd.detach (mul_scalar qkvoWeight 0.02)) true
-    attnGate := attnGate
+    wQ := autograd.set_requires_grad (autograd.detach wQ) true
+    wK := autograd.set_requires_grad (autograd.detach wK) true
+    wV := autograd.set_requires_grad (autograd.detach wV) true
+    wO := autograd.set_requires_grad (autograd.detach wO) true
   }
+
+/-- Functional RMSNorm (no learnable parameters) -/
+def rmsNorm3d {batch seq dim : UInt64} (x : T #[batch, seq, dim]) : T #[batch, seq, dim] :=
+  nanoproof.rmsNorm x
+
+/-- Forward pass for attention with rotary embeddings and QK norm.
+    x: [batch, seq, dim]
+    Returns: [batch, seq, dim] -/
+def CausalSelfAttention.forward {batch seq dim headDim numHeads rotaryLen : UInt64}
+    (attn : CausalSelfAttention dim headDim numHeads)
+    (x : T #[batch, seq, dim])
+    (yarn : YarnRotary headDim rotaryLen)
+    (windowSize : Option UInt64 := none)
+    : T #[batch, seq, dim] :=
+  -- Project to Q, K, V: [batch, seq, numHeads * headDim]
+  let q := linear3d x attn.wQ
+  let k := linear3d x attn.wK
+  let v := linear3d x attn.wV
+
+  -- Reshape to [batch, seq, numHeads, headDim] for rotary/attention
+  let q := reshape q #[batch, seq, numHeads, headDim]
+  let k := reshape k #[batch, seq, numHeads, headDim]
+  let v := reshape v #[batch, seq, numHeads, headDim]
+
+  -- Slice rotary embeddings to seq length (cos/sin are [rotaryLen, headDim])
+  let cos := data.slice2d yarn.cos 0 seq
+  let sin := data.slice2d yarn.sin 0 seq
+
+  -- Apply rotary embeddings (uses half-dim rotation)
+  let q := rotary.applyRotaryEmb q cos sin
+  let k := rotary.applyRotaryEmb k cos sin
+
+  -- QK normalization (nanochat style: normalize queries and keys)
+  let q := nanoproof.rmsNorm q
+  let k := nanoproof.rmsNorm k
+
+  -- Transpose to [batch, numHeads, seq, headDim] for attention
+  let q := nn.transpose_for_attention q
+  let k := nn.transpose_for_attention k
+  let v := nn.transpose_for_attention v
+
+  -- Scaled dot-product attention with optional sliding window
+  -- Using GQA window function for sliding window, regular SDPA for full context
+  let attnOut := match windowSize with
+    | some ws => nn.scaledDotProductAttentionGQAWindow q k v 0.0 true false ws
+    | none => nn.scaled_dot_product_attention q k v 0.0 true
+
+  -- Transpose back to [batch, seq, numHeads, headDim]
+  let attnOut := nn.transpose_from_attention attnOut
+
+  -- Reshape to [batch, seq, numHeads * headDim] and project
+  let attnOut := reshape attnOut #[batch, seq, numHeads * headDim]
+  let output := linear3d attnOut attn.wO
+
+  output
 
 /-! ## MLP Layer -/
 
@@ -246,7 +360,7 @@ instance {dim : UInt64} : Inhabited (MLP dim) where
   default := { cFc := zeros _, cProj := zeros _ }
 
 instance {dim headDim numHeads : UInt64} : Inhabited (CausalSelfAttention dim headDim numHeads) where
-  default := { qkvoWeight := zeros _, attnGate := default }
+  default := { wQ := zeros _, wK := zeros _, wV := zeros _, wO := zeros _ }
 
 instance {dim headDim numHeads : UInt64} : Inhabited (Block dim headDim numHeads) where
   default := { attn := none, mlp := default }
@@ -340,16 +454,15 @@ def ModdedGPTParams.init (cfg : Config) : IO (ModdedGPTParams cfg) := do
     Implements all modded-nanogpt features:
     1. Token embedding + smear gate
     2. Add value embeddings to V in attention
-    3. Variable window attention per layer
+    3. Variable window attention per layer (configurable via windowPattern)
     4. Skip connections (layer 3 -> 6)
     5. Backout lambda
     6. Softcapped logits
 -/
 def forward {cfg : Config} {batch seq : UInt64}
     (params : ModdedGPTParams cfg)
-    (_yarn : YarnRotary cfg.headDim cfg.maxSeqLen)
+    (yarn : YarnRotary cfg.headDim cfg.maxSeqLen)
     (inputSeq : T #[batch, seq])
-    (_wsShort _wsLong : UInt64)
     (_training : Bool := true)
     : IO (T #[batch, seq, cfg.vocabSize]) := do
   -- 1. Token embedding
@@ -370,26 +483,43 @@ def forward {cfg : Config} {batch seq : UInt64}
     if i == 2 then  -- Layer 3 (0-indexed: 2)
       skipConnection := some x
 
-    -- Apply block (simplified - full implementation would include attention)
+    -- Determine window size from config's windowPattern
+    -- Pattern is tiled across layers, final layer always gets full context
+    let windowSize : Option UInt64 := getWindowSizeForLayer cfg.windowPattern i cfg.nLayer.toNat seq
+
+    -- Apply block with attention and MLP
     match block.attn with
-    | some _attn =>
-      -- Would apply attention here
-      -- For now, just apply MLP
-      let h ← block.mlp.forward x
-      x := x + h
+    | some attn =>
+      -- Pre-norm (RMSNorm before attention)
+      let xNormed := nanoproof.rmsNorm x
+      -- Apply attention with rotary embeddings and window
+      let attnOut := attn.forward xNormed yarn windowSize
+      -- Residual connection
+      let x' := x + attnOut
+      -- Pre-norm before MLP
+      let xMlpNormed := nanoproof.rmsNorm x'
+      -- Apply MLP
+      let h ← block.mlp.forward xMlpNormed
+      -- Residual connection
+      x := x' + h
     | none =>
       -- Attention skipped (layer 6)
-      -- Apply skip connection
+      -- Apply skip connection from layer 3
       match skipConnection with
       | some skip => x := x + skip
       | none => pure ()
-      let h ← block.mlp.forward x
+      -- Pre-norm before MLP
+      let xNormed := nanoproof.rmsNorm x
+      let h ← block.mlp.forward xNormed
       x := x + h
 
-  -- 4. Final projection to vocab
-  let logits := params.lmHead.forward x
+  -- 4. Final layer norm before projection
+  let xNormed := nanoproof.rmsNorm x
 
-  -- 5. Softcap logits
+  -- 5. Final projection to vocab
+  let logits := params.lmHead.forward xNormed
+
+  -- 6. Softcap logits
   let logitsCapped := nanoproof.softcap logits cfg.softcapValue
 
   return logitsCapped
@@ -400,10 +530,9 @@ def loss {cfg : Config} {batch seq : UInt64}
     (yarn : YarnRotary cfg.headDim cfg.maxSeqLen)
     (inputSeq : T #[batch, seq])
     (targets : T #[batch, seq])
-    (wsShort wsLong : UInt64)
     (training : Bool := true)
     : IO (T #[]) := do
-  let logits ← forward params yarn inputSeq wsShort wsLong training
+  let logits ← forward params yarn inputSeq training
   -- Reshape for cross-entropy: (batch*seq, vocab) vs (batch*seq,)
   let logitsFlat := reshape logits #[batch * seq, cfg.vocabSize]
   let targetsFlat := reshape targets #[batch * seq]

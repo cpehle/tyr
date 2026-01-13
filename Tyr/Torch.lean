@@ -585,6 +585,20 @@ def meanDim {s : Shape} (t : T s) (dim : Nat) (keepdim : Bool := false) : T (red
 @[extern "lean_torch_topk_values"] opaque topk_values {s : Shape} (t : @& T s) (k : UInt64) (dim : Nat) : T (replaceAtDim s dim k)
 @[extern "lean_torch_multinomial"] opaque multinomial {s : Shape} (probs : @& T s) (num_samples : UInt64) (replacement : Bool := false) : IO (T (replaceAtDim s (s.size - 1) num_samples))
 
+/-- Top-k filtering: set all logits outside the top k to -infinity.
+    Used for top-k sampling in text generation. -/
+@[extern "lean_torch_topk_filter"]
+opaque topKFilter {s : Shape} (logits : @& T s) (k : UInt64) : T s
+
+/-- Top-p (nucleus) filtering: set logits outside cumulative probability p to -infinity.
+    Used for nucleus sampling in text generation. -/
+@[extern "lean_torch_topp_filter"]
+opaque topPFilter {s : Shape} (logits : @& T s) (p : Float) : T s
+
+/-- Squeeze tensor along a specific dimension (supports negative indices). -/
+@[extern "lean_torch_squeeze_dim"]
+opaque squeezeDim {s : Shape} (input : @& T s) (dim : Int64) : T #[]
+
 -- Argmax (returns indices along dimension, removing that dimension)
 @[extern "lean_torch_argmax"] opaque argmax {s : Shape} (t : @& T s) (dim : Nat) : T (reduceShape s dim false)
 
@@ -756,6 +770,25 @@ opaque scaledDotProductAttentionGQA
     (dropout_p : Float := 0.0)
     (is_causal : Bool := true)
     (enable_gqa : Bool := false)
+    : T #[batch, n_head, seq, head_dim]
+
+/-- Scaled dot-product attention with GQA and sliding window support.
+    Q: [batch, n_head, seq, head_dim]
+    K, V: [batch, n_kv_head, seq, head_dim]
+    window_size: number of positions each query can attend to (sliding window).
+    When enable_gqa=true, K/V heads are automatically repeated to match Q heads.
+    Note: This creates a causal mask where each position attends only to the
+    previous window_size positions (including itself). -/
+@[extern "lean_torch_sdpa_gqa_window"]
+opaque scaledDotProductAttentionGQAWindow
+    {batch n_head n_kv_head seq head_dim : UInt64}
+    (query : @& T #[batch, n_head, seq, head_dim])
+    (key : @& T #[batch, n_kv_head, seq, head_dim])
+    (value : @& T #[batch, n_kv_head, seq, head_dim])
+    (dropout_p : Float := 0.0)
+    (is_causal : Bool := true)
+    (enable_gqa : Bool := false)
+    (window_size : UInt64)
     : T #[batch, n_head, seq, head_dim]
 
 end nn

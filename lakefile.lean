@@ -67,9 +67,13 @@ def commonLinkArgs : Array String := #[
   "-L/opt/homebrew/opt/libomp/lib",  -- macOS Homebrew
   "-L/usr/lib",                       -- Linux fallback
   "-lomp",
+  -- Apache Arrow/Parquet (for streaming data loading)
+  "-L/opt/homebrew/lib",              -- macOS Homebrew
+  "-larrow", "-lparquet",
   -- Runtime library paths (macOS style - Linux uses different syntax)
   "-Wl,-rpath,@executable_path/../../external/libtorch/lib",
-  "-Wl,-rpath,/opt/homebrew/opt/libomp/lib"
+  "-Wl,-rpath,/opt/homebrew/opt/libomp/lib",
+  "-Wl,-rpath,/opt/homebrew/lib"
 ]
 
 /-- Link arguments for Linux builds (use when building on Linux) -/
@@ -78,6 +82,8 @@ def linuxLinkArgs : Array String := #[
   "-Lexternal/libtorch/lib",
   "-ltorch", "-ltorch_cpu", "-lc10",
   "-L/usr/lib", "-lomp",
+  -- Apache Arrow/Parquet
+  "-larrow", "-lparquet",
   "-Wl,-rpath,$ORIGIN/../../external/libtorch/lib"
 ]
 
@@ -92,7 +98,12 @@ lean_lib Tyr where
 
 /-- Test library containing all tests -/
 lean_lib Tests where
-  roots := #[`Tests.Test, `Tests.TestDiffusion, `Tests.TestDataLoader, `Tests.TestModdedGPT]
+  roots := #[`Tests]
+  precompileModules := false
+
+/-- Examples library -/
+lean_lib Examples where
+  roots := #[`Examples]
   precompileModules := false
 
 /-! ## Executables -/

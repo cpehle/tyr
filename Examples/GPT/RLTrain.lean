@@ -6,7 +6,7 @@
 -/
 import Tyr.MCTS
 import Tyr.Prover
-import Tyr.Train
+import Examples.GPT.Train
 
 namespace rltrain
 

@@ -4,7 +4,7 @@
   Provides save/load functionality for diffusion model parameters and optimizer state.
   Follows the same pattern as Tyr/Checkpoint.lean for GPT models.
 -/
-import Tyr.Diffusion
+import Examples.Diffusion.Diffusion
 import Tyr.TensorStruct
 import Tyr.Optim
 
