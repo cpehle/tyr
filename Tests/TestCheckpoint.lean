@@ -5,7 +5,8 @@
 -/
 import Tyr
 import Examples.GPT.GPT
-import Examples.GPT.ModdedTrain
+import Examples.NanoChat.ModdedGPT
+import Examples.NanoChat.ModdedTrain
 import Tyr.Optim.DistAdam
 import Tyr.Optim.NorMuon
 import LeanTest

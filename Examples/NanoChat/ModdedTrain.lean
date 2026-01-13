@@ -16,7 +16,7 @@
 import Tyr.Torch
 import Tyr.TensorStruct
 import Tyr.Distributed
-import Examples.GPT.ModdedGPT
+import Examples.NanoChat.ModdedGPT
 import Tyr.DataLoader
 import Examples.GPT.GPTDataLoader
 import Tyr.Optim.NorMuon

@@ -133,6 +133,12 @@ lean_exe TrainDiffusion where
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
+/-- NanoChat training executable (modded GPT + distributed) -/
+lean_exe TrainNanoChat where
+  root := `Examples.NanoChat.TrainNanoChat
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
 /-- Diffusion tests executable -/
 lean_exe TestDiffusion where
   root := `Tests.TestDiffusion

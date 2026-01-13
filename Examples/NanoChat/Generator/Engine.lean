@@ -12,9 +12,9 @@
   Based on nanochat's engine.py implementation.
 -/
 import Tyr.Torch
-import Tyr.Generator.State
-import Tyr.Generator.KVCache
-import Tyr.Generator.Tools
+import Examples.NanoChat.Generator.State
+import Examples.NanoChat.Generator.KVCache
+import Examples.NanoChat.Generator.Tools
 
 namespace torch.Generator.Engine
 

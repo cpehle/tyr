@@ -12,7 +12,7 @@
 -/
 import Tyr.Torch
 import Tyr.TensorStruct
-import Tyr.NanoProof
+import Examples.NanoProof.Model
 
 namespace torch.diffusion
 

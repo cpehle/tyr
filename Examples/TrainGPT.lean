@@ -5,9 +5,9 @@
   Uses the same data format as nanoGPT.
 -/
 import Tyr
+import Tyr.Checkpoint
 import Examples.GPT.GPT
 import Examples.GPT.Train
-import Examples.GPT.Checkpoint
 import Examples.GPT.GPTDataLoader
 
 namespace Examples.TrainGPT

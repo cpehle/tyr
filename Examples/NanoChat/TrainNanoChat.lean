@@ -20,9 +20,9 @@
 -/
 import Tyr.Torch
 import Tyr.Distributed
-import Examples.GPT.ModdedGPT
+import Examples.NanoChat.ModdedGPT
 import Tyr.DataLoader
-import Examples.GPT.ModdedTrain
+import Examples.NanoChat.ModdedTrain
 import Tyr.Optim.NorMuon
 import Tyr.Optim.DistAdam
 

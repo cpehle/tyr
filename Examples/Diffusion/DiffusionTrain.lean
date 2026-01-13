@@ -6,7 +6,7 @@
 import Tyr.Torch
 import Tyr.TensorStruct
 import Tyr.Optim
-import Tyr.NanoProof
+import Examples.NanoProof.Model
 import Examples.Diffusion.Diffusion
 import Examples.Diffusion.DiffusionSchedule
 import Examples.Diffusion.DiffusionCheckpoint

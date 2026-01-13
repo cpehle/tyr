@@ -1,7 +1,8 @@
 import Tyr
+import Tyr.Checkpoint
 import Examples.GPT.GPT
 import Examples.GPT.Train
-import Examples.GPT.Checkpoint
+import Examples.NanoProof.Model
 import LeanTest
 
 open torch

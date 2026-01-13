@@ -3,14 +3,16 @@
 
   Reinforcement learning training loop for NanoProof.
   Combines MCTS self-play with supervised fine-tuning.
+
+  TODO: MCTS and Prover modules need to be recreated
 -/
-import Tyr.MCTS
-import Tyr.Prover
+-- import Tyr.MCTS      -- Deleted, needs recreation
+-- import Tyr.Prover    -- Deleted, needs recreation
 import Examples.GPT.Train
 
 namespace rltrain
 
-open mcts prover
+-- open mcts prover  -- Commented out until MCTS/Prover are recreated
 
 /-- Training transition: (state, action, value) -/
 structure Transition where

@@ -4,7 +4,7 @@
   Tests for Model Parameter serialization and structure traversal using TensorStruct.
 -/
 import Tyr
-import Examples.GPT.ModdedGPT
+import Examples.NanoChat.ModdedGPT
 import LeanTest
 
 open torch
