@@ -6,7 +6,8 @@
   This module exports the core general-purpose infrastructure:
   - Tensor operations (Torch bindings)
   - Neural network modules
-  - Optimizers
+  - Optimizers (AdamW, Muon, DistAdam)
+  - Distributed training (DDP, reduce-scatter, sharding)
   - Data loading
   - Tokenization
   - Checkpointing
@@ -30,7 +31,13 @@ import Tyr.Module
 -- Optimizers
 import Tyr.Optim
 import Tyr.Optim.Scheduler
+import Tyr.Optim.Schedule
 import Tyr.Optim.DualOptimizer
+import Tyr.Optim.DistAdam
+
+-- Distributed training
+import Tyr.Distributed
+import Tyr.Sharding
 
 -- Data loading and tokenization
 import Tyr.Data

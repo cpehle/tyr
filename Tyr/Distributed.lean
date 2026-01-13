@@ -245,4 +245,146 @@ def isMaster : IO Bool := do
 def broadcastParams {α : Type} [TensorStruct α] (params : α) : IO α := do
   TensorStruct.mapM (fun t => do broadcast t 0; pure t) params
 
+/-- All-reduce gradients across all processes.
+    Uses the gradient field of tensors that have requires_grad=true.
+
+    Args:
+    - grads: Gradient structure (typically from TensorStruct.grads)
+    - op: Reduce operation (default: average across ranks)
+
+    After this call, all ranks have the same averaged gradients.
+-/
+def allReduceGrads {α : Type} [TensorStruct α] (grads : α) (op : ReduceOp := .avg) : IO α := do
+  TensorStruct.mapM (fun t => do
+    allReduce t op
+    pure t
+  ) grads
+
+/-- All-reduce gradients asynchronously, returning work handles.
+    Use `waitAll` to wait for completion before using gradients.
+-/
+def allReduceGradsAsync {α : Type} [TensorStruct α] (grads : α) (op : ReduceOp := .avg)
+    : IO (α × Array WorkHandle) := do
+  -- Use a StateT pattern to collect handles
+  let handlesRef ← IO.mkRef #[]
+  let result ← TensorStruct.mapM (fun t => do
+    let h ← allReduceAsync t op
+    handlesRef.modify (·.push h)
+    pure t
+  ) grads
+  let handles ← handlesRef.get
+  return (result, handles)
+
+/-! ## Distributed Sampler -/
+
+/-- Configuration for distributed data sampling.
+    Ensures each rank gets a different portion of the dataset.
+-/
+structure DistributedSamplerConfig where
+  /-- Total size of the dataset -/
+  datasetSize : Nat
+  /-- Rank of this process -/
+  rank : UInt64
+  /-- Total number of processes -/
+  worldSize : UInt64
+  /-- Random seed for shuffling -/
+  seed : UInt64 := 42
+  /-- Whether to shuffle indices -/
+  shuffle : Bool := true
+  /-- Whether to drop the last incomplete batch -/
+  dropLast : Bool := false
+  deriving Repr, Inhabited
+
+/-- Distributed sampler for sharding data across ranks.
+
+    Usage:
+    ```lean
+    let sampler := DistributedSampler.create cfg
+    for idx in sampler.indices do
+      let sample := dataset[idx]!
+      -- process sample
+    ```
+-/
+structure DistributedSampler where
+  /-- Configuration -/
+  config : DistributedSamplerConfig
+  /-- Indices for this rank -/
+  indices : Array Nat
+  /-- Current epoch (for re-shuffling) -/
+  epoch : Nat := 0
+  deriving Repr
+
+/-- LCG random number generator for deterministic shuffling -/
+private def lcgNext (state : UInt64) : UInt64 :=
+  state * 6364136223846793005 + 1442695040888963407
+
+/-- Fisher-Yates shuffle -/
+private def shuffleArray (arr : Array Nat) (seed : UInt64) : Array Nat := Id.run do
+  if arr.size <= 1 then return arr
+  let mut result := arr
+  let mut state := seed
+  for i in [:(arr.size - 1)] do
+    state := lcgNext state
+    let range := arr.size - i
+    let j := i + (state % range.toUInt64).toNat
+    let tmp := result[i]!
+    result := result.set! i result[j]!
+    result := result.set! j tmp
+  return result
+
+/-- Create a distributed sampler that shards data across ranks.
+
+    Each rank gets datasetSize / worldSize indices, starting from
+    rank * (datasetSize / worldSize).
+
+    If shuffle is true, indices are shuffled deterministically
+    using the seed (same shuffle on all ranks, different slices).
+-/
+def DistributedSampler.create (cfg : DistributedSamplerConfig) : DistributedSampler := Id.run do
+  let totalSize := cfg.datasetSize
+  let worldSize := cfg.worldSize.toNat
+  let rank := cfg.rank.toNat
+
+  -- Compute shard boundaries
+  let samplesPerRank := totalSize / worldSize
+  let remainder := totalSize % worldSize
+
+  -- First 'remainder' ranks get one extra sample
+  let startIdx := if rank < remainder then
+      rank * (samplesPerRank + 1)
+    else
+      remainder * (samplesPerRank + 1) + (rank - remainder) * samplesPerRank
+
+  let numSamples := if rank < remainder then samplesPerRank + 1 else samplesPerRank
+
+  -- Generate all indices
+  let allIndices := Array.range totalSize
+
+  -- Shuffle if requested (same shuffle for all ranks)
+  let allIndices := if cfg.shuffle then
+      shuffleArray allIndices cfg.seed
+    else
+      allIndices
+
+  -- Extract this rank's portion
+  let indices := allIndices.extract startIdx (startIdx + numSamples)
+
+  { config := cfg, indices := indices, epoch := 0 }
+
+/-- Create a new sampler for the next epoch (re-shuffles if shuffle=true) -/
+def DistributedSampler.nextEpoch (sampler : DistributedSampler) : DistributedSampler :=
+  let newEpoch := sampler.epoch + 1
+  let newSeed := sampler.config.seed + newEpoch.toUInt64
+  let newConfig := { sampler.config with seed := newSeed }
+  let newSampler := DistributedSampler.create newConfig
+  { newSampler with epoch := newEpoch }
+
+/-- Get the number of samples for this rank -/
+def DistributedSampler.size (sampler : DistributedSampler) : Nat :=
+  sampler.indices.size
+
+/-- Get index at position in this rank's shard -/
+def DistributedSampler.getIndex (sampler : DistributedSampler) (pos : Nat) : Option Nat :=
+  sampler.indices[pos]?
+
 end torch.dist

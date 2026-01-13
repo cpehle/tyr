@@ -21,6 +21,7 @@ import Examples.NanoChat.GRPO
 
 -- Generation
 import Examples.NanoChat.Generator.State
+import Examples.NanoChat.Generator.TypedState
 import Examples.NanoChat.Generator.KVCache
 import Examples.NanoChat.Generator.Tools
 import Examples.NanoChat.Generator.Engine

@@ -17,11 +17,13 @@
   - Reward computation for RL
 -/
 import Tyr.Data.Task
+import Tyr.Data.TaskClass
 import Lean.Data.Json
 
 namespace torch.Tasks.LLM
 
 open torch.Data.Task
+open torch.Data.TaskClass (EvalTask EvalType EvalResult BoxedTask boxTask MixtureEntry entry)
 
 /-! ## String Helpers -/
 
@@ -41,14 +43,6 @@ def findSubstr (haystack : String) (needle : String) : Option Nat := Id.run do
         break
     if found then return some i
   return none
-
-/-! ## Evaluation Types -/
-
-/-- Evaluation type for tasks -/
-inductive EvalType where
-  | categorical  -- Multiple choice, model picks a letter
-  | generative   -- Free-form generation, extract answer
-  deriving Repr, BEq, Inhabited
 
 /-! ## Answer Extraction -/
 
@@ -107,18 +101,6 @@ structure TaskConfig where
   /-- Random seed for shuffling -/
   seed : UInt64 := 42
   deriving Repr, Inhabited
-
-/-- Result of evaluating a response -/
-structure EvalResult where
-  /-- Whether the response is correct -/
-  correct : Bool
-  /-- Confidence score (0.0 to 1.0) -/
-  score : Float
-  /-- Expected answer -/
-  expected : String
-  /-- Predicted answer -/
-  predicted : String
-  deriving Repr
 
 /-! ## ARC Task (AI2 Reasoning Challenge) -/
 
@@ -629,7 +611,62 @@ def createHumanEvalTask (path : System.FilePath) (config : TaskConfig := {})
   let examples ← loadHumanEvalFromJsonl path
   return { examples, config }
 
-/-! ## Unified Task Interface -/
+/-! ## Task Typeclass Instances -/
+
+/-- ARC task implements Task typeclass -/
+instance : EvalTask ARCTask where
+  name := "arc"
+  evalType _ := .categorical
+  size := ARCTask.size
+  getExample := ARCTask.getExample
+  evaluate := ARCTask.evaluate
+
+/-- MMLU task implements Task typeclass -/
+instance : EvalTask MMLUTask where
+  name := "mmlu"
+  evalType _ := .categorical
+  size := MMLUTask.size
+  getExample := MMLUTask.getExample
+  evaluate := MMLUTask.evaluate
+
+/-- GSM8K task implements Task typeclass -/
+instance : EvalTask GSM8KTask where
+  name := "gsm8k"
+  evalType _ := .generative
+  size := GSM8KTask.size
+  getExample := GSM8KTask.getExample
+  evaluate := GSM8KTask.evaluate
+  reward := GSM8KTask.reward
+
+/-- SpellingBee task implements Task typeclass -/
+instance : EvalTask SpellingBeeTask where
+  name := "spelling_bee"
+  evalType _ := .generative
+  size t := t.size
+  getExample := SpellingBeeTask.getExample
+  evaluate := SpellingBeeTask.evaluate
+
+/-- SimpleSpelling task implements Task typeclass -/
+instance : EvalTask SimpleSpellingTask where
+  name := "simple_spelling"
+  evalType _ := .generative
+  size t := t.size
+  getExample := SimpleSpellingTask.getExample
+  evaluate _ _ response := { correct := true, score := 1.0, expected := "", predicted := response }
+
+/-- HumanEval task implements Task typeclass -/
+instance : EvalTask HumanEvalTask where
+  name := "humaneval"
+  evalType _ := .generative
+  size := HumanEvalTask.size
+  getExample := HumanEvalTask.getExample
+  evaluate := HumanEvalTask.evaluate
+
+/-! ## Unified Task Interface (Legacy)
+
+The AnyTask union is kept for backward compatibility.
+New code should prefer using the Task typeclass via BoxedTask.
+-/
 
 /-- Generic task that wraps concrete implementations -/
 inductive AnyTask where

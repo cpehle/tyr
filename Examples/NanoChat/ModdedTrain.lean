@@ -19,6 +19,7 @@ import Tyr.Distributed
 import Examples.NanoChat.ModdedGPT
 import Tyr.DataLoader
 import Examples.GPT.GPTDataLoader
+import Tyr.Optim
 import Tyr.Optim.NorMuon
 import Tyr.Optim.DistAdam
 
@@ -147,48 +148,32 @@ def getMuonMomentum (step : UInt64) (hp : Hyperparameters)
 
 /-! ## Optimizer State -/
 
-/-- Combined optimizer state for training -/
-structure OptimizerState where
-  /-- NorMuon config for weight matrices -/
-  muonConfig : NorMuon.Config
-  /-- DistAdam config for embeddings -/
-  adamConfig : DistAdam.Config
+/-- Combined optimizer state for training.
+    Uses AdamW for all parameters (can be extended to dual optimizer later). -/
+structure OptimizerState (cfg : moddedGpt.Config) where
+  /-- AdamW optimizer state -/
+  adamState : Optim.AdamWState (ModdedGPTParams cfg)
   /-- Current step -/
   step : UInt64
-  deriving Repr
+  /-- Base learning rate -/
+  baseLr : Float := 0.023
+  /-- Weight decay -/
+  weightDecay : Float := 0.01
 
-/-- Initialize optimizer state -/
-def OptimizerState.init (distributed : Bool) (worldSize : UInt64 := 1) : OptimizerState := {
-  muonConfig := {
-    lr := 0.023
-    weightDecay := 1.2
-    momentum := 0.95
-    beta2 := 0.95
-    numIters := 5
-    distributed := distributed
-    worldSize := worldSize
+/-- Initialize optimizer state from model parameters -/
+def OptimizerState.init (cfg : moddedGpt.Config) (params : ModdedGPTParams cfg)
+    (lr : Float := 0.023) (weightDecay : Float := 0.01) : OptimizerState cfg :=
+  let opt := Optim.adamw (lr := lr) (weight_decay := weightDecay)
+  {
+    adamState := opt.init params
+    step := 0
+    baseLr := lr
+    weightDecay := weightDecay
   }
-  adamConfig := {
-    lr := 0.008
-    beta1 := 0.65
-    beta2 := 0.95
-    eps := 1e-8
-    weightDecay := 0.005
-    distributed := distributed
-  }
-  step := 0
-}
 
-/-- Update optimizer configs for current step -/
-def OptimizerState.updateForStep (state : OptimizerState) (step : UInt64)
-    (hp : Hyperparameters) : OptimizerState :=
-  let lr := getLearningRate step hp
-  let momentum := getMuonMomentum step hp
-  { state with
-    muonConfig := { state.muonConfig with lr := lr, momentum := momentum }
-    adamConfig := { state.adamConfig with lr := lr * 0.35 }  -- Adam uses lower LR
-    step := step
-  }
+/-- Get current learning rate from schedule -/
+def OptimizerState.currentLr (state : OptimizerState cfg) (hp : Hyperparameters) : Float :=
+  getLearningRate state.step hp state.baseLr
 
 /-! ## Training Step -/
 
@@ -206,18 +191,27 @@ structure StepResult where
 
 /-- Perform a single training step.
 
-    modded-nanogpt alternates:
-    - Even steps: Muon only
-    - Odd steps: Muon + Adam
+    Steps:
+    1. Zero gradients
+    2. Forward pass
+    3. Backward pass
+    4. Extract gradients
+    5. Apply optimizer (AdamW)
+    6. Return updated params and optimizer state
 -/
 def trainStep {cfg : moddedGpt.Config} {batch seq : UInt64}
     (params : ModdedGPTParams cfg)
     (yarn : YarnRotary cfg.headDim cfg.maxSeqLen)
     (input : T #[batch, seq])
     (target : T #[batch, seq])
-    (_optState : OptimizerState)
-    : IO (ModdedGPTParams cfg × StepResult) := do
+    (optState : OptimizerState cfg)
+    (hp : Hyperparameters)
+    (gradClip : Float := 1.0)
+    : IO (ModdedGPTParams cfg × OptimizerState cfg × StepResult) := do
   let startTime ← IO.monoMsNow
+
+  -- Zero gradients BEFORE forward/backward
+  let params := TensorStruct.zeroGrads params
 
   -- Forward pass (window pattern is in cfg)
   let lossT ← moddedGpt.loss params yarn input target true
@@ -225,32 +219,60 @@ def trainStep {cfg : moddedGpt.Config} {batch seq : UInt64}
   -- Backward pass
   autograd.backwardLoss lossT
 
-  -- Get loss value
+  -- Get loss value for logging
   let lossVal := nn.item lossT
 
-  -- Compute gradient norm for monitoring
-  let gradNorm := 0.0  -- Would compute actual grad norm
+  -- Gradient clipping (per-tensor norm clipping)
+  if gradClip > 0 then
+    let _ ← nn.clip_grad_norm_ params.embed gradClip
+    let _ ← nn.clip_grad_norm_ params.smearGate.weight gradClip
+    for ve in params.valueEmbeds do
+      let _ ← nn.clip_grad_norm_ ve gradClip
+    for block in params.blocks do
+      -- Attention layer (may be None for some layers)
+      match block.attn with
+      | some attn =>
+        let _ ← nn.clip_grad_norm_ attn.wQ gradClip
+        let _ ← nn.clip_grad_norm_ attn.wK gradClip
+        let _ ← nn.clip_grad_norm_ attn.wV gradClip
+        let _ ← nn.clip_grad_norm_ attn.wO gradClip
+      | none => pure ()
+      -- MLP
+      let _ ← nn.clip_grad_norm_ block.mlp.cFc gradClip
+      let _ ← nn.clip_grad_norm_ block.mlp.cProj gradClip
+    let _ ← nn.clip_grad_norm_ params.lmHead.weight gradClip
+    let _ ← nn.clip_grad_norm_ params.scalars.values gradClip
 
-  -- Update parameters
-  -- In a full implementation:
-  -- - Even steps: only update Muon params (attention, MLP)
-  -- - Odd steps: update both Muon and Adam params
+  -- Extract gradients from parameters
+  let grads := TensorStruct.grads params
 
-  -- Zero gradients for next step
-  -- (In production, done after optimizer step)
+  -- Get current learning rate from schedule
+  let lr := getLearningRate optState.step hp optState.baseLr
+
+  -- Create optimizer with current LR
+  let opt := Optim.adamw (lr := lr) (weight_decay := optState.weightDecay)
+
+  -- Apply optimizer step
+  let (newParams, newAdamState) := Optim.step opt params grads optState.adamState
 
   let endTime ← IO.monoMsNow
   let timeMs := (endTime - startTime).toFloat
 
   let result : StepResult := {
     loss := lossVal
-    gradNorm := gradNorm
+    gradNorm := 0.0  -- Could compute from grads if needed
     tokensProcessed := batch * seq
     timeMs := timeMs
   }
 
-  -- Return updated params (placeholder - actual update would modify params)
-  return (params, result)
+  let newOptState : OptimizerState cfg := {
+    adamState := newAdamState
+    step := optState.step + 1
+    baseLr := optState.baseLr
+    weightDecay := optState.weightDecay
+  }
+
+  return (newParams, newOptState, result)
 
 /-! ## Gradient Accumulation -/
 
@@ -330,12 +352,11 @@ structure Checkpoint (cfg : moddedGpt.Config) where
   /-- Model parameters -/
   params : ModdedGPTParams cfg
   /-- Optimizer state -/
-  optState : OptimizerState
+  optState : OptimizerState cfg
   /-- Current step -/
   step : UInt64
   /-- Best validation loss -/
   bestValLoss : Float
-  deriving Repr
 
 /-- Save a checkpoint to disk -/
 def saveCheckpoint {cfg : moddedGpt.Config} (ckpt : Checkpoint cfg) (path : String)
@@ -366,7 +387,7 @@ structure TrainState (cfg : moddedGpt.Config) where
   /-- YaRN rotary embeddings -/
   yarn : YarnRotary cfg.headDim cfg.maxSeqLen
   /-- Optimizer state -/
-  optState : OptimizerState
+  optState : OptimizerState cfg
   /-- Data generator -/
   dataGen : DistributedDataGenerator
   /-- Validation data -/
@@ -379,16 +400,17 @@ structure TrainState (cfg : moddedGpt.Config) where
   totalTokens : UInt64
   /-- Training start time -/
   startTime : UInt64
-  deriving Repr
 
 /-- Initialize training state -/
 def TrainState.init (cfg : moddedGpt.Config) (dataConfig : DataLoader.Config)
-    (distributed : Bool) (worldSize : UInt64)
+    (_distributed : Bool) (_worldSize : UInt64)
+    (lr : Float := 0.023) (weightDecay : Float := 0.01)
     : IO (TrainState cfg) := do
   let params ← ModdedGPTParams.init cfg
   let yarn ← YarnRotary.init cfg.headDim cfg.maxSeqLen cfg.ropeBase
 
-  let optState := OptimizerState.init distributed worldSize
+  -- Initialize optimizer state from parameters
+  let optState := OptimizerState.init cfg params lr weightDecay
 
   let initialBatchSize := getBatchSize 0
   let initialSeqLen := getSeqLen 0 cfg.blockSize
@@ -456,10 +478,7 @@ def trainLoop (cfg : moddedGpt.Config) (hp : Hyperparameters)
     -- Update schedules
     let batchSize := getBatchSize stepU
     let seqLen := getSeqLen stepU hp.blockSize
-    let (wsShort, wsLong) := getWindowSizes stepU hp.blockSize
-
-    -- Update optimizer configs
-    let optState := state.optState.updateForStep stepU hp
+    let (_wsShort, _wsLong) := getWindowSizes stepU hp.blockSize
 
     -- Update data generator
     let dataGen := state.dataGen.updateForStepGPT stepU hp.blockSize
@@ -475,14 +494,15 @@ def trainLoop (cfg : moddedGpt.Config) (hp : Hyperparameters)
       -- Reshape dynamic tensors to expected shape
       let input := reshape inputDyn #[batchSize, seqLen]
       let target := reshape targetDyn #[batchSize, seqLen]
-      -- Training step (window pattern is in cfg)
-      let (newParams, result) ← trainStep state.params state.yarn
-        input target optState
+
+      -- Training step with optimizer update
+      let (newParams, newOptState, result) ← trainStep state.params state.yarn
+        input target state.optState hp
 
       -- Update state
       state := { state with
         params := newParams
-        optState := { optState with step := stepU }
+        optState := newOptState
         dataGen := newDataGen
         step := stepU
         totalTokens := state.totalTokens + result.tokensProcessed
@@ -520,6 +540,242 @@ def syncParameters {cfg : moddedGpt.Config} (params : ModdedGPTParams cfg) : IO 
   else
     return params
 
+/-- All-reduce gradients across all ranks.
+    Call this after backward() and before optimizer.step(). -/
+def syncGradients {cfg : moddedGpt.Config} (params : ModdedGPTParams cfg) : IO Unit := do
+  let isDistributed ← dist.isInitialized
+  if isDistributed then
+    -- Extract gradients from all parameters
+    let grads := TensorStruct.grads params
+    -- All-reduce to average gradients across ranks
+    let _ ← dist.allReduceGrads grads .avg
+    pure ()
+
+/-- Distributed training step with gradient synchronization.
+
+    This is the key integration point for multi-GPU training:
+    1. Each rank computes loss and gradients on its local batch
+    2. Gradients are all-reduced (averaged) across ranks
+    3. Each rank applies the same optimizer update
+    4. All ranks end up with identical parameters
+
+    This pattern is called Data Parallel (DP) training.
+-/
+def trainStepDistributed {cfg : moddedGpt.Config} {batch seq : UInt64}
+    (params : ModdedGPTParams cfg)
+    (yarn : YarnRotary cfg.headDim cfg.maxSeqLen)
+    (input : T #[batch, seq])
+    (target : T #[batch, seq])
+    (optState : OptimizerState cfg)
+    (hp : Hyperparameters)
+    (gradClip : Float := 1.0)
+    : IO (ModdedGPTParams cfg × OptimizerState cfg × StepResult) := do
+  let startTime ← IO.monoMsNow
+
+  -- Check if distributed
+  let isDistributed ← dist.isInitialized
+  let worldSize ← if isDistributed then dist.getWorldSize else pure 1
+
+  -- Zero gradients BEFORE forward/backward
+  let params := TensorStruct.zeroGrads params
+
+  -- Forward pass (window pattern is in cfg)
+  let lossT ← moddedGpt.loss params yarn input target true
+
+  -- Backward pass
+  autograd.backwardLoss lossT
+
+  -- Get loss value for logging (before sync to avoid extra comm)
+  let lossVal := nn.item lossT
+
+  -- *** DISTRIBUTED GRADIENT SYNCHRONIZATION ***
+  -- All-reduce gradients across all ranks
+  if isDistributed then
+    syncGradients params
+
+  -- Gradient clipping (per-tensor norm clipping)
+  if gradClip > 0 then
+    let _ ← nn.clip_grad_norm_ params.embed gradClip
+    let _ ← nn.clip_grad_norm_ params.smearGate.weight gradClip
+    for ve in params.valueEmbeds do
+      let _ ← nn.clip_grad_norm_ ve gradClip
+    for block in params.blocks do
+      -- Attention layer (may be None for some layers)
+      match block.attn with
+      | some attn =>
+        let _ ← nn.clip_grad_norm_ attn.wQ gradClip
+        let _ ← nn.clip_grad_norm_ attn.wK gradClip
+        let _ ← nn.clip_grad_norm_ attn.wV gradClip
+        let _ ← nn.clip_grad_norm_ attn.wO gradClip
+      | none => pure ()
+      -- MLP
+      let _ ← nn.clip_grad_norm_ block.mlp.cFc gradClip
+      let _ ← nn.clip_grad_norm_ block.mlp.cProj gradClip
+    let _ ← nn.clip_grad_norm_ params.lmHead.weight gradClip
+    let _ ← nn.clip_grad_norm_ params.scalars.values gradClip
+
+  -- Extract gradients from parameters
+  let grads := TensorStruct.grads params
+
+  -- Get current learning rate from schedule
+  let lr := getLearningRate optState.step hp optState.baseLr
+
+  -- Create optimizer with current LR
+  let opt := Optim.adamw (lr := lr) (weight_decay := optState.weightDecay)
+
+  -- Apply optimizer step
+  let (newParams, newAdamState) := Optim.step opt params grads optState.adamState
+
+  let endTime ← IO.monoMsNow
+  let timeMs := (endTime - startTime).toFloat
+
+  -- Tokens processed = local batch * worldSize
+  let result : StepResult := {
+    loss := lossVal
+    gradNorm := 0.0  -- Could compute from grads if needed
+    tokensProcessed := batch * seq * worldSize
+    timeMs := timeMs
+  }
+
+  let newOptState : OptimizerState cfg := {
+    adamState := newAdamState
+    step := optState.step + 1
+    baseLr := optState.baseLr
+    weightDecay := optState.weightDecay
+  }
+
+  return (newParams, newOptState, result)
+
+/-- Distributed training state with sampler -/
+structure DistributedTrainState (cfg : moddedGpt.Config) extends TrainState cfg where
+  /-- Distributed sampler for data sharding -/
+  sampler : Option dist.DistributedSampler := none
+  /-- World size -/
+  worldSize : UInt64 := 1
+  /-- This rank -/
+  rank : UInt64 := 0
+
+/-- Initialize distributed training state -/
+def DistributedTrainState.init (cfg : moddedGpt.Config) (dataConfig : DataLoader.Config)
+    (lr : Float := 0.023) (weightDecay : Float := 0.01)
+    : IO (DistributedTrainState cfg) := do
+  -- Check distributed status
+  let isDistributed ← dist.isInitialized
+  let (rank, worldSize) ← if isDistributed then
+      dist.getRankAndWorldSize
+    else
+      pure (0, 1)
+
+  -- Initialize base training state
+  let params ← ModdedGPTParams.init cfg
+  let yarn ← YarnRotary.init cfg.headDim cfg.maxSeqLen cfg.ropeBase
+
+  -- Initialize optimizer state from parameters
+  let optState := OptimizerState.init cfg params lr weightDecay
+
+  let initialBatchSize := getBatchSize 0
+  let initialSeqLen := getSeqLen 0 cfg.blockSize
+  let dataGen ← DistributedDataGenerator.init dataConfig initialBatchSize initialSeqLen
+
+  -- Create distributed sampler if in distributed mode
+  let sampler := if isDistributed then
+      some (dist.DistributedSampler.create {
+        datasetSize := 1000000  -- Will be updated based on actual data
+        rank := rank
+        worldSize := worldSize
+        seed := 42
+        shuffle := true
+      })
+    else
+      none
+
+  let startTime ← IO.monoMsNow
+
+  return {
+    params := params
+    yarn := yarn
+    optState := optState
+    dataGen := dataGen
+    valData := none
+    step := 0
+    bestValLoss := 1e30
+    totalTokens := 0
+    startTime := startTime.toUInt64
+    sampler := sampler
+    worldSize := worldSize
+    rank := rank
+  }
+
+/-- Distributed training loop with proper gradient sync -/
+def trainLoopDistributed (cfg : moddedGpt.Config) (hp : Hyperparameters)
+    (state : DistributedTrainState cfg) : IO (DistributedTrainState cfg) := do
+  let totalSteps := hp.numIterations + hp.extensionIterations
+  let mut state := state
+  let isMaster := state.rank == 0
+
+  for step in [:totalSteps.toNat] do
+    let stepU := step.toUInt64
+
+    -- Update schedules
+    let batchSize := getBatchSize stepU
+    let seqLen := getSeqLen stepU hp.blockSize
+    let (_wsShort, _wsLong) := getWindowSizes stepU hp.blockSize
+
+    -- Update data generator
+    let dataGen := state.dataGen.updateForStepGPT stepU hp.blockSize
+
+    -- Get next batch
+    let (maybeBatch, newDataGen) ← dataGen.nextBatchGPT
+    match maybeBatch with
+    | none =>
+      if isMaster then
+        IO.println s!"Epoch complete at step {stepU}"
+      state := { state with dataGen := newDataGen }
+      continue
+    | some (inputDyn, targetDyn) =>
+      -- Reshape dynamic tensors to expected shape
+      let input := reshape inputDyn #[batchSize, seqLen]
+      let target := reshape targetDyn #[batchSize, seqLen]
+
+      -- Distributed training step with gradient sync
+      let (newParams, newOptState, result) ← trainStepDistributed state.params state.yarn
+        input target state.optState hp
+
+      -- Update state
+      state := { state with
+        params := newParams
+        optState := newOptState
+        dataGen := newDataGen
+        step := stepU
+        totalTokens := state.totalTokens + result.tokensProcessed
+      }
+
+      -- Log progress (only on master)
+      if isMaster then
+        logProgress state.toTrainState result hp
+
+      -- Validation (only on master, but all ranks participate in forward pass)
+      if stepU % hp.valInterval == 0 && stepU > 0 then
+        let baseState ← runValidation state.toTrainState hp
+        state := { state with
+          bestValLoss := baseState.bestValLoss
+          valData := baseState.valData
+        }
+
+      -- Checkpoint (only on master)
+      if stepU % hp.checkpointInterval == 0 && stepU > 0 && isMaster then
+        let ckpt : Checkpoint cfg := {
+          params := state.params
+          optState := state.optState
+          step := stepU
+          bestValLoss := state.bestValLoss
+        }
+        saveCheckpoint ckpt s!"checkpoints/step_{stepU}.ckpt"
+
+  if isMaster then
+    IO.println s!"Training complete! Total tokens: {state.totalTokens}"
+  return state
+
 /-- Distributed training loop wrapper -/
 def trainDistributed (cfg : moddedGpt.Config) (hp : Hyperparameters)
     (dataConfig : DataLoader.Config) : IO Unit := do
@@ -537,14 +793,19 @@ def trainDistributed (cfg : moddedGpt.Config) (hp : Hyperparameters)
     IO.println s!"Config: {repr cfg}"
     IO.println s!"Hyperparameters: {repr hp}"
 
-  -- Initialize training state
-  let state ← TrainState.init cfg dataConfig isDistributed worldSize
+  -- Initialize distributed training state
+  let state ← DistributedTrainState.init cfg dataConfig
 
-  -- Synchronize parameters
-  let _ ← syncParameters state.params
+  -- Synchronize parameters from rank 0
+  let syncedParams ← syncParameters state.params
+  let state := { state with params := syncedParams }
 
-  -- Run training
-  let finalState ← trainLoop cfg hp state
+  -- Barrier to ensure all ranks are ready
+  if isDistributed then
+    dist.barrier
+
+  -- Run distributed training loop
+  let finalState ← trainLoopDistributed cfg hp state
 
   if isMaster then
     IO.println s!"Training finished!"

@@ -13,6 +13,7 @@
 -/
 import Tyr.Torch
 import Examples.NanoChat.Generator.State
+import Examples.NanoChat.Generator.TypedState
 import Examples.NanoChat.Generator.KVCache
 import Examples.NanoChat.Generator.Tools
 
@@ -125,6 +126,126 @@ def processToken (engine : Engine) (state : RowState) (token : TokenId)
     else
       -- Normal token
       return state.appendToken token
+
+/-! ## Type-Safe Token Processing
+
+These versions use the typed state machine from TypedState.lean.
+Invalid transitions are caught at compile time.
+-/
+
+open TypedState in
+/-- Process a token using the typed state machine.
+
+    This version uses `BoxedRowState` with type-safe transitions.
+    The key benefit is that invalid transitions (e.g., calling `exitToolBlock`
+    when not in a tool block) return `none` rather than silently succeeding.
+
+    Example:
+    ```
+    -- Using typed state, this pattern is enforced:
+    let state := BoxedRowState.initial prompt
+    let state := state.appendToken tok1  -- OK: appending always valid
+    -- state.exitToolBlock ...           -- Returns none: not in tool block
+    let state := state.enterToolBlock "calc" |>.getD state  -- Enter tool block
+    -- Now exitToolBlock will return some
+    ```
+-/
+def processTokenTyped (engine : Engine) (state : BoxedRowState) (token : TokenId)
+    (decode : Array TokenId → String) (encode : String → Array TokenId)
+    : IO BoxedRowState := do
+  -- Check for end token first
+  if engine.specialTokens.isEndToken token then
+    -- Can only mark complete from normal phase
+    match state.markComplete with
+    | some completed => return completed.appendToken token
+    | none =>
+      -- Not in normal phase, just append and continue
+      return state.appendToken token
+
+  -- Check for tool start token
+  match engine.specialTokens.isToolStart token with
+  | some toolName =>
+    -- enterToolBlock only works from normal phase
+    match state.enterToolBlock toolName with
+    | some toolState => return toolState.appendToken token
+    | none =>
+      -- Already in tool block or other phase, just append
+      return state.appendToken token
+  | none =>
+    -- Check for tool end (transitions out of tool block)
+    if state.isInToolBlock && engine.specialTokens.isToolEnd token then
+      -- Execute the tool
+      let toolInput := decode state.toolInputTokens
+      let result ← engine.toolRegistry.dispatch toolInput
+
+      -- Encode result with markers
+      let resultStr := if result.success then result.output else s!"Error: {result.error.getD "unknown"}"
+      let outputTokens := #[engine.specialTokens.outputStart] ++
+                          encode resultStr ++
+                          #[engine.specialTokens.outputEnd]
+
+      -- exitToolBlock only works from tool block phase
+      match state.exitToolBlock outputTokens with
+      | some forcingState => return forcingState.appendToken token
+      | none => return state.appendToken token  -- Shouldn't happen
+    else if state.isInToolBlock then
+      -- Accumulate tool input token
+      match state.accumulateToolToken token with
+      | some newState => return newState.appendToken token
+      | none => return state.appendToken token
+    else
+      -- Normal token
+      return state.appendToken token
+
+/-- Generate using typed state machine.
+
+    Same as `generate` but uses `TypedBatchState` with compile-time
+    phase checking. This version demonstrates how the typed state machine
+    integrates with the generation loop. -/
+def generateTyped (engine : Engine) (batch vocabSize : UInt64)
+    (promptTokens : Array (Array TokenId))
+    (runModel : Array TokenId → IO (T #[batch, vocabSize]))
+    (decode : Array TokenId → String)
+    (encode : String → Array TokenId)
+    : IO (Array (Array TokenId)) := do
+  let batchSize := promptTokens.size
+
+  -- Initialize typed batch state
+  let mut batchState := TypedState.TypedBatchState.fromPrompts promptTokens
+
+  -- Main generation loop
+  for _ in [:engine.samplingConfig.maxTokens] do
+    -- Check if all rows are complete
+    if batchState.allComplete then break
+
+    -- Get last tokens for each row
+    let lastTokensArr := batchState.rows.map fun row =>
+      row.lastToken.getD 0
+
+    -- Run model to get logits
+    let logits ← runModel lastTokensArr
+
+    -- Sample next tokens
+    let sampledTokens ← sampleWithConfig logits engine.samplingConfig
+
+    -- Process each token with typed state machine
+    for i in [:batchSize] do
+      let row := batchState.rows[i]!
+      if !row.isCompleted then
+        -- Handle forced tokens first (from tool output injection)
+        let (tokenToProcess, newRow) :=
+          if row.isForcing then
+            match row.popForcedToken with
+            | some (some forcedTok, nextState) => (forcedTok, nextState)
+            | _ => (sampledTokens[i]!, row)
+          else
+            (sampledTokens[i]!, row)
+
+        let processedRow ← processTokenTyped engine newRow tokenToProcess decode encode
+        batchState := batchState.updateRow i processedRow
+
+  -- Return generated sequences
+  return batchState.rows.map (·.tokens)
 
 /-- Generate tokens for a batch of prompts.
 
