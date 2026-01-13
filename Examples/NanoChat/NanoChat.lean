@@ -18,6 +18,7 @@ import Examples.NanoChat.ModdedGPT
 import Examples.NanoChat.ModdedTrain
 import Examples.NanoChat.ChatSFT
 import Examples.NanoChat.GRPO
+import Examples.NanoChat.Pipeline
 
 -- Generation
 import Examples.NanoChat.Generator.State

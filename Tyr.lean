@@ -47,5 +47,8 @@ import Tyr.Tokenizer
 -- Checkpointing
 import Tyr.Checkpoint
 
+-- Pipeline orchestration
+import Tyr.Pipeline
+
 -- Metrics
 import Tyr.Metrics
