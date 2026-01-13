@@ -101,10 +101,10 @@ def computeWindowSizes (cfg : Config) : Array (Option UInt64) := Id.run do
     where only the first half of head dimensions get rotation.
 -/
 structure YarnRotary (headDim maxSeqLen : UInt64) where
-  /-- Cosine frequencies [maxSeqLen, headDim] -/
-  cos : T #[maxSeqLen, headDim]
-  /-- Sine frequencies [maxSeqLen, headDim] -/
-  sin : T #[maxSeqLen, headDim]
+  /-- Cosine frequencies [maxSeqLen, headDim/2] for half-truncated RoPE -/
+  cos : T #[maxSeqLen, headDim / 2]
+  /-- Sine frequencies [maxSeqLen, headDim/2] for half-truncated RoPE -/
+  sin : T #[maxSeqLen, headDim / 2]
   /-- Base angular frequencies [headDim/2] -/
   angularFreq : T #[headDim / 2]
   /-- Attention scale factor -/
@@ -116,17 +116,10 @@ def YarnRotary.init (headDim maxSeqLen : UInt64) (base : Float := 500000.0)
     : IO (YarnRotary headDim maxSeqLen) := do
   -- computeFreqs returns [maxSeqLen, headDim/2]
   let (cosHalf, sinHalf) ← rotary.computeFreqs maxSeqLen headDim base
-  -- For half-truncated RoPE, we duplicate the cos/sin to fill full headDim
-  -- tensor_repeat #[1, 2] doubles along dim 1: [seq, dim/2] -> [seq, dim]
-  let cosRepeated := nn.tensor_repeat cosHalf #[1, 2]
-  let sinRepeated := nn.tensor_repeat sinHalf #[1, 2]
-  -- Reshape to ensure correct type: T #[maxSeqLen, headDim]
-  let cosFull := reshape cosRepeated #[maxSeqLen, headDim]
-  let sinFull := reshape sinRepeated #[maxSeqLen, headDim]
   let angularFreq := zeros #[headDim / 2]
   return {
-    cos := cosFull
-    sin := sinFull
+    cos := cosHalf
+    sin := sinHalf
     angularFreq := angularFreq
     attnScale := 0.1
   }

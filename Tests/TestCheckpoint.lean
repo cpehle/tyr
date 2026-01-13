@@ -31,9 +31,9 @@ def testCheckpointCreation : IO Unit := do
 
   -- Init params
   let params ← moddedGpt.ModdedGPTParams.init cfg
-  
+
   -- Init optimizer state
-  let optState := OptimizerState.init false 1
+  let optState := OptimizerState.init cfg params
 
   -- Create checkpoint
   let ckpt : Checkpoint cfg := {

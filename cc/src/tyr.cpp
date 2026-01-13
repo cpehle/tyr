@@ -1687,6 +1687,8 @@ lean_object* lean_torch_slice_along_dim(
 
 // Slice a 2D tensor along dimension 0: data[start:start+len, :]
 lean_object* lean_torch_slice_2d(
+  uint64_t /*n*/,
+  uint64_t /*d*/,
   b_lean_obj_arg input,
   uint64_t start,
   uint64_t len
