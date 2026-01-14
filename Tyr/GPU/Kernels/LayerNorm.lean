@@ -1,164 +1,158 @@
 /-
-  Tyr/GPU/Kernels/LayerNorm.lean
+  Tyr/GPU/Kernels/LayerNormNew.lean
 
-  LayerNorm kernel definition translated from ThunderKittens.
-  Based on: ThunderKittens/kernels/layernorm/layernorm.cu
-
-  Operations used:
-  - warp::load/store for shared memory
-  - add, sub, mul, div element-wise
-  - sum reduction for mean/variance
-  - rsqrt for normalization
+  LayerNorm kernel using native Lean4 GPU DSL.
+  Type-safe with compile-time dimension checking.
 -/
 import Tyr.GPU.Types
-import Tyr.GPU.Codegen.AST
-import Tyr.GPU.Codegen.Emit
+import Tyr.GPU.Codegen.Var
+import Tyr.GPU.Codegen.TileTypes
+import Tyr.GPU.Codegen.IR
+import Tyr.GPU.Codegen.Monad
+import Tyr.GPU.Codegen.Ops
+import Tyr.GPU.Codegen.Loop
+import Tyr.GPU.Codegen.EmitNew
+import Tyr.GPU.Codegen.Attribute
 
 namespace Tyr.GPU.Kernels
 
-open Codegen
+open Tyr.GPU
+open Tyr.GPU.Codegen
 
-/-- LayerNorm forward kernel with residual connection
+/-- LayerNorm forward using tile-based computation
 
-This kernel computes:
-1. residual = residual + x  (residual connection)
-2. mean = sum(residual) / D
-3. var = sum((residual - mean)^2) / D
-4. out = (residual - mean) / sqrt(var + eps) * weight + bias
+Uses 64x64 tiles where each row is a token and columns span hidden dim.
+This is more efficient than vector-based for larger hidden dimensions.
 -/
-def layerNormFwd (hiddenDim : Nat := 1024) : KernelDef := {
-  name := "layernorm_fwd"
-  arch := .SM90
-  params := [
-    { name := "x_ptr", cppType := "bf16", isPointer := true },
-    { name := "residual_ptr", cppType := "bf16", isPointer := true },
-    { name := "weight_ptr", cppType := "bf16", isPointer := true },
-    { name := "bias_ptr", cppType := "bf16", isPointer := true },
-    { name := "out_ptr", cppType := "bf16", isPointer := true },
-    { name := "out_resid_ptr", cppType := "bf16", isPointer := true },
-    { name := "batch_size", cppType := "int" },
-    { name := "seq_len", cppType := "int" },
-    { name := "hidden_dim", cppType := "int" }
-  ]
-  sharedMemBytes := hiddenDim * 2 * 4  -- x, residual, weight, bias
-  body := KExpr.seqAll [
-    .comment "Declare shared vectors for hidden dimension",
-    .declSV "x_s" .BFloat16 hiddenDim,
-    .declSV "residual_s" .BFloat16 hiddenDim,
-    .declSV "weight_s" .BFloat16 hiddenDim,
-    .declSV "bias_s" .BFloat16 hiddenDim,
-    .declSV "temp_s" .BFloat16 hiddenDim,
+@[gpu_kernel .SM90]
+def layerNormTiledNew (x_ptr : GPtr GpuFloat.BFloat16) (weight_ptr : GPtr GpuFloat.BFloat16)
+    (bias_ptr : GPtr GpuFloat.BFloat16) (out_ptr : GPtr GpuFloat.BFloat16)
+    (batch_size : KVal UInt64) (hidden_dim : KVal UInt64) : KernelM Unit := do
+  let tileSize : Nat := 64
+  comment "=== LayerNorm Forward (Tiled) ==="
 
-    .comment "Declare register vectors for computations",
-    .declRV "mean" .Float32 1,
-    .declRV "var" .Float32 1,
-    .declRV "inv_std" .Float32 1,
+  comment "Register tiles for input/output"
+  let x : RT GpuFloat.BFloat16 tileSize tileSize ← allocRT .BFloat16 tileSize tileSize
+  let xf : RT GpuFloat.Float32 tileSize tileSize ← allocRT .Float32 tileSize tileSize
+  let temp : RT GpuFloat.Float32 tileSize tileSize ← allocRT .Float32 tileSize tileSize
 
-    .comment "Load norm parameters (long-resident)",
-    .load "weight_s" "weight_ptr",
-    .load "bias_s" "bias_ptr",
+  comment "Statistics vectors (one per row/token)"
+  let mean : RV GpuFloat.Float32 tileSize ← allocRV .Float32 tileSize
+  let var : RV GpuFloat.Float32 tileSize ← allocRV .Float32 tileSize
+  let invStd : RV GpuFloat.Float32 tileSize ← allocRV .Float32 tileSize
 
-    .comment "Process each token in the sequence",
-    .forLoop "seq_idx" 0 128 (KExpr.seqAll [
-      .comment "Load input and residual for this token",
-      .load "x_s" "x_ptr",
-      .load "residual_s" "residual_ptr",
+  comment "Normalization parameters"
+  let weight : RT GpuFloat.BFloat16 tileSize tileSize ← allocRT .BFloat16 tileSize tileSize
+  let bias : RT GpuFloat.BFloat16 tileSize tileSize ← allocRT .BFloat16 tileSize tileSize
 
-      .comment "Step 1: Add residual connection",
-      .binary .Add "residual_s" "residual_s" "x_s",
+  comment "Shared memory"
+  let xShared : ST GpuFloat.BFloat16 tileSize tileSize ← allocST .BFloat16 tileSize tileSize
+  let weightShared : ST GpuFloat.BFloat16 tileSize tileSize ← allocST .BFloat16 tileSize tileSize
+  let biasShared : ST GpuFloat.BFloat16 tileSize tileSize ← allocST .BFloat16 tileSize tileSize
 
-      .comment "Store updated residual for skip connection output",
-      .store "out_resid_ptr" "residual_s",
+  comment "Load normalization parameters (long-resident)"
+  load weight weightShared
+  load bias biasShared
 
-      .comment "Step 2: Compute mean = sum(residual) / D",
-      .reduce .Sum .Full "mean" "residual_s",
-      -- Note: Division by hidden_dim would need scalar div
+  comment "Process tiles of tokens"
+  forLoop 0 16 do
+    comment "Load input tile"
+    load x xShared
 
-      .comment "Step 3: Subtract mean from residual",
-      .binaryBroadcast .Sub .Row "temp_s" "residual_s" "mean",
+    comment "Convert to float32 for precision"
+    convert xf x
 
-      .comment "Step 4: Compute variance = sum((x - mean)^2) / D",
-      .binary .Mul "residual_s" "temp_s" "temp_s",
-      .reduce .Sum .Full "var" "residual_s",
-      -- Note: Division by hidden_dim + eps, then rsqrt
+    comment "Step 1: Compute row-wise mean"
+    rowSum mean xf
+    -- Note: Would need scalar division by tileSize
 
-      .comment "Step 5: Compute inverse standard deviation",
-      .unary .Rsqrt "inv_std" "var",
+    comment "Step 2: Subtract mean from each row"
+    subCol temp xf mean
 
-      .comment "Step 6: Normalize: (x - mean) * inv_std",
-      .binaryBroadcast .Mul .Row "temp_s" "temp_s" "inv_std",
+    comment "Step 3: Compute variance = mean((x - mean)^2)"
+    mul xf temp temp
+    rowSum var xf
+    -- Note: Would need scalar division + eps
 
-      .comment "Step 7: Scale and shift: out = normalized * weight + bias",
-      .binary .Mul "temp_s" "temp_s" "weight_s",
-      .binary .Add "temp_s" "temp_s" "bias_s",
+    comment "Step 4: Compute inverse std = 1/sqrt(var + eps)"
+    -- rsqrt invStd var  -- Would need vec rsqrt
 
-      .comment "Store output",
-      .store "out_ptr" "temp_s",
+    comment "Step 5: Normalize: (x - mean) * invStd"
+    mulCol temp temp invStd
 
-      .sync 0
-    ])
-  ]
-}
+    comment "Step 6: Scale and shift"
+    let weightF : RT GpuFloat.Float32 tileSize tileSize ← allocRT .Float32 tileSize tileSize
+    let biasF : RT GpuFloat.Float32 tileSize tileSize ← allocRT .Float32 tileSize tileSize
+    convert weightF weight
+    convert biasF bias
+    mul temp temp weightF
+    add temp temp biasF
 
-/-- RMSNorm kernel (simpler variant without mean subtraction)
+    comment "Convert back to bf16 and store"
+    convert x temp
+    store xShared x
 
-RMSNorm computes:
-  rms = sqrt(mean(x^2) + eps)
-  out = x / rms * weight
--/
-def rmsNormFwd (hiddenDim : Nat := 1024) : KernelDef := {
-  name := "rmsnorm_fwd"
-  arch := .SM90
-  params := [
-    { name := "x_ptr", cppType := "bf16", isPointer := true },
-    { name := "weight_ptr", cppType := "bf16", isPointer := true },
-    { name := "out_ptr", cppType := "bf16", isPointer := true },
-    { name := "hidden_dim", cppType := "int" }
-  ]
-  sharedMemBytes := hiddenDim * 2 * 2  -- x, weight
-  body := KExpr.seqAll [
-    .comment "Declare shared vectors",
-    .declSV "x_s" .BFloat16 hiddenDim,
-    .declSV "weight_s" .BFloat16 hiddenDim,
-    .declSV "temp_s" .BFloat16 hiddenDim,
+    sync
 
-    .comment "Declare register scalars",
-    .declRV "rms_sq" .Float32 1,
-    .declRV "inv_rms" .Float32 1,
+/-- RMSNorm forward (simpler variant without mean subtraction) -/
+@[gpu_kernel .SM90]
+def rmsNormTiledNew (x_ptr : GPtr GpuFloat.BFloat16) (weight_ptr : GPtr GpuFloat.BFloat16)
+    (out_ptr : GPtr GpuFloat.BFloat16) (hidden_dim : KVal UInt64) : KernelM Unit := do
+  let tileSize : Nat := 64
+  comment "=== RMSNorm Forward (Tiled) ==="
 
-    .comment "Load weight (long-resident)",
-    .load "weight_s" "weight_ptr",
+  let x : RT GpuFloat.BFloat16 tileSize tileSize ← allocRT .BFloat16 tileSize tileSize
+  let xf : RT GpuFloat.Float32 tileSize tileSize ← allocRT .Float32 tileSize tileSize
+  let temp : RT GpuFloat.Float32 tileSize tileSize ← allocRT .Float32 tileSize tileSize
 
-    .comment "Process each token",
-    .forLoop "seq_idx" 0 128 (KExpr.seqAll [
-      .comment "Load input",
-      .load "x_s" "x_ptr",
+  let rmsSq : RV GpuFloat.Float32 tileSize ← allocRV .Float32 tileSize
+  let invRms : RV GpuFloat.Float32 tileSize ← allocRV .Float32 tileSize
 
-      .comment "Compute sum of squares",
-      .binary .Mul "temp_s" "x_s" "x_s",
-      .reduce .Sum .Full "rms_sq" "temp_s",
+  let weight : RT GpuFloat.BFloat16 tileSize tileSize ← allocRT .BFloat16 tileSize tileSize
 
-      .comment "Compute inverse RMS (1/sqrt(mean(x^2) + eps))",
-      .unary .Rsqrt "inv_rms" "rms_sq",
+  let xShared : ST GpuFloat.BFloat16 tileSize tileSize ← allocST .BFloat16 tileSize tileSize
+  let weightShared : ST GpuFloat.BFloat16 tileSize tileSize ← allocST .BFloat16 tileSize tileSize
 
-      .comment "Normalize: x * inv_rms",
-      .binaryBroadcast .Mul .Row "temp_s" "x_s" "inv_rms",
+  comment "Load weight (long-resident)"
+  load weight weightShared
 
-      .comment "Scale by weight",
-      .binary .Mul "temp_s" "temp_s" "weight_s",
+  comment "Process tiles"
+  forLoop 0 16 do
+    comment "Load input"
+    load x xShared
 
-      .comment "Store output",
-      .store "out_ptr" "temp_s",
+    comment "Convert to float32"
+    convert xf x
 
-      .sync 0
-    ])
-  ]
-}
+    comment "Compute sum of squares per row"
+    mul temp xf xf
+    rowSum rmsSq temp
 
--- Generate C++ code for LayerNorm
-#eval IO.println (generateCpp (layerNormFwd 1024))
+    comment "Compute inverse RMS (would need vec rsqrt)"
+    -- rsqrtVec invRms rmsSq
 
--- Generate C++ code for RMSNorm
-#eval IO.println (generateCpp (rmsNormFwd 1024))
+    comment "Normalize: x * invRms"
+    mulCol temp xf invRms
+
+    comment "Scale by weight"
+    let weightF : RT GpuFloat.Float32 tileSize tileSize ← allocRT .Float32 tileSize tileSize
+    convert weightF weight
+    mul temp temp weightF
+
+    comment "Convert back and store"
+    convert x temp
+    store xShared x
+
+    sync
+
+-- Verify auto-generated kernel and launch definitions
+#check layerNormTiledNew.kernel
+#check layerNormTiledNew.launch
+#check rmsNormTiledNew.kernel
+#check rmsNormTiledNew.launch
+
+-- Generate C++ code
+#eval IO.println "=== LayerNorm Tiled ===" *> IO.println (generateKernel layerNormTiledNew.kernel)
+#eval IO.println "\n=== RMSNorm Tiled ===" *> IO.println (generateKernel rmsNormTiledNew.kernel)
 
 end Tyr.GPU.Kernels

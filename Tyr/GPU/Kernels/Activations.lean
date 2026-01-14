@@ -11,6 +11,7 @@ import Tyr.GPU.Codegen.Monad
 import Tyr.GPU.Codegen.Ops
 import Tyr.GPU.Codegen.Loop
 import Tyr.GPU.Codegen.EmitNew
+import Tyr.GPU.Codegen.Attribute
 
 namespace Tyr.GPU.Kernels
 
@@ -18,7 +19,9 @@ open Tyr.GPU
 open Tyr.GPU.Codegen
 
 /-- GELU activation with bias fusion -/
-def geluFwdNew : KernelM Unit := do
+@[gpu_kernel .SM90]
+def geluFwd (x_ptr : GPtr GpuFloat.BFloat16) (bias_ptr : GPtr GpuFloat.BFloat16)
+    (out_ptr : GPtr GpuFloat.BFloat16) (size : KVal UInt64) : KernelM Unit := do
   comment "=== GELU with Bias ==="
 
   let x : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
@@ -44,16 +47,10 @@ def geluFwdNew : KernelM Unit := do
     store xShared x
     sync
 
-def geluFwdKernel : Kernel :=
-  buildKernelM "gelu_fwd" .SM90 #[
-    { name := "x_ptr", dtype := .BFloat16, isPointer := true },
-    { name := "bias_ptr", dtype := .BFloat16, isPointer := true },
-    { name := "out_ptr", dtype := .BFloat16, isPointer := true },
-    { name := "size", dtype := .Float32, isPointer := false }
-  ] geluFwdNew
-
 /-- SwiGLU activation: x * sigmoid(gate) -/
-def swiGluFwdNew : KernelM Unit := do
+@[gpu_kernel .SM90]
+def swiGluFwd (x_ptr : GPtr GpuFloat.BFloat16) (gate_ptr : GPtr GpuFloat.BFloat16)
+    (out_ptr : GPtr GpuFloat.BFloat16) (size : KVal UInt64) : KernelM Unit := do
   comment "=== SwiGLU ==="
 
   let x : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
@@ -77,16 +74,10 @@ def swiGluFwdNew : KernelM Unit := do
     store xShared x
     sync
 
-def swiGluFwdKernel : Kernel :=
-  buildKernelM "swiglu_fwd" .SM90 #[
-    { name := "x_ptr", dtype := .BFloat16, isPointer := true },
-    { name := "gate_ptr", dtype := .BFloat16, isPointer := true },
-    { name := "out_ptr", dtype := .BFloat16, isPointer := true },
-    { name := "size", dtype := .Float32, isPointer := false }
-  ] swiGluFwdNew
-
 /-- GeGLU activation: x * GELU(gate) -/
-def geGluFwdNew : KernelM Unit := do
+@[gpu_kernel .SM90]
+def geGluFwd (x_ptr : GPtr GpuFloat.BFloat16) (gate_ptr : GPtr GpuFloat.BFloat16)
+    (out_ptr : GPtr GpuFloat.BFloat16) (size : KVal UInt64) : KernelM Unit := do
   comment "=== GeGLU ==="
 
   let x : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
@@ -108,17 +99,17 @@ def geGluFwdNew : KernelM Unit := do
     store xShared x
     sync
 
-def geGluFwdKernel : Kernel :=
-  buildKernelM "geglu_fwd" .SM90 #[
-    { name := "x_ptr", dtype := .BFloat16, isPointer := true },
-    { name := "gate_ptr", dtype := .BFloat16, isPointer := true },
-    { name := "out_ptr", dtype := .BFloat16, isPointer := true },
-    { name := "size", dtype := .Float32, isPointer := false }
-  ] geGluFwdNew
+-- Verify auto-generated kernel and launch definitions
+#check geluFwd.kernel
+#check geluFwd.launch
+#check swiGluFwd.kernel
+#check swiGluFwd.launch
+#check geGluFwd.kernel
+#check geGluFwd.launch
 
 -- Generate C++ code
-#eval IO.println "=== GELU ===" *> IO.println (generateKernel geluFwdKernel)
-#eval IO.println "\n=== SwiGLU ===" *> IO.println (generateKernel swiGluFwdKernel)
-#eval IO.println "\n=== GeGLU ===" *> IO.println (generateKernel geGluFwdKernel)
+#eval IO.println "=== GELU ===" *> IO.println (generateKernel geluFwd.kernel)
+#eval IO.println "\n=== SwiGLU ===" *> IO.println (generateKernel swiGluFwd.kernel)
+#eval IO.println "\n=== GeGLU ===" *> IO.println (generateKernel geGluFwd.kernel)
 
 end Tyr.GPU.Kernels

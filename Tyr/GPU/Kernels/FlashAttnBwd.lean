@@ -15,6 +15,7 @@ import Tyr.GPU.Codegen.Monad
 import Tyr.GPU.Codegen.Ops
 import Tyr.GPU.Codegen.Loop
 import Tyr.GPU.Codegen.EmitNew
+import Tyr.GPU.Codegen.Attribute
 
 namespace Tyr.GPU.Kernels
 
@@ -28,9 +29,13 @@ open Tyr.GPU.Codegen
 This version stores L_vec = log(sum(exp(S - max))) + max for each row,
 which is needed to recompute the softmax during the backward pass.
 -/
-def flashAttnFwdWithLse (tileSize : Nat := 64) (numKvBlocks : Nat := 4)
+@[gpu_kernel .SM90]
+def flashAttnFwdWithLse (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat16)
+    (V_ptr : GPtr GpuFloat.BFloat16) (O_ptr : GPtr GpuFloat.BFloat16)
+    (L_ptr : GPtr GpuFloat.Float32) (seq_len : KVal UInt64) (head_dim : KVal UInt64)
     : KernelM Unit := do
-  setArch .SM90
+  let tileSize : Nat := 64
+  let numKvBlocks : Nat := 4
   comment "=== FlashAttention Forward (with LSE for backward) ==="
 
   comment "Register tiles for Q, K, V"
@@ -117,18 +122,6 @@ def flashAttnFwdWithLse (tileSize : Nat := 64) (numKvBlocks : Nat := 4)
   comment "Store L_vec for backward pass"
   storeVec lseShared lseVec
 
-/-- Build FlashAttention forward kernel -/
-def flashAttnFwdWithLseKernel : Kernel :=
-  buildKernelM "flash_attn_fwd_lse" .SM90 #[
-    { name := "Q_ptr", dtype := .BFloat16, isPointer := true },
-    { name := "K_ptr", dtype := .BFloat16, isPointer := true },
-    { name := "V_ptr", dtype := .BFloat16, isPointer := true },
-    { name := "O_ptr", dtype := .BFloat16, isPointer := true },
-    { name := "L_ptr", dtype := .Float32, isPointer := true },  -- log-sum-exp output
-    { name := "seq_len", dtype := .Float32, isPointer := false },
-    { name := "head_dim", dtype := .Float32, isPointer := false }
-  ] (flashAttnFwdWithLse 64 4)
-
 
 /-! ## FlashAttention Backward Preparation Kernel -/
 
@@ -137,8 +130,11 @@ def flashAttnFwdWithLseKernel : Kernel :=
 This is computed separately as it's needed by the main backward kernel
 to compute dS = P * (dP - D_vec).
 -/
-def flashAttnBwdPrep (tileSize : Nat := 64) : KernelM Unit := do
-  setArch .SM90
+@[gpu_kernel .SM90]
+def flashAttnBwdPrep (dO_ptr : GPtr GpuFloat.BFloat16) (O_ptr : GPtr GpuFloat.BFloat16)
+    (D_ptr : GPtr GpuFloat.Float32) (seq_len : KVal UInt64) (head_dim : KVal UInt64)
+    : KernelM Unit := do
+  let tileSize : Nat := 64
   comment "=== FlashAttention Backward Prep ==="
   comment "Computes D_vec = rowSum(dO * O)"
 
@@ -176,16 +172,6 @@ def flashAttnBwdPrep (tileSize : Nat := 64) : KernelM Unit := do
   comment "Store D_vec"
   storeVec dVecShared dVec
 
-/-- Build backward prep kernel -/
-def flashAttnBwdPrepKernel : Kernel :=
-  buildKernelM "flash_attn_bwd_prep" .SM90 #[
-    { name := "dO_ptr", dtype := .BFloat16, isPointer := true },
-    { name := "O_ptr", dtype := .BFloat16, isPointer := true },
-    { name := "D_ptr", dtype := .Float32, isPointer := true },
-    { name := "seq_len", dtype := .Float32, isPointer := false },
-    { name := "head_dim", dtype := .Float32, isPointer := false }
-  ] (flashAttnBwdPrep 64)
-
 
 /-! ## FlashAttention Main Backward Kernel -/
 
@@ -201,9 +187,15 @@ Key equations:
   5. dK += dS^T @ Q (accumulated across query blocks)
   6. dV += P^T @ dO (accumulated across query blocks)
 -/
-def flashAttnBwd (tileSize : Nat := 64) (numKvBlocks : Nat := 4)
+@[gpu_kernel .SM90]
+def flashAttnBwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat16)
+    (V_ptr : GPtr GpuFloat.BFloat16) (dO_ptr : GPtr GpuFloat.BFloat16)
+    (L_ptr : GPtr GpuFloat.Float32) (D_ptr : GPtr GpuFloat.Float32)
+    (dQ_ptr : GPtr GpuFloat.Float32) (dK_ptr : GPtr GpuFloat.Float32)
+    (dV_ptr : GPtr GpuFloat.Float32) (seq_len : KVal UInt64) (head_dim : KVal UInt64)
     : KernelM Unit := do
-  setArch .SM90
+  let tileSize : Nat := 64
+  let numKvBlocks : Nat := 4
   comment "=== FlashAttention Backward ==="
 
   comment "=== Input tiles (from forward pass) ==="
@@ -323,28 +315,6 @@ def flashAttnBwd (tileSize : Nat := 64) (numKvBlocks : Nat := 4)
   storeAdd dKShared dK  -- Atomic add for accumulation across query blocks
   storeAdd dVShared dV  -- Atomic add for accumulation across query blocks
 
-/-- Build FlashAttention backward kernel -/
-def flashAttnBwdKernel : Kernel :=
-  buildKernelM "flash_attn_bwd" .SM90 #[
-    -- Forward activations
-    { name := "Q_ptr", dtype := .BFloat16, isPointer := true },
-    { name := "K_ptr", dtype := .BFloat16, isPointer := true },
-    { name := "V_ptr", dtype := .BFloat16, isPointer := true },
-    -- Output gradient
-    { name := "dO_ptr", dtype := .BFloat16, isPointer := true },
-    -- Stored from forward
-    { name := "L_ptr", dtype := .Float32, isPointer := true },
-    -- From prep kernel
-    { name := "D_ptr", dtype := .Float32, isPointer := true },
-    -- Output gradients
-    { name := "dQ_ptr", dtype := .Float32, isPointer := true },
-    { name := "dK_ptr", dtype := .Float32, isPointer := true },
-    { name := "dV_ptr", dtype := .Float32, isPointer := true },
-    -- Dimensions
-    { name := "seq_len", dtype := .Float32, isPointer := false },
-    { name := "head_dim", dtype := .Float32, isPointer := false }
-  ] (flashAttnBwd 64 4)
-
 
 /-! ## Combined Forward+Backward Example -/
 
@@ -364,15 +334,23 @@ def trainingPattern : String :=
   "// 4. Backward: flash_attn_bwd(Q, K, V, dO, L_vec, D_vec) -> dQ, dK, dV"
 
 
+-- Verify auto-generated kernel and launch definitions
+#check flashAttnFwdWithLse.kernel
+#check flashAttnFwdWithLse.launch
+#check flashAttnBwdPrep.kernel
+#check flashAttnBwdPrep.launch
+#check flashAttnBwd.kernel
+#check flashAttnBwd.launch
+
 -- Generate C++ code
 #eval IO.println "=== FlashAttention Forward (with LSE) ===" *>
-      IO.println (generateKernel flashAttnFwdWithLseKernel)
+      IO.println (generateKernel flashAttnFwdWithLse.kernel)
 
 #eval IO.println "\n=== FlashAttention Backward Prep ===" *>
-      IO.println (generateKernel flashAttnBwdPrepKernel)
+      IO.println (generateKernel flashAttnBwdPrep.kernel)
 
 #eval IO.println "\n=== FlashAttention Backward ===" *>
-      IO.println (generateKernel flashAttnBwdKernel)
+      IO.println (generateKernel flashAttnBwd.kernel)
 
 #eval IO.println "\n" *> IO.println trainingPattern
 

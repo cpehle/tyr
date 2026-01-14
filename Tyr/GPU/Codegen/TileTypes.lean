@@ -101,6 +101,29 @@ instance {dtype : GpuFloat} {len : Nat} : IsVec (SV dtype len) where
   len := len
   location := .Shared
 
+/-! ## Type Aliases
+
+More descriptive names for tile types. Use whichever style you prefer.
+-/
+
+/-- Register tile (alias for RT) -/
+abbrev RegTile := RT
+
+/-- Shared memory tile (alias for ST) -/
+abbrev SmemTile := ST
+
+/-- Register vector (alias for RV) -/
+abbrev RegVec := RV
+
+/-- Shared memory vector (alias for SV) -/
+abbrev SmemVec := SV
+
+/-- Global pointer (alias for GPtr) -/
+abbrev GpuPtr := GPtr
+
+/-- Kernel value (alias for KVal) -/
+abbrev KernelVal := KVal
+
 /-- Get VarId from register tile -/
 def RT.varId {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
     (t : RT dtype rows cols layout) : VarId := t.id

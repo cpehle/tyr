@@ -1,8 +1,8 @@
 /-
   Tyr/GPU/Codegen/AST.lean
 
-  Kernel expression AST matching ThunderKittens operations.
-  Used for type-checked kernel construction and C++ code generation.
+  Kernel operation types matching ThunderKittens operations.
+  These enums are used by the VarId-based IR (IR.lean).
 -/
 import Tyr.GPU.Types
 
@@ -162,98 +162,5 @@ inductive SemaphoreOp where
   | Arrive (count : Nat)  -- Arrive with transaction count
   | ArriveAndWait         -- Arrive and wait
   deriving Repr, BEq, Hashable, Inhabited, Lean.ToExpr
-
-/-- Kernel expression AST -/
-inductive KExpr where
-  -- Tile declarations
-  | declRT (name : String) (dtype : GpuFloat) (rows cols : Nat) (layout : TileLayout)
-  | declST (name : String) (dtype : GpuFloat) (rows cols : Nat) (layout : TileLayout)
-  | declRV (name : String) (dtype : GpuFloat) (len : Nat)  -- Register vector
-  | declSV (name : String) (dtype : GpuFloat) (len : Nat)  -- Shared vector
-
-  -- Memory operations
-  | load (dst src : String)           -- load(dst, src) - S→R or G→S/R
-  | store (dst src : String)          -- store(dst, src) - R→S or S/R→G
-  | loadAsync (dst src : String)      -- load_async for TMA
-  | storeAsync (dst src : String)     -- store_async for TMA
-  | tmaExpect (barrier : String) (bytes : Nat)  -- expect_bytes for TMA
-
-  -- MMA operations
-  | mma (trans : MMATranspose) (dst a b c : String)  -- d = a × b + c
-  | mm (trans : MMATranspose) (dst a b : String)     -- d = a × b (no accumulate)
-  | mmaFence (dst : String)           -- Hopper WGMMA fence
-  | mmaCommitGroup                    -- Commit WGMMA group
-  | mmaAsyncWait (n : Nat)            -- Wait for n groups
-
-  -- Element-wise unary
-  | unary (op : UnaryOp) (dst src : String)
-
-  -- Element-wise binary
-  | binary (op : BinaryOp) (dst a b : String)
-
-  -- Scalar operations
-  | scalarMul (dst src : String) (scalar : Float)  -- dst = src * scalar
-
-  -- Broadcasting (row/col vector to tile)
-  | broadcast (axis : BroadcastAxis) (dst vec : String)
-  | binaryBroadcast (op : BinaryOp) (axis : BroadcastAxis) (dst tile vec : String)
-
-  -- Reductions
-  | reduce (op : ReduceOp) (axis : ReduceAxis) (dst src : String)
-  | reduceAccum (op : ReduceOp) (axis : ReduceAxis) (dst src accum : String)
-
-  -- Scan/prefix operations (for state-space models)
-  | cumsum (axis : ReduceAxis) (dst src : String)  -- Inclusive prefix sum
-
-  -- Outer product (for state matrix updates)
-  | outer (dst a b : String)  -- dst[i,j] = a[i] * b[j]
-
-  -- Layout/type conversions
-  | swapLayout (dst src : String)
-  | transpose (dst src : String)
-  | convert (dst src : String)        -- Type conversion (e.g., bf16 → float)
-
-  -- Masking
-  | mask (op : MaskOp) (dst src : String) (fillVal : Option Float)
-
-  -- Tile slicing/splitting
-  | sliceRows (dst src : String) (startRow numRows : Nat)  -- Extract row range
-  | sliceCols (dst src : String) (startCol numCols : Nat)  -- Extract col range
-
-  -- Synchronization
-  | sync (barrierId : Nat)
-  | arrive (barrierId : Nat)
-
-  -- Control flow
-  | seq (a b : KExpr)
-  | forLoop (var : String) (lo hi : Nat) (body : KExpr)
-  | comment (text : String)           -- C++ comment for readability
-
-  deriving Repr, Inhabited
-
-/-- Helper to sequence multiple expressions -/
-def KExpr.seqAll : List KExpr → KExpr
-  | [] => .comment "noop"
-  | [e] => e
-  | e :: es => .seq e (seqAll es)
-
-/-- Kernel parameter specification -/
-structure KernelParam where
-  name : String
-  cppType : String
-  isPointer : Bool := false
-  deriving Repr, Inhabited
-
-/-- Kernel definition -/
-structure KernelDef where
-  name : String
-  arch : GpuArch
-  /-- Kernel parameters -/
-  params : List KernelParam := []
-  /-- Shared memory size requirement -/
-  sharedMemBytes : Nat := 0
-  /-- Kernel body -/
-  body : KExpr
-  deriving Repr, Inhabited
 
 end Tyr.GPU.Codegen

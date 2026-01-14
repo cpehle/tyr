@@ -1,125 +1,123 @@
 /-
-  Tyr/GPU/Kernels/FlashAttn.lean
+  Tyr/GPU/Kernels/FlashAttnNew.lean
 
-  FlashAttention kernel definition using ThunderKittens abstractions.
-  Demonstrates type-safe kernel construction and C++ code generation.
+  FlashAttention kernel using native Lean4 GPU DSL.
+  Type-safe with compile-time dimension checking.
 -/
 import Tyr.GPU.Types
-import Tyr.GPU.Codegen.AST
-import Tyr.GPU.Codegen.Emit
+import Tyr.GPU.Codegen.Var
+import Tyr.GPU.Codegen.TileTypes
+import Tyr.GPU.Codegen.IR
+import Tyr.GPU.Codegen.Monad
+import Tyr.GPU.Codegen.Ops
+import Tyr.GPU.Codegen.Loop
+import Tyr.GPU.Codegen.EmitNew
+import Tyr.GPU.Codegen.Attribute
 
 namespace Tyr.GPU.Kernels
 
-open Codegen
+open Tyr.GPU
+open Tyr.GPU.Codegen
 
-/-- FlashAttention forward kernel (simplified single-block version) -/
-def flashAttnFwd : KernelDef := {
-  name := "flash_attn_fwd"
-  arch := .SM90
-  params := [
-    { name := "Q_ptr", cppType := "bf16", isPointer := true },
-    { name := "K_ptr", cppType := "bf16", isPointer := true },
-    { name := "V_ptr", cppType := "bf16", isPointer := true },
-    { name := "O_ptr", cppType := "bf16", isPointer := true },
-    { name := "seq_len", cppType := "int", isPointer := false },
-    { name := "head_dim", cppType := "int", isPointer := false }
-  ]
-  sharedMemBytes := 64 * 64 * 2 * 3  -- Q, K, V shared tiles
-  body := KExpr.seqAll [
-    .comment "Declare register tiles",
-    .declRT "Q" .BFloat16 64 64 .Row,
-    .declRT "K" .BFloat16 64 64 .Col,    -- K must be col-major for mma_AB
-    .declRT "V" .BFloat16 64 64 .Row,
-    .declRT "S" .BFloat16 64 64 .Row,    -- QK^T scores
-    .declRT "P" .BFloat16 64 64 .Row,    -- Softmax output
-    .declRT "O" .BFloat16 64 64 .Row,    -- Output accumulator
-    .declRV "row_max" .Float32 64,       -- Row-wise max for softmax
-    .declRV "row_sum" .Float32 64,       -- Row-wise sum for softmax
+/-- FlashAttention forward kernel (simplified single-block version)
 
-    .comment "Declare shared tiles for loading from global",
-    .declST "Qs" .BFloat16 64 64 .Row,
-    .declST "Ks" .BFloat16 64 64 .Row,
-    .declST "Vs" .BFloat16 64 64 .Row,
+This demonstrates the native Lean4 DSL where:
+- Variables are Lean identifiers, not strings
+- Dimensions are checked at compile time
+- Standard do-notation is used
+-/
+@[gpu_kernel .SM90]
+def flashAttnFwdNew (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat16)
+    (V_ptr : GPtr GpuFloat.BFloat16) (O_ptr : GPtr GpuFloat.BFloat16)
+    (seq_len : KVal UInt64) (head_dim : KVal UInt64) : KernelM Unit := do
+  comment "=== FlashAttention Forward ==="
 
-    .comment "Initialize accumulators",
-    .unary .NegInfty "row_max" "row_max",
-    .unary .Zero "row_sum" "row_sum",
-    .unary .Zero "O" "O",
+  comment "Declare register tiles"
+  let q : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
+  let k : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64  -- Row-major, transposed in mmaT
+  let v : RT GpuFloat.BFloat16 64 64 .Col ← allocRT .BFloat16 64 64 .Col
+  let s : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
+  let p : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
+  let o : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
 
-    .comment "Load Q from shared to register",
-    .load "Q" "Qs",
+  comment "Row-wise tracking for online softmax"
+  let rowMax : RV GpuFloat.Float32 64 ← negInftyRV .Float32 64
+  let rowSum : RV GpuFloat.Float32 64 ← allocRV .Float32 64
 
-    .comment "Main loop over K, V blocks",
-    .forLoop "kv_idx" 0 4 (KExpr.seqAll [
-      .comment "Load K, V from shared",
-      .load "K" "Ks",
-      .load "V" "Vs",
+  comment "Declare shared tiles for loading from global"
+  let qShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
+  let kShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
+  let vShared : ST GpuFloat.BFloat16 64 64 .Col ← allocST .BFloat16 64 64 .Col
 
-      .comment "S = Q × K^T",
-      .mma .AB "S" "Q" "K" "S",
+  comment "Load Q from shared to register (long-resident)"
+  load q qShared
 
-      .comment "Apply causal mask",
-      .mask .MakeCausal "S" "S" (some (-1e10)),
+  comment "Main loop over K, V blocks"
+  forLoop 0 4 do
+    comment "Load K, V from shared"
+    load k kShared
+    load v vShared
 
-      .comment "Online softmax: update row_max",
-      .reduceAccum .Max .Row "row_max" "S" "row_max",
+    comment "S = Q × K^T (bf16 inputs, f32 accumulator)"
+    mmaT s q k s
 
-      .comment "Subtract max and exponentiate",
-      .binaryBroadcast .Sub .Col "S" "S" "row_max",
-      .unary .Exp "P" "S",
+    comment "Apply causal mask"
+    makeCausal s s (some (-1e10))
 
-      .comment "Update row_sum",
-      .reduceAccum .Sum .Row "row_sum" "P" "row_sum",
+    comment "Online softmax: update row_max"
+    rowMaxAccum rowMax s rowMax
 
-      .comment "Accumulate O = O + P × V",
-      .mma .AB "O" "P" "V" "O",
+    comment "Subtract max and exponentiate"
+    subCol s s rowMax
+    exp s s
 
-      .comment "Synchronize before next iteration",
-      .sync 0
-    ]),
+    comment "Convert to bf16 for V multiply"
+    convert p s
 
-    .comment "Final normalization: O = O / row_sum",
-    .binaryBroadcast .Div .Col "O" "O" "row_sum"
-  ]
-}
+    comment "Update row_sum"
+    rowSumAccum rowSum s rowSum
+
+    comment "Accumulate O = O + P × V"
+    mma o p v o
+
+    comment "Synchronize before next iteration"
+    sync
+
+  comment "Final normalization: O = O / row_sum"
+  divCol o o rowSum
 
 /-- Simple GEMM kernel for testing -/
-def simpleGemm : KernelDef := {
-  name := "simple_gemm"
-  arch := .SM90
-  params := [
-    { name := "A_ptr", cppType := "bf16", isPointer := true },
-    { name := "B_ptr", cppType := "bf16", isPointer := true },
-    { name := "C_ptr", cppType := "float", isPointer := true },
-    { name := "M", cppType := "int" },
-    { name := "N", cppType := "int" },
-    { name := "K", cppType := "int" }
-  ]
-  body := KExpr.seqAll [
-    .comment "Declare tiles",
-    .declRT "A" .BFloat16 64 64 .Row,
-    .declRT "B" .BFloat16 64 64 .Col,
-    .declRT "C" .Float32 64 64 .Row,
-    .declST "As" .BFloat16 64 64 .Row,
-    .declST "Bs" .BFloat16 64 64 .Row,
+@[gpu_kernel .SM90]
+def simpleGemmNew (A_ptr : GPtr GpuFloat.BFloat16) (B_ptr : GPtr GpuFloat.BFloat16)
+    (C_ptr : GPtr GpuFloat.Float32) (M : KVal UInt64) (N : KVal UInt64) (K : KVal UInt64)
+    : KernelM Unit := do
+  comment "=== Simple GEMM ==="
 
-    .comment "Initialize accumulator",
-    .unary .Zero "C" "C",
+  comment "Declare tiles"
+  let a : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
+  let b : RT GpuFloat.BFloat16 64 64 .Col ← allocRT .BFloat16 64 64 .Col
+  let c : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
 
-    .comment "Main GEMM loop",
-    .forLoop "k" 0 8 (KExpr.seqAll [
-      .load "A" "As",
-      .load "B" "Bs",
-      .mma .AB "C" "A" "B" "C",
-      .sync 0
-    ])
-  ]
-}
+  let aShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
+  let bShared : ST GpuFloat.BFloat16 64 64 .Col ← allocST .BFloat16 64 64 .Col
+
+  comment "Main GEMM loop"
+  forLoop 0 8 do
+    load a aShared
+    load b bShared
+    mma c a b c
+    sync
+
+-- Verify auto-generated kernel and launch definitions
+#check flashAttnFwdNew.kernel
+#check flashAttnFwdNew.launch
+#check simpleGemmNew.kernel
+#check simpleGemmNew.launch
 
 -- Generate C++ code for FlashAttention
-#eval IO.println (generateCpp flashAttnFwd)
+#eval IO.println "=== FlashAttention ===" *> IO.println (generateKernel flashAttnFwdNew.kernel)
 
 -- Generate C++ code for simple GEMM
-#eval IO.println (generateCpp simpleGemm)
+#eval IO.println "\n=== Simple GEMM ===" *> IO.println (generateKernel simpleGemmNew.kernel)
 
 end Tyr.GPU.Kernels
