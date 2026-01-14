@@ -94,4 +94,37 @@ def RV.varId {dtype : GpuFloat} {len : Nat} (v : RV dtype len) : VarId := v.id
 /-- Get VarId from shared vector -/
 def SV.varId {dtype : GpuFloat} {len : Nat} (v : SV dtype len) : VarId := v.id
 
+/-! ## Complex Number Types -/
+
+/-- Complex register tile (pair of real/imag tiles) -/
+structure CRT (dtype : GpuFloat) (rows cols : Nat) (layout : TileLayout := .Row) where
+  real : RT dtype rows cols layout
+  imag : RT dtype rows cols layout
+  deriving Repr
+
+/-- Complex shared memory tile -/
+structure CST (dtype : GpuFloat) (rows cols : Nat) (layout : TileLayout := .Row) where
+  real : ST dtype rows cols layout
+  imag : ST dtype rows cols layout
+  deriving Repr
+
+/-- Complex register vector -/
+structure CRV (dtype : GpuFloat) (len : Nat) where
+  real : RV dtype len
+  imag : RV dtype len
+  deriving Repr
+
+/-- Complex shared vector -/
+structure CSV (dtype : GpuFloat) (len : Nat) where
+  real : SV dtype len
+  imag : SV dtype len
+  deriving Repr
+
+/-- Get real part VarIds -/
+def CRT.realId {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
+    (t : CRT dtype rows cols layout) : VarId := t.real.id
+
+def CRT.imagId {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
+    (t : CRT dtype rows cols layout) : VarId := t.imag.id
+
 end Tyr.GPU.Codegen

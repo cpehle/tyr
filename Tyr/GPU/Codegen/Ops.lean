@@ -272,6 +272,11 @@ def tanh {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
     (dst src : RT dtype rows cols layout) : KernelM Unit := do
   emit (.unary .Tanh dst.id src.id)
 
+/-- Element-wise fast tanh (hardware-accelerated __nv_fast_tanh) -/
+def fastTanh {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
+    (dst src : RT dtype rows cols layout) : KernelM Unit := do
+  emit (.unary .FastTanh dst.id src.id)
+
 /-- Element-wise sigmoid -/
 def sigmoid {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
     (dst src : RT dtype rows cols layout) : KernelM Unit := do
@@ -704,5 +709,276 @@ def mmaCommitGroup : KernelM Unit := do
 /-- Wait for N MMA groups -/
 def mmaAsyncWait (n : Nat := 0) : KernelM Unit := do
   emit (.mmaAsyncWait n)
+
+/-! ## Complex Number Operations -/
+
+/-- Allocate a complex register tile -/
+def allocCRT (dtype : GpuFloat) (rows cols : Nat) (layout : TileLayout := .Row)
+    : KernelM (CRT dtype rows cols layout) := do
+  let realTile ← allocRT dtype rows cols layout
+  let imagTile ← allocRT dtype rows cols layout
+  pure ⟨realTile, imagTile⟩
+
+/-- Allocate a zero-initialized complex register tile -/
+def zeroCRT (dtype : GpuFloat) (rows cols : Nat) (layout : TileLayout := .Row)
+    : KernelM (CRT dtype rows cols layout) := do
+  let realTile ← zeroRT dtype rows cols layout
+  let imagTile ← zeroRT dtype rows cols layout
+  pure ⟨realTile, imagTile⟩
+
+/-- Allocate a complex shared memory tile -/
+def allocCST (dtype : GpuFloat) (rows cols : Nat) (layout : TileLayout := .Row)
+    : KernelM (CST dtype rows cols layout) := do
+  let realTile ← allocST dtype rows cols layout
+  let imagTile ← allocST dtype rows cols layout
+  pure ⟨realTile, imagTile⟩
+
+/-- Allocate a complex register vector -/
+def allocCRV (dtype : GpuFloat) (len : Nat) : KernelM (CRV dtype len) := do
+  let realVec ← allocRV dtype len
+  let imagVec ← allocRV dtype len
+  pure ⟨realVec, imagVec⟩
+
+/-- Allocate a complex shared vector -/
+def allocCSV (dtype : GpuFloat) (len : Nat) : KernelM (CSV dtype len) := do
+  let realVec ← allocSV dtype len
+  let imagVec ← allocSV dtype len
+  pure ⟨realVec, imagVec⟩
+
+/-- Complex addition: (a+bi) + (c+di) = (a+c) + (b+d)i -/
+def complexAdd {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
+    (dst a b : CRT dtype rows cols layout) : KernelM Unit := do
+  add dst.real a.real b.real
+  add dst.imag a.imag b.imag
+
+/-- Complex subtraction: (a+bi) - (c+di) = (a-c) + (b-d)i -/
+def complexSub {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
+    (dst a b : CRT dtype rows cols layout) : KernelM Unit := do
+  sub dst.real a.real b.real
+  sub dst.imag a.imag b.imag
+
+/-- Complex multiplication: (a+bi)(c+di) = (ac-bd) + (ad+bc)i -/
+def complexMul {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
+    (dst a b : CRT dtype rows cols layout) : KernelM Unit := do
+  -- Need temp tiles for intermediate results
+  let ac ← allocRT dtype rows cols layout
+  let bd ← allocRT dtype rows cols layout
+  let ad ← allocRT dtype rows cols layout
+  let bc ← allocRT dtype rows cols layout
+  -- ac = a.real * b.real
+  mul ac a.real b.real
+  -- bd = a.imag * b.imag
+  mul bd a.imag b.imag
+  -- ad = a.real * b.imag
+  mul ad a.real b.imag
+  -- bc = a.imag * b.real
+  mul bc a.imag b.real
+  -- dst.real = ac - bd
+  sub dst.real ac bd
+  -- dst.imag = ad + bc
+  add dst.imag ad bc
+
+/-- Load complex tile from shared to register -/
+def loadComplex {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
+    (dst : CRT dtype rows cols layout)
+    (src : CST dtype rows cols layout) : KernelM Unit := do
+  load dst.real src.real
+  load dst.imag src.imag
+
+/-- Store complex tile from register to shared -/
+def storeComplex {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
+    (dst : CST dtype rows cols layout)
+    (src : CRT dtype rows cols layout) : KernelM Unit := do
+  store dst.real src.real
+  store dst.imag src.imag
+
+/-- Complex matrix multiply-accumulate: D = A @ B + C
+    Uses: (a+bi)(c+di) = (ac-bd) + (ad+bc)i -/
+def complexMma {M K N : Nat} {inDtype accDtype : GpuFloat}
+    (dst : CRT accDtype M N .Row)
+    (a : CRT inDtype M K .Row)
+    (b : CRT inDtype K N .Col)
+    (c : CRT accDtype M N .Row)
+    : KernelM Unit := do
+  -- real part: ac - bd + c_real
+  let ac ← allocRT accDtype M N .Row
+  mma ac a.real b.real c.real
+  let bd ← allocRT accDtype M N .Row
+  mma bd a.imag b.imag (← zeroRT accDtype M N .Row)
+  sub dst.real ac bd
+  -- imag part: ad + bc + c_imag
+  let ad ← allocRT accDtype M N .Row
+  mma ad a.real b.imag c.imag
+  let bc ← allocRT accDtype M N .Row
+  mma bc a.imag b.real (← zeroRT accDtype M N .Row)
+  add dst.imag ad bc
+
+/-- Complex matrix multiply with B transposed -/
+def complexMmaT {M K N : Nat} {inDtype accDtype : GpuFloat}
+    (dst : CRT accDtype M N .Row)
+    (a : CRT inDtype M K .Row)
+    (b : CRT inDtype N K .Row)
+    (c : CRT accDtype M N .Row)
+    : KernelM Unit := do
+  -- real part: ac - bd + c_real
+  let ac ← allocRT accDtype M N .Row
+  mmaT ac a.real b.real c.real
+  let bd ← allocRT accDtype M N .Row
+  mmaT bd a.imag b.imag (← zeroRT accDtype M N .Row)
+  sub dst.real ac bd
+  -- imag part: ad + bc + c_imag (note: for transposed B, we use -b.imag)
+  let ad ← allocRT accDtype M N .Row
+  let negBImag ← allocRT inDtype N K .Row
+  neg negBImag b.imag
+  mmaT ad a.real negBImag c.imag
+  let bc ← allocRT accDtype M N .Row
+  mmaT bc a.imag b.real (← zeroRT accDtype M N .Row)
+  add dst.imag ad bc
+
+/-! ## Additional Complex Operations (ThunderKittens compatibility) -/
+
+/-- Zero both components of a complex tile -/
+def complexZero {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
+    (dst : CRT dtype rows cols layout) : KernelM Unit := do
+  zero dst.real
+  zero dst.imag
+
+/-- Copy complex tile (with optional type conversion) -/
+def complexCopy {dstDtype srcDtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
+    (dst : CRT dstDtype rows cols layout)
+    (src : CRT srcDtype rows cols layout) : KernelM Unit := do
+  convert dst.real src.real
+  convert dst.imag src.imag
+
+/-- Negate complex tile: -(a+bi) = -a - bi -/
+def complexNeg {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
+    (dst src : CRT dtype rows cols layout) : KernelM Unit := do
+  neg dst.real src.real
+  neg dst.imag src.imag
+
+/-- Complex conjugate: conj(a+bi) = a - bi -/
+def complexConj {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
+    (dst src : CRT dtype rows cols layout) : KernelM Unit := do
+  copy dst.real src.real
+  neg dst.imag src.imag
+
+/-- Multiply complex tile by real scalar: c * (a+bi) = ca + cbi -/
+def complexScalarMul {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
+    (dst src : CRT dtype rows cols layout) (scalar : Float) : KernelM Unit := do
+  scalarMul dst.real src.real scalar
+  scalarMul dst.imag src.imag scalar
+
+/-- Add real scalar to complex tile: (a+bi) + c = (a+c) + bi -/
+def complexScalarAdd {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
+    (dst src : CRT dtype rows cols layout) (scalar : Float) : KernelM Unit := do
+  scalarAdd dst.real src.real scalar
+  copy dst.imag src.imag
+
+/-- Complex division: (a+bi)/(c+di) = (ac+bd)/(c²+d²) + (bc-ad)/(c²+d²)i -/
+def complexDiv {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
+    (dst a b : CRT dtype rows cols layout) : KernelM Unit := do
+  -- Compute denominator: c² + d²
+  let cc ← allocRT dtype rows cols layout
+  let dd ← allocRT dtype rows cols layout
+  let denom ← allocRT dtype rows cols layout
+  mul cc b.real b.real
+  mul dd b.imag b.imag
+  add denom cc dd
+
+  -- Real part: (ac + bd) / denom
+  let ac ← allocRT dtype rows cols layout
+  let bd ← allocRT dtype rows cols layout
+  let realNum ← allocRT dtype rows cols layout
+  mul ac a.real b.real
+  mul bd a.imag b.imag
+  add realNum ac bd
+  div dst.real realNum denom
+
+  -- Imag part: (bc - ad) / denom
+  let bc ← allocRT dtype rows cols layout
+  let ad ← allocRT dtype rows cols layout
+  let imagNum ← allocRT dtype rows cols layout
+  mul bc a.imag b.real
+  mul ad a.real b.imag
+  sub imagNum bc ad
+  div dst.imag imagNum denom
+
+/-- Complex exponential: e^(a+bi) = e^a * (cos(b) + i*sin(b)) -/
+def complexExp {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
+    (dst src : CRT dtype rows cols layout) : KernelM Unit := do
+  -- Compute e^a (real exponential of real part)
+  let expA ← allocRT dtype rows cols layout
+  exp expA src.real
+
+  -- Compute cos(b) and sin(b)
+  let cosB ← allocRT dtype rows cols layout
+  let sinB ← allocRT dtype rows cols layout
+  cos cosB src.imag
+  sin sinB src.imag
+
+  -- dst.real = e^a * cos(b)
+  mul dst.real expA cosB
+  -- dst.imag = e^a * sin(b)
+  mul dst.imag expA sinB
+
+/-- Swap layout of complex tile -/
+def complexSwapLayout {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
+    (dst : CRT dtype rows cols (layout.transpose))
+    (src : CRT dtype rows cols layout) : KernelM Unit := do
+  swapLayout dst.real src.real
+  swapLayout dst.imag src.imag
+
+/-- Transpose complex tile -/
+def complexTranspose {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
+    (dst : CRT dtype cols rows layout)
+    (src : CRT dtype rows cols layout) : KernelM Unit := do
+  transpose dst.real src.real
+  transpose dst.imag src.imag
+
+/-- Allocate zero-initialized complex register vector -/
+def zeroCRV (dtype : GpuFloat) (len : Nat) : KernelM (CRV dtype len) := do
+  let realVec ← zeroRV dtype len
+  let imagVec ← zeroRV dtype len
+  pure ⟨realVec, imagVec⟩
+
+/-- Zero existing complex register vector -/
+def complexZeroVec {dtype : GpuFloat} {len : Nat}
+    (dst : CRV dtype len) : KernelM Unit := do
+  zeroVec dst.real
+  zeroVec dst.imag
+
+/-- Load complex vector from shared to register -/
+def loadComplexVec {dtype : GpuFloat} {len : Nat}
+    (dst : CRV dtype len)
+    (src : CSV dtype len) : KernelM Unit := do
+  loadVec dst.real src.real
+  loadVec dst.imag src.imag
+
+/-- Store complex vector from register to shared -/
+def storeComplexVec {dtype : GpuFloat} {len : Nat}
+    (dst : CSV dtype len)
+    (src : CRV dtype len) : KernelM Unit := do
+  storeVec dst.real src.real
+  storeVec dst.imag src.imag
+
+/-- Complex vector addition -/
+def complexAddVec {dtype : GpuFloat} {len : Nat}
+    (dst a b : CRV dtype len) : KernelM Unit := do
+  addVec dst.real a.real b.real
+  addVec dst.imag a.imag b.imag
+
+/-- Complex vector multiplication -/
+def complexMulVec {dtype : GpuFloat} {len : Nat}
+    (dst a b : CRV dtype len) : KernelM Unit := do
+  let ac ← allocRV dtype len
+  let bd ← allocRV dtype len
+  let ad ← allocRV dtype len
+  let bc ← allocRV dtype len
+  mulVec ac a.real b.real
+  mulVec bd a.imag b.imag
+  mulVec ad a.real b.imag
+  mulVec bc a.imag b.real
+  subVec dst.real ac bd
+  addVec dst.imag ad bc
 
 end Tyr.GPU.Codegen

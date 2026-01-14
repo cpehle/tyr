@@ -56,7 +56,7 @@ def ReduceAxis.toPrefix : ReduceAxis → String
 /-- Unary element-wise operations -/
 inductive UnaryOp where
   | Exp | Exp2 | Log | Log2 | Abs | Relu | Copy
-  | Neg | Sqrt | Rsqrt | Tanh | Sigmoid | Gelu  -- Activation functions
+  | Neg | Sqrt | Rsqrt | Tanh | FastTanh | Sigmoid | Gelu  -- Activation functions
   | Silu | Swish                                -- Modern activations (SwiGLU)
   | Sin | Cos                                   -- Trig (for rotary embeddings)
   | Recip                                       -- 1/x
@@ -68,7 +68,7 @@ instance : ToString UnaryOp where
   toString
     | .Exp => "Exp" | .Exp2 => "Exp2" | .Log => "Log" | .Log2 => "Log2"
     | .Abs => "Abs" | .Relu => "Relu" | .Copy => "Copy" | .Neg => "Neg"
-    | .Sqrt => "Sqrt" | .Rsqrt => "Rsqrt" | .Tanh => "Tanh"
+    | .Sqrt => "Sqrt" | .Rsqrt => "Rsqrt" | .Tanh => "Tanh" | .FastTanh => "FastTanh"
     | .Sigmoid => "Sigmoid" | .Gelu => "Gelu"
     | .Silu => "Silu" | .Swish => "Swish"
     | .Sin => "Sin" | .Cos => "Cos"
@@ -89,6 +89,7 @@ def UnaryOp.toCpp : UnaryOp → String
   | .Sqrt => "sqrt"
   | .Rsqrt => "rsqrt"
   | .Tanh => "tanh"
+  | .FastTanh => "fast_tanh"  -- Hardware-accelerated tanh (__nv_fast_tanh)
   | .Sigmoid => "sigmoid"
   | .Gelu => "gelu"
   | .Silu => "silu"

@@ -72,10 +72,12 @@ partial def generateExpr (indent : String := "  ") : KExpr → String
     | .Tril d => s!"{indent}tril({dst}, {src}, {d}{fillStr});\n"
     | .Triu d => s!"{indent}triu({dst}, {src}, {d}{fillStr});\n"
     | .MakeCausal => s!"{indent}make_causal({dst}, {src}{fillStr});\n"
+    | .MakeCausalT => s!"{indent}make_causal_t({dst}, {src}{fillStr});\n"
     | .RightFill c => s!"{indent}right_fill({dst}, {src}, {c}{fillStr});\n"
     | .LeftFill c => s!"{indent}left_fill({dst}, {src}, {c}{fillStr});\n"
     | .UpperFill r => s!"{indent}upper_fill({dst}, {src}, {r}{fillStr});\n"
     | .LowerFill r => s!"{indent}lower_fill({dst}, {src}, {r}{fillStr});\n"
+    | .UpperRightFill r c => s!"{indent}upper_right_fill({dst}, {src}, {r}, {c}{fillStr});\n"
 
   -- Tile slicing
   | .sliceRows dst src startRow numRows =>
