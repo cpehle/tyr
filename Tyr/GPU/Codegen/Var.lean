@@ -5,13 +5,14 @@
   Follows Lean4 IR convention of using index-based identifiers.
 -/
 import Std.Data.HashMap
+import Lean.ToExpr
 
 namespace Tyr.GPU.Codegen
 
 /-- Variable identifier (index-based, like Lean4 IR) -/
 structure VarId where
   idx : Nat
-  deriving Repr, BEq, Hashable, Inhabited, DecidableEq
+  deriving Repr, BEq, Hashable, Inhabited, DecidableEq, Lean.ToExpr
 
 namespace VarId
   /-- Convert to C++ identifier string -/

@@ -14,7 +14,7 @@ inductive MMATranspose where
   | ABt   -- A row, B row (B transposed)
   | AtB   -- A col, B col (A transposed)
   | AtBt  -- A col, B row (both transposed)
-  deriving Repr, BEq, Hashable, Inhabited, DecidableEq
+  deriving Repr, BEq, Hashable, Inhabited, DecidableEq, Lean.ToExpr
 
 instance : ToString MMATranspose where
   toString
@@ -33,7 +33,7 @@ def MMATranspose.toSuffix : MMATranspose → String
 /-- Reduction operations -/
 inductive ReduceOp where
   | Max | Min | Sum | Prod
-  deriving Repr, BEq, Hashable, Inhabited
+  deriving Repr, BEq, Hashable, Inhabited, Lean.ToExpr
 
 /-- Convert ReduceOp to C++ -/
 def ReduceOp.toCpp : ReduceOp → String
@@ -45,7 +45,7 @@ def ReduceOp.toCpp : ReduceOp → String
 /-- Reduction axis -/
 inductive ReduceAxis where
   | Row | Col | Full
-  deriving Repr, BEq, Hashable, Inhabited
+  deriving Repr, BEq, Hashable, Inhabited, Lean.ToExpr
 
 /-- Convert ReduceAxis to C++ function prefix -/
 def ReduceAxis.toPrefix : ReduceAxis → String
@@ -62,7 +62,7 @@ inductive UnaryOp where
   | Recip                                       -- 1/x
   | Square                                      -- x^2
   | Zero | One | PosInfty | NegInfty            -- Initialization
-  deriving Repr, BEq, Hashable, Inhabited, DecidableEq
+  deriving Repr, BEq, Hashable, Inhabited, DecidableEq, Lean.ToExpr
 
 instance : ToString UnaryOp where
   toString
@@ -106,7 +106,7 @@ def UnaryOp.toCpp : UnaryOp → String
 /-- Binary element-wise operations -/
 inductive BinaryOp where
   | Add | Sub | Mul | Div | Max | Min
-  deriving Repr, BEq, Hashable, Inhabited
+  deriving Repr, BEq, Hashable, Inhabited, Lean.ToExpr
 
 /-- Convert BinaryOp to C++ -/
 def BinaryOp.toCpp : BinaryOp → String
@@ -120,7 +120,7 @@ def BinaryOp.toCpp : BinaryOp → String
 /-- Broadcast axis -/
 inductive BroadcastAxis where
   | Row | Col
-  deriving Repr, BEq, Hashable, Inhabited
+  deriving Repr, BEq, Hashable, Inhabited, Lean.ToExpr
 
 /-- Convert BroadcastAxis to C++ suffix -/
 def BroadcastAxis.toSuffix : BroadcastAxis → String
@@ -138,14 +138,14 @@ inductive MaskOp where
   | UpperFill (rowIdx : Nat)
   | LowerFill (rowIdx : Nat)
   | UpperRightFill (row col : Nat)  -- Fill upper-right block
-  deriving Repr, BEq, Hashable, Inhabited
+  deriving Repr, BEq, Hashable, Inhabited, Lean.ToExpr
 
 /-- Ternary operations (FMA patterns) -/
 inductive TernaryOp where
   | FMA           -- dst = a * b + c
   | FMAAxBtC      -- dst = A × B + C (matrix-style, like attention)
   | FMAAxCtB      -- dst = A × C + B (alternate pattern)
-  deriving Repr, BEq, Hashable, Inhabited
+  deriving Repr, BEq, Hashable, Inhabited, Lean.ToExpr
 
 /-- Convert TernaryOp to C++ -/
 def TernaryOp.toCpp : TernaryOp → String
@@ -161,7 +161,7 @@ inductive SemaphoreOp where
   | Wait                  -- Wait on semaphore
   | Arrive (count : Nat)  -- Arrive with transaction count
   | ArriveAndWait         -- Arrive and wait
-  deriving Repr, BEq, Hashable, Inhabited
+  deriving Repr, BEq, Hashable, Inhabited, Lean.ToExpr
 
 /-- Kernel expression AST -/
 inductive KExpr where

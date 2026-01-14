@@ -21,6 +21,10 @@ inductive KStmt where
   | declSV (v : VarId) (dtype : GpuFloat) (len : Nat)
   | declSemaphore (v : VarId)  -- Semaphore/barrier declaration
 
+  -- Kernel parameter declarations (used by attribute-generated code)
+  | declGPtr (v : VarId) (dtype : GpuFloat) (name : String)  -- Global memory pointer param
+  | declKVal (v : VarId) (dtype : GpuFloat) (name : String)  -- Scalar value param
+
   -- Memory operations
   | load (dst src : VarId)
   | store (dst src : VarId)
@@ -31,6 +35,10 @@ inductive KStmt where
   | storeMinAsync (dst src : VarId)  -- Async atomic min (TMA)
   | prefetch (src : VarId)           -- TMA prefetch
   | tmaExpect (barrier : VarId) (bytes : Nat)
+
+  -- TMA operations with global pointers
+  | tmaLoad (dst src : VarId) (coord : VarId)      -- TMA load: shared ← global[coord]
+  | tmaStore (dst src : VarId) (coord : VarId)     -- TMA store: global[coord] ← shared
 
   -- MMA operations
   | mma (trans : MMATranspose) (dst a b c : VarId)

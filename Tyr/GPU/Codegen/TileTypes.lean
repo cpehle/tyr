@@ -31,10 +31,31 @@ structure SV (dtype : GpuFloat) (len : Nat) where
   id : VarId
   deriving Repr
 
-/-- GPU pointer (for kernel parameters) -/
-structure Ptr (dtype : GpuFloat) where
+/-! ## Kernel Parameter Types
+
+These types represent kernel parameters as first-class Lean values.
+They wrap VarId so they can be used in operations like tmaLoad.
+-/
+
+/-- Global memory pointer (kernel parameter)
+    This is a first-class Lean value usable in TMA operations -/
+structure GPtr (dtype : GpuFloat) where
+  id : VarId
+  name : String  -- Original parameter name for debugging/codegen
+  deriving Repr
+
+/-- Kernel scalar value parameter
+    Usable in index calculations, loop bounds, etc. -/
+structure KVal (T : Type) where
+  id : VarId
   name : String
   deriving Repr
+
+/-- Get VarId from global pointer -/
+def GPtr.varId {dtype : GpuFloat} (p : GPtr dtype) : VarId := p.id
+
+/-- Get VarId from kernel value -/
+def KVal.varId {T : Type} (v : KVal T) : VarId := v.id
 
 /-- Typeclass for tile types -/
 class IsTile (T : Type) where

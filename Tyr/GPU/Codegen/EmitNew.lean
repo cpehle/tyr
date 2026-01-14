@@ -27,6 +27,13 @@ partial def generateStmt (indent : String := "  ") : KStmt → String
   | .declSemaphore v =>
     s!"{indent}semaphore {v.toIdent};\n"
 
+  -- Kernel parameter declarations (these are part of the signature, not body)
+  -- When they appear in the body, just emit a comment for debugging
+  | .declGPtr v dtype name =>
+    s!"{indent}// param: {dtype.toCpp}* {name} (v{v.idx})\n"
+  | .declKVal v dtype name =>
+    s!"{indent}// param: {dtype.toCpp} {name} (v{v.idx})\n"
+
   -- Memory operations
   | .load dst src => s!"{indent}load({dst.toIdent}, {src.toIdent});\n"
   | .store dst src => s!"{indent}store({dst.toIdent}, {src.toIdent});\n"
@@ -37,6 +44,12 @@ partial def generateStmt (indent : String := "  ") : KStmt → String
   | .storeMinAsync dst src => s!"{indent}tma::store_min_async({dst.toIdent}, {src.toIdent});\n"
   | .prefetch src => s!"{indent}tma::prefetch({src.toIdent});\n"
   | .tmaExpect barrier bytes => s!"{indent}tma::expect_bytes({barrier.toIdent}, {bytes});\n"
+
+  -- TMA operations with global pointers
+  | .tmaLoad dst src coord =>
+    s!"{indent}tma::load({dst.toIdent}, {src.toIdent}, {coord.toIdent});\n"
+  | .tmaStore dst src coord =>
+    s!"{indent}tma::store({dst.toIdent}, {src.toIdent}, {coord.toIdent});\n"
 
   -- MMA operations
   | .mma trans dst a b c =>

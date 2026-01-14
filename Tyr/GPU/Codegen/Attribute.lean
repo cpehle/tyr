@@ -65,17 +65,18 @@ def extractGpuFloat? (type : Expr) : MetaM (Option GpuFloat) := do
   else if type.isConstOf ``GpuFloat.FP8E5M2 then return some .FP8E5M2
   else return none
 
-/-- Try to extract parameter info from a Ptr type -/
-def extractPtrParam? (paramName : Name) (type : Expr) : MetaM (Option ExtractedParam) := do
+/-- Try to extract parameter info from GPtr or KVal types -/
+def extractParamFromType? (paramName : Name) (type : Expr) : MetaM (Option ExtractedParam) := do
   let type ← whnf type
-  -- Check if it's a Ptr dtype
-  if type.isAppOfArity ``Ptr 1 then
+  -- Check if it's GPtr dtype
+  if type.isAppOfArity ``GPtr 1 then
     let dtypeExpr := type.getArg! 0
     if let some dtype ← extractGpuFloat? dtypeExpr then
       return some { name := paramName, dtype := dtype, isPointer := true }
-  -- Check for raw dtype (scalar parameter)
-  if let some dtype ← extractGpuFloat? type then
-    return some { name := paramName, dtype := dtype, isPointer := false }
+  -- Check if it's KVal T (maps to scalar)
+  if type.isAppOfArity ``KVal 1 then
+    -- KVal maps to Float32 scalar for now
+    return some { name := paramName, dtype := .Float32, isPointer := false }
   return none
 
 /-- Extract parameters from function type -/
@@ -87,7 +88,7 @@ partial def extractParams (type : Expr) : MetaM (Array ExtractedParam) := do
     let name := currType.bindingName!
     let domainType := currType.bindingDomain!
 
-    if let some param ← extractPtrParam? name domainType then
+    if let some param ← extractParamFromType? name domainType then
       params := params.push param
 
     currType ← whnf (currType.bindingBody!.instantiate1 (mkFVar ⟨name⟩))
@@ -119,11 +120,57 @@ def parseArchSyntax (stx : Syntax) : Except String GpuArch :=
   else if containsSubstr s "SM100" then .ok .SM100
   else .error s!"Invalid architecture: {s}"
 
+/-- Generate companion kernel definition as syntax -/
+def generateKernelCompanion (declName : Name) (arch : GpuArch)
+    (params : Array ExtractedParam) : CommandElabM Unit := do
+  let companionName := declName ++ `kernel
+  let fnIdent := mkIdent declName
+
+  -- Build KParam array syntax
+  let kparamStxs ← params.mapM fun p => do
+    let dtypeStx := match p.dtype with
+      | .Float32 => mkIdent ``GpuFloat.Float32
+      | .Float16 => mkIdent ``GpuFloat.Float16
+      | .BFloat16 => mkIdent ``GpuFloat.BFloat16
+      | .FP8E4M3 => mkIdent ``GpuFloat.FP8E4M3
+      | .FP8E5M2 => mkIdent ``GpuFloat.FP8E5M2
+    let nameStr := Syntax.mkStrLit p.name.toString
+    let isPtr := if p.isPointer then mkIdent ``true else mkIdent ``false
+    `({ name := $nameStr, dtype := $dtypeStx, isPointer := $isPtr : KParam })
+
+  -- Build argument syntax for each parameter
+  let mut argStxs : Array (TSyntax `term) := #[]
+  for h : idx in [:params.size] do
+    let p := params[idx]
+    let idxLit := Syntax.mkNumLit (toString idx)
+    let nameStr := Syntax.mkStrLit p.name.toString
+    let argStx : TSyntax `term ← if p.isPointer then
+      `(GPtr.mk ⟨$idxLit⟩ $nameStr)
+    else
+      `(KVal.mk ⟨$idxLit⟩ $nameStr)
+    argStxs := argStxs.push argStx
+
+  -- Build arch syntax
+  let archStx := match arch with
+    | .SM80 => mkIdent ``GpuArch.SM80
+    | .SM90 => mkIdent ``GpuArch.SM90
+    | .SM100 => mkIdent ``GpuArch.SM100
+
+  let nameStr := Syntax.mkStrLit declName.toString
+
+  -- Generate the definition and ensure it's compiled
+  let cmd ← `(
+    def $(mkIdent companionName) : Kernel :=
+      buildKernelM $nameStr $archStx #[$kparamStxs,*] ($fnIdent $argStxs*)
+  )
+
+  elabCommand cmd
+
 /-- Attribute handler for @[gpu_kernel arch] -/
 initialize registerBuiltinAttribute {
   name := `gpuKernelAttr
   descr := "Mark a function as a GPU kernel for the specified architecture"
-  applicationTime := .afterTypeChecking
+  applicationTime := .afterCompilation
   add := fun declName stx _attrKind => do
     let `(attr| gpu_kernel $archStx) := stx
       | throwError "Invalid gpu_kernel attribute syntax"
@@ -133,18 +180,23 @@ initialize registerBuiltinAttribute {
       | .ok a => pure a
       | .error e => throwError e
 
-    -- Get the declaration to verify it exists
+    -- Get the declaration info
     let env ← getEnv
-    let some _info := env.find? declName
+    let some info := env.find? declName
       | throwError s!"Declaration {declName} not found"
 
-    -- For now, we just register basic metadata
-    -- Full parameter extraction requires more complex type analysis
+    -- Extract parameters from the function type
+    let params ← Meta.MetaM.run' (extractParams info.type)
+
+    -- Generate companion .kernel definition
+    liftCommandElabM (generateKernelCompanion declName arch params)
+
+    -- Register minimal kernel info (full info is in companion definition)
     let registeredKernel : RegisteredKernel := {
       name := declName
       arch := arch
       kernel := { name := declName.toString, arch := arch, params := #[], body := #[] }
-      cppCode := s!"// Kernel: {declName}\n// Architecture: {arch}"
+      cppCode := s!"// Kernel: {declName}\n// See {declName}.kernel for full definition"
     }
 
     registerKernel registeredKernel

@@ -4,6 +4,8 @@
   Core types for ThunderKittens GPU kernel abstraction.
   These types map directly to ThunderKittens C++ template parameters.
 -/
+import Lean.ToExpr
+
 namespace Tyr.GPU
 
 /-- GPU floating point types, matching ThunderKittens supported dtypes -/
@@ -13,7 +15,7 @@ inductive GpuFloat where
   | BFloat16  -- bf16
   | FP8E4M3   -- fp8e4m3 (Hopper/Blackwell)
   | FP8E5M2   -- fp8e5m2 (Hopper/Blackwell)
-  deriving Repr, BEq, Hashable, Inhabited, DecidableEq
+  deriving Repr, BEq, Hashable, Inhabited, DecidableEq, Lean.ToExpr
 
 instance : ToString GpuFloat where
   toString
@@ -45,13 +47,13 @@ inductive TileLoc where
   | Shared     -- st<T, rows, cols, layout> - warp-cooperative
   | Global     -- gl<T, ...> - device memory
   | TensorCore -- tt - Blackwell TMA descriptors
-  deriving Repr, BEq, Hashable, Inhabited
+  deriving Repr, BEq, Hashable, Inhabited, Lean.ToExpr
 
 /-- Tile layout (row-major vs column-major) -/
 inductive TileLayout where
   | Row  -- row_l in ThunderKittens
   | Col  -- col_l in ThunderKittens
-  deriving Repr, BEq, Hashable, Inhabited, DecidableEq
+  deriving Repr, BEq, Hashable, Inhabited, DecidableEq, Lean.ToExpr
 
 instance : ToString TileLayout where
   toString
@@ -63,12 +65,17 @@ def TileLayout.toCpp : TileLayout → String
   | .Row => "row_l"
   | .Col => "col_l"
 
+/-- Transpose layout (swap Row ↔ Col) -/
+def TileLayout.transpose : TileLayout → TileLayout
+  | .Row => .Col
+  | .Col => .Row
+
 /-- GPU architecture generations -/
 inductive GpuArch where
   | SM80   -- Ampere (A100)
   | SM90   -- Hopper (H100)
   | SM100  -- Blackwell (B200)
-  deriving Repr, BEq, Hashable, Inhabited, DecidableEq
+  deriving Repr, BEq, Hashable, Inhabited, DecidableEq, Lean.ToExpr
 
 instance : ToString GpuArch where
   toString

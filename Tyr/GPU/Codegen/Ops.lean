@@ -650,6 +650,20 @@ def storeMinAsync {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
     (src : RT dtype rows cols layout) : KernelM Unit := do
   emit (.storeMinAsync dst.id src.id)
 
+/-- TMA load from global pointer to shared tile -/
+def tmaLoad {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
+    (dst : ST dtype rows cols layout)
+    (src : GPtr dtype)
+    (coord : KVal UInt64) : KernelM Unit := do
+  emit (.tmaLoad dst.id src.id coord.id)
+
+/-- TMA store from shared tile to global pointer -/
+def tmaStore {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
+    (dst : GPtr dtype)
+    (src : ST dtype rows cols layout)
+    (coord : KVal UInt64) : KernelM Unit := do
+  emit (.tmaStore dst.id src.id coord.id)
+
 /-! ## Semaphore Operations -/
 
 /-- Semaphore type (barrier) -/
