@@ -148,4 +148,24 @@ def CRT.realId {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
 def CRT.imagId {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
     (t : CRT dtype rows cols layout) : VarId := t.imag.id
 
+/-! ## FFI Types for Kernel Launching
+
+These types are used by auto-generated kernel launchers.
+They wrap opaque pointers to tensors and CUDA streams.
+-/
+
+/-- Untyped tensor for FFI (wraps any tensor regardless of shape) -/
+opaque TensorSpec : NonemptyType
+def Tensor : Type := TensorSpec.type
+instance : Nonempty Tensor := TensorSpec.property
+
+/-- CUDA stream handle for kernel launches -/
+opaque CudaStreamSpec : NonemptyType
+def CudaStream : Type := CudaStreamSpec.type
+instance : Nonempty CudaStream := CudaStreamSpec.property
+
+/-- Default CUDA stream (stream 0) -/
+@[extern "lean_cuda_default_stream"]
+opaque defaultStream : CudaStream
+
 end Tyr.GPU.Codegen

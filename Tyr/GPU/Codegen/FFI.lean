@@ -221,4 +221,41 @@ def generateKernelFFI (env : Environment) (name : Name) : Option (String × Stri
 /-- Command to print FFI for a specific kernel -/
 syntax "#print_kernel_ffi" ident : command
 
+/-! ## Non-Macro FFI Functions
+
+These functions can be called from `#eval` or Lake scripts without needing macros.
+-/
+
+/-- Write all registered kernel C++ launchers to a file -/
+def writeAllKernelCpp (env : Environment) (path : System.FilePath) : IO Unit := do
+  let kernels := getRegisteredKernels env
+  let header := generateCppHeader
+  let launchers := kernels.toList.map (·.cppCode)
+  let cppCode := header ++
+    "extern \"C\" {\n\n" ++
+    String.intercalate "\n" launchers ++
+    "\n} // extern \"C\"\n"
+  IO.FS.writeFile path cppCode
+  IO.println s!"Written {kernels.size} kernel launchers to {path}"
+
+/-- Get all generated C++ code as a string -/
+def getAllKernelCpp (env : Environment) : String :=
+  let kernels := getRegisteredKernels env
+  let header := generateCppHeader
+  let launchers := kernels.toList.map (·.cppCode)
+  header ++
+    "extern \"C\" {\n\n" ++
+    String.intercalate "\n" launchers ++
+    "\n} // extern \"C\"\n"
+
+/-- Get all generated Lean FFI declarations as a string -/
+def getAllKernelLean (env : Environment) : String :=
+  let kernels := getRegisteredKernels env
+  let decls := kernels.toList.map fun k => generateLeanExternDecl k.kernel
+  "-- Auto-generated kernel FFI declarations\n" ++
+  "-- Do not edit manually\n\n" ++
+  "namespace Tyr.GPU.Kernels\n\n" ++
+  String.intercalate "\n\n" decls ++
+  "\n\nend Tyr.GPU.Kernels"
+
 end Tyr.GPU.Codegen

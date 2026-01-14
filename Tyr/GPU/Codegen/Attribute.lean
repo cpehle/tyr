@@ -166,6 +166,99 @@ def generateKernelCompanion (declName : Name) (arch : GpuArch)
 
   elabCommand cmd
 
+/-! ## C++ Code Generation -/
+
+/-- Generate C++ extern parameter for a kernel param -/
+def paramToCppExternAttr (p : KParam) : String :=
+  if p.isPointer then s!"b_lean_obj_arg {p.name}"
+  else s!"uint64_t {p.name}"
+
+/-- Generate C++ kernel argument (pointer extraction or pass-through) -/
+def paramToCppArgAttr (p : KParam) : String :=
+  if p.isPointer then s!"{p.name}_ptr"
+  else p.name
+
+/-- Generate pointer extraction code for a param -/
+def generatePtrExtractionAttr (p : KParam) : String :=
+  if p.isPointer then
+    s!"    auto {p.name}_ptr = borrowTensor({p.name}).data_ptr<{p.dtype.toCpp}>();\n"
+  else ""
+
+/-- Generate complete C++ launcher code for a kernel -/
+def generateCppLauncherCode (declName : Name) (params : Array KParam) : String :=
+  let name := declName.toString.replace "." "_"
+  let externName := "lean_launch_" ++ name
+
+  let externParams := params.toList.map paramToCppExternAttr
+  let allParams := externParams ++ [
+    "uint64_t grid_x", "uint64_t grid_y", "uint64_t grid_z",
+    "uint64_t block_x", "uint64_t block_y", "uint64_t block_z",
+    "uint64_t shared_mem", "b_lean_obj_arg stream"
+  ]
+  let paramStr := String.intercalate ", " allParams
+
+  let ptrExtractions := params.toList.map generatePtrExtractionAttr
+  let extractionCode := String.join ptrExtractions
+
+  let kernelArgs := params.toList.map paramToCppArgAttr
+  let argStr := String.intercalate ", " kernelArgs
+
+  "extern \"C\" lean_object* " ++ externName ++ "(" ++ paramStr ++ ") {\n" ++
+  "  try {\n" ++
+  extractionCode ++
+  "    auto cuda_stream = extractCudaStream(stream);\n" ++
+  "    dim3 grid(grid_x, grid_y, grid_z);\n" ++
+  "    dim3 block(block_x, block_y, block_z);\n\n" ++
+  "    " ++ name ++ "<<<grid, block, shared_mem, cuda_stream>>>(" ++ argStr ++ ");\n\n" ++
+  "    CUDA_CHECK(cudaGetLastError());\n" ++
+  "    return lean_io_result_mk_ok(lean_box(0));\n" ++
+  "  } catch (const std::exception& e) {\n" ++
+  "    return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string(e.what())));\n" ++
+  "  }\n" ++
+  "}\n"
+
+/-- Generate the FFI launch declaration for a kernel
+    Creates: @[extern "lean_launch_X"] opaque X.launch (params...) : IO Unit -/
+def generateLaunchDecl (declName : Name) (params : Array ExtractedParam) : CommandElabM Unit := do
+  let launchName := declName ++ `launch
+  let externNameStr := "lean_launch_" ++ declName.toString.replace "." "_"
+
+  -- Build parameter binders: (a : @& Tensor) (b : @& Tensor) (size : UInt64)
+  let mut paramBinders : Array (TSyntax `Lean.Parser.Term.bracketedBinder) := #[]
+  for p in params do
+    let paramIdent := mkIdent p.name
+    let binder ← if p.isPointer then
+      `(bracketedBinder| ($paramIdent : @& Tensor))
+    else
+      `(bracketedBinder| ($paramIdent : UInt64))
+    paramBinders := paramBinders.push binder
+
+  -- Add grid, block, sharedMem, stream parameters
+  let gridBinder ← `(bracketedBinder| (grid : UInt64 × UInt64 × UInt64))
+  let blockBinder ← `(bracketedBinder| (block : UInt64 × UInt64 × UInt64))
+  let smemBinder ← `(bracketedBinder| (sharedMem : UInt64))
+  let streamBinder ← `(bracketedBinder| (stream : CudaStream))
+  paramBinders := paramBinders ++ #[gridBinder, blockBinder, smemBinder, streamBinder]
+
+  -- Build extern entry syntax node:
+  -- externEntry := optional (ident >> ppSpace) >> optional (nonReservedSymbol "inline ") >> strLit
+  -- For simple case: just the string literal with nulls for optional parts
+  let strLitNode := Syntax.mkStrLit externNameStr
+  let externEntryStx : TSyntax `Lean.Parser.Attr.externEntry := ⟨Syntax.node SourceInfo.none
+    `Lean.Parser.Attr.externEntry #[
+      Syntax.node SourceInfo.none `null #[],  -- optional ident (empty)
+      Syntax.node SourceInfo.none `null #[],  -- optional "inline" (empty)
+      strLitNode                               -- strLit
+    ]⟩
+
+  -- Generate: @[extern "lean_launch_X"] opaque X.launch (params...) : IO Unit
+  let cmd ← `(command|
+    @[extern $externEntryStx]
+    opaque $(mkIdent launchName) $paramBinders* : IO Unit
+  )
+
+  elabCommand cmd
+
 /-- Attribute handler for @[gpu_kernel arch] -/
 initialize registerBuiltinAttribute {
   name := `gpuKernelAttr
@@ -191,12 +284,22 @@ initialize registerBuiltinAttribute {
     -- Generate companion .kernel definition
     liftCommandElabM (generateKernelCompanion declName arch params)
 
-    -- Register minimal kernel info (full info is in companion definition)
+    -- Generate .launch FFI declaration
+    liftCommandElabM (generateLaunchDecl declName params)
+
+    -- Convert ExtractedParam to KParam for registration
+    let kparams := params.map fun p =>
+      { name := p.name.toString, dtype := p.dtype, isPointer := p.isPointer : KParam }
+
+    -- Generate C++ launcher code
+    let cppCode := generateCppLauncherCode declName kparams
+
+    -- Register kernel with full info
     let registeredKernel : RegisteredKernel := {
       name := declName
       arch := arch
-      kernel := { name := declName.toString, arch := arch, params := #[], body := #[] }
-      cppCode := s!"// Kernel: {declName}\n// See {declName}.kernel for full definition"
+      kernel := { name := declName.toString, arch := arch, params := kparams, body := #[] }
+      cppCode := cppCode
     }
 
     registerKernel registeredKernel
