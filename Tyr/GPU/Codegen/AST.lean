@@ -49,6 +49,7 @@ def ReduceAxis.toPrefix : ReduceAxis → String
 /-- Unary element-wise operations -/
 inductive UnaryOp where
   | Exp | Exp2 | Log | Log2 | Abs | Relu | Copy
+  | Neg | Sqrt | Rsqrt | Tanh | Sigmoid | Gelu  -- Additional math ops
   | Zero | One | PosInfty | NegInfty  -- Initialization
   deriving Repr, BEq, Hashable, Inhabited
 
@@ -61,6 +62,12 @@ def UnaryOp.toCpp : UnaryOp → String
   | .Abs => "abs"
   | .Relu => "relu"
   | .Copy => "copy"
+  | .Neg => "neg"
+  | .Sqrt => "sqrt"
+  | .Rsqrt => "rsqrt"
+  | .Tanh => "tanh"
+  | .Sigmoid => "sigmoid"
+  | .Gelu => "gelu"
   | .Zero => "zero"
   | .One => "one"
   | .PosInfty => "pos_infty"
@@ -113,6 +120,8 @@ inductive KExpr where
   | load (dst src : String)           -- load(dst, src) - S→R or G→S/R
   | store (dst src : String)          -- store(dst, src) - R→S or S/R→G
   | loadAsync (dst src : String)      -- load_async for TMA
+  | storeAsync (dst src : String)     -- store_async for TMA
+  | tmaExpect (barrier : String) (bytes : Nat)  -- expect_bytes for TMA
 
   -- MMA operations
   | mma (trans : MMATranspose) (dst a b c : String)  -- d = a × b + c
@@ -127,6 +136,9 @@ inductive KExpr where
   -- Element-wise binary
   | binary (op : BinaryOp) (dst a b : String)
 
+  -- Scalar operations
+  | scalarMul (dst src : String) (scalar : Float)  -- dst = src * scalar
+
   -- Broadcasting (row/col vector to tile)
   | broadcast (axis : BroadcastAxis) (dst vec : String)
   | binaryBroadcast (op : BinaryOp) (axis : BroadcastAxis) (dst tile vec : String)
@@ -135,6 +147,12 @@ inductive KExpr where
   | reduce (op : ReduceOp) (axis : ReduceAxis) (dst src : String)
   | reduceAccum (op : ReduceOp) (axis : ReduceAxis) (dst src accum : String)
 
+  -- Scan/prefix operations (for state-space models)
+  | cumsum (axis : ReduceAxis) (dst src : String)  -- Inclusive prefix sum
+
+  -- Outer product (for state matrix updates)
+  | outer (dst a b : String)  -- dst[i,j] = a[i] * b[j]
+
   -- Layout/type conversions
   | swapLayout (dst src : String)
   | transpose (dst src : String)
@@ -142,6 +160,10 @@ inductive KExpr where
 
   -- Masking
   | mask (op : MaskOp) (dst src : String) (fillVal : Option Float)
+
+  -- Tile slicing/splitting
+  | sliceRows (dst src : String) (startRow numRows : Nat)  -- Extract row range
+  | sliceCols (dst src : String) (startCol numCols : Nat)  -- Extract col range
 
   -- Synchronization
   | sync (barrierId : Nat)

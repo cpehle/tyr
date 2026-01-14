@@ -25,6 +25,8 @@ partial def generateExpr (indent : String := "  ") : KExpr → String
   | .load dst src => s!"{indent}load({dst}, {src});\n"
   | .store dst src => s!"{indent}store({dst}, {src});\n"
   | .loadAsync dst src => s!"{indent}load_async({dst}, {src});\n"
+  | .storeAsync dst src => s!"{indent}store_async({dst}, {src});\n"
+  | .tmaExpect barrier bytes => s!"{indent}tma::expect_bytes({barrier}, {bytes});\n"
 
   -- MMA
   | .mma trans dst a b c => s!"{indent}mma_{trans.toSuffix}({dst}, {a}, {b}, {c});\n"
@@ -37,6 +39,9 @@ partial def generateExpr (indent : String := "  ") : KExpr → String
   | .unary op dst src => s!"{indent}{op.toCpp}({dst}, {src});\n"
   | .binary op dst a b => s!"{indent}{op.toCpp}({dst}, {a}, {b});\n"
 
+  -- Scalar operations
+  | .scalarMul dst src scalar => s!"{indent}mul({dst}, {src}, {scalar}f);\n"
+
   -- Broadcasting
   | .broadcast axis dst vec => s!"{indent}broadcast{axis.toSuffix}({dst}, {vec});\n"
   | .binaryBroadcast op axis dst tile vec =>
@@ -47,6 +52,13 @@ partial def generateExpr (indent : String := "  ") : KExpr → String
     s!"{indent}{axis.toPrefix}{op.toCpp}({dst}, {src});\n"
   | .reduceAccum op axis dst src accum =>
     s!"{indent}{axis.toPrefix}{op.toCpp}({dst}, {src}, {accum});\n"
+
+  -- Scan/prefix operations
+  | .cumsum axis dst src =>
+    s!"{indent}{axis.toPrefix}cumsum({dst}, {src});\n"
+
+  -- Outer product
+  | .outer dst a b => s!"{indent}outer({dst}, {a}, {b});\n"
 
   -- Conversions
   | .swapLayout dst src => s!"{indent}swap_layout({dst}, {src});\n"
@@ -64,6 +76,12 @@ partial def generateExpr (indent : String := "  ") : KExpr → String
     | .LeftFill c => s!"{indent}left_fill({dst}, {src}, {c}{fillStr});\n"
     | .UpperFill r => s!"{indent}upper_fill({dst}, {src}, {r}{fillStr});\n"
     | .LowerFill r => s!"{indent}lower_fill({dst}, {src}, {r}{fillStr});\n"
+
+  -- Tile slicing
+  | .sliceRows dst src startRow numRows =>
+    s!"{indent}subtile<{startRow}, 0, {numRows}>({dst}, {src});\n"
+  | .sliceCols dst src startCol numCols =>
+    s!"{indent}subtile<0, {startCol}, -1, {numCols}>({dst}, {src});\n"
 
   -- Synchronization
   | .sync barrierId => s!"{indent}sync({barrierId});\n"
