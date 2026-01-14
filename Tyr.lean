@@ -52,3 +52,6 @@ import Tyr.Pipeline
 
 -- Metrics
 import Tyr.Metrics
+
+-- GPU kernel abstraction (ThunderKittens)
+import Tyr.GPU

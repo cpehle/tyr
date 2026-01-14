@@ -4,3 +4,6 @@
 [submodule "nanochat"]
 	path = nanochat
 	url = https://github.com/karpathy/nanochat.git
+[submodule "ThunderKittens"]
+	path = ThunderKittens
+	url = https://github.com/HazyResearch/ThunderKittens.git
