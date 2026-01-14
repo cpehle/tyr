@@ -13,7 +13,15 @@ inductive GpuFloat where
   | BFloat16  -- bf16
   | FP8E4M3   -- fp8e4m3 (Hopper/Blackwell)
   | FP8E5M2   -- fp8e5m2 (Hopper/Blackwell)
-  deriving Repr, BEq, Hashable, Inhabited
+  deriving Repr, BEq, Hashable, Inhabited, DecidableEq
+
+instance : ToString GpuFloat where
+  toString
+    | .Float32 => "Float32"
+    | .Float16 => "Float16"
+    | .BFloat16 => "BFloat16"
+    | .FP8E4M3 => "FP8E4M3"
+    | .FP8E5M2 => "FP8E5M2"
 
 /-- Convert GpuFloat to C++ type string -/
 def GpuFloat.toCpp : GpuFloat → String
@@ -43,7 +51,12 @@ inductive TileLoc where
 inductive TileLayout where
   | Row  -- row_l in ThunderKittens
   | Col  -- col_l in ThunderKittens
-  deriving Repr, BEq, Hashable, Inhabited
+  deriving Repr, BEq, Hashable, Inhabited, DecidableEq
+
+instance : ToString TileLayout where
+  toString
+    | .Row => "Row"
+    | .Col => "Col"
 
 /-- Convert TileLayout to C++ layout string -/
 def TileLayout.toCpp : TileLayout → String
@@ -55,7 +68,13 @@ inductive GpuArch where
   | SM80   -- Ampere (A100)
   | SM90   -- Hopper (H100)
   | SM100  -- Blackwell (B200)
-  deriving Repr, BEq, Hashable, Inhabited
+  deriving Repr, BEq, Hashable, Inhabited, DecidableEq
+
+instance : ToString GpuArch where
+  toString
+    | .SM80 => "SM80"
+    | .SM90 => "SM90"
+    | .SM100 => "SM100"
 
 /-- Convert GpuArch to C++ preprocessor guard -/
 def GpuArch.toGuard : GpuArch → String

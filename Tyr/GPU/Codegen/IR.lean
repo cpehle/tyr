@@ -25,6 +25,8 @@ inductive KStmt where
   | store (dst src : VarId)
   | loadAsync (dst src : VarId)
   | storeAsync (dst src : VarId)
+  | storeAdd (dst src : VarId)       -- Atomic add for gradient accumulation
+  | storeAddAsync (dst src : VarId)  -- Async atomic add (TMA)
   | tmaExpect (barrier : VarId) (bytes : Nat)
 
   -- MMA operations

@@ -18,8 +18,9 @@ structure KRange where
 /-- Create a kernel range -/
 def krange (lo hi : Nat) : KRange := ⟨lo, hi⟩
 
-/-- Notation for kernel ranges: [lo:hi] -/
-scoped notation "[" lo ":" hi "]" => krange lo hi
+/-- Notation for kernel ranges: gpu[lo:hi]
+    Using gpu prefix to avoid conflict with Std.Range -/
+scoped notation "gpu[" lo ":" hi "]" => krange lo hi
 
 /-- Size of range -/
 def KRange.size (r : KRange) : Nat := r.hi - r.lo

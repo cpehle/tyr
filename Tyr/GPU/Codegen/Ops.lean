@@ -96,6 +96,48 @@ def storeVec {dtype : GpuFloat} {len : Nat}
     (src : RV dtype len) : KernelM Unit := do
   emit (.store dst.id src.id)
 
+/-! ## Vector Unary/Binary Operations -/
+
+/-- Copy vector -/
+def copyVec {dtype : GpuFloat} {len : Nat}
+    (dst src : RV dtype len) : KernelM Unit := do
+  emit (.unary .Copy dst.id src.id)
+
+/-- Zero vector -/
+def zeroVec {dtype : GpuFloat} {len : Nat}
+    (v : RV dtype len) : KernelM Unit := do
+  emit (.unary .Zero v.id v.id)
+
+/-- Vector element-wise add -/
+def addVec {dtype : GpuFloat} {len : Nat}
+    (dst a b : RV dtype len) : KernelM Unit := do
+  emit (.binary .Add dst.id a.id b.id)
+
+/-- Vector element-wise subtract -/
+def subVec {dtype : GpuFloat} {len : Nat}
+    (dst a b : RV dtype len) : KernelM Unit := do
+  emit (.binary .Sub dst.id a.id b.id)
+
+/-- Vector element-wise multiply -/
+def mulVec {dtype : GpuFloat} {len : Nat}
+    (dst a b : RV dtype len) : KernelM Unit := do
+  emit (.binary .Mul dst.id a.id b.id)
+
+/-- Vector element-wise divide -/
+def divVec {dtype : GpuFloat} {len : Nat}
+    (dst a b : RV dtype len) : KernelM Unit := do
+  emit (.binary .Div dst.id a.id b.id)
+
+/-- Vector exp -/
+def expVec {dtype : GpuFloat} {len : Nat}
+    (dst src : RV dtype len) : KernelM Unit := do
+  emit (.unary .Exp dst.id src.id)
+
+/-- Vector log -/
+def logVec {dtype : GpuFloat} {len : Nat}
+    (dst src : RV dtype len) : KernelM Unit := do
+  emit (.unary .Log dst.id src.id)
+
 /-- Async load (TMA) -/
 def loadAsync {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
     (dst : ST dtype rows cols layout)
@@ -107,6 +149,18 @@ def storeAsync {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
     (dst : ST dtype rows cols layout)
     (src : RT dtype rows cols layout) : KernelM Unit := do
   emit (.storeAsync dst.id src.id)
+
+/-- Atomic store-add for gradient accumulation -/
+def storeAdd {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
+    (dst : ST dtype rows cols layout)
+    (src : RT dtype rows cols layout) : KernelM Unit := do
+  emit (.storeAdd dst.id src.id)
+
+/-- Async atomic store-add (TMA) for gradient accumulation -/
+def storeAddAsync {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
+    (dst : ST dtype rows cols layout)
+    (src : RT dtype rows cols layout) : KernelM Unit := do
+  emit (.storeAddAsync dst.id src.id)
 
 /-! ## Matrix Multiply -/
 

@@ -14,7 +14,14 @@ inductive MMATranspose where
   | ABt   -- A row, B row (B transposed)
   | AtB   -- A col, B col (A transposed)
   | AtBt  -- A col, B row (both transposed)
-  deriving Repr, BEq, Hashable, Inhabited
+  deriving Repr, BEq, Hashable, Inhabited, DecidableEq
+
+instance : ToString MMATranspose where
+  toString
+    | .AB => "AB"
+    | .ABt => "ABt"
+    | .AtB => "AtB"
+    | .AtBt => "AtBt"
 
 /-- Convert MMATranspose to C++ function suffix -/
 def MMATranspose.toSuffix : MMATranspose → String
@@ -51,7 +58,16 @@ inductive UnaryOp where
   | Exp | Exp2 | Log | Log2 | Abs | Relu | Copy
   | Neg | Sqrt | Rsqrt | Tanh | Sigmoid | Gelu  -- Additional math ops
   | Zero | One | PosInfty | NegInfty  -- Initialization
-  deriving Repr, BEq, Hashable, Inhabited
+  deriving Repr, BEq, Hashable, Inhabited, DecidableEq
+
+instance : ToString UnaryOp where
+  toString
+    | .Exp => "Exp" | .Exp2 => "Exp2" | .Log => "Log" | .Log2 => "Log2"
+    | .Abs => "Abs" | .Relu => "Relu" | .Copy => "Copy" | .Neg => "Neg"
+    | .Sqrt => "Sqrt" | .Rsqrt => "Rsqrt" | .Tanh => "Tanh"
+    | .Sigmoid => "Sigmoid" | .Gelu => "Gelu"
+    | .Zero => "Zero" | .One => "One"
+    | .PosInfty => "PosInfty" | .NegInfty => "NegInfty"
 
 /-- Convert UnaryOp to C++ -/
 def UnaryOp.toCpp : UnaryOp → String

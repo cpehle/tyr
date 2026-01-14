@@ -30,6 +30,8 @@ partial def generateStmt (indent : String := "  ") : KStmt → String
   | .store dst src => s!"{indent}store({dst.toIdent}, {src.toIdent});\n"
   | .loadAsync dst src => s!"{indent}load_async({dst.toIdent}, {src.toIdent});\n"
   | .storeAsync dst src => s!"{indent}store_async({dst.toIdent}, {src.toIdent});\n"
+  | .storeAdd dst src => s!"{indent}store_add({dst.toIdent}, {src.toIdent});\n"
+  | .storeAddAsync dst src => s!"{indent}tma::store_add_async({dst.toIdent}, {src.toIdent});\n"
   | .tmaExpect barrier bytes => s!"{indent}tma::expect_bytes({barrier.toIdent}, {bytes});\n"
 
   -- MMA operations
