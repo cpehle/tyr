@@ -63,6 +63,12 @@ def negInftyRV (dtype : GpuFloat) (len : Nat) : KernelM (RV dtype len) := do
   emit (.unary .NegInfty vec.id vec.id)
   pure vec
 
+/-- Allocate a zero-initialized register vector -/
+def zeroRV (dtype : GpuFloat) (len : Nat) : KernelM (RV dtype len) := do
+  let vec ← allocRV dtype len
+  emit (.unary .Zero vec.id vec.id)
+  pure vec
+
 /-- Allocate with ones -/
 def onesRT (dtype : GpuFloat) (rows cols : Nat) (layout : TileLayout := .Row)
     : KernelM (RT dtype rows cols layout) := do
@@ -211,6 +217,23 @@ def mmaAtB {M K N : Nat} {inDtype accDtype : GpuFloat}
     : KernelM Unit := do
   emit (.mma .AtB dst.id a.id b.id c.id)
 
+/-! ## Ternary Operations (FMA) -/
+
+/-- Fused multiply-add: dst = a * b + c -/
+def fma {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
+    (dst a b c : RT dtype rows cols layout) : KernelM Unit := do
+  emit (.ternary .FMA dst.id a.id b.id c.id)
+
+/-- FMA pattern for attention: dst = A × B + C (matrix-style) -/
+def fmaAxBtC {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
+    (dst a b c : RT dtype rows cols layout) : KernelM Unit := do
+  emit (.ternary .FMAAxBtC dst.id a.id b.id c.id)
+
+/-- FMA pattern: dst = A × C + B -/
+def fmaAxCtB {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
+    (dst a b c : RT dtype rows cols layout) : KernelM Unit := do
+  emit (.ternary .FMAAxCtB dst.id a.id b.id c.id)
+
 /-! ## Element-wise Unary Operations -/
 
 /-- Apply unary operation in-place or to different tile -/
@@ -289,6 +312,36 @@ def copy {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
     (dst src : RT dtype rows cols layout) : KernelM Unit := do
   emit (.unary .Copy dst.id src.id)
 
+/-- Element-wise sin (for rotary embeddings) -/
+def sin {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
+    (dst src : RT dtype rows cols layout) : KernelM Unit := do
+  emit (.unary .Sin dst.id src.id)
+
+/-- Element-wise cos (for rotary embeddings) -/
+def cos {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
+    (dst src : RT dtype rows cols layout) : KernelM Unit := do
+  emit (.unary .Cos dst.id src.id)
+
+/-- Element-wise SiLU (x * sigmoid(x)) -/
+def silu {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
+    (dst src : RT dtype rows cols layout) : KernelM Unit := do
+  emit (.unary .Silu dst.id src.id)
+
+/-- Element-wise Swish (same as SiLU) -/
+def swish {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
+    (dst src : RT dtype rows cols layout) : KernelM Unit := do
+  emit (.unary .Swish dst.id src.id)
+
+/-- Element-wise reciprocal (1/x) -/
+def recip {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
+    (dst src : RT dtype rows cols layout) : KernelM Unit := do
+  emit (.unary .Recip dst.id src.id)
+
+/-- Element-wise square (x^2) -/
+def square {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
+    (dst src : RT dtype rows cols layout) : KernelM Unit := do
+  emit (.unary .Square dst.id src.id)
+
 /-! ## Element-wise Binary Operations -/
 
 /-- Apply binary operation -/
@@ -332,6 +385,11 @@ def scalarMul {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
     (dst src : RT dtype rows cols layout) (scalar : Float) : KernelM Unit := do
   emit (.scalarMul dst.id src.id scalar)
 
+/-- Scalar add -/
+def scalarAdd {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
+    (dst src : RT dtype rows cols layout) (scalar : Float) : KernelM Unit := do
+  emit (.scalarAdd dst.id src.id scalar)
+
 /-! ## Reduction Operations -/
 
 /-- Row-wise max reduction -/
@@ -363,6 +421,24 @@ def colSum {dtype : GpuFloat} {rows cols : Nat}
     (dst : RV dtype cols)
     (src : RT dtype rows cols .Row) : KernelM Unit := do
   emit (.reduce .Sum .Col dst.id src.id)
+
+/-- Column-wise min reduction -/
+def colMin {dtype : GpuFloat} {rows cols : Nat}
+    (dst : RV dtype cols)
+    (src : RT dtype rows cols .Row) : KernelM Unit := do
+  emit (.reduce .Min .Col dst.id src.id)
+
+/-- Row-wise product reduction -/
+def rowProd {dtype : GpuFloat} {rows cols : Nat}
+    (dst : RV dtype rows)
+    (src : RT dtype rows cols .Row) : KernelM Unit := do
+  emit (.reduce .Prod .Row dst.id src.id)
+
+/-- Column-wise product reduction -/
+def colProd {dtype : GpuFloat} {rows cols : Nat}
+    (dst : RV dtype cols)
+    (src : RT dtype rows cols .Row) : KernelM Unit := do
+  emit (.reduce .Prod .Col dst.id src.id)
 
 /-- Row-wise max with accumulator -/
 def rowMaxAccum {dtype : GpuFloat} {rows cols : Nat}
@@ -415,6 +491,12 @@ def divRow {dtype : GpuFloat} {rows cols : Nat}
     (dst tile : RT dtype rows cols .Row)
     (vec : RV dtype cols) : KernelM Unit := do
   emit (.binaryBroadcast .Div .Row dst.id tile.id vec.id)
+
+/-- Add column vector to each column -/
+def addCol {dtype : GpuFloat} {rows cols : Nat}
+    (dst tile : RT dtype rows cols .Row)
+    (vec : RV dtype rows) : KernelM Unit := do
+  emit (.binaryBroadcast .Add .Col dst.id tile.id vec.id)
 
 /-- Subtract column vector from each column -/
 def subCol {dtype : GpuFloat} {rows cols : Nat}
@@ -496,6 +578,109 @@ def triu {dtype : GpuFloat} {rows cols : Nat}
     (diagonal : Int := 0)
     (fillVal : Option Float := none) : KernelM Unit := do
   emit (.mask (.Triu diagonal) dst.id src.id fillVal)
+
+/-- Transpose causal mask (for backward pass) -/
+def makeCausalT {dtype : GpuFloat} {rows cols : Nat}
+    (dst src : RT dtype rows cols .Row)
+    (fillVal : Option Float := none) : KernelM Unit := do
+  emit (.mask .MakeCausalT dst.id src.id fillVal)
+
+/-- Left fill: fill columns 0..colIdx with value -/
+def leftFill {dtype : GpuFloat} {rows cols : Nat}
+    (dst src : RT dtype rows cols .Row)
+    (colIdx : Nat)
+    (fillVal : Option Float := none) : KernelM Unit := do
+  emit (.mask (.LeftFill colIdx) dst.id src.id fillVal)
+
+/-- Right fill: fill columns colIdx..end with value -/
+def rightFill {dtype : GpuFloat} {rows cols : Nat}
+    (dst src : RT dtype rows cols .Row)
+    (colIdx : Nat)
+    (fillVal : Option Float := none) : KernelM Unit := do
+  emit (.mask (.RightFill colIdx) dst.id src.id fillVal)
+
+/-- Upper fill: fill rows 0..rowIdx with value -/
+def upperFill {dtype : GpuFloat} {rows cols : Nat}
+    (dst src : RT dtype rows cols .Row)
+    (rowIdx : Nat)
+    (fillVal : Option Float := none) : KernelM Unit := do
+  emit (.mask (.UpperFill rowIdx) dst.id src.id fillVal)
+
+/-- Lower fill: fill rows rowIdx..end with value -/
+def lowerFill {dtype : GpuFloat} {rows cols : Nat}
+    (dst src : RT dtype rows cols .Row)
+    (rowIdx : Nat)
+    (fillVal : Option Float := none) : KernelM Unit := do
+  emit (.mask (.LowerFill rowIdx) dst.id src.id fillVal)
+
+/-- Upper-right fill: fill block at (row, col) to end -/
+def upperRightFill {dtype : GpuFloat} {rows cols : Nat}
+    (dst src : RT dtype rows cols .Row)
+    (rowIdx colIdx : Nat)
+    (fillVal : Option Float := none) : KernelM Unit := do
+  emit (.mask (.UpperRightFill rowIdx colIdx) dst.id src.id fillVal)
+
+/-! ## Cumulative/Scan Operations -/
+
+/-- Row-wise cumulative product (for decay in Mamba) -/
+def cumprodRow {dtype : GpuFloat} {rows cols : Nat}
+    (dst src : RT dtype rows cols .Row) : KernelM Unit := do
+  emit (.cumprod .Row dst.id src.id)
+
+/-- Column-wise cumulative product -/
+def cumprodCol {dtype : GpuFloat} {rows cols : Nat}
+    (dst src : RT dtype rows cols .Row) : KernelM Unit := do
+  emit (.cumprod .Col dst.id src.id)
+
+/-! ## TMA Operations -/
+
+/-- TMA prefetch -/
+def prefetch {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
+    (src : ST dtype rows cols layout) : KernelM Unit := do
+  emit (.prefetch src.id)
+
+/-- Async atomic store-min (TMA) -/
+def storeMinAsync {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
+    (dst : ST dtype rows cols layout)
+    (src : RT dtype rows cols layout) : KernelM Unit := do
+  emit (.storeMinAsync dst.id src.id)
+
+/-! ## Semaphore Operations -/
+
+/-- Semaphore type (barrier) -/
+structure Semaphore where
+  id : VarId
+  deriving Repr
+
+/-- Allocate a semaphore -/
+def allocSemaphore : KernelM Semaphore := do
+  let v ← freshVar
+  emit (.declSemaphore v)
+  pure ⟨v⟩
+
+/-- Initialize semaphore with count -/
+def initSemaphore (sem : Semaphore) (count : Nat := 1) : KernelM Unit := do
+  emit (.semaphore (.Init count) sem.id)
+
+/-- Invalidate semaphore -/
+def invalidateSemaphore (sem : Semaphore) : KernelM Unit := do
+  emit (.semaphore .Invalidate sem.id)
+
+/-- Expect bytes on semaphore -/
+def expectBytes (sem : Semaphore) (bytes : Nat) : KernelM Unit := do
+  emit (.semaphore (.Expect bytes) sem.id)
+
+/-- Wait on semaphore -/
+def waitSemaphore (sem : Semaphore) : KernelM Unit := do
+  emit (.semaphore .Wait sem.id)
+
+/-- Arrive at semaphore with transaction count -/
+def arriveSemaphore (sem : Semaphore) (count : Nat := 1) : KernelM Unit := do
+  emit (.semaphore (.Arrive count) sem.id)
+
+/-- Arrive and wait at semaphore -/
+def arriveAndWait (barrier : Nat := 0) : KernelM Unit := do
+  emit (.arriveAndWait barrier)
 
 /-! ## Synchronization -/
 

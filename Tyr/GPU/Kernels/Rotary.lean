@@ -1,192 +1,115 @@
 /-
   Tyr/GPU/Kernels/Rotary.lean
 
-  Rotary Positional Embedding (RoPE) kernel translated from ThunderKittens.
-  Based on: ThunderKittens/kernels/rotary/rotary.cu
+  Rotary Position Embedding (RoPE) kernel implementation.
+  Based on ThunderKittens patterns.
 
-  RoPE applies rotation to pairs of elements in the hidden dimension:
-    x1' = x1 * cos(θ) - x2 * sin(θ)
-    x2' = x1 * sin(θ) + x2 * cos(θ)
-
-  Where θ = position * base^(-2i/d) for each dimension i.
-
-  Operations used:
-  - load/store for shared memory
-  - mul, add, sub element-wise
-  - slicing for splitting dimensions
+  RoPE applies a rotation to query and key vectors based on position:
+  - Split x into x1 (first half) and x2 (second half)
+  - Apply 2D rotation: [cos -sin; sin cos]
+  - x1_out = x1*cos - x2*sin
+  - x2_out = x1*sin + x2*cos
 -/
 import Tyr.GPU.Types
-import Tyr.GPU.Codegen.AST
-import Tyr.GPU.Codegen.Emit
+import Tyr.GPU.Codegen.Var
+import Tyr.GPU.Codegen.TileTypes
+import Tyr.GPU.Codegen.IR
+import Tyr.GPU.Codegen.Monad
+import Tyr.GPU.Codegen.Ops
+import Tyr.GPU.Codegen.Loop
+import Tyr.GPU.Codegen.EmitNew
+import Tyr.GPU.Codegen.Attribute
 
-namespace Tyr.GPU.Kernels
+namespace Tyr.GPU.Kernels.Rotary
 
-open Codegen
+open Tyr.GPU
+open Tyr.GPU.Codegen
 
-/-- Rotary Positional Embedding forward kernel
+/-! ## Rotary Position Embedding
 
-Applies rotation to Q and K tensors for attention.
-The rotation is applied to pairs of adjacent elements.
+RoPE encodes position information by rotating vectors in 2D subspaces.
+For each position i and dimension pair (2k, 2k+1):
+  x'[2k]   = x[2k]*cos(θ_k*i) - x[2k+1]*sin(θ_k*i)
+  x'[2k+1] = x[2k]*sin(θ_k*i) + x[2k+1]*cos(θ_k*i)
+
+Where θ_k = 10000^(-2k/d) are the frequency bases.
 -/
-def rotaryFwd (headDim : Nat := 64) : KernelDef := {
-  name := "rotary_fwd"
-  arch := .SM90
-  params := [
-    { name := "q_ptr", cppType := "bf16", isPointer := true },
-    { name := "k_ptr", cppType := "bf16", isPointer := true },
-    { name := "q_out_ptr", cppType := "bf16", isPointer := true },
-    { name := "k_out_ptr", cppType := "bf16", isPointer := true },
-    { name := "sin_ptr", cppType := "float", isPointer := true },
-    { name := "cos_ptr", cppType := "float", isPointer := true },
-    { name := "seq_len", cppType := "int" },
-    { name := "num_heads", cppType := "int" }
-  ]
-  sharedMemBytes := headDim * 2 * 4  -- q, k tiles + sin/cos
-  body := KExpr.seqAll [
-    .comment "Declare register tiles for query and key",
-    .declRT "q" .BFloat16 16 headDim .Row,
-    .declRT "k" .BFloat16 16 headDim .Row,
 
-    .comment "Split into first and second halves for rotation",
-    .declRT "q1" .BFloat16 16 (headDim/2) .Row,
-    .declRT "q2" .BFloat16 16 (headDim/2) .Row,
-    .declRT "k1" .BFloat16 16 (headDim/2) .Row,
-    .declRT "k2" .BFloat16 16 (headDim/2) .Row,
+/-- Rotary embedding forward pass -/
+@[gpu_kernel .SM90]
+def rotaryFwd : KernelM Unit := do
+  comment "=== Rotary Position Embedding Forward ==="
 
-    .comment "Temporary tiles for rotated values",
-    .declRT "q1_rot" .BFloat16 16 (headDim/2) .Row,
-    .declRT "q2_rot" .BFloat16 16 (headDim/2) .Row,
-    .declRT "k1_rot" .BFloat16 16 (headDim/2) .Row,
-    .declRT "k2_rot" .BFloat16 16 (headDim/2) .Row,
+  -- Input tile: 64 x 64 (batch of positions x head_dim)
+  let x : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
+  let xF : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
 
-    .comment "Sin and cos tables (position-dependent)",
-    .declRT "sin_table" .Float32 16 (headDim/2) .Row,
-    .declRT "cos_table" .Float32 16 (headDim/2) .Row,
+  -- Split halves (each 64 x 32)
+  let x1 : RT GpuFloat.Float32 64 32 ← allocRT .Float32 64 32
+  let x2 : RT GpuFloat.Float32 64 32 ← allocRT .Float32 64 32
 
-    .comment "Shared memory tiles",
-    .declST "q_s" .BFloat16 16 headDim .Row,
-    .declST "k_s" .BFloat16 16 headDim .Row,
+  -- Precomputed sin/cos for these positions (64 x 32)
+  let sinT : RT GpuFloat.Float32 64 32 ← allocRT .Float32 64 32
+  let cosT : RT GpuFloat.Float32 64 32 ← allocRT .Float32 64 32
 
-    .comment "Load sin/cos tables for this position range",
-    .load "sin_table" "sin_ptr",
-    .load "cos_table" "cos_ptr",
+  -- Temporaries for rotation
+  let temp1 : RT GpuFloat.Float32 64 32 ← allocRT .Float32 64 32
+  let temp2 : RT GpuFloat.Float32 64 32 ← allocRT .Float32 64 32
+  let negX2 : RT GpuFloat.Float32 64 32 ← allocRT .Float32 64 32
 
-    .comment "Process tokens in blocks of 16",
-    .forLoop "token_idx" 0 64 (KExpr.seqAll [
-      .comment "Load Q and K tiles",
-      .load "q" "q_s",
-      .load "k" "k_s",
+  -- Output
+  let out : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
 
-      .comment "Split Q into halves: q1 = q[:, :d/2], q2 = q[:, d/2:]",
-      .sliceCols "q1" "q" 0 (headDim/2),
-      .sliceCols "q2" "q" (headDim/2) (headDim/2),
+  -- Shared memory
+  let xShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
+  let sinShared : ST GpuFloat.Float32 64 32 ← allocST .Float32 64 32
+  let cosShared : ST GpuFloat.Float32 64 32 ← allocST .Float32 64 32
+  let outShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
 
-      .comment "Split K into halves: k1 = k[:, :d/2], k2 = k[:, d/2:]",
-      .sliceCols "k1" "k" 0 (headDim/2),
-      .sliceCols "k2" "k" (headDim/2) (headDim/2),
+  comment "Load precomputed sin/cos (long-resident)"
+  load sinT sinShared
+  load cosT cosShared
 
-      .comment "Apply rotation to Q:",
-      .comment "q1' = q1 * cos - q2 * sin",
-      .binary .Mul "q1_rot" "q1" "cos_table",
-      .binary .Mul "q2_rot" "q2" "sin_table",
-      .binary .Sub "q1_rot" "q1_rot" "q2_rot",
+  comment "Process sequence positions"
+  forLoop 0 16 do
+    comment "Load input"
+    load x xShared
+    convert xF x
 
-      .comment "q2' = q1 * sin + q2 * cos",
-      .binary .Mul "q1" "q1" "sin_table",
-      .binary .Mul "q2" "q2" "cos_table",
-      .binary .Add "q2_rot" "q1" "q2",
+    comment "Compute x1 * cos"
+    mul temp1 x1 cosT
 
-      .comment "Apply rotation to K:",
-      .comment "k1' = k1 * cos - k2 * sin",
-      .binary .Mul "k1_rot" "k1" "cos_table",
-      .binary .Mul "k2_rot" "k2" "sin_table",
-      .binary .Sub "k1_rot" "k1_rot" "k2_rot",
+    comment "Compute -x2 * sin for first half"
+    neg negX2 x2
+    mul negX2 negX2 sinT
 
-      .comment "k2' = k1 * sin + k2 * cos",
-      .binary .Mul "k1" "k1" "sin_table",
-      .binary .Mul "k2" "k2" "cos_table",
-      .binary .Add "k2_rot" "k1" "k2",
+    comment "x1_out = x1*cos - x2*sin"
+    add temp1 temp1 negX2
 
-      .comment "Store rotated Q and K",
-      .store "q_out_ptr" "q",
-      .store "k_out_ptr" "k",
+    comment "Compute x1 * sin for second half"
+    mul negX2 x1 sinT
 
-      .sync 0
-    ])
-  ]
-}
+    comment "x2_out = x2*cos + x1*sin"
+    mul temp2 x2 cosT
+    add temp2 temp2 negX2
 
-/-- YaRN-style rotary with NTK-aware scaling
+    comment "Store result"
+    convert out x
+    store outShared out
+    sync
 
-YaRN extends RoPE with:
-1. NTK-aware interpolation for sequence length extension
-2. Linear interpolation in lower dimensions
-3. Full NTK scaling in higher dimensions
--/
-def yarnRotaryFwd (headDim : Nat := 64) : KernelDef := {
-  name := "yarn_rotary_fwd"
-  arch := .SM90
-  params := [
-    { name := "x_ptr", cppType := "bf16", isPointer := true },
-    { name := "out_ptr", cppType := "bf16", isPointer := true },
-    { name := "sin_ptr", cppType := "float", isPointer := true },
-    { name := "cos_ptr", cppType := "float", isPointer := true },
-    { name := "scale_ptr", cppType := "float", isPointer := true },
-    { name := "seq_len", cppType := "int" },
-    { name := "original_max_len", cppType := "int" }
-  ]
-  body := KExpr.seqAll [
-    .comment "Declare register tiles",
-    .declRT "x" .BFloat16 16 headDim .Row,
-    .declRT "x1" .BFloat16 16 (headDim/2) .Row,
-    .declRT "x2" .BFloat16 16 (headDim/2) .Row,
-    .declRT "x1_rot" .BFloat16 16 (headDim/2) .Row,
-    .declRT "x2_rot" .BFloat16 16 (headDim/2) .Row,
+/-- Build rotary forward kernel -/
+def rotaryFwdKernel : Kernel :=
+  buildKernelM "rotary_fwd" .SM90 #[
+    { name := "x", dtype := .BFloat16, isPointer := true },
+    { name := "sin", dtype := .Float32, isPointer := true },
+    { name := "cos", dtype := .Float32, isPointer := true },
+    { name := "out", dtype := .BFloat16, isPointer := true },
+    { name := "seq_len", dtype := .Float32, isPointer := false },
+    { name := "head_dim", dtype := .Float32, isPointer := false }
+  ] rotaryFwd
 
-    .comment "Sin/cos with NTK scaling applied",
-    .declRT "sin_scaled" .Float32 16 (headDim/2) .Row,
-    .declRT "cos_scaled" .Float32 16 (headDim/2) .Row,
+-- Print generated kernel
+#eval IO.println "=== Rotary Forward ===" *> IO.println (generateKernel rotaryFwdKernel)
 
-    .comment "Per-dimension attention scaling factor",
-    .declRV "scale" .Float32 (headDim/2),
-
-    .declST "x_s" .BFloat16 16 headDim .Row,
-
-    .comment "Load precomputed NTK-scaled sin/cos and attention scales",
-    .load "sin_scaled" "sin_ptr",
-    .load "cos_scaled" "cos_ptr",
-    .load "scale" "scale_ptr",
-
-    .forLoop "token_idx" 0 64 (KExpr.seqAll [
-      .load "x" "x_s",
-
-      .comment "Split into halves",
-      .sliceCols "x1" "x" 0 (headDim/2),
-      .sliceCols "x2" "x" (headDim/2) (headDim/2),
-
-      .comment "Apply scaled rotation",
-      .binary .Mul "x1_rot" "x1" "cos_scaled",
-      .binary .Mul "x2_rot" "x2" "sin_scaled",
-      .binary .Sub "x1_rot" "x1_rot" "x2_rot",
-
-      .binary .Mul "x1" "x1" "sin_scaled",
-      .binary .Mul "x2" "x2" "cos_scaled",
-      .binary .Add "x2_rot" "x1" "x2",
-
-      .comment "Apply attention scaling",
-      .binaryBroadcast .Mul .Col "x1_rot" "x1_rot" "scale",
-      .binaryBroadcast .Mul .Col "x2_rot" "x2_rot" "scale",
-
-      .store "out_ptr" "x",
-      .sync 0
-    ])
-  ]
-}
-
--- Generate C++ code for Rotary
-#eval IO.println (generateCpp (rotaryFwd 64))
-
--- Generate C++ code for YaRN Rotary
-#eval IO.println (generateCpp (yarnRotaryFwd 64))
-
-end Tyr.GPU.Kernels
+end Tyr.GPU.Kernels.Rotary

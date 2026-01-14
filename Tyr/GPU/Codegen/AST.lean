@@ -56,8 +56,12 @@ def ReduceAxis.toPrefix : ReduceAxis → String
 /-- Unary element-wise operations -/
 inductive UnaryOp where
   | Exp | Exp2 | Log | Log2 | Abs | Relu | Copy
-  | Neg | Sqrt | Rsqrt | Tanh | Sigmoid | Gelu  -- Additional math ops
-  | Zero | One | PosInfty | NegInfty  -- Initialization
+  | Neg | Sqrt | Rsqrt | Tanh | Sigmoid | Gelu  -- Activation functions
+  | Silu | Swish                                -- Modern activations (SwiGLU)
+  | Sin | Cos                                   -- Trig (for rotary embeddings)
+  | Recip                                       -- 1/x
+  | Square                                      -- x^2
+  | Zero | One | PosInfty | NegInfty            -- Initialization
   deriving Repr, BEq, Hashable, Inhabited, DecidableEq
 
 instance : ToString UnaryOp where
@@ -66,6 +70,9 @@ instance : ToString UnaryOp where
     | .Abs => "Abs" | .Relu => "Relu" | .Copy => "Copy" | .Neg => "Neg"
     | .Sqrt => "Sqrt" | .Rsqrt => "Rsqrt" | .Tanh => "Tanh"
     | .Sigmoid => "Sigmoid" | .Gelu => "Gelu"
+    | .Silu => "Silu" | .Swish => "Swish"
+    | .Sin => "Sin" | .Cos => "Cos"
+    | .Recip => "Recip" | .Square => "Square"
     | .Zero => "Zero" | .One => "One"
     | .PosInfty => "PosInfty" | .NegInfty => "NegInfty"
 
@@ -84,6 +91,12 @@ def UnaryOp.toCpp : UnaryOp → String
   | .Tanh => "tanh"
   | .Sigmoid => "sigmoid"
   | .Gelu => "gelu"
+  | .Silu => "silu"
+  | .Swish => "swish"
+  | .Sin => "sin"
+  | .Cos => "cos"
+  | .Recip => "recip"
+  | .Square => "square"
   | .Zero => "zero"
   | .One => "one"
   | .PosInfty => "pos_infty"
@@ -118,10 +131,35 @@ inductive MaskOp where
   | Tril (diagonal : Int)
   | Triu (diagonal : Int)
   | MakeCausal
+  | MakeCausalT      -- Transpose causal mask (for backward pass)
   | RightFill (colIdx : Nat)
   | LeftFill (colIdx : Nat)
   | UpperFill (rowIdx : Nat)
   | LowerFill (rowIdx : Nat)
+  | UpperRightFill (row col : Nat)  -- Fill upper-right block
+  deriving Repr, BEq, Hashable, Inhabited
+
+/-- Ternary operations (FMA patterns) -/
+inductive TernaryOp where
+  | FMA           -- dst = a * b + c
+  | FMAAxBtC      -- dst = A × B + C (matrix-style, like attention)
+  | FMAAxCtB      -- dst = A × C + B (alternate pattern)
+  deriving Repr, BEq, Hashable, Inhabited
+
+/-- Convert TernaryOp to C++ -/
+def TernaryOp.toCpp : TernaryOp → String
+  | .FMA => "fma"
+  | .FMAAxBtC => "fma_AxBtC"
+  | .FMAAxCtB => "fma_AxCtB"
+
+/-- Semaphore operations -/
+inductive SemaphoreOp where
+  | Init (count : Nat)    -- Initialize semaphore with count
+  | Invalidate            -- Invalidate semaphore
+  | Expect (bytes : Nat)  -- Expect bytes on semaphore
+  | Wait                  -- Wait on semaphore
+  | Arrive (count : Nat)  -- Arrive with transaction count
+  | ArriveAndWait         -- Arrive and wait
   deriving Repr, BEq, Hashable, Inhabited
 
 /-- Kernel expression AST -/

@@ -24,6 +24,8 @@ partial def generateStmt (indent : String := "  ") : KStmt → String
     s!"{indent}rv<{dtype.toCpp}, {len}> {v.toIdent};\n"
   | .declSV v dtype len =>
     s!"{indent}sv<{dtype.toCpp}, {len}> {v.toIdent};\n"
+  | .declSemaphore v =>
+    s!"{indent}semaphore {v.toIdent};\n"
 
   -- Memory operations
   | .load dst src => s!"{indent}load({dst.toIdent}, {src.toIdent});\n"
@@ -32,6 +34,8 @@ partial def generateStmt (indent : String := "  ") : KStmt → String
   | .storeAsync dst src => s!"{indent}store_async({dst.toIdent}, {src.toIdent});\n"
   | .storeAdd dst src => s!"{indent}store_add({dst.toIdent}, {src.toIdent});\n"
   | .storeAddAsync dst src => s!"{indent}tma::store_add_async({dst.toIdent}, {src.toIdent});\n"
+  | .storeMinAsync dst src => s!"{indent}tma::store_min_async({dst.toIdent}, {src.toIdent});\n"
+  | .prefetch src => s!"{indent}tma::prefetch({src.toIdent});\n"
   | .tmaExpect barrier bytes => s!"{indent}tma::expect_bytes({barrier.toIdent}, {bytes});\n"
 
   -- MMA operations
@@ -50,9 +54,15 @@ partial def generateStmt (indent : String := "  ") : KStmt → String
   | .binary op dst a b =>
     s!"{indent}{op.toCpp}({dst.toIdent}, {a.toIdent}, {b.toIdent});\n"
 
+  -- Element-wise ternary (FMA)
+  | .ternary op dst a b c =>
+    s!"{indent}{op.toCpp}({dst.toIdent}, {a.toIdent}, {b.toIdent}, {c.toIdent});\n"
+
   -- Scalar operations
   | .scalarMul dst src scalar =>
     s!"{indent}mul({dst.toIdent}, {src.toIdent}, {scalar}f);\n"
+  | .scalarAdd dst src scalar =>
+    s!"{indent}add({dst.toIdent}, {src.toIdent}, {scalar}f);\n"
 
   -- Broadcasting
   | .broadcast axis dst vec =>
@@ -69,6 +79,8 @@ partial def generateStmt (indent : String := "  ") : KStmt → String
   -- Scan operations
   | .cumsum axis dst src =>
     s!"{indent}{axis.toPrefix}cumsum({dst.toIdent}, {src.toIdent});\n"
+  | .cumprod axis dst src =>
+    s!"{indent}{axis.toPrefix}cumprod({dst.toIdent}, {src.toIdent});\n"
 
   -- Outer product
   | .outer dst a b =>
@@ -86,10 +98,12 @@ partial def generateStmt (indent : String := "  ") : KStmt → String
     | .Tril d => s!"{indent}tril({dst.toIdent}, {src.toIdent}, {d}{fillStr});\n"
     | .Triu d => s!"{indent}triu({dst.toIdent}, {src.toIdent}, {d}{fillStr});\n"
     | .MakeCausal => s!"{indent}make_causal({dst.toIdent}, {src.toIdent}{fillStr});\n"
+    | .MakeCausalT => s!"{indent}make_causal_t({dst.toIdent}, {src.toIdent}{fillStr});\n"
     | .RightFill c => s!"{indent}right_fill({dst.toIdent}, {src.toIdent}, {c}{fillStr});\n"
     | .LeftFill c => s!"{indent}left_fill({dst.toIdent}, {src.toIdent}, {c}{fillStr});\n"
     | .UpperFill r => s!"{indent}upper_fill({dst.toIdent}, {src.toIdent}, {r}{fillStr});\n"
     | .LowerFill r => s!"{indent}lower_fill({dst.toIdent}, {src.toIdent}, {r}{fillStr});\n"
+    | .UpperRightFill r c => s!"{indent}upper_right_fill({dst.toIdent}, {src.toIdent}, {r}, {c}{fillStr});\n"
 
   -- Tile slicing
   | .sliceRows dst src startRow numRows =>
@@ -100,11 +114,29 @@ partial def generateStmt (indent : String := "  ") : KStmt → String
   -- Synchronization
   | .sync barrierId => s!"{indent}sync({barrierId});\n"
   | .arrive barrierId => s!"{indent}arrive({barrierId});\n"
+  | .arriveAndWait barrierId => s!"{indent}arrive_and_wait({barrierId});\n"
+
+  -- Semaphore operations
+  | .semaphore op sem =>
+    match op with
+    | .Init count => s!"{indent}init_semaphore({sem.toIdent}, {count});\n"
+    | .Invalidate => s!"{indent}invalidate_semaphore({sem.toIdent});\n"
+    | .Expect bytes => s!"{indent}expect({sem.toIdent}, {bytes});\n"
+    | .Wait => s!"{indent}wait({sem.toIdent});\n"
+    | .Arrive count => s!"{indent}arrive({sem.toIdent}, {count});\n"
+    | .ArriveAndWait => s!"{indent}arrive_and_wait({sem.toIdent});\n"
 
   -- Control flow
   | .forLoop v lo hi body =>
     let bodyStr := body.toList.map (generateStmt (indent ++ "  ")) |>.foldl (· ++ ·) ""
     s!"{indent}for (int {v.toIdent} = {lo}; {v.toIdent} < {hi}; {v.toIdent}++) \{\n{bodyStr}{indent}}\n"
+  | .ifStmt cond thenBody elseBody =>
+    let thenStr := thenBody.toList.map (generateStmt (indent ++ "  ")) |>.foldl (· ++ ·) ""
+    let elseStr := elseBody.toList.map (generateStmt (indent ++ "  ")) |>.foldl (· ++ ·) ""
+    if elseBody.isEmpty then
+      s!"{indent}if ({cond.toIdent}) \{\n{thenStr}{indent}}\n"
+    else
+      s!"{indent}if ({cond.toIdent}) \{\n{thenStr}{indent}} else \{\n{elseStr}{indent}}\n"
   | .comment text => s!"{indent}// {text}\n"
 
 /-- Generate kernel parameter list -/

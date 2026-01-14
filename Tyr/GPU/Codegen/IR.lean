@@ -19,6 +19,7 @@ inductive KStmt where
   | declST (v : VarId) (dtype : GpuFloat) (rows cols : Nat) (layout : TileLayout)
   | declRV (v : VarId) (dtype : GpuFloat) (len : Nat)
   | declSV (v : VarId) (dtype : GpuFloat) (len : Nat)
+  | declSemaphore (v : VarId)  -- Semaphore/barrier declaration
 
   -- Memory operations
   | load (dst src : VarId)
@@ -27,6 +28,8 @@ inductive KStmt where
   | storeAsync (dst src : VarId)
   | storeAdd (dst src : VarId)       -- Atomic add for gradient accumulation
   | storeAddAsync (dst src : VarId)  -- Async atomic add (TMA)
+  | storeMinAsync (dst src : VarId)  -- Async atomic min (TMA)
+  | prefetch (src : VarId)           -- TMA prefetch
   | tmaExpect (barrier : VarId) (bytes : Nat)
 
   -- MMA operations
@@ -42,8 +45,12 @@ inductive KStmt where
   -- Element-wise binary
   | binary (op : BinaryOp) (dst a b : VarId)
 
+  -- Element-wise ternary (FMA)
+  | ternary (op : TernaryOp) (dst a b c : VarId)
+
   -- Scalar operations
   | scalarMul (dst src : VarId) (scalar : Float)
+  | scalarAdd (dst src : VarId) (scalar : Float)
 
   -- Broadcasting
   | broadcast (axis : BroadcastAxis) (dst vec : VarId)
@@ -55,6 +62,7 @@ inductive KStmt where
 
   -- Scan/prefix operations
   | cumsum (axis : ReduceAxis) (dst src : VarId)
+  | cumprod (axis : ReduceAxis) (dst src : VarId)  -- Cumulative product (for decay)
 
   -- Outer product
   | outer (dst a b : VarId)
@@ -74,9 +82,14 @@ inductive KStmt where
   -- Synchronization
   | sync (barrierId : Nat)
   | arrive (barrierId : Nat)
+  | arriveAndWait (barrierId : Nat)
+
+  -- Semaphore operations
+  | semaphore (op : SemaphoreOp) (sem : VarId)
 
   -- Control flow
   | forLoop (v : VarId) (lo hi : Nat) (body : Array KStmt)
+  | ifStmt (cond : VarId) (thenBody elseBody : Array KStmt)  -- Conditional
   | comment (text : String)
 
   deriving Repr, Inhabited
