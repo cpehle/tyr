@@ -113,7 +113,7 @@ unsafe def testStateDictSimulation : IO Unit := do
       let remaining ← ref.get
       match remaining with
       | [] => throw $ IO.userError "Not enough tensors in state list"
-      | ⟨s', t⟩ :: rest => 
+      | ⟨_s', t⟩ :: rest => 
         -- In real loading, we'd check shape match here (s == s')
         -- But T s and T s' are different types if s != s' statically
         -- We cast or rely on runtime check
@@ -127,6 +127,6 @@ unsafe def testStateDictSimulation : IO Unit := do
   
   -- Verify loaded matches original
   let diff := TensorStruct.zipWith (fun a b => a - b) params loadedParams
-  let totalDiff := TensorStruct.fold (fun {s} t acc => acc + nn.item (nn.sumAll (nn.abs t))) 0.0 diff
+  let totalDiff := TensorStruct.fold (fun {_s} t acc => acc + nn.item (nn.sumAll (nn.abs t))) 0.0 diff
   
   LeanTest.assertTrue (totalDiff < 1e-6) "Loaded parameters should match saved ones"

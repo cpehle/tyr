@@ -108,6 +108,15 @@ inductive BinaryOp where
   | Add | Sub | Mul | Div | Max | Min
   deriving Repr, BEq, Hashable, Inhabited, Lean.ToExpr
 
+instance : ToString BinaryOp where
+  toString
+    | .Add => "Add"
+    | .Sub => "Sub"
+    | .Mul => "Mul"
+    | .Div => "Div"
+    | .Max => "Max"
+    | .Min => "Min"
+
 /-- Convert BinaryOp to C++ -/
 def BinaryOp.toCpp : BinaryOp → String
   | .Add => "add"

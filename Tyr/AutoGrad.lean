@@ -1,99 +1,348 @@
-import Lean.Compiler.IR
 import Lean.Compiler.IR.Basic
-import Lean.Compiler.IR.LiveVars
+import Lean.Compiler.IR.Format
+import Lean.Compiler.IR.CompilerM
+import Tyr.GPU.Codegen.IR
+import Tyr.GPU.Codegen.Var
 
-namespace Lean
-namespace IR
+namespace Tyr.AD
 
-def define (f : FunId) (params : Array Param) := Decl.fdecl f params
-def var (idx : Index ) := VarId.mk idx
-def num (val : Nat) := Expr.lit (LitVal.num 12)
+open Lean.IR
 
-def argToParam : Arg → Param
-| Arg.var idx => mkParam idx false IRType.object
-| Arg.irrelevant => unreachable!
+/-- Replace variable in Argument -/
+def replaceArg (a : Arg) (old new : VarId) : Arg :=
+  match a with
+  | .var x => if x.idx == old.idx then .var new else a
+  | .erased => .erased
 
-def argToVarId : Arg → VarId
-| Arg.var idx => idx
-| Arg.irrelevant => unreachable!
-
-def collectContextExpr : Expr → Array Param
-| Expr.fap c ys => ys.map argToParam
-| Expr.proj i y => #[mkParam y false IRType.object]
-| other => #[]
-
-partial def collectContextFnBody : FnBody → Array Param
-| FnBody.vdecl x ty e b => collectContextExpr e ++ collectContextFnBody b
-| other => #[]
-
-def collectContext : Decl → Array Param
-| Decl.fdecl f xs ty b _  => collectContextFnBody b
-| Decl.extern f xs ty _   => #[]
-
-def transposeExpr (arg : Arg) : Expr → Expr
-| Expr.fap c ys => Expr.fap (c ++ "T") (ys ++ #[arg])
-| Expr.ctor i ys => Expr.ctor i ys
-| other => other
-
-partial def transposeConstructor (high : Index) (ty : IRType) (args : Array VarId) (x : VarId) (b : FnBody) : FnBody :=
-let rec loop (idx : Nat) (acc : FnBody) :=
-  if idx >= args.size then acc else
-    let v := var (args[idx].idx + high);
-    let dx := var (x.idx + high);
-    let acc' := FnBody.vdecl v ty (Expr.proj idx dx)  acc;
-    loop (idx + 1) acc'
-loop 0 b
-
-partial def transposeFnBody (high : Index) (b : FnBody) : FnBody :=
-let rec loop (curr acc : FnBody) : FnBody :=
-match curr with
-| FnBody.vdecl x ty e b =>
+/-- Replace variable in Expression -/
+def replaceExpr (e : Expr) (old new : VarId) : Expr :=
   match e with
-  | Expr.proj i y => loop b (FnBody.set y i (Arg.var (var (x.idx + high))) acc)
-  | Expr.uproj i y => loop b (FnBody.set y i (Arg.var (var (x.idx + high))) acc)
-  | Expr.ctor cinfo args =>
-    let vars := args.map (fun x => var ((argToVarId x).idx));
-    let acc' := transposeConstructor high ty vars x acc;
-    loop b acc'
-  | Expr.box t i =>
-    let dyId := var (i.idx + high-1);
-    let dxId := var (x.idx + high);
-    loop b (FnBody.vdecl dyId t (Expr.unbox dxId) acc)
-  | other => let dxId := var (x.idx + high - 1);
-    loop b (FnBody.vdecl dxId ty (transposeExpr (Arg.var (var (x.idx + high))) e) acc)
-| FnBody.ret x => acc
-| FnBody.sset x i o y ty b  =>
-    let dyId := var (y.idx + high);
-    let dxId := var (x.idx + high);
-    loop b (FnBody.vdecl dyId ty (Expr.sproj i o dxId) acc)
-| other => other
-loop b (FnBody.ret (Arg.var (var high)))
+  | .ctor i args => .ctor i (args.map (replaceArg · old new))
+  | .reset n x => .reset n (if x.idx == old.idx then new else x)
+  | .reuse x i u args => .reuse (if x.idx == old.idx then new else x) i u (args.map (replaceArg · old new))
+  | .proj i x => .proj i (if x.idx == old.idx then new else x)
+  | .uproj i x => .uproj i (if x.idx == old.idx then new else x)
+  | .sproj n o x => .sproj n o (if x.idx == old.idx then new else x)
+  | .fap c args => .fap c (args.map (replaceArg · old new))
+  | .pap c args => .pap c (args.map (replaceArg · old new))
+  | .ap x args => .ap (if x.idx == old.idx then new else x) (args.map (replaceArg · old new))
+  | .box t x => .box t (if x.idx == old.idx then new else x)
+  | .unbox x => .unbox (if x.idx == old.idx then new else x)
+  | .lit l => .lit l
+  | .isShared x => .isShared (if x.idx == old.idx then new else x)
 
-partial def returnArg : FnBody → Arg
-| FnBody.vdecl x ty e b      => returnArg b
-| FnBody.jdecl j xs v b      => unreachable!
-| FnBody.set x i y b         => returnArg b
-| FnBody.uset x i y b        => returnArg b
-| FnBody.sset x i o y ty b   => returnArg b
-| FnBody.setTag x cidx b     => returnArg b
-| FnBody.inc x n c _ b       => returnArg b
-| FnBody.dec x n c _ b       => returnArg b
-| FnBody.del x b             => returnArg b
-| FnBody.mdata d b           => returnArg b
-| FnBody.case tid x xType cs => unreachable!
-| FnBody.jmp j ys            => unreachable!
-| FnBody.ret x               => x
-| FnBody.unreachable         => unreachable!
+/-- Replace variable in FnBody -/
+partial def replaceVar (b : FnBody) (old new : VarId) : FnBody :=
+  match b with
+  | .vdecl x ty e rest => 
+    .vdecl x ty (replaceExpr e old new) (replaceVar rest old new)
+  | .jdecl j xs v rest => 
+    .jdecl j xs (replaceVar v old new) (replaceVar rest old new)
+  | .set x i y rest => 
+    .set (if x.idx == old.idx then new else x) i (replaceArg y old new) (replaceVar rest old new)
+  | .setTag x i rest => 
+    .setTag (if x.idx == old.idx then new else x) i (replaceVar rest old new)
+  | .uset x i y rest => 
+    .uset (if x.idx == old.idx then new else x) i (if y.idx == old.idx then new else y) (replaceVar rest old new)
+  | .sset x i o y ty rest => 
+    .sset (if x.idx == old.idx then new else x) i o (if y.idx == old.idx then new else y) ty (replaceVar rest old new)
+  | .inc x n c p rest => 
+    .inc (if x.idx == old.idx then new else x) n c p (replaceVar rest old new)
+  | .dec x n c p rest => 
+    .dec (if x.idx == old.idx then new else x) n c p (replaceVar rest old new)
+  | .del x rest => 
+    .del (if x.idx == old.idx then new else x) (replaceVar rest old new)
+  | .case tid x xType alts => 
+    .case tid (if x.idx == old.idx then new else x) xType (alts.map fun 
+      | .ctor info b => .ctor info (replaceVar b old new)
+      | .default b => .default (replaceVar b old new))
+  | .jmp j args => 
+    .jmp j (args.map (replaceArg · old new))
+  | .ret x => 
+    .ret (replaceArg x old new)
+  | .unreachable => .unreachable
 
+-- AD Context and Monad
+structure ADContext where
+  tangents : Std.HashMap Nat Nat := {}
+  cotangents : Std.HashMap Nat Nat := {}
+  nextVarIdx : Nat := 0
+  /-- Accumulator for backward pass -/
+  pullbackStack : Array (FnBody → FnBody) := #[]
+  deriving Inhabited
 
-def transposeDecl : Decl → Decl
-| d@(Decl.fdecl f xs ty b m) =>
-  let ctx := collectContextFnBody b;
-  let high := d.highestId;
-  let retvar := returnArg b |> (fun x => match x with | Arg.var idx => idx | other => unreachable!);
-  Decl.fdecl (f ++ "T") (ctx ++ #[mkParam (var (retvar.idx + high)) false IRType.object]) ty (transposeFnBody high b) m
-| other => other
+abbrev ADM := StateT ADContext Lean.CoreM
 
+def getFreshVarIdx : ADM Nat := do
+  let s ← get
+  let idx := s.nextVarIdx
+  modify fun s => { s with nextVarIdx := idx + 1 }
+  return idx
 
-end IR
-end Lean
+def getFreshVar : ADM VarId := do
+  return { idx := ← getFreshVarIdx }
+
+def getFreshGpuVar : ADM Tyr.GPU.Codegen.VarId := do
+  return { idx := ← getFreshVarIdx }
+
+def getTangentIdx (idx : Nat) : ADM Nat := do
+  let s ← get
+  match s.tangents.get? idx with
+  | some t => return t
+  | none => return idx 
+
+def getTangent (x : VarId) : ADM VarId := do
+  return { idx := ← getTangentIdx x.idx }
+
+def getGpuTangent (x : Tyr.GPU.Codegen.VarId) : ADM Tyr.GPU.Codegen.VarId := do
+  return { idx := ← getTangentIdx x.idx }
+
+def setTangentIdx (x idx : Nat) : ADM Unit := do
+  modify fun s => { s with tangents := s.tangents.insert x idx }
+
+def setTangent (x dx : VarId) : ADM Unit := do
+  setTangentIdx x.idx dx.idx
+
+def setGpuTangent (x dx : Tyr.GPU.Codegen.VarId) : ADM Unit := do
+  setTangentIdx x.idx dx.idx
+
+def getCotangentIdx (idx : Nat) : ADM Nat := do
+  let s ← get
+  match s.cotangents.get? idx with
+  | some dx => return dx
+  | none => do
+    let dx ← getFreshVarIdx
+    modify fun s => { s with cotangents := s.cotangents.insert idx dx }
+    return dx
+
+def getCotangent (x : VarId) : ADM VarId := do
+  return { idx := ← getCotangentIdx x.idx }
+
+def getGpuCotangent (x : Tyr.GPU.Codegen.VarId) : ADM Tyr.GPU.Codegen.VarId := do
+  return { idx := ← getCotangentIdx x.idx }
+
+def setCotangentIdx (x idx : Nat) : ADM Unit := do
+  modify fun s => { s with cotangents := s.cotangents.insert x idx }
+
+def setCotangent (x dx : VarId) : ADM Unit := do
+  setCotangentIdx x.idx dx.idx
+
+def setGpuCotangent (x dx : Tyr.GPU.Codegen.VarId) : ADM Unit := do
+  setCotangentIdx x.idx dx.idx
+
+-- AD Rules for Lean IR
+abbrev JVPBuilder := FnBody → FnBody
+abbrev JVPRule := Array Arg → Array Arg → IRType → ADM (JVPBuilder × VarId × VarId)
+
+abbrev VJPBuilder := FnBody → FnBody
+abbrev VJPRule := Array Arg → VarId → IRType → ADM (VJPBuilder × Array VarId)
+
+structure ADRegistry where
+  jvpRules : Std.HashMap Lean.Name JVPRule := {}
+  vjpRules : Std.HashMap Lean.Name VJPRule := {}
+  deriving Inhabited
+
+initialize adRegistry : Lean.EnvExtension ADRegistry ←
+  Lean.registerEnvExtension (pure {})
+
+-- GPU AD Registry
+/-- 
+  GPU VJP Rule Type:
+  Arguments:
+  - dout : Cotangent of the output
+  - dins : Array of cotangents of the inputs
+  - ctx  : Array of primal variables preserved from forward pass
+  Returns:
+  - Array KStmt: The statements implementing the backward pass
+-/
+abbrev GpuVJPRule := Tyr.GPU.Codegen.VarId → Array Tyr.GPU.Codegen.VarId → Array Tyr.GPU.Codegen.VarId → ADM (Array Tyr.GPU.Codegen.KStmt)
+
+/--
+  GPU AD Registry for custom operations.
+  Unlike Lean IR which uses Name, GPU IR operations are typically Enums (BinaryOp, UnaryOp).
+  We map a String key (e.g. "UnaryOp.Sin") to the rule.
+-/
+structure GpuADRegistry where
+  /-- Map from Op Name to VJP Rule -/
+  vjpRules : Std.HashMap String GpuVJPRule := {}
+  deriving Inhabited
+
+initialize gpuAdRegistry : Lean.EnvExtension GpuADRegistry ←
+  Lean.registerEnvExtension (pure {})
+
+def registerJVPRule (fn : Lean.Name) (rule : JVPRule) : Lean.CoreM Unit := do
+  Lean.modifyEnv fun env => adRegistry.modifyState env fun s => 
+    { s with jvpRules := s.jvpRules.insert fn rule }
+
+def registerVJPRule (fn : Lean.Name) (rule : VJPRule) : Lean.CoreM Unit := do
+  Lean.modifyEnv fun env => adRegistry.modifyState env fun s => 
+    { s with vjpRules := s.vjpRules.insert fn rule }
+
+def getJVPRule (fn : Lean.Name) : Lean.CoreM (Option JVPRule) := do
+  return (adRegistry.getState (← Lean.getEnv)).jvpRules.get? fn
+
+def getVJPRule (fn : Lean.Name) : Lean.CoreM (Option VJPRule) := do
+  return (adRegistry.getState (← Lean.getEnv)).vjpRules.get? fn
+
+-- Lean VJP Registration Helper
+
+partial def unpackTuple (res : VarId) (vars : List VarId) : ADM (FnBody → FnBody) := do
+  match vars with
+  | [] => return id
+  | [v] => 
+    return fun b => FnBody.vdecl v IRType.object (Expr.fap `id #[Arg.var res]) b
+
+  | v :: vs =>
+    let tail ← getFreshVar
+    let unpackTail ← unpackTuple tail vs
+    return fun b => 
+      FnBody.vdecl v IRType.object (Expr.proj 0 res) <|
+      FnBody.vdecl tail IRType.object (Expr.proj 1 res) <|
+      unpackTail b
+
+def registerLeanVJPRule (primalFn vjpFn : Lean.Name) : Lean.CoreM Unit := do
+  registerVJPRule primalFn fun args dy _resTy => do
+    let res ← getFreshVar
+    let callArgs := args.push (Arg.var dy)
+    
+    let mut dxs := #[]
+    let mut varsToUnpack := []
+    
+    -- Create fresh vars for cotangents
+    for _ in [:args.size] do
+       let dx ← getFreshVar
+       dxs := dxs.push dx
+       varsToUnpack := varsToUnpack ++ [dx]
+       
+    let unpacker ← unpackTuple res varsToUnpack
+    
+    let builder := fun rest => 
+      FnBody.vdecl res IRType.object (Expr.fap vjpFn callArgs) <|
+      unpacker rest
+      
+    return (builder, dxs)
+
+def registerLeanJVPRule (primalFn jvpFn : Lean.Name) : Lean.CoreM Unit := do
+  registerJVPRule primalFn fun args tans _resTy => do
+    let resPair ← getFreshVar
+    let callArgs := args ++ tans
+    let prim ← getFreshVar
+    let tan ← getFreshVar
+    
+    let builder := fun rest =>
+      FnBody.vdecl resPair IRType.object (Expr.fap jvpFn callArgs) <|
+      FnBody.vdecl prim IRType.object (Expr.proj 0 resPair) <|
+      FnBody.vdecl tan IRType.object (Expr.proj 1 resPair) <|
+      rest
+      
+    return (builder, prim, tan)
+
+-- JVP Interpreter
+partial def jvp (b : FnBody) : ADM FnBody := do
+  match b with
+  | .vdecl x ty e rest =>
+    match e with
+    | .fap fn args =>
+      let rule? ← getJVPRule fn
+      match rule? with
+      | some rule =>
+        let tanArgs ← args.mapM fun 
+          | Arg.var v => do return Arg.var (← getTangent v)
+          | Arg.erased => return .erased
+        let (builder, prim, tan) ← rule args tanArgs ty
+        setTangent x tan
+        let rest' ← jvp rest
+        return builder (replaceVar rest' x prim)
+      | none =>
+        let rest' ← jvp rest
+        return .vdecl x ty e rest'
+    | _ =>
+      let rest' ← jvp rest
+      return .vdecl x ty e rest'
+  | .ret (.var x) =>
+    let dx ← getTangent x
+    let pair ← getFreshVar
+    let ctorInfo : CtorInfo := { name := `Prod.mk, cidx := 0, size := 2, usize := 0, ssize := 0 }
+    return .vdecl pair IRType.object (.ctor ctorInfo #[Arg.var x, .var dx]) (.ret (.var pair))
+  | other => return other
+
+-- VJP Interpreter
+partial def vjp (b : FnBody) : ADM FnBody := do
+  match b with
+  | .vdecl x ty e rest =>
+    match e with
+    | .fap fn args =>
+      let rule? ← getVJPRule fn
+      match rule? with
+      | some rule =>
+        let dx ← getCotangent x
+        let (pbBuilder, argCotans) ← rule args dx ty
+        
+        -- Register cotangents for arguments
+        for i in [:args.size] do
+           match args[i]! with
+           | .var v => setCotangent v argCotans[i]!
+           | _ => pure ()
+
+        modify fun s => { s with pullbackStack := s.pullbackStack.push pbBuilder }
+        let rest' ← vjp rest
+        return .vdecl x ty e rest'
+      | none =>
+        let rest' ← vjp rest
+        return .vdecl x ty e rest'
+    | _ =>
+      let rest' ← vjp rest
+      return .vdecl x ty e rest'
+  | .ret (.var x) =>
+    let dx ← getCotangent x
+    let s ← get
+    -- Construct backward pass
+    let _backward := s.pullbackStack.foldr (fun pb acc => pb acc) (.ret (.var dx))
+    
+    return .ret (.var x)
+  | other => return other
+
+-- Linearize
+def linearize (decl : Decl) : ADM Decl := do
+  match decl with
+  | Decl.fdecl f params _ty body info =>
+    let tanParams ← params.mapM fun p => do
+      let dp ← getFreshVar
+      setTangent p.x dp
+      return { p with x := dp } 
+    let body' ← jvp body
+    return Decl.fdecl (Lean.Name.mkStr f "jvp") (params ++ tanParams) IRType.object body' info
+  | other => return other
+
+-- GPU Registration helpers
+def registerGpuVJPRule (opName : String) (rule : GpuVJPRule) : Lean.CoreM Unit := do
+  Lean.modifyEnv fun env => gpuAdRegistry.modifyState env fun s => 
+    { s with vjpRules := s.vjpRules.insert opName rule }
+
+def getGpuVJPRule (opName : String) : Lean.CoreM (Option GpuVJPRule) := do
+  return (gpuAdRegistry.getState (← Lean.getEnv)).vjpRules.get? opName
+
+-- Attributes
+syntax (name := jvpAttr) "jvp" ident : attr
+syntax (name := vjpAttr) "vjp" ident : attr
+
+initialize
+  Lean.registerBuiltinAttribute {
+    name := `jvpAttr
+    descr := "Register JVP rule"
+    add := fun declName stx _ => do
+      match stx with
+      | `(attr| jvp $id) => registerLeanJVPRule id.getId declName
+      | _ => throwError "invalid jvp attribute"
+  }
+  
+  Lean.registerBuiltinAttribute {
+    name := `vjpAttr
+    descr := "Register VJP rule"
+    add := fun declName stx _ => do
+      match stx with
+      | `(attr| vjp $id) => registerLeanVJPRule id.getId declName
+      | _ => throwError "invalid vjp attribute"
+  }
+
+end Tyr.AD

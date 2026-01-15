@@ -25,6 +25,9 @@ import Tyr.Basic
 import Tyr.Torch
 import Tyr.TensorStruct
 
+-- AutoGrad (JAX-style AD on IR)
+import Tyr.AutoGrad
+
 -- Neural network modules
 import Tyr.Module
 
@@ -55,3 +58,5 @@ import Tyr.Metrics
 
 -- GPU kernel abstraction (ThunderKittens)
 import Tyr.GPU
+import Tyr.GPU.AD
+import Tyr.GPU.AutoGrad

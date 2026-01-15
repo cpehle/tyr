@@ -40,6 +40,11 @@ inductive KStmt where
   | tmaLoad (dst src : VarId) (coord : VarId)      -- TMA load: shared ← global[coord]
   | tmaStore (dst src : VarId) (coord : VarId)     -- TMA store: global[coord] ← shared
 
+  -- Distributed / Multimem operations
+  | multimemLoadReduce (op : ReduceOp) (dst src : VarId)
+  | multimemStore (dst src : VarId)
+  | multimemRed (op : ReduceOp) (dst src : VarId)
+
   -- MMA operations
   | mma (trans : MMATranspose) (dst a b c : VarId)
   | mm (trans : MMATranspose) (dst a b : VarId)
@@ -100,14 +105,14 @@ inductive KStmt where
   | ifStmt (cond : VarId) (thenBody elseBody : Array KStmt)  -- Conditional
   | comment (text : String)
 
-  deriving Repr, Inhabited
+  deriving Repr, Inhabited, BEq
 
 /-- Kernel parameter -/
 structure KParam where
   name : String
   dtype : GpuFloat
   isPointer : Bool := false
-  deriving Repr, Inhabited
+  deriving Repr, Inhabited, BEq
 
 /-- Complete kernel definition -/
 structure Kernel where
@@ -116,6 +121,6 @@ structure Kernel where
   params : Array KParam
   body : Array KStmt
   sharedMemBytes : Nat := 0
-  deriving Repr, Inhabited
+  deriving Repr, Inhabited, BEq
 
 end Tyr.GPU.Codegen

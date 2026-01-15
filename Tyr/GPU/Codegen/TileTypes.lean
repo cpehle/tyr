@@ -187,8 +187,4 @@ opaque CudaStreamSpec : NonemptyType
 def CudaStream : Type := CudaStreamSpec.type
 instance : Nonempty CudaStream := CudaStreamSpec.property
 
-/-- Default CUDA stream (stream 0) -/
-@[extern "lean_cuda_default_stream"]
-opaque defaultStream : CudaStream
-
 end Tyr.GPU.Codegen
