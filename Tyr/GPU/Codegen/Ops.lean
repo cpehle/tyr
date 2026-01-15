@@ -48,6 +48,11 @@ def allocSV (dtype : GpuFloat) (len : Nat) : KernelM (SV dtype len) := do
   modify fun s => { s with sharedMemBytes := s.sharedMemBytes + bytes }
   pure ⟨v⟩
 
+/-- Semaphore type (barrier) for async operations -/
+structure Semaphore where
+  id : VarId
+  deriving Repr
+
 /-! ## Zero/Initialized Allocation -/
 
 /-- Allocate a zero-initialized register tile -/
@@ -664,6 +669,88 @@ def tmaStore {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
     (coord : KVal UInt64) : KernelM Unit := do
   emit (.tmaStore dst.id src.id coord.id)
 
+/-! ## Global Memory Operations (ThunderKittens Style)
+
+These operations use GlobalLayout and TileCoord/RTileCoord for 4D coordinate-based
+memory access, following ThunderKittens' gl and coord patterns.
+-/
+
+-- Forward declare GlobalLayout and RTileCoord (will be imported via Codegen.lean)
+-- For now, we use VarId directly in the low-level operations
+
+/-- Load tile from global memory to shared memory using 4D coordinates.
+    Emits: kittens::load(dst, src, {.b=b, .d=d, .r=r, .c=c}) -/
+def loadGlobalCoord {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
+    (dst : ST dtype rows cols layout)
+    (src : GPtr dtype)
+    (coordB coordD coordR coordC : VarId)
+    : KernelM Unit := do
+  emit (.loadGlobal dst.id src.id coordB coordD coordR coordC)
+
+/-- Store tile from shared memory to global memory using 4D coordinates.
+    Emits: kittens::store(dst, src, {.b=b, .d=d, .r=r, .c=c}) -/
+def storeGlobalCoord {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
+    (dst : GPtr dtype)
+    (src : ST dtype rows cols layout)
+    (coordB coordD coordR coordC : VarId)
+    : KernelM Unit := do
+  emit (.storeGlobal dst.id src.id coordB coordD coordR coordC)
+
+/-- Async load from global to shared with semaphore (TMA).
+    Emits: kittens::tma::load_async(dst, src, coord, sem) -/
+def loadGlobalAsyncCoord {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
+    (dst : ST dtype rows cols layout)
+    (src : GPtr dtype)
+    (coordB coordD coordR coordC : VarId)
+    (sem : Semaphore)
+    : KernelM Unit := do
+  emit (.loadGlobalAsync dst.id src.id coordB coordD coordR coordC sem.id)
+
+/-- Async store from shared to global (TMA).
+    Emits: kittens::tma::store_async(dst, src, coord) -/
+def storeGlobalAsyncCoord {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
+    (dst : GPtr dtype)
+    (src : ST dtype rows cols layout)
+    (coordB coordD coordR coordC : VarId)
+    : KernelM Unit := do
+  emit (.storeGlobalAsync dst.id src.id coordB coordD coordR coordC)
+
+/-- Atomic add store from shared to global (for gradient accumulation).
+    Emits: kittens::tma::store_add_async(dst, src, coord) -/
+def storeGlobalAddCoord {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
+    (dst : GPtr dtype)
+    (src : ST dtype rows cols layout)
+    (coordB coordD coordR coordC : VarId)
+    : KernelM Unit := do
+  emit (.storeGlobalAdd dst.id src.id coordB coordD coordR coordC)
+
+/-- Load vector from global memory.
+    Emits: kittens::load(dst, src, offset) -/
+def loadVecGlobalCoord {dtype : GpuFloat} {len : Nat}
+    (dst : SV dtype len)
+    (src : GPtr dtype)
+    (offset : VarId)
+    : KernelM Unit := do
+  emit (.loadVecGlobal dst.id src.id offset)
+
+/-- Store vector to global memory.
+    Emits: kittens::store(dst, src, offset) -/
+def storeVecGlobalCoord {dtype : GpuFloat} {len : Nat}
+    (dst : GPtr dtype)
+    (src : SV dtype len)
+    (offset : VarId)
+    : KernelM Unit := do
+  emit (.storeVecGlobal dst.id src.id offset)
+
+/-- Atomic add store vector to global memory.
+    Emits: kittens::store_add(dst, src, offset) -/
+def storeVecGlobalAddCoord {dtype : GpuFloat} {len : Nat}
+    (dst : GPtr dtype)
+    (src : SV dtype len)
+    (offset : VarId)
+    : KernelM Unit := do
+  emit (.storeVecGlobalAdd dst.id src.id offset)
+
 /-! ## Distributed / Multimem Operations -/
 
 /-- Multimem load-reduce: dst (reg) = reduce(src (shared) across cluster) -/
@@ -687,11 +774,6 @@ def multimemRed {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
   emit (.multimemRed op dst.id src.id)
 
 /-! ## Semaphore Operations -/
-
-/-- Semaphore type (barrier) -/
-structure Semaphore where
-  id : VarId
-  deriving Repr
 
 /-- Allocate a semaphore -/
 def allocSemaphore : KernelM Semaphore := do

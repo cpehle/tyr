@@ -17,6 +17,7 @@ import Tyr.GPU.Codegen.IR
 import Tyr.GPU.Codegen.Monad
 import Tyr.GPU.Codegen.Ops
 import Tyr.GPU.Codegen.Loop
+import Tyr.GPU.Codegen.GlobalLayout
 import Tyr.GPU.Codegen.EmitNew
 import Tyr.GPU.Codegen.Attribute
 
@@ -72,7 +73,7 @@ def moeGatingFwd : KernelM Unit := do
   load wGate wGateShared
 
   comment "Process token batches"
-  forLoop 0 8 do
+  for batchIdx in krange 0 8 do
     comment "Load tokens"
     load x xShared
 
@@ -91,15 +92,9 @@ def moeGatingFwd : KernelM Unit := do
     store outShared out
     sync
 
-def moeGatingFwdKernel : Kernel :=
-  buildKernelM "moe_gating_fwd" .SM90 #[
-    { name := "x", dtype := .BFloat16, isPointer := true },
-    { name := "w_gate", dtype := .BFloat16, isPointer := true },
-    { name := "routing_probs", dtype := .BFloat16, isPointer := true },
-    { name := "num_tokens", dtype := .Float32, isPointer := false },
-    { name := "num_experts", dtype := .Float32, isPointer := false },
-    { name := "hidden_dim", dtype := .Float32, isPointer := false }
-  ] moeGatingFwd
+-- Verify auto-generated kernel
+#check moeGatingFwd.kernel
+#check moeGatingFwd.launch
 
 /-- MOE Dispatch - route tokens to experts -/
 @[gpu_kernel .SM90]
@@ -143,16 +138,9 @@ def moeDispatchFwd : KernelM Unit := do
   store dispatchedShared dispatched
   sync
 
-def moeDispatchFwdKernel : Kernel :=
-  buildKernelM "moe_dispatch_fwd" .SM90 #[
-    { name := "tokens", dtype := .BFloat16, isPointer := true },
-    { name := "expert_ids", dtype := .Float32, isPointer := true },
-    { name := "routing_weights", dtype := .Float32, isPointer := true },
-    { name := "dispatched", dtype := .BFloat16, isPointer := true },
-    { name := "token_indices", dtype := .Float32, isPointer := true },
-    { name := "num_tokens", dtype := .Float32, isPointer := false },
-    { name := "top_k", dtype := .Float32, isPointer := false }
-  ] moeDispatchFwd
+-- Verify auto-generated kernel
+#check moeDispatchFwd.kernel
+#check moeDispatchFwd.launch
 
 /-- MOE Combine - gather expert outputs and weight -/
 @[gpu_kernel .SM90]
@@ -182,7 +170,7 @@ def moeCombineFwd : KernelM Unit := do
   loadVec routingWeights routingWeightsShared
 
   comment "Process expert outputs"
-  forLoop 0 8 do  -- Loop over experts (assuming top-k = 2 or so)
+  for expertIdx in krange 0 8 do  -- Loop over experts (assuming top-k = 2 or so)
     comment "Load expert output"
     load expertOut expertOutShared
 
@@ -201,15 +189,9 @@ def moeCombineFwd : KernelM Unit := do
   convert out combined
   store outShared out
 
-def moeCombineFwdKernel : Kernel :=
-  buildKernelM "moe_combine_fwd" .SM90 #[
-    { name := "expert_outputs", dtype := .BFloat16, isPointer := true },
-    { name := "routing_weights", dtype := .Float32, isPointer := true },
-    { name := "combined_output", dtype := .BFloat16, isPointer := true },
-    { name := "num_tokens", dtype := .Float32, isPointer := false },
-    { name := "num_experts", dtype := .Float32, isPointer := false },
-    { name := "top_k", dtype := .Float32, isPointer := false }
-  ] moeCombineFwd
+-- Verify auto-generated kernel
+#check moeCombineFwd.kernel
+#check moeCombineFwd.launch
 
 /-! ## Expert-Choice MOE
 
@@ -266,15 +248,9 @@ def moeExpertChoiceFwd : KernelM Unit := do
   store outShared out
   sync
 
-def moeExpertChoiceFwdKernel : Kernel :=
-  buildKernelM "moe_expert_choice_fwd" .SM90 #[
-    { name := "scores", dtype := .Float32, isPointer := true },
-    { name := "routing_weights", dtype := .BFloat16, isPointer := true },
-    { name := "selections", dtype := .Float32, isPointer := true },
-    { name := "num_tokens", dtype := .Float32, isPointer := false },
-    { name := "num_experts", dtype := .Float32, isPointer := false },
-    { name := "capacity", dtype := .Float32, isPointer := false }
-  ] moeExpertChoiceFwd
+-- Verify auto-generated kernel
+#check moeExpertChoiceFwd.kernel
+#check moeExpertChoiceFwd.launch
 
 /-! ## Full MOE Block
 
@@ -324,7 +300,7 @@ def moeFfnFwd : KernelM Unit := do
   load wDown wDownShared
 
   comment "Process token batches"
-  forLoop 0 4 do
+  for batchIdx in krange 0 4 do
     comment "Load tokens"
     load x xShared
 
@@ -361,23 +337,15 @@ def moeFfnFwd : KernelM Unit := do
 
     sync
 
-def moeFfnFwdKernel : Kernel :=
-  buildKernelM "moe_ffn_fwd" .SM90 #[
-    { name := "x", dtype := .BFloat16, isPointer := true },
-    { name := "w_gate", dtype := .BFloat16, isPointer := true },
-    { name := "w_up", dtype := .BFloat16, isPointer := true },
-    { name := "w_down", dtype := .BFloat16, isPointer := true },
-    { name := "out", dtype := .BFloat16, isPointer := true },
-    { name := "num_tokens", dtype := .Float32, isPointer := false },
-    { name := "hidden_dim", dtype := .Float32, isPointer := false },
-    { name := "num_experts", dtype := .Float32, isPointer := false }
-  ] moeFfnFwd
+-- Verify auto-generated kernel
+#check moeFfnFwd.kernel
+#check moeFfnFwd.launch
 
 -- Print generated kernels
-#eval IO.println "=== MOE Gating ===" *> IO.println (generateKernel moeGatingFwdKernel)
-#eval IO.println "\n=== MOE Dispatch ===" *> IO.println (generateKernel moeDispatchFwdKernel)
-#eval IO.println "\n=== MOE Combine ===" *> IO.println (generateKernel moeCombineFwdKernel)
-#eval IO.println "\n=== Expert-Choice MOE ===" *> IO.println (generateKernel moeExpertChoiceFwdKernel)
-#eval IO.println "\n=== MOE FFN ===" *> IO.println (generateKernel moeFfnFwdKernel)
+#eval IO.println "=== MOE Gating ===" *> IO.println (generateKernel moeGatingFwd.kernel)
+#eval IO.println "\n=== MOE Dispatch ===" *> IO.println (generateKernel moeDispatchFwd.kernel)
+#eval IO.println "\n=== MOE Combine ===" *> IO.println (generateKernel moeCombineFwd.kernel)
+#eval IO.println "\n=== Expert-Choice MOE ===" *> IO.println (generateKernel moeExpertChoiceFwd.kernel)
+#eval IO.println "\n=== MOE FFN ===" *> IO.println (generateKernel moeFfnFwd.kernel)
 
 end Tyr.GPU.Kernels.MOE

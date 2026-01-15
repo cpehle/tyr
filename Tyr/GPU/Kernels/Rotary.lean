@@ -17,6 +17,7 @@ import Tyr.GPU.Codegen.IR
 import Tyr.GPU.Codegen.Monad
 import Tyr.GPU.Codegen.Ops
 import Tyr.GPU.Codegen.Loop
+import Tyr.GPU.Codegen.GlobalLayout
 import Tyr.GPU.Codegen.EmitNew
 import Tyr.GPU.Codegen.Attribute
 
@@ -37,8 +38,13 @@ Where θ_k = 10000^(-2k/d) are the frequency bases.
 
 /-- Rotary embedding forward pass -/
 @[gpu_kernel .SM90]
-def rotaryFwd : KernelM Unit := do
+def rotaryFwd (x_ptr : GPtr GpuFloat.BFloat16) (sin_ptr : GPtr GpuFloat.Float32)
+    (cos_ptr : GPtr GpuFloat.Float32) (out_ptr : GPtr GpuFloat.BFloat16)
+    (seq_len : KVal UInt64) (head_dim : KVal UInt64) : KernelM Unit := do
   comment "=== Rotary Position Embedding Forward ==="
+  let numTiles : Nat := 16
+
+  let coord ← blockCoord2D
 
   -- Input tile: 64 x 64 (batch of positions x head_dim)
   let x : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
@@ -67,12 +73,15 @@ def rotaryFwd : KernelM Unit := do
   let outShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
 
   comment "Load precomputed sin/cos (long-resident)"
+  -- Note: sin/cos are typically precomputed for the sequence positions
   load sinT sinShared
   load cosT cosShared
 
   comment "Process sequence positions"
-  forLoop 0 16 do
-    comment "Load input"
+  for tileIdx in krange 0 numTiles do
+    comment "Load input from global"
+    loadGlobal xShared x_ptr (coord.withRow tileIdx.id)
+    sync
     load x xShared
     convert xF x
 
@@ -93,23 +102,17 @@ def rotaryFwd : KernelM Unit := do
     mul temp2 x2 cosT
     add temp2 temp2 negX2
 
-    comment "Store result"
+    comment "Store result to global"
     convert out x
     store outShared out
+    storeGlobal out_ptr outShared (coord.withRow tileIdx.id)
     sync
 
-/-- Build rotary forward kernel -/
-def rotaryFwdKernel : Kernel :=
-  buildKernelM "rotary_fwd" .SM90 #[
-    { name := "x", dtype := .BFloat16, isPointer := true },
-    { name := "sin", dtype := .Float32, isPointer := true },
-    { name := "cos", dtype := .Float32, isPointer := true },
-    { name := "out", dtype := .BFloat16, isPointer := true },
-    { name := "seq_len", dtype := .Float32, isPointer := false },
-    { name := "head_dim", dtype := .Float32, isPointer := false }
-  ] rotaryFwd
+-- Verify auto-generated kernel
+#check rotaryFwd.kernel
+#check rotaryFwd.launch
 
 -- Print generated kernel
-#eval IO.println "=== Rotary Forward ===" *> IO.println (generateKernel rotaryFwdKernel)
+#eval IO.println "=== Rotary Forward ===" *> IO.println (generateKernel rotaryFwd.kernel)
 
 end Tyr.GPU.Kernels.Rotary

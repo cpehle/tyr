@@ -17,6 +17,7 @@ import Tyr.GPU.Codegen.IR
 import Tyr.GPU.Codegen.Monad
 import Tyr.GPU.Codegen.Ops
 import Tyr.GPU.Codegen.Loop
+import Tyr.GPU.Codegen.GlobalLayout
 import Tyr.GPU.Codegen.EmitNew
 import Tyr.GPU.Codegen.Attribute
 
@@ -44,9 +45,17 @@ where q⊗q is the outer product of q with itself.
 
 /-- Based Linear Attention forward pass -/
 @[gpu_kernel .SM90]
-def basedLinearAttnFwd : KernelM Unit := do
+def basedLinearAttnFwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat16)
+    (V_ptr : GPtr GpuFloat.BFloat16) (O_ptr : GPtr GpuFloat.BFloat16)
+    (kv_a0_ptr : GPtr GpuFloat.BFloat16) (kv_a1_ptr : GPtr GpuFloat.BFloat16)
+    (batch_size : KVal UInt64) (num_heads : KVal UInt64)
+    (seq_len : KVal UInt64) : KernelM Unit := do
   comment "=== Based Linear Attention Forward ==="
   comment "Taylor expansion: 1 + qk + (qk)²/2"
+
+  let numChunks : Nat := 16
+
+  let coord ← blockCoord2D
 
   -- Dimensions (hardcoded as in ThunderKittens)
   -- d_qk = 16, d_vo = 64
@@ -88,8 +97,12 @@ def basedLinearAttnFwd : KernelM Unit := do
   let a2Shared : ST GpuFloat.Float32 64 64 ← allocST .Float32 64 64
 
   comment "Process sequence chunks"
-  forLoop 0 16 do
-    comment "Load Q, K, V tiles"
+  for chunkIdx in krange 0 numChunks do
+    comment "Load Q, K, V tiles from global"
+    loadGlobal qShared Q_ptr (coord.withRow chunkIdx.id)
+    loadGlobal kShared K_ptr (coord.withRow chunkIdx.id)
+    loadGlobal vShared V_ptr (coord.withRow chunkIdx.id)
+    sync
     load q qShared
     load k kShared
     load v vShared
@@ -144,25 +157,15 @@ def basedLinearAttnFwd : KernelM Unit := do
     comment "Store output"
     convert outBf o
     store oShared outBf
+    storeGlobal O_ptr oShared (coord.withRow chunkIdx.id)
     sync
 
     comment "Reset output accumulator for next chunk"
     zero o
 
-/-- Build Based Linear Attention forward kernel -/
-def basedLinearAttnFwdKernel : Kernel :=
-  buildKernelM "based_linear_attn_fwd" .SM90 #[
-    { name := "Q", dtype := .BFloat16, isPointer := true },
-    { name := "K", dtype := .BFloat16, isPointer := true },
-    { name := "V", dtype := .BFloat16, isPointer := true },
-    { name := "O", dtype := .BFloat16, isPointer := true },
-    { name := "kv_a0", dtype := .BFloat16, isPointer := true },
-    { name := "kv_a1", dtype := .BFloat16, isPointer := true },
-    { name := "kv_a2", dtype := .BFloat16, isPointer := true },
-    { name := "batch_size", dtype := .Float32, isPointer := false },
-    { name := "num_heads", dtype := .Float32, isPointer := false },
-    { name := "seq_len", dtype := .Float32, isPointer := false }
-  ] basedLinearAttnFwd
+-- Verify auto-generated kernel
+#check basedLinearAttnFwd.kernel
+#check basedLinearAttnFwd.launch
 
 /-! ## Based Linear Attention - Inference Mode
 
@@ -171,9 +174,13 @@ Simplified version for inference that only maintains the recurrent state.
 
 /-- Based Linear Attention inference (single token) -/
 @[gpu_kernel .SM90]
-def basedLinearAttnInference : KernelM Unit := do
+def basedLinearAttnInference (q_ptr : GPtr GpuFloat.BFloat16) (k_ptr : GPtr GpuFloat.BFloat16)
+    (v_ptr : GPtr GpuFloat.BFloat16) (o_ptr : GPtr GpuFloat.Float32)
+    (kv_state_ptr : GPtr GpuFloat.Float32) : KernelM Unit := do
   comment "=== Based Linear Attention Inference ==="
   comment "Process single token with recurrent state"
+
+  let coord ← blockCoord2D
 
   -- Single token input
   let q : RV GpuFloat.BFloat16 16 ← allocRV .BFloat16 16
@@ -221,16 +228,11 @@ def basedLinearAttnInference : KernelM Unit := do
   store a1Shared a1
   storeVec oShared o
 
-def basedLinearAttnInferenceKernel : Kernel :=
-  buildKernelM "based_linear_attn_inference" .SM90 #[
-    { name := "q", dtype := .BFloat16, isPointer := true },
-    { name := "k", dtype := .BFloat16, isPointer := true },
-    { name := "v", dtype := .BFloat16, isPointer := true },
-    { name := "o", dtype := .Float32, isPointer := true },
-    { name := "kv_state", dtype := .Float32, isPointer := true }
-  ] basedLinearAttnInference
+-- Verify auto-generated kernel
+#check basedLinearAttnInference.kernel
+#check basedLinearAttnInference.launch
 
 -- Print generated kernels
-#eval IO.println "=== Based Linear Attn ===" *> IO.println (generateKernel basedLinearAttnFwdKernel)
+#eval IO.println "=== Based Linear Attn ===" *> IO.println (generateKernel basedLinearAttnFwd.kernel)
 
 end Tyr.GPU.Kernels.Based

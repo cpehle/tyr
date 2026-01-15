@@ -15,6 +15,7 @@ import Tyr.GPU.Codegen.IR
 import Tyr.GPU.Codegen.Monad
 import Tyr.GPU.Codegen.Ops
 import Tyr.GPU.Codegen.Loop
+import Tyr.GPU.Codegen.GlobalLayout
 import Tyr.GPU.Codegen.EmitNew
 import Tyr.GPU.Codegen.Attribute
 
@@ -40,14 +41,22 @@ Key computation flow:
 
 /-- Mamba2 forward pass - single chunk processing -/
 @[gpu_kernel .SM90]
-def mamba2Fwd : KernelM Unit := do
+def mamba2Fwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat16)
+    (V_ptr : GPtr GpuFloat.BFloat16) (A_ptr : GPtr GpuFloat.Float32)
+    (O_ptr : GPtr GpuFloat.BFloat16) (state_ptr : GPtr GpuFloat.Float32)
+    (seq_len : KVal UInt64) (head_dim : KVal UInt64) : KernelM Unit := do
   comment "=== Mamba2 Forward Pass ==="
+
+  let numChunks : Nat := 8
+
+  let coord ← blockCoord2D
 
   -- Register tiles for Q, K, V (64x64)
   let q : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
   let k : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
   let v : RT GpuFloat.BFloat16 64 64 .Col ← allocRT .BFloat16 64 64 .Col
   let o : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
+  let outBf : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
 
   -- Attention scores and decay
   let att : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
@@ -64,10 +73,15 @@ def mamba2Fwd : KernelM Unit := do
   let qShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
   let kShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
   let vShared : ST GpuFloat.BFloat16 64 64 .Col ← allocST .BFloat16 64 64 .Col
+  let outShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
 
   comment "Main loop over sequence chunks"
-  forLoop 0 8 do
+  for chunkIdx in krange 0 numChunks do
     -- Load Q, K, V for this chunk
+    loadGlobal qShared Q_ptr (coord.withRow chunkIdx.id)
+    loadGlobal kShared K_ptr (coord.withRow chunkIdx.id)
+    loadGlobal vShared V_ptr (coord.withRow chunkIdx.id)
+    sync
     load q qShared
     load k kShared
     load v vShared
@@ -103,27 +117,31 @@ def mamba2Fwd : KernelM Unit := do
     -- State update with total decay from this chunk
     -- kv = kv * total_decay + K^T @ V (simplified)
 
+    comment "Store output"
+    convert outBf o
+    store outShared outBf
+    storeGlobal O_ptr outShared (coord.withRow chunkIdx.id)
+
     sync
 
-/-- Build Mamba2 forward kernel -/
-def mamba2FwdKernel : Kernel :=
-  buildKernelM "mamba2_fwd" .SM90 #[
-    { name := "Q", dtype := .BFloat16, isPointer := true },
-    { name := "K", dtype := .BFloat16, isPointer := true },
-    { name := "V", dtype := .BFloat16, isPointer := true },
-    { name := "A", dtype := .Float32, isPointer := true },  -- Decay factors
-    { name := "O", dtype := .BFloat16, isPointer := true },
-    { name := "state", dtype := .Float32, isPointer := true },  -- Running state
-    { name := "seq_len", dtype := .Float32, isPointer := false },
-    { name := "head_dim", dtype := .Float32, isPointer := false }
-  ] mamba2Fwd
+-- Verify auto-generated kernel
+#check mamba2Fwd.kernel
+#check mamba2Fwd.launch
 
 /-! ## Mamba2 Backward Kernel -/
 
 /-- Mamba2 backward pass -/
 @[gpu_kernel .SM90]
-def mamba2Bwd : KernelM Unit := do
+def mamba2Bwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat16)
+    (V_ptr : GPtr GpuFloat.BFloat16) (A_ptr : GPtr GpuFloat.Float32)
+    (dO_ptr : GPtr GpuFloat.Float32) (dQ_ptr : GPtr GpuFloat.Float32)
+    (dK_ptr : GPtr GpuFloat.Float32) (dV_ptr : GPtr GpuFloat.Float32)
+    (dA_ptr : GPtr GpuFloat.Float32) : KernelM Unit := do
   comment "=== Mamba2 Backward Pass ==="
+
+  let numChunks : Nat := 8
+
+  let coord ← blockCoord2D
 
   -- Gradient tiles
   let dQ : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
@@ -145,15 +163,22 @@ def mamba2Bwd : KernelM Unit := do
   let qShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
   let kShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
   let vShared : ST GpuFloat.BFloat16 64 64 .Col ← allocST .BFloat16 64 64 .Col
+  let dOShared : ST GpuFloat.Float32 64 64 ← allocST .Float32 64 64
   let dQShared : ST GpuFloat.Float32 64 64 ← allocST .Float32 64 64
   let dKShared : ST GpuFloat.Float32 64 64 ← allocST .Float32 64 64
   let dVShared : ST GpuFloat.Float32 64 64 ← allocST .Float32 64 64
 
   comment "Backward loop - reverse order"
-  forLoop 0 8 do
+  for chunkIdx in krange 0 numChunks do
+    loadGlobal qShared Q_ptr (coord.withRow chunkIdx.id)
+    loadGlobal kShared K_ptr (coord.withRow chunkIdx.id)
+    loadGlobal vShared V_ptr (coord.withRow chunkIdx.id)
+    loadGlobal dOShared dO_ptr (coord.withRow chunkIdx.id)
+    sync
     load q qShared
     load k kShared
     load v vShared
+    load dO dOShared
 
     comment "Recompute forward attention"
     mmaT att q k att
@@ -202,22 +227,12 @@ def mamba2Bwd : KernelM Unit := do
 
     sync
 
-/-- Build Mamba2 backward kernel -/
-def mamba2BwdKernel : Kernel :=
-  buildKernelM "mamba2_bwd" .SM90 #[
-    { name := "Q", dtype := .BFloat16, isPointer := true },
-    { name := "K", dtype := .BFloat16, isPointer := true },
-    { name := "V", dtype := .BFloat16, isPointer := true },
-    { name := "A", dtype := .Float32, isPointer := true },
-    { name := "dO", dtype := .Float32, isPointer := true },
-    { name := "dQ", dtype := .Float32, isPointer := true },
-    { name := "dK", dtype := .Float32, isPointer := true },
-    { name := "dV", dtype := .Float32, isPointer := true },
-    { name := "dA", dtype := .Float32, isPointer := true }
-  ] mamba2Bwd
+-- Verify auto-generated kernels
+#check mamba2Bwd.kernel
+#check mamba2Bwd.launch
 
 -- Print generated kernels
-#eval IO.println "=== Mamba2 Forward ===" *> IO.println (generateKernel mamba2FwdKernel)
-#eval IO.println "\n=== Mamba2 Backward ===" *> IO.println (generateKernel mamba2BwdKernel)
+#eval IO.println "=== Mamba2 Forward ===" *> IO.println (generateKernel mamba2Fwd.kernel)
+#eval IO.println "\n=== Mamba2 Backward ===" *> IO.println (generateKernel mamba2Bwd.kernel)
 
 end Tyr.GPU.Kernels.Mamba2

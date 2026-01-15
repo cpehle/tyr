@@ -17,6 +17,7 @@ import Tyr.GPU.Codegen.IR
 import Tyr.GPU.Codegen.Monad
 import Tyr.GPU.Codegen.Ops
 import Tyr.GPU.Codegen.Loop
+import Tyr.GPU.Codegen.GlobalLayout
 import Tyr.GPU.Codegen.EmitNew
 import Tyr.GPU.Codegen.Attribute
 
@@ -41,9 +42,14 @@ Three phases:
 
 /-- Ring Attention - Phase 1: Partial attention computation -/
 @[gpu_kernel .SM90]
-def ringAttnPartial : KernelM Unit := do
+def ringAttnPartial (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat16)
+    (V_ptr : GPtr GpuFloat.BFloat16) (O_partial_ptr : GPtr GpuFloat.BFloat16)
+    (lse_ptr : GPtr GpuFloat.Float32) (rank : KVal UInt64)
+    (kv_block_idx : KVal UInt64) : KernelM Unit := do
   comment "=== Ring Attention - Partial Computation ==="
   comment "Compute attention with one KV block, output partial O and log-sum-exp"
+
+  let coord ← blockCoord2D
 
   -- Q block (stays on this GPU)
   let q : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
@@ -74,9 +80,14 @@ def ringAttnPartial : KernelM Unit := do
   let lseShared : SV GpuFloat.Float32 64 ← allocSV .Float32 64
 
   comment "Load Q (stays resident on this GPU)"
+  loadGlobal qShared Q_ptr coord
+  sync
   load q qShared
 
   comment "Process KV block"
+  loadGlobal kShared K_ptr coord
+  loadGlobal vShared V_ptr coord
+  sync
   load k kShared
   load v vShared
 
@@ -114,25 +125,26 @@ def ringAttnPartial : KernelM Unit := do
   comment "Store partial output and LSE"
   convert out oPartial
   store outShared out
+  storeGlobal O_partial_ptr outShared coord
   storeVec lseShared lse
   sync
 
-def ringAttnPartialKernel : Kernel :=
-  buildKernelM "ring_attn_partial" .SM90 #[
-    { name := "Q", dtype := .BFloat16, isPointer := true },
-    { name := "K", dtype := .BFloat16, isPointer := true },
-    { name := "V", dtype := .BFloat16, isPointer := true },
-    { name := "O_partial", dtype := .BFloat16, isPointer := true },
-    { name := "lse", dtype := .Float32, isPointer := true },
-    { name := "rank", dtype := .Float32, isPointer := false },
-    { name := "kv_block_idx", dtype := .Float32, isPointer := false }
-  ] ringAttnPartial
+-- Verify auto-generated kernel
+#check ringAttnPartial.kernel
+#check ringAttnPartial.launch
 
 /-- Ring Attention - Phase 2: Full ring processing -/
 @[gpu_kernel .SM90]
-def ringAttnFull : KernelM Unit := do
+def ringAttnFull (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat16)
+    (V_ptr : GPtr GpuFloat.BFloat16) (O_ptr : GPtr GpuFloat.BFloat16)
+    (lse_ptr : GPtr GpuFloat.Float32) (rank : KVal UInt64)
+    (world_size : KVal UInt64) (seq_len : KVal UInt64) : KernelM Unit := do
   comment "=== Ring Attention - Full Ring Processing ==="
   comment "Process all KV blocks around the ring, accumulate with LSE"
+
+  let numGpus : Nat := 8
+
+  let coord ← blockCoord2D
 
   -- Q block (stays on this GPU)
   let q : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
@@ -168,14 +180,19 @@ def ringAttnFull : KernelM Unit := do
   let outShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
 
   comment "Load Q (stays resident)"
+  loadGlobal qShared Q_ptr coord
+  sync
   load q qShared
 
   comment "Load initial KV block"
+  loadGlobal kShared K_ptr coord
+  loadGlobal vShared V_ptr coord
+  sync
   load k kShared
   load v vShared
 
   comment "Ring loop over all GPUs"
-  forLoop 0 8 do  -- 8 GPUs in ring
+  for gpuIdx in krange 0 numGpus do
     comment "Prefetch next KV block (async from next GPU)"
     -- In actual implementation: async ring communication
     load kNext kNextShared
@@ -235,24 +252,22 @@ def ringAttnFull : KernelM Unit := do
   comment "Store final output"
   convert out o
   store outShared out
+  storeGlobal O_ptr outShared coord
 
-def ringAttnFullKernel : Kernel :=
-  buildKernelM "ring_attn_full" .SM90 #[
-    { name := "Q", dtype := .BFloat16, isPointer := true },
-    { name := "K", dtype := .BFloat16, isPointer := true },
-    { name := "V", dtype := .BFloat16, isPointer := true },
-    { name := "O", dtype := .BFloat16, isPointer := true },
-    { name := "lse", dtype := .Float32, isPointer := true },
-    { name := "rank", dtype := .Float32, isPointer := false },
-    { name := "world_size", dtype := .Float32, isPointer := false },
-    { name := "seq_len", dtype := .Float32, isPointer := false }
-  ] ringAttnFull
+-- Verify auto-generated kernel
+#check ringAttnFull.kernel
+#check ringAttnFull.launch
 
 /-- Ring Attention - Phase 3: Reduction combining partial outputs -/
 @[gpu_kernel .SM90]
-def ringAttnReduce : KernelM Unit := do
+def ringAttnReduce (O1_ptr : GPtr GpuFloat.Float32) (O2_ptr : GPtr GpuFloat.Float32)
+    (lse1_ptr : GPtr GpuFloat.Float32) (lse2_ptr : GPtr GpuFloat.Float32)
+    (O_combined_ptr : GPtr GpuFloat.BFloat16) (lse_combined_ptr : GPtr GpuFloat.Float32)
+    : KernelM Unit := do
   comment "=== Ring Attention - Reduction ==="
   comment "Combine partial outputs using log-sum-exp trick"
+
+  let coord ← blockCoord2D
 
   -- Partial outputs from different KV blocks
   let o1 : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
@@ -280,6 +295,9 @@ def ringAttnReduce : KernelM Unit := do
   let outShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
 
   comment "Load partial outputs and LSE values"
+  loadGlobal o1Shared O1_ptr coord
+  loadGlobal o2Shared O2_ptr coord
+  sync
   load o1 o1Shared
   load o2 o2Shared
   loadVec lse1 lse1Shared
@@ -318,22 +336,17 @@ def ringAttnReduce : KernelM Unit := do
   comment "Store combined output"
   convert out oCombined
   store outShared out
+  storeGlobal O_combined_ptr outShared coord
 
   sync
 
-def ringAttnReduceKernel : Kernel :=
-  buildKernelM "ring_attn_reduce" .SM90 #[
-    { name := "O1", dtype := .Float32, isPointer := true },
-    { name := "O2", dtype := .Float32, isPointer := true },
-    { name := "lse1", dtype := .Float32, isPointer := true },
-    { name := "lse2", dtype := .Float32, isPointer := true },
-    { name := "O_combined", dtype := .BFloat16, isPointer := true },
-    { name := "lse_combined", dtype := .Float32, isPointer := true }
-  ] ringAttnReduce
+-- Verify auto-generated kernels
+#check ringAttnReduce.kernel
+#check ringAttnReduce.launch
 
 -- Print generated kernels
-#eval IO.println "=== Ring Attn Partial ===" *> IO.println (generateKernel ringAttnPartialKernel)
-#eval IO.println "\n=== Ring Attn Full ===" *> IO.println (generateKernel ringAttnFullKernel)
-#eval IO.println "\n=== Ring Attn Reduce ===" *> IO.println (generateKernel ringAttnReduceKernel)
+#eval IO.println "=== Ring Attn Partial ===" *> IO.println (generateKernel ringAttnPartial.kernel)
+#eval IO.println "\n=== Ring Attn Full ===" *> IO.println (generateKernel ringAttnFull.kernel)
+#eval IO.println "\n=== Ring Attn Reduce ===" *> IO.println (generateKernel ringAttnReduce.kernel)
 
 end Tyr.GPU.Kernels.RingAttn

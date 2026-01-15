@@ -36,9 +36,21 @@ inductive KStmt where
   | prefetch (src : VarId)           -- TMA prefetch
   | tmaExpect (barrier : VarId) (bytes : Nat)
 
-  -- TMA operations with global pointers
+  -- TMA operations with global pointers (legacy single coord)
   | tmaLoad (dst src : VarId) (coord : VarId)      -- TMA load: shared ← global[coord]
   | tmaStore (dst src : VarId) (coord : VarId)     -- TMA store: global[coord] ← shared
+
+  -- Global memory operations with 4D coordinates (ThunderKittens style)
+  | loadGlobal (dst src : VarId) (coordB coordD coordR coordC : VarId)
+  | storeGlobal (dst src : VarId) (coordB coordD coordR coordC : VarId)
+  | loadGlobalAsync (dst src : VarId) (coordB coordD coordR coordC sem : VarId)
+  | storeGlobalAsync (dst src : VarId) (coordB coordD coordR coordC : VarId)
+  | storeGlobalAdd (dst src : VarId) (coordB coordD coordR coordC : VarId)  -- Atomic add
+
+  -- Vector global memory operations
+  | loadVecGlobal (dst src : VarId) (offset : VarId)
+  | storeVecGlobal (dst src : VarId) (offset : VarId)
+  | storeVecGlobalAdd (dst src : VarId) (offset : VarId)  -- Atomic add for vectors
 
   -- Distributed / Multimem operations
   | multimemLoadReduce (op : ReduceOp) (dst src : VarId)
@@ -117,6 +129,13 @@ inductive KStmt where
   | ifStmt (cond : VarId) (thenBody elseBody : Array KStmt)  -- Conditional
   | ifWarpGroup (wgIdx : Nat) (body : Array KStmt)           -- Execute only in specific warp group
   | comment (text : String)
+
+  -- Block/thread index accessors
+  | getBlockIdx (dst : VarId) (axis : Nat)   -- axis: 0=x, 1=y, 2=z
+  | getThreadIdx (dst : VarId) (axis : Nat)  -- axis: 0=x, 1=y, 2=z
+
+  -- Constants
+  | constInt (dst : VarId) (value : Int)     -- Integer constant
 
   deriving Repr, Inhabited, BEq
 

@@ -16,6 +16,7 @@ import Tyr.GPU.Codegen.IR
 import Tyr.GPU.Codegen.Monad
 import Tyr.GPU.Codegen.Ops
 import Tyr.GPU.Codegen.Loop
+import Tyr.GPU.Codegen.GlobalLayout
 import Tyr.GPU.Codegen.EmitNew
 import Tyr.GPU.Codegen.Attribute
 
@@ -58,7 +59,7 @@ def fluxGeluFwd : KernelM Unit := do
   let outShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
 
   comment "Producer-consumer loop"
-  forLoop 0 8 do
+  for blkIdx in krange 0 8 do
     comment "Load input and weights"
     load x xShared
     load w wShared
@@ -93,16 +94,9 @@ def fluxGeluFwd : KernelM Unit := do
 
     sync
 
-/-- Build Flux GELU forward kernel -/
-def fluxGeluFwdKernel : Kernel :=
-  buildKernelM "flux_gelu_fwd" .SM90 #[
-    { name := "x", dtype := .BFloat16, isPointer := true },
-    { name := "w", dtype := .BFloat16, isPointer := true },
-    { name := "out", dtype := .BFloat16, isPointer := true },
-    { name := "M", dtype := .Float32, isPointer := false },
-    { name := "N", dtype := .Float32, isPointer := false },
-    { name := "K", dtype := .Float32, isPointer := false }
-  ] fluxGeluFwd
+-- Verify auto-generated kernel
+#check fluxGeluFwd.kernel
+#check fluxGeluFwd.launch
 
 /-! ## Flux Gate Kernel (SwiGLU-style)
 
@@ -138,7 +132,7 @@ def fluxGateFwd : KernelM Unit := do
   let outShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
 
   comment "Process sequence"
-  forLoop 0 16 do
+  for seqIdx in krange 0 16 do
     comment "Load inputs"
     load x xShared
     load gate gateShared
@@ -161,15 +155,9 @@ def fluxGateFwd : KernelM Unit := do
 
     sync
 
-/-- Build Flux Gate forward kernel -/
-def fluxGateFwdKernel : Kernel :=
-  buildKernelM "flux_gate_fwd" .SM90 #[
-    { name := "x", dtype := .BFloat16, isPointer := true },
-    { name := "gate", dtype := .BFloat16, isPointer := true },
-    { name := "residual", dtype := .BFloat16, isPointer := true },
-    { name := "out", dtype := .BFloat16, isPointer := true },
-    { name := "size", dtype := .Float32, isPointer := false }
-  ] fluxGateFwd
+-- Verify auto-generated kernel
+#check fluxGateFwd.kernel
+#check fluxGateFwd.launch
 
 /-! ## Flux Linear + SiLU (GLU variant)
 
@@ -195,7 +183,7 @@ def fluxSiluFwd : KernelM Unit := do
   let wGateShared : ST GpuFloat.BFloat16 64 64 .Col ← allocST .BFloat16 64 64 .Col
   let outShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
 
-  forLoop 0 8 do
+  for blkIdx in krange 0 8 do
     comment "Load inputs"
     load x xShared
     load wUp wUpShared
@@ -219,20 +207,13 @@ def fluxSiluFwd : KernelM Unit := do
 
     sync
 
-def fluxSiluFwdKernel : Kernel :=
-  buildKernelM "flux_silu_fwd" .SM90 #[
-    { name := "x", dtype := .BFloat16, isPointer := true },
-    { name := "w_up", dtype := .BFloat16, isPointer := true },
-    { name := "w_gate", dtype := .BFloat16, isPointer := true },
-    { name := "out", dtype := .BFloat16, isPointer := true },
-    { name := "M", dtype := .Float32, isPointer := false },
-    { name := "N", dtype := .Float32, isPointer := false },
-    { name := "K", dtype := .Float32, isPointer := false }
-  ] fluxSiluFwd
+-- Verify auto-generated kernel
+#check fluxSiluFwd.kernel
+#check fluxSiluFwd.launch
 
 -- Print generated kernels
-#eval IO.println "=== Flux GELU ===" *> IO.println (generateKernel fluxGeluFwdKernel)
-#eval IO.println "\n=== Flux Gate ===" *> IO.println (generateKernel fluxGateFwdKernel)
-#eval IO.println "\n=== Flux SiLU ===" *> IO.println (generateKernel fluxSiluFwdKernel)
+#eval IO.println "=== Flux GELU ===" *> IO.println (generateKernel fluxGeluFwd.kernel)
+#eval IO.println "\n=== Flux Gate ===" *> IO.println (generateKernel fluxGateFwd.kernel)
+#eval IO.println "\n=== Flux SiLU ===" *> IO.println (generateKernel fluxSiluFwd.kernel)
 
 end Tyr.GPU.Kernels.Flux

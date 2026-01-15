@@ -18,6 +18,7 @@ import Tyr.GPU.Codegen.IR
 import Tyr.GPU.Codegen.Monad
 import Tyr.GPU.Codegen.Ops
 import Tyr.GPU.Codegen.Loop
+import Tyr.GPU.Codegen.GlobalLayout
 import Tyr.GPU.Codegen.EmitNew
 import Tyr.GPU.Codegen.Attribute
 
@@ -42,8 +43,14 @@ The state S = φ(K)^T @ V can be accumulated across chunks.
 
 /-- Linear attention forward with state accumulation -/
 @[gpu_kernel .SM90]
-def linearAttnFwd : KernelM Unit := do
+def linearAttnFwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat16)
+    (V_ptr : GPtr GpuFloat.BFloat16) (O_ptr : GPtr GpuFloat.BFloat16)
+    (state_ptr : GPtr GpuFloat.Float32) (seq_len : KVal UInt64) : KernelM Unit := do
   comment "=== Linear Attention Forward ==="
+
+  let numChunks : Nat := 16
+
+  let coord ← blockCoord2D
 
   -- Q, K, V tiles
   let q : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
@@ -59,6 +66,7 @@ def linearAttnFwd : KernelM Unit := do
 
   -- Output accumulator
   let o : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
+  let outBf : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
 
   -- Normalization (for numerical stability)
   let zVec : RV GpuFloat.Float32 64 ← allocRV .Float32 64
@@ -69,13 +77,20 @@ def linearAttnFwd : KernelM Unit := do
   let kShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
   let vShared : ST GpuFloat.BFloat16 64 64 .Col ← allocST .BFloat16 64 64 .Col
   let stateShared : ST GpuFloat.Float32 64 64 ← allocST .Float32 64 64
+  let outShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
 
   comment "Initialize state from previous chunk (if any)"
+  loadGlobal stateShared state_ptr coord
+  sync
   load state stateShared
 
   comment "Process sequence chunks"
-  forLoop 0 16 do
-    comment "Load Q, K, V"
+  for chunkIdx in krange 0 numChunks do
+    comment "Load Q, K, V from global"
+    loadGlobal qShared Q_ptr (coord.withRow chunkIdx.id)
+    loadGlobal kShared K_ptr (coord.withRow chunkIdx.id)
+    loadGlobal vShared V_ptr (coord.withRow chunkIdx.id)
+    sync
     load q qShared
     load k kShared
     load v vShared
@@ -106,21 +121,20 @@ def linearAttnFwd : KernelM Unit := do
     rowSum zVec phiK
     addVec zState zState zVec
 
+    comment "Store output for this chunk"
+    convert outBf o
+    store outShared outBf
+    storeGlobal O_ptr outShared (coord.withRow chunkIdx.id)
+
     sync
 
   comment "Store final state for next chunk"
   store stateShared state
+  storeGlobal state_ptr stateShared coord
 
-/-- Build linear attention forward kernel -/
-def linearAttnFwdKernel : Kernel :=
-  buildKernelM "linear_attn_fwd" .SM90 #[
-    { name := "Q", dtype := .BFloat16, isPointer := true },
-    { name := "K", dtype := .BFloat16, isPointer := true },
-    { name := "V", dtype := .BFloat16, isPointer := true },
-    { name := "O", dtype := .BFloat16, isPointer := true },
-    { name := "state", dtype := .Float32, isPointer := true },
-    { name := "seq_len", dtype := .Float32, isPointer := false }
-  ] linearAttnFwd
+-- Verify auto-generated kernel
+#check linearAttnFwd.kernel
+#check linearAttnFwd.launch
 
 /-! ## Causal Linear Attention
 
@@ -130,8 +144,14 @@ the running state and compute outputs incrementally.
 
 /-- Causal linear attention with chunk-wise state -/
 @[gpu_kernel .SM90]
-def causalLinearAttnFwd : KernelM Unit := do
+def causalLinearAttnFwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat16)
+    (V_ptr : GPtr GpuFloat.BFloat16) (O_ptr : GPtr GpuFloat.BFloat16)
+    (state_ptr : GPtr GpuFloat.Float32) : KernelM Unit := do
   comment "=== Causal Linear Attention Forward ==="
+
+  let numChunks : Nat := 16
+
+  let coord ← blockCoord2D
 
   let q : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
   let k : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
@@ -144,6 +164,7 @@ def causalLinearAttnFwd : KernelM Unit := do
   -- Running state and output
   let state : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
   let o : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
+  let outBf : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
 
   -- Intra-chunk attention (quadratic within chunk)
   let intraAtt : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
@@ -152,8 +173,13 @@ def causalLinearAttnFwd : KernelM Unit := do
   let qShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
   let kShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
   let vShared : ST GpuFloat.BFloat16 64 64 .Col ← allocST .BFloat16 64 64 .Col
+  let outShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
 
-  forLoop 0 16 do
+  for chunkIdx in krange 0 numChunks do
+    loadGlobal qShared Q_ptr (coord.withRow chunkIdx.id)
+    loadGlobal kShared K_ptr (coord.withRow chunkIdx.id)
+    loadGlobal vShared V_ptr (coord.withRow chunkIdx.id)
+    sync
     load q qShared
     load k kShared
     load v vShared
@@ -187,19 +213,19 @@ def causalLinearAttnFwd : KernelM Unit := do
     convert phiKBf phiK
     mma state phiKBf v state
 
+    comment "Store output for this chunk"
+    convert outBf o
+    store outShared outBf
+    storeGlobal O_ptr outShared (coord.withRow chunkIdx.id)
+
     sync
 
-def causalLinearAttnFwdKernel : Kernel :=
-  buildKernelM "causal_linear_attn_fwd" .SM90 #[
-    { name := "Q", dtype := .BFloat16, isPointer := true },
-    { name := "K", dtype := .BFloat16, isPointer := true },
-    { name := "V", dtype := .BFloat16, isPointer := true },
-    { name := "O", dtype := .BFloat16, isPointer := true },
-    { name := "state", dtype := .Float32, isPointer := true }
-  ] causalLinearAttnFwd
+-- Verify auto-generated kernels
+#check causalLinearAttnFwd.kernel
+#check causalLinearAttnFwd.launch
 
 -- Print generated kernels
-#eval IO.println "=== Linear Attention ===" *> IO.println (generateKernel linearAttnFwdKernel)
-#eval IO.println "\n=== Causal Linear Attention ===" *> IO.println (generateKernel causalLinearAttnFwdKernel)
+#eval IO.println "=== Linear Attention ===" *> IO.println (generateKernel linearAttnFwd.kernel)
+#eval IO.println "\n=== Causal Linear Attention ===" *> IO.println (generateKernel causalLinearAttnFwd.kernel)
 
 end Tyr.GPU.Kernels.LinearAttn

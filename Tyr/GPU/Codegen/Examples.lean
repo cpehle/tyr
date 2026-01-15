@@ -11,6 +11,7 @@ import Tyr.GPU.Codegen.Monad
 import Tyr.GPU.Codegen.Ops
 import Tyr.GPU.Codegen.Loop
 import Tyr.GPU.Codegen.EmitNew
+import Tyr.GPU.Codegen.Attribute
 
 namespace Tyr.GPU.Codegen.Examples
 
@@ -20,6 +21,7 @@ open Tyr.GPU.Codegen
 /-! ## Simple Matrix Multiply Example -/
 
 /-- Simple matrix multiply: C = A @ B -/
+@[gpu_kernel .SM90]
 def simpleMatmul : KernelM Unit := do
   comment "Simple 64x64 matrix multiply"
 
@@ -41,19 +43,15 @@ def simpleMatmul : KernelM Unit := do
 
   sync
 
-/-- Build the simple matmul kernel -/
-def simpleMatmulKernel : Kernel :=
-  buildKernelM "simple_matmul" .SM90 #[
-    { name := "A", dtype := .BFloat16, isPointer := true },
-    { name := "B", dtype := .BFloat16, isPointer := true },
-    { name := "C", dtype := .Float32, isPointer := true }
-  ] simpleMatmul
+-- Verify auto-generated kernel
+#check simpleMatmul.kernel
+#check simpleMatmul.launch
 
 /-! ## FlashAttention-style Example -/
 
 /-- FlashAttention forward pass (simplified) -/
-def flashAttnFwd : KernelM Unit := do
-  setArch .SM90
+@[gpu_kernel .SM90]
+def flashAttnFwdExample : KernelM Unit := do
   comment "=== FlashAttention Forward ==="
 
   comment "Register tiles for Q, K, V (bf16)"
@@ -78,7 +76,7 @@ def flashAttnFwd : KernelM Unit := do
   load q qShared
 
   comment "=== Main KV loop ==="
-  forLoop 0 4 do
+  for kvBlkIdx in krange 0 4 do
     comment "Load K and V"
     load k kShared
     load v vShared
@@ -111,21 +109,15 @@ def flashAttnFwd : KernelM Unit := do
   comment "Final normalization: O = O / rowSum"
   divCol o o rowSum
 
-/-- Build the FlashAttention kernel -/
-def flashAttnKernel : Kernel :=
-  buildKernelM "flash_attn_fwd" .SM90 #[
-    { name := "Q", dtype := .BFloat16, isPointer := true },
-    { name := "K", dtype := .BFloat16, isPointer := true },
-    { name := "V", dtype := .BFloat16, isPointer := true },
-    { name := "O", dtype := .BFloat16, isPointer := true },
-    { name := "seq_len", dtype := .Float32, isPointer := false },
-    { name := "head_dim", dtype := .Float32, isPointer := false }
-  ] flashAttnFwd
+-- Verify auto-generated kernel
+#check flashAttnFwdExample.kernel
+#check flashAttnFwdExample.launch
 
 /-! ## LayerNorm Example -/
 
 /-- LayerNorm forward pass -/
-def layerNormFwd : KernelM Unit := do
+@[gpu_kernel .SM90]
+def layerNormFwdExample : KernelM Unit := do
   comment "=== LayerNorm Forward ==="
 
   let x : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
@@ -160,24 +152,19 @@ def layerNormFwd : KernelM Unit := do
 
   sync
 
-/-- Build the LayerNorm kernel -/
-def layerNormKernel : Kernel :=
-  buildKernelM "layer_norm_fwd" .SM90 #[
-    { name := "x", dtype := .BFloat16, isPointer := true },
-    { name := "gamma", dtype := .BFloat16, isPointer := true },
-    { name := "beta", dtype := .BFloat16, isPointer := true },
-    { name := "out", dtype := .BFloat16, isPointer := true }
-  ] layerNormFwd
+-- Verify auto-generated kernel
+#check layerNormFwdExample.kernel
+#check layerNormFwdExample.launch
 
 /-! ## Code Generation Tests -/
 
 -- Generate C++ for simple matmul
-#eval IO.println "=== Simple Matmul ===" *> IO.println (generateKernel simpleMatmulKernel)
+#eval IO.println "=== Simple Matmul ===" *> IO.println (generateKernel simpleMatmul.kernel)
 
 -- Generate C++ for FlashAttention
-#eval IO.println "\n=== FlashAttention ===" *> IO.println (generateKernel flashAttnKernel)
+#eval IO.println "\n=== FlashAttention ===" *> IO.println (generateKernel flashAttnFwdExample.kernel)
 
 -- Generate C++ for LayerNorm
-#eval IO.println "\n=== LayerNorm ===" *> IO.println (generateKernel layerNormKernel)
+#eval IO.println "\n=== LayerNorm ===" *> IO.println (generateKernel layerNormFwdExample.kernel)
 
 end Tyr.GPU.Codegen.Examples

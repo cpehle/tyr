@@ -17,6 +17,7 @@ import Tyr.GPU.Codegen.IR
 import Tyr.GPU.Codegen.Monad
 import Tyr.GPU.Codegen.Ops
 import Tyr.GPU.Codegen.Loop
+import Tyr.GPU.Codegen.GlobalLayout
 import Tyr.GPU.Codegen.EmitNew
 import Tyr.GPU.Codegen.Attribute
 
@@ -74,7 +75,7 @@ def fusedLayerNormFwd : KernelM Unit := do
   loadVec bias biasShared
 
   comment "Process tokens"
-  forLoop 0 64 do  -- batch * seq_len tokens
+  for tokenIdx in krange 0 64 do  -- batch * seq_len tokens
     comment "Load input and residual"
     loadVec x xShared
     loadVec residual residualShared
@@ -133,20 +134,9 @@ def fusedLayerNormFwd : KernelM Unit := do
 
     sync
 
-/-- Build Fused LayerNorm forward kernel -/
-def fusedLayerNormFwdKernel : Kernel :=
-  buildKernelM "fused_layernorm_fwd" .SM90 #[
-    { name := "x", dtype := .BFloat16, isPointer := true },
-    { name := "residual", dtype := .BFloat16, isPointer := true },
-    { name := "weight", dtype := .BFloat16, isPointer := true },
-    { name := "bias", dtype := .BFloat16, isPointer := true },
-    { name := "out", dtype := .BFloat16, isPointer := true },
-    { name := "out_resid", dtype := .BFloat16, isPointer := true },
-    { name := "dropout_p", dtype := .Float32, isPointer := false },
-    { name := "batch_size", dtype := .Float32, isPointer := false },
-    { name := "seq_len", dtype := .Float32, isPointer := false },
-    { name := "d_model", dtype := .Float32, isPointer := false }
-  ] fusedLayerNormFwd
+-- Verify auto-generated kernel
+#check fusedLayerNormFwd.kernel
+#check fusedLayerNormFwd.launch
 
 /-! ## Tiled LayerNorm
 
@@ -188,7 +178,7 @@ def fusedLayerNormTiledFwd : KernelM Unit := do
   load bias biasShared
 
   comment "Process tiles"
-  forLoop 0 16 do
+  for tileIdx in krange 0 16 do
     comment "Load input tile"
     load x xShared
     load residual residualShared
@@ -234,18 +224,12 @@ def fusedLayerNormTiledFwd : KernelM Unit := do
 
     sync
 
-def fusedLayerNormTiledFwdKernel : Kernel :=
-  buildKernelM "fused_layernorm_tiled_fwd" .SM90 #[
-    { name := "x", dtype := .BFloat16, isPointer := true },
-    { name := "residual", dtype := .BFloat16, isPointer := true },
-    { name := "weight", dtype := .BFloat16, isPointer := true },
-    { name := "bias", dtype := .BFloat16, isPointer := true },
-    { name := "out", dtype := .BFloat16, isPointer := true },
-    { name := "d_model", dtype := .Float32, isPointer := false }
-  ] fusedLayerNormTiledFwd
+-- Verify auto-generated kernel
+#check fusedLayerNormTiledFwd.kernel
+#check fusedLayerNormTiledFwd.launch
 
 -- Print generated kernels
-#eval IO.println "=== Fused LayerNorm ===" *> IO.println (generateKernel fusedLayerNormFwdKernel)
-#eval IO.println "\n=== Fused LayerNorm Tiled ===" *> IO.println (generateKernel fusedLayerNormTiledFwdKernel)
+#eval IO.println "=== Fused LayerNorm ===" *> IO.println (generateKernel fusedLayerNormFwd.kernel)
+#eval IO.println "\n=== Fused LayerNorm Tiled ===" *> IO.println (generateKernel fusedLayerNormTiledFwd.kernel)
 
 end Tyr.GPU.Kernels.FusedLayerNorm

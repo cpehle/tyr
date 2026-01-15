@@ -10,6 +10,7 @@ import Tyr.GPU.Codegen.IR
 import Tyr.GPU.Codegen.Monad
 import Tyr.GPU.Codegen.Ops
 import Tyr.GPU.Codegen.Loop
+import Tyr.GPU.Codegen.GlobalLayout
 import Tyr.GPU.Codegen.EmitNew
 import Tyr.GPU.Codegen.Attribute
 
@@ -30,9 +31,11 @@ def mamba2FwdNew (q_ptr : GPtr GpuFloat.BFloat16) (k_ptr : GPtr GpuFloat.BFloat1
     (v_ptr : GPtr GpuFloat.BFloat16) (a_ptr : GPtr GpuFloat.Float32)
     (o_ptr : GPtr GpuFloat.BFloat16) (batch_size : KVal UInt64)
     (num_heads : KVal UInt64) (seq_len : KVal UInt64) : KernelM Unit := do
-  let seqTile : Nat := 64
   let headDim : Nat := 64
+  let numChunks : Nat := 16
   comment "=== Mamba2 Forward ==="
+
+  let coord ← blockCoord2D
 
   comment "Register tiles for Q, K, V"
   let qReg : RT GpuFloat.BFloat16 16 headDim ← allocRT .BFloat16 16 headDim
@@ -45,6 +48,7 @@ def mamba2FwdNew (q_ptr : GPtr GpuFloat.BFloat16) (k_ptr : GPtr GpuFloat.BFloat1
 
   comment "Output accumulator"
   let oReg : RT GpuFloat.Float32 16 headDim ← zeroRT .Float32 16 headDim
+  let outBf : RT GpuFloat.BFloat16 16 headDim ← allocRT .BFloat16 16 headDim
 
   comment "Decay factor vectors"
   let aVec : RV GpuFloat.Float32 16 ← allocRV .Float32 16
@@ -57,10 +61,15 @@ def mamba2FwdNew (q_ptr : GPtr GpuFloat.BFloat16) (k_ptr : GPtr GpuFloat.BFloat1
   let qShared : ST GpuFloat.BFloat16 16 headDim ← allocST .BFloat16 16 headDim
   let kShared : ST GpuFloat.BFloat16 16 headDim ← allocST .BFloat16 16 headDim
   let vShared : ST GpuFloat.BFloat16 16 headDim .Col ← allocST .BFloat16 16 headDim .Col
+  let outShared : ST GpuFloat.BFloat16 16 headDim ← allocST .BFloat16 16 headDim
 
   comment "Main sequence loop"
-  forLoop 0 16 do
+  for chunkIdx in krange 0 numChunks do
     comment "Load Q, K, V for this chunk"
+    loadGlobal qShared q_ptr (coord.withRow chunkIdx.id)
+    loadGlobal kShared k_ptr (coord.withRow chunkIdx.id)
+    loadGlobal vShared v_ptr (coord.withRow chunkIdx.id)
+    sync
     load qReg qShared
     load kReg kShared
     load vReg vShared
@@ -86,6 +95,11 @@ def mamba2FwdNew (q_ptr : GPtr GpuFloat.BFloat16) (k_ptr : GPtr GpuFloat.BFloat1
     let vReg16 : RT GpuFloat.BFloat16 16 headDim .Col ← allocRT .BFloat16 16 headDim .Col
     mma oReg attBf16 vReg16 oReg
 
+    comment "Store output"
+    convert outBf oReg
+    store outShared outBf
+    storeGlobal o_ptr outShared (coord.withRow chunkIdx.id)
+
     comment "Reset for next chunk"
     zero oReg
 
@@ -96,7 +110,10 @@ def mamba2FwdNew (q_ptr : GPtr GpuFloat.BFloat16) (k_ptr : GPtr GpuFloat.BFloat1
 def mambaSimpleNew (x_ptr : GPtr GpuFloat.BFloat16) (A_ptr : GPtr GpuFloat.Float32)
     (out_ptr : GPtr GpuFloat.BFloat16) (seq_len : KVal UInt64) : KernelM Unit := do
   let headDim : Nat := 64
+  let numSteps : Nat := 128
   comment "=== Mamba SSM: y = Cx + Du, x' = Ax + Bu ==="
+
+  let coord ← blockCoord2D
 
   comment "State vector h"
   let h : RV GpuFloat.Float32 headDim ← allocRV .Float32 headDim
@@ -110,8 +127,12 @@ def mambaSimpleNew (x_ptr : GPtr GpuFloat.BFloat16) (A_ptr : GPtr GpuFloat.Float
   let bBar : RV GpuFloat.Float32 headDim ← allocRV .Float32 headDim
   let cVec : RV GpuFloat.Float32 headDim ← allocRV .Float32 headDim
 
+  comment "Shared memory for I/O"
+  let xShared : SV GpuFloat.BFloat16 headDim ← allocSV .BFloat16 headDim
+  let outShared : SV GpuFloat.BFloat16 1 ← allocSV .BFloat16 1
+
   comment "Sequential recurrence"
-  forLoop 0 128 do
+  for stepIdx in krange 0 numSteps do
     comment "State update: h = A*h + B*u"
     -- Simplified: would need vector-vector ops
 

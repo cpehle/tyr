@@ -14,6 +14,7 @@ import Tyr.GPU.Codegen.IR
 import Tyr.GPU.Codegen.Monad
 import Tyr.GPU.Codegen.Ops
 import Tyr.GPU.Codegen.Loop
+import Tyr.GPU.Codegen.GlobalLayout
 import Tyr.GPU.Codegen.EmitNew
 import Tyr.GPU.Codegen.Attribute
 
@@ -72,7 +73,7 @@ def flashAttnFwdWithLse (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.
   -- Note: zero operation on vectors would go here
 
   comment "Main loop over K, V blocks"
-  forLoop 0 numKvBlocks do
+  for blkIdx in krange 0 numKvBlocks do
     comment "Load K, V tiles"
     load k kShared
     load v vShared
@@ -247,7 +248,7 @@ def flashAttnBwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat1
   loadVec dVec dVecShared
 
   comment "Main loop over K, V blocks"
-  forLoop 0 numKvBlocks do
+  for blkIdx in krange 0 numKvBlocks do
     comment "Load K, V for this block"
     load k kShared
     load v vShared

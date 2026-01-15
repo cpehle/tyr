@@ -61,10 +61,12 @@ def buildKernel (name : String) (params : Array KParam := #[]) : KernelM Kernel 
 def runKernelM (arch : GpuArch := .SM90) (m : KernelM α) : α × KernelState :=
   m.run { arch := arch }
 
-/-- Run and extract just the kernel -/
+/-- Run and extract just the kernel.
+    Note: nextId starts at params.size to avoid conflicts with parameter VarIds -/
 def buildKernelM (name : String) (arch : GpuArch := .SM90)
     (params : Array KParam := #[]) (m : KernelM Unit) : Kernel :=
-  let (_, state) := m.run { arch := arch }
+  -- Start nextId at params.size so freshVar doesn't conflict with parameter VarIds
+  let (_, state) := m.run { arch := arch, nextId := params.size }
   {
     name := name
     arch := state.arch

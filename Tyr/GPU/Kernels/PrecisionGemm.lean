@@ -17,6 +17,7 @@ import Tyr.GPU.Codegen.IR
 import Tyr.GPU.Codegen.Monad
 import Tyr.GPU.Codegen.Ops
 import Tyr.GPU.Codegen.Loop
+import Tyr.GPU.Codegen.GlobalLayout
 import Tyr.GPU.Codegen.EmitNew
 import Tyr.GPU.Codegen.Attribute
 
@@ -37,9 +38,15 @@ Typically: weights in E4M3, activations in E5M2 or E4M3.
 
 /-- FP8 GEMM (E4M3 inputs) -/
 @[gpu_kernel .SM90]
-def gemmFp8E4M3Fwd : KernelM Unit := do
+def gemmFp8E4M3Fwd (A_ptr : GPtr GpuFloat.FP8E4M3) (B_ptr : GPtr GpuFloat.FP8E4M3)
+    (C_ptr : GPtr GpuFloat.BFloat16) (M : KVal UInt64) (N : KVal UInt64)
+    (K_dim : KVal UInt64) : KernelM Unit := do
   comment "=== FP8 GEMM (E4M3) ==="
   comment "A (E4M3) @ B (E4M3) → C (FP32)"
+
+  let numBlocks : Nat := 8
+
+  let coord ← blockCoord2D
 
   -- FP8 E4M3 inputs
   let a : RT GpuFloat.FP8E4M3 64 64 ← allocRT .FP8E4M3 64 64
@@ -57,8 +64,11 @@ def gemmFp8E4M3Fwd : KernelM Unit := do
   let outShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
 
   comment "GEMM loop"
-  forLoop 0 8 do
+  for blkIdx in krange 0 numBlocks do
     comment "Load FP8 tiles"
+    loadGlobal aShared A_ptr (coord.withCol blkIdx.id)
+    loadGlobal bShared B_ptr (coord.withRow blkIdx.id)
+    sync
     load a aShared
     load b bShared
 
@@ -71,22 +81,23 @@ def gemmFp8E4M3Fwd : KernelM Unit := do
   comment "Convert to output dtype and store"
   convert out c
   store outShared out
+  storeGlobal C_ptr outShared coord
 
-def gemmFp8E4M3FwdKernel : Kernel :=
-  buildKernelM "gemm_fp8_e4m3_fwd" .SM90 #[
-    { name := "A", dtype := .FP8E4M3, isPointer := true },
-    { name := "B", dtype := .FP8E4M3, isPointer := true },
-    { name := "C", dtype := .BFloat16, isPointer := true },
-    { name := "M", dtype := .Float32, isPointer := false },
-    { name := "N", dtype := .Float32, isPointer := false },
-    { name := "K", dtype := .Float32, isPointer := false }
-  ] gemmFp8E4M3Fwd
+-- Verify auto-generated kernel
+#check gemmFp8E4M3Fwd.kernel
+#check gemmFp8E4M3Fwd.launch
 
 /-- FP8 GEMM (E5M2 inputs) -/
 @[gpu_kernel .SM90]
-def gemmFp8E5M2Fwd : KernelM Unit := do
+def gemmFp8E5M2Fwd (A_ptr : GPtr GpuFloat.FP8E5M2) (B_ptr : GPtr GpuFloat.FP8E5M2)
+    (C_ptr : GPtr GpuFloat.BFloat16) (M : KVal UInt64) (N : KVal UInt64)
+    (K_dim : KVal UInt64) : KernelM Unit := do
   comment "=== FP8 GEMM (E5M2) ==="
   comment "A (E5M2) @ B (E5M2) → C (FP32)"
+
+  let numBlocks : Nat := 8
+
+  let coord ← blockCoord2D
 
   let a : RT GpuFloat.FP8E5M2 64 64 ← allocRT .FP8E5M2 64 64
   let b : RT GpuFloat.FP8E5M2 64 64 .Col ← allocRT .FP8E5M2 64 64 .Col
@@ -97,7 +108,10 @@ def gemmFp8E5M2Fwd : KernelM Unit := do
   let bShared : ST GpuFloat.FP8E5M2 64 64 .Col ← allocST .FP8E5M2 64 64 .Col
   let outShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
 
-  forLoop 0 8 do
+  for blkIdx in krange 0 numBlocks do
+    loadGlobal aShared A_ptr (coord.withCol blkIdx.id)
+    loadGlobal bShared B_ptr (coord.withRow blkIdx.id)
+    sync
     load a aShared
     load b bShared
     mma c a b c
@@ -105,16 +119,11 @@ def gemmFp8E5M2Fwd : KernelM Unit := do
 
   convert out c
   store outShared out
+  storeGlobal C_ptr outShared coord
 
-def gemmFp8E5M2FwdKernel : Kernel :=
-  buildKernelM "gemm_fp8_e5m2_fwd" .SM90 #[
-    { name := "A", dtype := .FP8E5M2, isPointer := true },
-    { name := "B", dtype := .FP8E5M2, isPointer := true },
-    { name := "C", dtype := .BFloat16, isPointer := true },
-    { name := "M", dtype := .Float32, isPointer := false },
-    { name := "N", dtype := .Float32, isPointer := false },
-    { name := "K", dtype := .Float32, isPointer := false }
-  ] gemmFp8E5M2Fwd
+-- Verify auto-generated kernel
+#check gemmFp8E5M2Fwd.kernel
+#check gemmFp8E5M2Fwd.launch
 
 /-! ## Microscaling FP8 (MxFP8)
 
@@ -126,9 +135,16 @@ MxFP8 adds per-block scaling factors to FP8 for better dynamic range:
 
 /-- MxFP8 GEMM with per-block scaling -/
 @[gpu_kernel .SM90]
-def gemmMxFp8Fwd : KernelM Unit := do
+def gemmMxFp8Fwd (A_ptr : GPtr GpuFloat.FP8E4M3) (B_ptr : GPtr GpuFloat.FP8E4M3)
+    (scale_A_ptr : GPtr GpuFloat.Float32) (scale_B_ptr : GPtr GpuFloat.Float32)
+    (C_ptr : GPtr GpuFloat.BFloat16) (M : KVal UInt64) (N : KVal UInt64)
+    (K_dim : KVal UInt64) : KernelM Unit := do
   comment "=== Microscaling FP8 GEMM ==="
   comment "FP8 values with per-block scale factors"
+
+  let numBlocks : Nat := 8
+
+  let coord ← blockCoord2D
 
   -- FP8 data
   let a : RT GpuFloat.FP8E4M3 64 64 ← allocRT .FP8E4M3 64 64
@@ -157,7 +173,10 @@ def gemmMxFp8Fwd : KernelM Unit := do
   loadVec scaleB scaleBShared
 
   comment "GEMM with FP8"
-  forLoop 0 8 do
+  for blkIdx in krange 0 numBlocks do
+    loadGlobal aShared A_ptr (coord.withCol blkIdx.id)
+    loadGlobal bShared B_ptr (coord.withRow blkIdx.id)
+    sync
     load a aShared
     load b bShared
     mma c a b c
@@ -173,18 +192,11 @@ def gemmMxFp8Fwd : KernelM Unit := do
   comment "Store output"
   convert out cScaled
   store outShared out
+  storeGlobal C_ptr outShared coord
 
-def gemmMxFp8FwdKernel : Kernel :=
-  buildKernelM "gemm_mxfp8_fwd" .SM90 #[
-    { name := "A", dtype := .FP8E4M3, isPointer := true },
-    { name := "B", dtype := .FP8E4M3, isPointer := true },
-    { name := "scale_A", dtype := .Float32, isPointer := true },
-    { name := "scale_B", dtype := .Float32, isPointer := true },
-    { name := "C", dtype := .BFloat16, isPointer := true },
-    { name := "M", dtype := .Float32, isPointer := false },
-    { name := "N", dtype := .Float32, isPointer := false },
-    { name := "K", dtype := .Float32, isPointer := false }
-  ] gemmMxFp8Fwd
+-- Verify auto-generated kernel
+#check gemmMxFp8Fwd.kernel
+#check gemmMxFp8Fwd.launch
 
 /-! ## Mixed Precision GEMM
 
@@ -193,9 +205,15 @@ Common patterns: BF16 activations with FP8 weights for inference.
 
 /-- Mixed precision GEMM: BF16 @ FP8 → FP32 -/
 @[gpu_kernel .SM90]
-def gemmMixedFwd : KernelM Unit := do
+def gemmMixedFwd (A_ptr : GPtr GpuFloat.BFloat16) (B_ptr : GPtr GpuFloat.FP8E4M3)
+    (C_ptr : GPtr GpuFloat.BFloat16) (M : KVal UInt64) (N : KVal UInt64)
+    (K_dim : KVal UInt64) : KernelM Unit := do
   comment "=== Mixed Precision GEMM ==="
   comment "A (BF16) @ B (FP8) → C (FP32)"
+
+  let numBlocks : Nat := 8
+
+  let coord ← blockCoord2D
 
   -- BF16 activations
   let a : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
@@ -215,7 +233,10 @@ def gemmMixedFwd : KernelM Unit := do
   let outShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
 
   comment "Mixed precision GEMM"
-  forLoop 0 8 do
+  for blkIdx in krange 0 numBlocks do
+    loadGlobal aShared A_ptr (coord.withCol blkIdx.id)
+    loadGlobal bShared B_ptr (coord.withRow blkIdx.id)
+    sync
     load a aShared
     load b bShared
 
@@ -230,16 +251,11 @@ def gemmMixedFwd : KernelM Unit := do
   comment "Store output"
   convert out c
   store outShared out
+  storeGlobal C_ptr outShared coord
 
-def gemmMixedFwdKernel : Kernel :=
-  buildKernelM "gemm_mixed_fwd" .SM90 #[
-    { name := "A", dtype := .BFloat16, isPointer := true },
-    { name := "B", dtype := .FP8E4M3, isPointer := true },
-    { name := "C", dtype := .BFloat16, isPointer := true },
-    { name := "M", dtype := .Float32, isPointer := false },
-    { name := "N", dtype := .Float32, isPointer := false },
-    { name := "K", dtype := .Float32, isPointer := false }
-  ] gemmMixedFwd
+-- Verify auto-generated kernel
+#check gemmMixedFwd.kernel
+#check gemmMixedFwd.launch
 
 /-! ## Scaled FP8 GEMM with Bias
 
@@ -248,9 +264,16 @@ Common inference pattern: FP8 GEMM + scale + bias + activation.
 
 /-- FP8 GEMM with scale and bias fusion -/
 @[gpu_kernel .SM90]
-def gemmFp8ScaledBiasFwd : KernelM Unit := do
+def gemmFp8ScaledBiasFwd (A_ptr : GPtr GpuFloat.FP8E4M3) (B_ptr : GPtr GpuFloat.FP8E4M3)
+    (scale_ptr : GPtr GpuFloat.Float32) (bias_ptr : GPtr GpuFloat.Float32)
+    (C_ptr : GPtr GpuFloat.BFloat16) (M : KVal UInt64) (N : KVal UInt64)
+    (K_dim : KVal UInt64) : KernelM Unit := do
   comment "=== FP8 GEMM with Scale and Bias ==="
   comment "C = scale * (A @ B) + bias"
+
+  let numBlocks : Nat := 8
+
+  let coord ← blockCoord2D
 
   let a : RT GpuFloat.FP8E4M3 64 64 ← allocRT .FP8E4M3 64 64
   let b : RT GpuFloat.FP8E4M3 64 64 .Col ← allocRT .FP8E4M3 64 64 .Col
@@ -273,11 +296,16 @@ def gemmFp8ScaledBiasFwd : KernelM Unit := do
   let outShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
 
   comment "Load scale and bias"
+  loadGlobal scaleShared scale_ptr coord
+  sync
   load scale scaleShared
   loadVec bias biasShared
 
   comment "FP8 GEMM"
-  forLoop 0 8 do
+  for blkIdx in krange 0 numBlocks do
+    loadGlobal aShared A_ptr (coord.withCol blkIdx.id)
+    loadGlobal bShared B_ptr (coord.withRow blkIdx.id)
+    sync
     load a aShared
     load b bShared
     mma c a b c
@@ -292,24 +320,17 @@ def gemmFp8ScaledBiasFwd : KernelM Unit := do
   comment "Store output"
   convert out c
   store outShared out
+  storeGlobal C_ptr outShared coord
 
-def gemmFp8ScaledBiasFwdKernel : Kernel :=
-  buildKernelM "gemm_fp8_scaled_bias_fwd" .SM90 #[
-    { name := "A", dtype := .FP8E4M3, isPointer := true },
-    { name := "B", dtype := .FP8E4M3, isPointer := true },
-    { name := "scale", dtype := .Float32, isPointer := true },
-    { name := "bias", dtype := .Float32, isPointer := true },
-    { name := "C", dtype := .BFloat16, isPointer := true },
-    { name := "M", dtype := .Float32, isPointer := false },
-    { name := "N", dtype := .Float32, isPointer := false },
-    { name := "K", dtype := .Float32, isPointer := false }
-  ] gemmFp8ScaledBiasFwd
+-- Verify auto-generated kernels
+#check gemmFp8ScaledBiasFwd.kernel
+#check gemmFp8ScaledBiasFwd.launch
 
 -- Print generated kernels
-#eval IO.println "=== FP8 E4M3 GEMM ===" *> IO.println (generateKernel gemmFp8E4M3FwdKernel)
-#eval IO.println "\n=== FP8 E5M2 GEMM ===" *> IO.println (generateKernel gemmFp8E5M2FwdKernel)
-#eval IO.println "\n=== MxFP8 GEMM ===" *> IO.println (generateKernel gemmMxFp8FwdKernel)
-#eval IO.println "\n=== Mixed GEMM ===" *> IO.println (generateKernel gemmMixedFwdKernel)
-#eval IO.println "\n=== FP8 Scaled Bias ===" *> IO.println (generateKernel gemmFp8ScaledBiasFwdKernel)
+#eval IO.println "=== FP8 E4M3 GEMM ===" *> IO.println (generateKernel gemmFp8E4M3Fwd.kernel)
+#eval IO.println "\n=== FP8 E5M2 GEMM ===" *> IO.println (generateKernel gemmFp8E5M2Fwd.kernel)
+#eval IO.println "\n=== MxFP8 GEMM ===" *> IO.println (generateKernel gemmMxFp8Fwd.kernel)
+#eval IO.println "\n=== Mixed GEMM ===" *> IO.println (generateKernel gemmMixedFwd.kernel)
+#eval IO.println "\n=== FP8 Scaled Bias ===" *> IO.println (generateKernel gemmFp8ScaledBiasFwd.kernel)
 
 end Tyr.GPU.Kernels.PrecisionGemm

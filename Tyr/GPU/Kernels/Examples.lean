@@ -13,6 +13,7 @@ import Tyr.GPU.Codegen.IR
 import Tyr.GPU.Codegen.Monad
 import Tyr.GPU.Codegen.Ops
 import Tyr.GPU.Codegen.Loop
+import Tyr.GPU.Codegen.GlobalLayout
 import Tyr.GPU.Codegen.EmitNew
 import Tyr.GPU.Codegen.Attribute
 import Tyr.GPU.Codegen.ArchConfig
@@ -36,23 +37,16 @@ def simpleGemm : KernelM Unit := do
   let aShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
   let bShared : ST GpuFloat.BFloat16 64 64 .Col ← allocST .BFloat16 64 64 .Col
 
-  -- Using forLoop for iteration
-  forLoop 0 8 do
+  -- Using for..in krange for iteration
+  for blkIdx in krange 0 8 do
     load a aShared
     load b bShared
     mma c a b c
     sync
 
-/-- Build simple GEMM kernel -/
-def simpleGemmKernel : Kernel :=
-  buildKernelM "simple_gemm" .SM90 #[
-    { name := "A", dtype := .BFloat16, isPointer := true },
-    { name := "B", dtype := .BFloat16, isPointer := true },
-    { name := "C", dtype := .Float32, isPointer := true },
-    { name := "M", dtype := .Float32, isPointer := false },
-    { name := "N", dtype := .Float32, isPointer := false },
-    { name := "K", dtype := .Float32, isPointer := false }
-  ] simpleGemm
+-- Verify auto-generated kernel
+#check simpleGemm.kernel
+#check simpleGemm.launch
 
 /-! ## Example 2: FlashAttention with attribute -/
 
@@ -81,7 +75,7 @@ def flashAttnFwd : KernelM Unit := do
   load q qShared
 
   -- Main loop over K, V blocks
-  forLoop 0 4 do
+  for kvBlkIdx in krange 0 4 do
     -- Load K, V
     load k kShared
     load v vShared
@@ -108,15 +102,9 @@ def flashAttnFwd : KernelM Unit := do
   -- Final normalization
   divCol o o rowSum
 
-/-- Build FlashAttention kernel -/
-def flashAttnFwdKernel : Kernel :=
-  buildKernelM "flash_attn_fwd" .SM90 #[
-    { name := "Q", dtype := .BFloat16, isPointer := true },
-    { name := "K", dtype := .BFloat16, isPointer := true },
-    { name := "V", dtype := .BFloat16, isPointer := true },
-    { name := "O", dtype := .BFloat16, isPointer := true },
-    { name := "seq_len", dtype := .Float32, isPointer := false }
-  ] flashAttnFwd
+-- Verify auto-generated kernel
+#check flashAttnFwd.kernel
+#check flashAttnFwd.launch
 
 /-! ## Example 3: Ampere (SM80) kernel -/
 
@@ -133,18 +121,15 @@ def ampereGemm : KernelM Unit := do
   let bShared : ST GpuFloat.BFloat16 64 64 .Col ← allocST .BFloat16 64 64 .Col
 
   -- SM80 uses smaller pipeline stages
-  forLoop 0 4 do
+  for blkIdx in krange 0 4 do
     load a aShared
     load b bShared
     mma c a b c
     sync
 
-def ampereGemmKernel : Kernel :=
-  buildKernelM "ampere_gemm" .SM80 #[
-    { name := "A", dtype := .BFloat16, isPointer := true },
-    { name := "B", dtype := .BFloat16, isPointer := true },
-    { name := "C", dtype := .Float32, isPointer := true }
-  ] ampereGemm
+-- Verify auto-generated kernel
+#check ampereGemm.kernel
+#check ampereGemm.launch
 
 /-! ## Example 4: Blackwell (SM100) kernel -/
 
@@ -161,18 +146,15 @@ def blackwellGemm : KernelM Unit := do
   let bShared : ST GpuFloat.BFloat16 64 64 .Col ← allocST .BFloat16 64 64 .Col
 
   -- SM100 can handle deeper pipelines
-  forLoop 0 8 do
+  for blkIdx in krange 0 8 do
     load a aShared
     load b bShared
     mma c a b c
     sync
 
-def blackwellGemmKernel : Kernel :=
-  buildKernelM "blackwell_gemm" .SM100 #[
-    { name := "A", dtype := .BFloat16, isPointer := true },
-    { name := "B", dtype := .BFloat16, isPointer := true },
-    { name := "C", dtype := .Float32, isPointer := true }
-  ] blackwellGemm
+-- Verify auto-generated kernel
+#check blackwellGemm.kernel
+#check blackwellGemm.launch
 
 /-! ## Example 5: LayerNorm with loop syntax -/
 
@@ -199,7 +181,7 @@ def layerNorm : KernelM Unit := do
   load weight weightShared
   load bias biasShared
 
-  forLoop 0 16 do
+  for blkIdx in krange 0 16 do
     -- Load input
     load x xShared
 
@@ -230,23 +212,17 @@ def layerNorm : KernelM Unit := do
 
     sync
 
-def layerNormKernel : Kernel :=
-  buildKernelM "layer_norm" .SM90 #[
-    { name := "x_ptr", dtype := .BFloat16, isPointer := true },
-    { name := "weight_ptr", dtype := .BFloat16, isPointer := true },
-    { name := "bias_ptr", dtype := .BFloat16, isPointer := true },
-    { name := "out_ptr", dtype := .BFloat16, isPointer := true },
-    { name := "hidden_dim", dtype := .Float32, isPointer := false }
-  ] layerNorm
-
+-- Verify auto-generated kernel
+#check layerNorm.kernel
+#check layerNorm.launch
 
 /-! ## Generated Code Output -/
 
 -- Print generated kernels
-#eval IO.println "=== Simple GEMM ===" *> IO.println (generateKernel simpleGemmKernel)
-#eval IO.println "\n=== FlashAttention ===" *> IO.println (generateKernel flashAttnFwdKernel)
-#eval IO.println "\n=== Ampere GEMM (SM80) ===" *> IO.println (generateKernel ampereGemmKernel)
-#eval IO.println "\n=== Blackwell GEMM (SM100) ===" *> IO.println (generateKernel blackwellGemmKernel)
-#eval IO.println "\n=== LayerNorm ===" *> IO.println (generateKernel layerNormKernel)
+#eval IO.println "=== Simple GEMM ===" *> IO.println (generateKernel simpleGemm.kernel)
+#eval IO.println "\n=== FlashAttention ===" *> IO.println (generateKernel flashAttnFwd.kernel)
+#eval IO.println "\n=== Ampere GEMM (SM80) ===" *> IO.println (generateKernel ampereGemm.kernel)
+#eval IO.println "\n=== Blackwell GEMM (SM100) ===" *> IO.println (generateKernel blackwellGemm.kernel)
+#eval IO.println "\n=== LayerNorm ===" *> IO.println (generateKernel layerNorm.kernel)
 
 end Tyr.GPU.Kernels.Examples

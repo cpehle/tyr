@@ -18,6 +18,7 @@ import Tyr.GPU.Codegen.IR
 import Tyr.GPU.Codegen.Monad
 import Tyr.GPU.Codegen.Ops
 import Tyr.GPU.Codegen.Loop
+import Tyr.GPU.Codegen.GlobalLayout
 import Tyr.GPU.Codegen.EmitNew
 import Tyr.GPU.Codegen.Attribute
 
@@ -38,8 +39,15 @@ where α can be learned or fixed.
 
 /-- Hedgehog forward pass - hybrid linear + sliding window attention -/
 @[gpu_kernel .SM90]
-def hedgehogFwd : KernelM Unit := do
+def hedgehogFwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat16)
+    (V_ptr : GPtr GpuFloat.BFloat16) (O_ptr : GPtr GpuFloat.BFloat16)
+    (state_ptr : GPtr GpuFloat.Float32) (z_state_ptr : GPtr GpuFloat.Float32)
+    (seq_len : KVal UInt64) (head_dim : KVal UInt64) : KernelM Unit := do
   comment "=== Hedgehog Hybrid Attention Forward ==="
+
+  let numChunks : Nat := 16
+
+  let coord ← blockCoord2D
 
   -- Q, K, V tiles
   let q : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
@@ -78,11 +86,17 @@ def hedgehogFwd : KernelM Unit := do
   let outShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
 
   comment "Load previous state (if any)"
+  loadGlobal stateShared state_ptr coord
+  sync
   load state stateShared
 
   comment "Process sequence chunks"
-  forLoop 0 16 do
-    comment "Load Q, K, V for this chunk"
+  for chunkIdx in krange 0 numChunks do
+    comment "Load Q, K, V for this chunk from global"
+    loadGlobal qShared Q_ptr (coord.withRow chunkIdx.id)
+    loadGlobal kShared K_ptr (coord.withRow chunkIdx.id)
+    loadGlobal vShared V_ptr (coord.withRow chunkIdx.id)
+    sync
     load q qShared
     load k kShared
     load v vShared
@@ -170,24 +184,17 @@ def hedgehogFwd : KernelM Unit := do
     comment "Store output"
     convert out oFinal
     store outShared out
+    storeGlobal O_ptr outShared (coord.withRow chunkIdx.id)
 
     sync
 
   comment "Store final state for next chunk"
   store stateShared state
+  storeGlobal state_ptr stateShared coord
 
-/-- Build Hedgehog forward kernel -/
-def hedgehogFwdKernel : Kernel :=
-  buildKernelM "hedgehog_fwd" .SM90 #[
-    { name := "Q", dtype := .BFloat16, isPointer := true },
-    { name := "K", dtype := .BFloat16, isPointer := true },
-    { name := "V", dtype := .BFloat16, isPointer := true },
-    { name := "O", dtype := .BFloat16, isPointer := true },
-    { name := "state", dtype := .Float32, isPointer := true },
-    { name := "z_state", dtype := .Float32, isPointer := true },
-    { name := "seq_len", dtype := .Float32, isPointer := false },
-    { name := "head_dim", dtype := .Float32, isPointer := false }
-  ] hedgehogFwd
+-- Verify auto-generated kernel
+#check hedgehogFwd.kernel
+#check hedgehogFwd.launch
 
 /-! ## Hedgehog with Learned Mixing
 
@@ -196,8 +203,14 @@ Variant with learnable mixing coefficients α.
 
 /-- Hedgehog with learned mixing weights -/
 @[gpu_kernel .SM90]
-def hedgehogLearnedFwd : KernelM Unit := do
+def hedgehogLearnedFwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat16)
+    (V_ptr : GPtr GpuFloat.BFloat16) (alpha_ptr : GPtr GpuFloat.Float32)
+    (O_ptr : GPtr GpuFloat.BFloat16) (state_ptr : GPtr GpuFloat.Float32) : KernelM Unit := do
   comment "=== Hedgehog with Learned Mixing ==="
+
+  let numChunks : Nat := 16
+
+  let coord ← blockCoord2D
 
   let q : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
   let k : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
@@ -224,7 +237,11 @@ def hedgehogLearnedFwd : KernelM Unit := do
   comment "Load mixing weights"
   loadVec alpha alphaShared
 
-  forLoop 0 16 do
+  for chunkIdx in krange 0 numChunks do
+    loadGlobal qShared Q_ptr (coord.withRow chunkIdx.id)
+    loadGlobal kShared K_ptr (coord.withRow chunkIdx.id)
+    loadGlobal vShared V_ptr (coord.withRow chunkIdx.id)
+    sync
     load q qShared
     load k kShared
     load v vShared
@@ -271,20 +288,15 @@ def hedgehogLearnedFwd : KernelM Unit := do
 
     convert out oFinal
     store outShared out
+    storeGlobal O_ptr outShared (coord.withRow chunkIdx.id)
     sync
 
-def hedgehogLearnedFwdKernel : Kernel :=
-  buildKernelM "hedgehog_learned_fwd" .SM90 #[
-    { name := "Q", dtype := .BFloat16, isPointer := true },
-    { name := "K", dtype := .BFloat16, isPointer := true },
-    { name := "V", dtype := .BFloat16, isPointer := true },
-    { name := "alpha", dtype := .Float32, isPointer := true },
-    { name := "O", dtype := .BFloat16, isPointer := true },
-    { name := "state", dtype := .Float32, isPointer := true }
-  ] hedgehogLearnedFwd
+-- Verify auto-generated kernels
+#check hedgehogLearnedFwd.kernel
+#check hedgehogLearnedFwd.launch
 
 -- Print generated kernels
-#eval IO.println "=== Hedgehog ===" *> IO.println (generateKernel hedgehogFwdKernel)
-#eval IO.println "\n=== Hedgehog Learned ===" *> IO.println (generateKernel hedgehogLearnedFwdKernel)
+#eval IO.println "=== Hedgehog ===" *> IO.println (generateKernel hedgehogFwd.kernel)
+#eval IO.println "\n=== Hedgehog Learned ===" *> IO.println (generateKernel hedgehogLearnedFwd.kernel)
 
 end Tyr.GPU.Kernels.Hedgehog

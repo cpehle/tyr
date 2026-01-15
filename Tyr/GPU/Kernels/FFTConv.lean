@@ -22,6 +22,7 @@ import Tyr.GPU.Codegen.IR
 import Tyr.GPU.Codegen.Monad
 import Tyr.GPU.Codegen.Ops
 import Tyr.GPU.Codegen.Loop
+import Tyr.GPU.Codegen.GlobalLayout
 import Tyr.GPU.Codegen.EmitNew
 import Tyr.GPU.Codegen.Attribute
 
@@ -89,7 +90,7 @@ def fftConvFwd : KernelM Unit := do
   loadComplex twInv twInvShared
 
   comment "Process batches"
-  forLoop 0 16 do
+  for batchIdx in krange 0 16 do
     comment "Load input (real only)"
     load x xShared
 
@@ -146,24 +147,9 @@ def fftConvFwd : KernelM Unit := do
 
     sync
 
-/-- Build FFT Convolution forward kernel -/
-def fftConvFwdKernel : Kernel :=
-  buildKernelM "fftconv_fwd" .SM90 #[
-    { name := "x", dtype := .BFloat16, isPointer := true },
-    { name := "kf_real", dtype := .BFloat16, isPointer := true },
-    { name := "kf_imag", dtype := .BFloat16, isPointer := true },
-    { name := "f_real", dtype := .BFloat16, isPointer := true },
-    { name := "f_imag", dtype := .BFloat16, isPointer := true },
-    { name := "finv_real", dtype := .BFloat16, isPointer := true },
-    { name := "finv_imag", dtype := .BFloat16, isPointer := true },
-    { name := "tw_real", dtype := .BFloat16, isPointer := true },
-    { name := "tw_imag", dtype := .BFloat16, isPointer := true },
-    { name := "twinv_real", dtype := .BFloat16, isPointer := true },
-    { name := "twinv_imag", dtype := .BFloat16, isPointer := true },
-    { name := "out", dtype := .BFloat16, isPointer := true },
-    { name := "batch_size", dtype := .Float32, isPointer := false },
-    { name := "num_heads", dtype := .Float32, isPointer := false }
-  ] fftConvFwd
+-- Verify auto-generated kernel
+#check fftConvFwd.kernel
+#check fftConvFwd.launch
 
 /-! ## Persistent Cache Variant
 
@@ -211,7 +197,7 @@ def fftConvPersistentFwd : KernelM Unit := do
   loadComplex twInv twInvShared
 
   comment "Process batches with persistent cache"
-  forLoop 0 16 do
+  for batchIdx in krange 0 16 do
     comment "Load per-head filter"
     loadComplex kf kfShared
 
@@ -259,26 +245,12 @@ def fftConvPersistentFwd : KernelM Unit := do
 
     sync
 
-def fftConvPersistentFwdKernel : Kernel :=
-  buildKernelM "fftconv_persistent_fwd" .SM90 #[
-    { name := "x", dtype := .BFloat16, isPointer := true },
-    { name := "kf_real", dtype := .BFloat16, isPointer := true },
-    { name := "kf_imag", dtype := .BFloat16, isPointer := true },
-    { name := "f_real", dtype := .BFloat16, isPointer := true },
-    { name := "f_imag", dtype := .BFloat16, isPointer := true },
-    { name := "finv_real", dtype := .BFloat16, isPointer := true },
-    { name := "finv_imag", dtype := .BFloat16, isPointer := true },
-    { name := "tw_real", dtype := .BFloat16, isPointer := true },
-    { name := "tw_imag", dtype := .BFloat16, isPointer := true },
-    { name := "twinv_real", dtype := .BFloat16, isPointer := true },
-    { name := "twinv_imag", dtype := .BFloat16, isPointer := true },
-    { name := "out", dtype := .BFloat16, isPointer := true },
-    { name := "batch_size", dtype := .Float32, isPointer := false },
-    { name := "num_heads", dtype := .Float32, isPointer := false }
-  ] fftConvPersistentFwd
+-- Verify auto-generated kernel
+#check fftConvPersistentFwd.kernel
+#check fftConvPersistentFwd.launch
 
 -- Print generated kernels
-#eval IO.println "=== FFT Conv ===" *> IO.println (generateKernel fftConvFwdKernel)
-#eval IO.println "\n=== FFT Conv Persistent ===" *> IO.println (generateKernel fftConvPersistentFwdKernel)
+#eval IO.println "=== FFT Conv ===" *> IO.println (generateKernel fftConvFwd.kernel)
+#eval IO.println "\n=== FFT Conv Persistent ===" *> IO.println (generateKernel fftConvPersistentFwd.kernel)
 
 end Tyr.GPU.Kernels.FFTConv

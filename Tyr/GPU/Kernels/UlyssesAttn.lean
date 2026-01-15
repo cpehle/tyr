@@ -17,6 +17,7 @@ import Tyr.GPU.Codegen.IR
 import Tyr.GPU.Codegen.Monad
 import Tyr.GPU.Codegen.Ops
 import Tyr.GPU.Codegen.Loop
+import Tyr.GPU.Codegen.GlobalLayout
 import Tyr.GPU.Codegen.EmitNew
 import Tyr.GPU.Codegen.Attribute
 
@@ -137,19 +138,9 @@ def ulyssesAttnFwd : KernelM Unit := do
   store outShared out
   sync
 
-/-- Build Ulysses Attention forward kernel -/
-def ulyssesAttnFwdKernel : Kernel :=
-  buildKernelM "ulysses_attn_fwd" .SM90 #[
-    { name := "Q", dtype := .BFloat16, isPointer := true },
-    { name := "K", dtype := .BFloat16, isPointer := true },
-    { name := "V", dtype := .BFloat16, isPointer := true },
-    { name := "O", dtype := .BFloat16, isPointer := true },
-    { name := "rank", dtype := .Float32, isPointer := false },
-    { name := "world_size", dtype := .Float32, isPointer := false },
-    { name := "seq_len", dtype := .Float32, isPointer := false },
-    { name := "num_heads", dtype := .Float32, isPointer := false },
-    { name := "head_dim", dtype := .Float32, isPointer := false }
-  ] ulyssesAttnFwd
+-- Verify auto-generated kernel
+#check ulyssesAttnFwd.kernel
+#check ulyssesAttnFwd.launch
 
 /-! ## Ulysses with Fused All-to-all
 
@@ -193,7 +184,7 @@ def ulyssesAttnFusedFwd : KernelM Unit := do
   load v vShared
 
   comment "Fused all-to-all + attention loop"
-  forLoop 0 8 do  -- world_size iterations
+  for gpuIdx in krange 0 8 do  -- world_size iterations
     comment "Prefetch next chunk (overlapped all-to-all)"
     load qNext qNextShared
     load kNext kNextShared
@@ -242,15 +233,9 @@ def ulyssesAttnFusedFwd : KernelM Unit := do
   convert out o
   store outShared out
 
-def ulyssesAttnFusedFwdKernel : Kernel :=
-  buildKernelM "ulysses_attn_fused_fwd" .SM90 #[
-    { name := "Q", dtype := .BFloat16, isPointer := true },
-    { name := "K", dtype := .BFloat16, isPointer := true },
-    { name := "V", dtype := .BFloat16, isPointer := true },
-    { name := "O", dtype := .BFloat16, isPointer := true },
-    { name := "rank", dtype := .Float32, isPointer := false },
-    { name := "world_size", dtype := .Float32, isPointer := false }
-  ] ulyssesAttnFusedFwd
+-- Verify auto-generated kernel
+#check ulyssesAttnFusedFwd.kernel
+#check ulyssesAttnFusedFwd.launch
 
 /-! ## All-to-all Kernel
 
@@ -285,18 +270,13 @@ def allToAllFwd : KernelM Unit := do
   store outputShared output
   sync
 
-def allToAllFwdKernel : Kernel :=
-  buildKernelM "all_to_all_fwd" .SM90 #[
-    { name := "input", dtype := .BFloat16, isPointer := true },
-    { name := "output", dtype := .BFloat16, isPointer := true },
-    { name := "rank", dtype := .Float32, isPointer := false },
-    { name := "world_size", dtype := .Float32, isPointer := false },
-    { name := "chunk_size", dtype := .Float32, isPointer := false }
-  ] allToAllFwd
+-- Verify auto-generated kernel
+#check allToAllFwd.kernel
+#check allToAllFwd.launch
 
 -- Print generated kernels
-#eval IO.println "=== Ulysses Attn ===" *> IO.println (generateKernel ulyssesAttnFwdKernel)
-#eval IO.println "\n=== Ulysses Attn Fused ===" *> IO.println (generateKernel ulyssesAttnFusedFwdKernel)
-#eval IO.println "\n=== All-to-all ===" *> IO.println (generateKernel allToAllFwdKernel)
+#eval IO.println "=== Ulysses Attn ===" *> IO.println (generateKernel ulyssesAttnFwd.kernel)
+#eval IO.println "\n=== Ulysses Attn Fused ===" *> IO.println (generateKernel ulyssesAttnFusedFwd.kernel)
+#eval IO.println "\n=== All-to-all ===" *> IO.println (generateKernel allToAllFwd.kernel)
 
 end Tyr.GPU.Kernels.UlyssesAttn

@@ -51,6 +51,26 @@ partial def generateStmt (indent : String := "  ") : KStmt → String
   | .tmaStore dst src coord =>
     s!"{indent}tma::store({dst.toIdent}, {src.toIdent}, {coord.toIdent});\n"
 
+  -- Global memory operations with 4D coordinates (ThunderKittens style)
+  | .loadGlobal dst src coordB coordD coordR coordC =>
+    s!"{indent}load({dst.toIdent}, {src.toIdent}, \{.b={coordB.toIdent}, .d={coordD.toIdent}, .r={coordR.toIdent}, .c={coordC.toIdent}});\n"
+  | .storeGlobal dst src coordB coordD coordR coordC =>
+    s!"{indent}store({dst.toIdent}, {src.toIdent}, \{.b={coordB.toIdent}, .d={coordD.toIdent}, .r={coordR.toIdent}, .c={coordC.toIdent}});\n"
+  | .loadGlobalAsync dst src coordB coordD coordR coordC sem =>
+    s!"{indent}tma::load_async({dst.toIdent}, {src.toIdent}, \{.b={coordB.toIdent}, .d={coordD.toIdent}, .r={coordR.toIdent}, .c={coordC.toIdent}}, {sem.toIdent});\n"
+  | .storeGlobalAsync dst src coordB coordD coordR coordC =>
+    s!"{indent}tma::store_async({dst.toIdent}, {src.toIdent}, \{.b={coordB.toIdent}, .d={coordD.toIdent}, .r={coordR.toIdent}, .c={coordC.toIdent}});\n"
+  | .storeGlobalAdd dst src coordB coordD coordR coordC =>
+    s!"{indent}tma::store_add_async({dst.toIdent}, {src.toIdent}, \{.b={coordB.toIdent}, .d={coordD.toIdent}, .r={coordR.toIdent}, .c={coordC.toIdent}});\n"
+
+  -- Vector global memory operations
+  | .loadVecGlobal dst src offset =>
+    s!"{indent}load({dst.toIdent}, {src.toIdent}, {offset.toIdent});\n"
+  | .storeVecGlobal dst src offset =>
+    s!"{indent}store({dst.toIdent}, {src.toIdent}, {offset.toIdent});\n"
+  | .storeVecGlobalAdd dst src offset =>
+    s!"{indent}store_add({dst.toIdent}, {src.toIdent}, {offset.toIdent});\n"
+
   -- Distributed / Multimem operations
   | .multimemLoadReduce op dst src =>
     s!"{indent}multimem::load_reduce_{op.toCpp}({dst.toIdent}, {src.toIdent});\n"
@@ -180,6 +200,18 @@ partial def generateStmt (indent : String := "  ") : KStmt → String
     let bodyStr := body.toList.map (generateStmt (indent ++ "  ")) |>.foldl (· ++ ·) ""
     s!"{indent}if (kittens::warpgroup::warpgroup_idx() == {wgIdx}) \{\n{bodyStr}{indent}}\n"
   | .comment text => s!"{indent}// {text}\n"
+
+  -- Block/thread index accessors
+  | .getBlockIdx dst axis =>
+    let axisName := match axis with | 0 => "x" | 1 => "y" | _ => "z"
+    s!"{indent}int {dst.toIdent} = blockIdx.{axisName};\n"
+  | .getThreadIdx dst axis =>
+    let axisName := match axis with | 0 => "x" | 1 => "y" | _ => "z"
+    s!"{indent}int {dst.toIdent} = threadIdx.{axisName};\n"
+
+  -- Constants
+  | .constInt dst value =>
+    s!"{indent}int {dst.toIdent} = {value};\n"
 
 /-- Generate kernel parameter list -/
 def generateParams (params : Array KParam) : String :=

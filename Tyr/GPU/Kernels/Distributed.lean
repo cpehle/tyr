@@ -17,6 +17,7 @@ import Tyr.GPU.Codegen.IR
 import Tyr.GPU.Codegen.Monad
 import Tyr.GPU.Codegen.Ops
 import Tyr.GPU.Codegen.Loop
+import Tyr.GPU.Codegen.GlobalLayout
 import Tyr.GPU.Codegen.EmitNew
 import Tyr.GPU.Codegen.Attribute
 
@@ -61,15 +62,9 @@ def allGatherFwd : KernelM Unit := do
   store gatheredShared gathered
   sync
 
-/-- Build AllGather kernel -/
-def allGatherFwdKernel : Kernel :=
-  buildKernelM "all_gather_fwd" .SM90 #[
-    { name := "local_ptr", dtype := .BFloat16, isPointer := true },
-    { name := "gathered_ptr", dtype := .BFloat16, isPointer := true },
-    { name := "rank", dtype := .Float32, isPointer := false },
-    { name := "world_size", dtype := .Float32, isPointer := false },
-    { name := "local_size", dtype := .Float32, isPointer := false }
-  ] allGatherFwd
+-- Verify auto-generated kernel
+#check allGatherFwd.kernel
+#check allGatherFwd.launch
 
 /-- AllReduce kernel - sum across all GPUs, result on all GPUs -/
 @[gpu_kernel .SM90]
@@ -91,22 +86,15 @@ def allReduceFwd : KernelM Unit := do
   load localTile localShared
 
   comment "AllReduce via multimem.ld_reduce.add"
-  comment "(In actual implementation, atomically reads and adds from all GPUs)"
-  -- Simulated: add local to reduced
-  add reduced reduced localTile
+  multimemLoadReduce reduced localShared .Sum
 
   comment "Store reduced result"
   store reducedShared reduced
   sync
 
-/-- Build AllReduce kernel -/
-def allReduceFwdKernel : Kernel :=
-  buildKernelM "all_reduce_fwd" .SM90 #[
-    { name := "data_ptr", dtype := .Float32, isPointer := true },
-    { name := "rank", dtype := .Float32, isPointer := false },
-    { name := "world_size", dtype := .Float32, isPointer := false },
-    { name := "size", dtype := .Float32, isPointer := false }
-  ] allReduceFwd
+-- Verify auto-generated kernel
+#check allReduceFwd.kernel
+#check allReduceFwd.launch
 
 /-- ReduceScatter kernel - reduce across GPUs, scatter slices -/
 @[gpu_kernel .SM90]
@@ -125,19 +113,15 @@ def reduceScatterFwd : KernelM Unit := do
 
   comment "Reduce contributions from all GPUs"
   comment "(Each GPU only stores its designated slice)"
-  add output output input
+  multimemLoadReduce output inputShared .Sum
 
   comment "Store this GPU's slice of reduced result"
   store outputShared output
   sync
 
-def reduceScatterFwdKernel : Kernel :=
-  buildKernelM "reduce_scatter_fwd" .SM90 #[
-    { name := "input_ptr", dtype := .Float32, isPointer := true },
-    { name := "output_ptr", dtype := .Float32, isPointer := true },
-    { name := "rank", dtype := .Float32, isPointer := false },
-    { name := "world_size", dtype := .Float32, isPointer := false }
-  ] reduceScatterFwd
+-- Verify auto-generated kernel
+#check reduceScatterFwd.kernel
+#check reduceScatterFwd.launch
 
 /-! ## Distributed GEMM Operations
 
@@ -172,7 +156,7 @@ def agGemmFwd : KernelM Unit := do
   load b bShared
 
   comment "Loop over all GPUs' A slices"
-  forLoop 0 8 do  -- 8 GPUs
+  for gpuIdx in krange 0 8 do  -- 8 GPUs
     comment "AllGather: load A slice from GPU i"
     load aLocal aShared
 
@@ -185,16 +169,9 @@ def agGemmFwd : KernelM Unit := do
   convert out c
   store outShared out
 
-def agGemmFwdKernel : Kernel :=
-  buildKernelM "ag_gemm_fwd" .SM90 #[
-    { name := "A_ptr", dtype := .BFloat16, isPointer := true },
-    { name := "B_ptr", dtype := .BFloat16, isPointer := true },
-    { name := "C_ptr", dtype := .BFloat16, isPointer := true },
-    { name := "M", dtype := .Float32, isPointer := false },
-    { name := "N", dtype := .Float32, isPointer := false },
-    { name := "K", dtype := .Float32, isPointer := false },
-    { name := "world_size", dtype := .Float32, isPointer := false }
-  ] agGemmFwd
+-- Verify auto-generated kernel
+#check agGemmFwd.kernel
+#check agGemmFwd.launch
 
 /-- GEMM-AllReduce: Compute A @ B, then allreduce result -/
 @[gpu_kernel .SM90]
@@ -210,32 +187,28 @@ def gemmArFwd : KernelM Unit := do
 
   let aShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
   let bShared : ST GpuFloat.BFloat16 64 64 .Col ← allocST .BFloat16 64 64 .Col
+  let cShared : ST GpuFloat.Float32 64 64 ← allocST .Float32 64 64
   let outShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
 
   comment "Compute local GEMM"
-  forLoop 0 4 do
+  for blkIdx in krange 0 4 do
     load a aShared
     load b bShared
     mma c a b c
     sync
 
   comment "AllReduce: sum partial results across GPUs"
-  comment "(In actual implementation: multimem.ld_reduce.add)"
-  add cReduced cReduced c
+  store cShared c
+  sync
+  multimemLoadReduce cReduced cShared .Sum
 
   comment "Store reduced result"
   convert out cReduced
   store outShared out
 
-def gemmArFwdKernel : Kernel :=
-  buildKernelM "gemm_ar_fwd" .SM90 #[
-    { name := "A_ptr", dtype := .BFloat16, isPointer := true },
-    { name := "B_ptr", dtype := .BFloat16, isPointer := true },
-    { name := "C_ptr", dtype := .BFloat16, isPointer := true },
-    { name := "M", dtype := .Float32, isPointer := false },
-    { name := "N", dtype := .Float32, isPointer := false },
-    { name := "K", dtype := .Float32, isPointer := false }
-  ] gemmArFwd
+-- Verify auto-generated kernel
+#check gemmArFwd.kernel
+#check gemmArFwd.launch
 
 /-- GEMM-ReduceScatter: Compute A @ B, then reduce-scatter result -/
 @[gpu_kernel .SM90]
@@ -254,7 +227,7 @@ def gemmRsFwd : KernelM Unit := do
   let outShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
 
   comment "Compute local GEMM"
-  forLoop 0 4 do
+  for blkIdx in krange 0 4 do
     load a aShared
     load b bShared
     mma c a b c
@@ -267,21 +240,16 @@ def gemmRsFwd : KernelM Unit := do
   convert out cScattered
   store outShared out
 
-def gemmRsFwdKernel : Kernel :=
-  buildKernelM "gemm_rs_fwd" .SM90 #[
-    { name := "A_ptr", dtype := .BFloat16, isPointer := true },
-    { name := "B_ptr", dtype := .BFloat16, isPointer := true },
-    { name := "C_ptr", dtype := .BFloat16, isPointer := true },
-    { name := "rank", dtype := .Float32, isPointer := false },
-    { name := "world_size", dtype := .Float32, isPointer := false }
-  ] gemmRsFwd
+-- Verify auto-generated kernel
+#check gemmRsFwd.kernel
+#check gemmRsFwd.launch
 
 -- Print generated kernels
-#eval IO.println "=== AllGather ===" *> IO.println (generateKernel allGatherFwdKernel)
-#eval IO.println "\n=== AllReduce ===" *> IO.println (generateKernel allReduceFwdKernel)
-#eval IO.println "\n=== ReduceScatter ===" *> IO.println (generateKernel reduceScatterFwdKernel)
-#eval IO.println "\n=== AG-GEMM ===" *> IO.println (generateKernel agGemmFwdKernel)
-#eval IO.println "\n=== GEMM-AR ===" *> IO.println (generateKernel gemmArFwdKernel)
-#eval IO.println "\n=== GEMM-RS ===" *> IO.println (generateKernel gemmRsFwdKernel)
+#eval IO.println "=== AllGather ===" *> IO.println (generateKernel allGatherFwd.kernel)
+#eval IO.println "\n=== AllReduce ===" *> IO.println (generateKernel allReduceFwd.kernel)
+#eval IO.println "\n=== ReduceScatter ===" *> IO.println (generateKernel reduceScatterFwd.kernel)
+#eval IO.println "\n=== AG-GEMM ===" *> IO.println (generateKernel agGemmFwd.kernel)
+#eval IO.println "\n=== GEMM-AR ===" *> IO.println (generateKernel gemmArFwd.kernel)
+#eval IO.println "\n=== GEMM-RS ===" *> IO.println (generateKernel gemmRsFwd.kernel)
 
 end Tyr.GPU.Kernels.Distributed

@@ -17,6 +17,7 @@ import Tyr.GPU.Codegen.IR
 import Tyr.GPU.Codegen.Monad
 import Tyr.GPU.Codegen.Ops
 import Tyr.GPU.Codegen.Loop
+import Tyr.GPU.Codegen.GlobalLayout
 import Tyr.GPU.Codegen.EmitNew
 import Tyr.GPU.Codegen.Attribute
 
@@ -89,7 +90,7 @@ def nvfp4GemmFwd : KernelM Unit := do
   load bScale bScaleShared
 
   comment "GEMM loop (K dimension)"
-  forLoop 0 4 do  -- Kb/64 iterations
+  for kBlkIdx in krange 0 4 do  -- Kb/64 iterations
     comment "Load FP4 tiles (async TMA)"
     load a aShared
     load b bShared
@@ -110,20 +111,9 @@ def nvfp4GemmFwd : KernelM Unit := do
   convert out c
   store outShared out
 
-/-- Build NVFP4 GEMM forward kernel -/
-def nvfp4GemmFwdKernel : Kernel :=
-  buildKernelM "nvfp4_gemm_fwd" .SM100 #[
-    { name := "A", dtype := .FP8E4M3, isPointer := true },
-    { name := "A_scale", dtype := .Float16, isPointer := true },
-    { name := "A_scale_global", dtype := .Float32, isPointer := true },
-    { name := "B", dtype := .FP8E4M3, isPointer := true },
-    { name := "B_scale", dtype := .Float16, isPointer := true },
-    { name := "B_scale_global", dtype := .Float32, isPointer := true },
-    { name := "C", dtype := .BFloat16, isPointer := true },
-    { name := "M", dtype := .Float32, isPointer := false },
-    { name := "N", dtype := .Float32, isPointer := false },
-    { name := "K", dtype := .Float32, isPointer := false }
-  ] nvfp4GemmFwd
+-- Verify auto-generated kernel
+#check nvfp4GemmFwd.kernel
+#check nvfp4GemmFwd.launch
 
 /-! ## FP4 Quantization Kernel
 
@@ -150,7 +140,7 @@ def quantizeToFp4 : KernelM Unit := do
   let scaleShared : SV GpuFloat.Float32 1 ← allocSV .Float32 1
 
   comment "Process blocks"
-  forLoop 0 16 do
+  for blkIdx in krange 0 16 do
     comment "Load input block"
     load x xShared
 
@@ -168,13 +158,9 @@ def quantizeToFp4 : KernelM Unit := do
 
     sync
 
-def quantizeToFp4Kernel : Kernel :=
-  buildKernelM "quantize_to_fp4" .SM100 #[
-    { name := "x", dtype := .BFloat16, isPointer := true },
-    { name := "x_q", dtype := .FP8E4M3, isPointer := true },
-    { name := "scale", dtype := .Float32, isPointer := true },
-    { name := "size", dtype := .Float32, isPointer := false }
-  ] quantizeToFp4
+-- Verify auto-generated kernel
+#check quantizeToFp4.kernel
+#check quantizeToFp4.launch
 
 /-! ## Mixed FP4/FP8 GEMM
 
@@ -212,7 +198,7 @@ def mixedFp4Fp8GemmFwd : KernelM Unit := do
   load wScale wScaleShared
 
   comment "GEMM loop"
-  forLoop 0 8 do
+  for kBlkIdx in krange 0 8 do
     load a aShared
     load w wShared
 
@@ -228,20 +214,13 @@ def mixedFp4Fp8GemmFwd : KernelM Unit := do
   convert out c
   store outShared out
 
-def mixedFp4Fp8GemmFwdKernel : Kernel :=
-  buildKernelM "mixed_fp4_fp8_gemm_fwd" .SM100 #[
-    { name := "A", dtype := .FP8E4M3, isPointer := true },
-    { name := "W", dtype := .FP8E4M3, isPointer := true },
-    { name := "W_scale", dtype := .Float32, isPointer := true },
-    { name := "C", dtype := .BFloat16, isPointer := true },
-    { name := "M", dtype := .Float32, isPointer := false },
-    { name := "N", dtype := .Float32, isPointer := false },
-    { name := "K", dtype := .Float32, isPointer := false }
-  ] mixedFp4Fp8GemmFwd
+-- Verify auto-generated kernel
+#check mixedFp4Fp8GemmFwd.kernel
+#check mixedFp4Fp8GemmFwd.launch
 
 -- Print generated kernels
-#eval IO.println "=== NVFP4 GEMM ===" *> IO.println (generateKernel nvfp4GemmFwdKernel)
-#eval IO.println "\n=== Quantize to FP4 ===" *> IO.println (generateKernel quantizeToFp4Kernel)
-#eval IO.println "\n=== Mixed FP4/FP8 GEMM ===" *> IO.println (generateKernel mixedFp4Fp8GemmFwdKernel)
+#eval IO.println "=== NVFP4 GEMM ===" *> IO.println (generateKernel nvfp4GemmFwd.kernel)
+#eval IO.println "\n=== Quantize to FP4 ===" *> IO.println (generateKernel quantizeToFp4.kernel)
+#eval IO.println "\n=== Mixed FP4/FP8 GEMM ===" *> IO.println (generateKernel mixedFp4Fp8GemmFwd.kernel)
 
 end Tyr.GPU.Kernels.NvFp4Gemm
