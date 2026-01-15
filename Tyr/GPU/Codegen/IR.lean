@@ -97,12 +97,25 @@ inductive KStmt where
   | arrive (barrierId : Nat)
   | arriveAndWait (barrierId : Nat)
 
+  -- Named barriers (for warp specialization in FA3)
+  | namedBarrierSync (id : Nat) (numThreads : Nat)
+  | namedBarrierArrive (id : Nat) (numThreads : Nat)
+
+  -- Warp group operations (for warp specialization)
+  | warpGroupIdx (dst : VarId)
+  | electOneSync (dst : VarId)
+
+  -- Fence operations (for WGMMA pipelining)
+  | fenceViewAsyncShared
+  | fenceProxyAsync
+
   -- Semaphore operations
   | semaphore (op : SemaphoreOp) (sem : VarId)
 
   -- Control flow
   | forLoop (v : VarId) (lo hi : Nat) (body : Array KStmt)
   | ifStmt (cond : VarId) (thenBody elseBody : Array KStmt)  -- Conditional
+  | ifWarpGroup (wgIdx : Nat) (body : Array KStmt)           -- Execute only in specific warp group
   | comment (text : String)
 
   deriving Repr, Inhabited, BEq

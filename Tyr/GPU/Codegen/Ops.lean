@@ -664,6 +664,28 @@ def tmaStore {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
     (coord : KVal UInt64) : KernelM Unit := do
   emit (.tmaStore dst.id src.id coord.id)
 
+/-! ## Distributed / Multimem Operations -/
+
+/-- Multimem load-reduce: dst (reg) = reduce(src (shared) across cluster) -/
+def multimemLoadReduce {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
+    (dst : RT dtype rows cols layout)
+    (src : ST dtype rows cols layout)
+    (op : ReduceOp := .Sum) : KernelM Unit := do
+  emit (.multimemLoadReduce op dst.id src.id)
+
+/-- Multimem store: dst (shared across cluster) = src (reg) -/
+def multimemStore {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
+    (dst : ST dtype rows cols layout)
+    (src : RT dtype rows cols layout) : KernelM Unit := do
+  emit (.multimemStore dst.id src.id)
+
+/-- Multimem reduce: dst (shared across cluster) op= src (reg) -/
+def multimemRed {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
+    (dst : ST dtype rows cols layout)
+    (src : RT dtype rows cols layout)
+    (op : ReduceOp := .Sum) : KernelM Unit := do
+  emit (.multimemRed op dst.id src.id)
+
 /-! ## Semaphore Operations -/
 
 /-- Semaphore type (barrier) -/
@@ -723,6 +745,53 @@ def mmaCommitGroup : KernelM Unit := do
 /-- Wait for N MMA groups -/
 def mmaAsyncWait (n : Nat := 0) : KernelM Unit := do
   emit (.mmaAsyncWait n)
+
+/-! ## FlashAttention3 Warp Specialization Operations -/
+
+/-- Named barrier synchronization (for warp specialization)
+    All threads in the barrier must call this to proceed -/
+def namedBarrierSync (barrierId : Nat) (numThreads : Nat) : KernelM Unit := do
+  emit (.namedBarrierSync barrierId numThreads)
+
+/-- Named barrier arrive (for warp specialization)
+    Signal arrival without waiting -/
+def namedBarrierArrive (barrierId : Nat) (numThreads : Nat) : KernelM Unit := do
+  emit (.namedBarrierArrive barrierId numThreads)
+
+/-- Get the warp group index (0, 1, 2, ...) within a CTA
+    Used to determine producer vs consumer role in FA3 -/
+def getWarpGroupIdx : KernelM (KVal UInt32) := do
+  let v ← freshVar
+  emit (.warpGroupIdx v)
+  pure ⟨v, "wg_idx"⟩
+
+/-- Elect one thread per warp to execute a region
+    Returns true for the elected thread -/
+def electOneSync : KernelM (KVal Bool) := do
+  let v ← freshVar
+  emit (.electOneSync v)
+  pure ⟨v, "elected"⟩
+
+/-- Fence for view async shared (WGMMA pipelining)
+    Ensures shared memory writes are visible to WGMMA -/
+def fenceViewAsyncShared : KernelM Unit := do
+  emit .fenceViewAsyncShared
+
+/-- Proxy async fence (WGMMA pipelining)
+    Ensures async proxy operations complete -/
+def fenceProxyAsync : KernelM Unit := do
+  emit .fenceProxyAsync
+
+/-- Execute a block of code only in the specified warp group
+    Used for producer/consumer specialization in FA3 -/
+def ifWarpGroup (wgIdx : Nat) (action : KernelM Unit) : KernelM Unit := do
+  -- Capture the body statements
+  let startLen := (← get).body.size
+  action
+  let endLen := (← get).body.size
+  let bodyStmts := (← get).body.extract startLen endLen
+  -- Replace with ifWarpGroup construct
+  modify fun s => { s with body := s.body.extract 0 startLen |>.push (.ifWarpGroup wgIdx bodyStmts) }
 
 /-! ## Complex Number Operations -/
 

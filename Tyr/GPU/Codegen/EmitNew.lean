@@ -51,6 +51,14 @@ partial def generateStmt (indent : String := "  ") : KStmt → String
   | .tmaStore dst src coord =>
     s!"{indent}tma::store({dst.toIdent}, {src.toIdent}, {coord.toIdent});\n"
 
+  -- Distributed / Multimem operations
+  | .multimemLoadReduce op dst src =>
+    s!"{indent}multimem::load_reduce_{op.toCpp}({dst.toIdent}, {src.toIdent});\n"
+  | .multimemStore dst src =>
+    s!"{indent}multimem::store({dst.toIdent}, {src.toIdent});\n"
+  | .multimemRed op dst src =>
+    s!"{indent}multimem::reduce_{op.toCpp}({dst.toIdent}, {src.toIdent});\n"
+
   -- MMA operations
   | .mma trans dst a b c =>
     s!"{indent}mma_{trans.toSuffix}({dst.toIdent}, {a.toIdent}, {b.toIdent}, {c.toIdent});\n"
@@ -129,6 +137,24 @@ partial def generateStmt (indent : String := "  ") : KStmt → String
   | .arrive barrierId => s!"{indent}arrive({barrierId});\n"
   | .arriveAndWait barrierId => s!"{indent}arrive_and_wait({barrierId});\n"
 
+  -- Named barriers (for FA3 warp specialization)
+  | .namedBarrierSync id numThreads =>
+    s!"{indent}kittens::named_barrier_sync<{id}, {numThreads}>();\n"
+  | .namedBarrierArrive id numThreads =>
+    s!"{indent}kittens::named_barrier_arrive<{id}, {numThreads}>();\n"
+
+  -- Warp group operations (for FA3 warp specialization)
+  | .warpGroupIdx dst =>
+    s!"{indent}int {dst.toIdent} = kittens::warpgroup::warpgroup_idx();\n"
+  | .electOneSync dst =>
+    s!"{indent}bool {dst.toIdent} = kittens::elect_one_sync();\n"
+
+  -- Fence operations (for WGMMA pipelining)
+  | .fenceViewAsyncShared =>
+    s!"{indent}__syncwarp();\n{indent}__fence_view_async_shared();\n"
+  | .fenceProxyAsync =>
+    s!"{indent}__fence_proxy_async();\n"
+
   -- Semaphore operations
   | .semaphore op sem =>
     match op with
@@ -150,6 +176,9 @@ partial def generateStmt (indent : String := "  ") : KStmt → String
       s!"{indent}if ({cond.toIdent}) \{\n{thenStr}{indent}}\n"
     else
       s!"{indent}if ({cond.toIdent}) \{\n{thenStr}{indent}} else \{\n{elseStr}{indent}}\n"
+  | .ifWarpGroup wgIdx body =>
+    let bodyStr := body.toList.map (generateStmt (indent ++ "  ")) |>.foldl (· ++ ·) ""
+    s!"{indent}if (kittens::warpgroup::warpgroup_idx() == {wgIdx}) \{\n{bodyStr}{indent}}\n"
   | .comment text => s!"{indent}// {text}\n"
 
 /-- Generate kernel parameter list -/
