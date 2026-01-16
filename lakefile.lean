@@ -6,6 +6,16 @@ package tyr where
   srcDir := "."
   buildDir := ".lake/build"
   moreServerArgs := #["-Dpp.unicode.fun=true"]
+  -- Link arguments for extern_lib shared library
+  moreLinkArgs := #[
+    "-Lexternal/libtorch/lib",
+    "-ltorch", "-ltorch_cpu", "-lc10",
+    "-L/opt/homebrew/opt/libomp/lib", "-lomp",
+    "-L/opt/homebrew/lib", "-larrow", "-lparquet",
+    "-Wl,-rpath,@loader_path/../../external/libtorch/lib",
+    "-Wl,-rpath,/opt/homebrew/opt/libomp/lib",
+    "-Wl,-rpath,/opt/homebrew/lib"
+  ]
 
 require LeanTest from "../LeanTest"
 
@@ -93,8 +103,7 @@ def linuxLinkArgs : Array String := #[
 @[default_target]
 lean_lib Tyr where
   roots := #[`Tyr]
-  -- Disable precompilation to avoid needing dylib at compile time
-  precompileModules := false
+  precompileModules := true
 
 /-- Test library containing all tests -/
 lean_lib Tests where

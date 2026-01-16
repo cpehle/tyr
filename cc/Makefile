@@ -62,21 +62,38 @@ SRCS := \
 
 LIB_NAME := TyrC
 LIB := lib${LIB_NAME}.a
+DYLIB := lib${LIB_NAME}.dylib
 
 OBJ_FILES := $(addprefix $(OUT_DIR)/,$(SRCS:.cpp=.o))
 HDR_FILES := $(addprefix $(HDR_DIR)/,$(HDRS))
 
+# Lean runtime library
+LEAN_LIB := $(LEAN_HOME)/lib/lean
+
+# Shared library link flags
+DYLIB_LINK_FLAGS := -L$(LEAN_LIB) -lleanshared \
+	-L$(TORCH_LIBPATH) -ltorch -ltorch_cpu -lc10 \
+	-L$(ARROW_LIBPATH) -larrow -lparquet \
+	-Wl,-rpath,$(LEAN_LIB) \
+	-Wl,-rpath,$(abspath $(TORCH_LIBPATH)) \
+	-Wl,-rpath,$(ARROW_LIBPATH)
+
 # Build Rules
 
-all: lib
+all: lib dylib
 
 lib: $(OUT_DIR)/$(LIB)
+
+dylib: $(OUT_DIR)/$(DYLIB)
 
 $(OUT_DIR):
 	$(MKPATH) $@
 
 $(OUT_DIR)/$(LIB) : $(OBJ_FILES) | $(OUT_DIR)
 	${AR} rcs $@ $^
+
+$(OUT_DIR)/$(DYLIB) : $(OBJ_FILES) | $(OUT_DIR)
+	$(CXX) -shared -o $@ $^ $(DYLIB_LINK_FLAGS)
 
 $(OUT_DIR)/%.o : $(SRC_DIR)/%.cpp $(HDR_FILES) | $(OUT_DIR)
 	$(CXX) --std=c++17 -o $@ -c $< -I$(HDR_DIR) -I$(LEAN_INCLUDE) $(TORCH_INC_FLAGS) $(XLA_INC_FLAGS) $(ARROW_INC_FLAGS) $(EXTRA_CXX_FLAGS) -fPIC -rdynamic

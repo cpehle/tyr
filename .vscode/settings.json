@@ -1,5 +1,2 @@
 {
-    "lean4.serverArgs": [
-      "--plugin=/Users/pehle/dev/tyr/out/libTyr.dylib"
-    ]
 }
