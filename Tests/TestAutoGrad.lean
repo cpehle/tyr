@@ -297,4 +297,215 @@ def testMusicalIsomorphisms : IO Unit := do
   let flatted : Float := flat (x := x) tangent
   LeanTest.assertTrue (flatted == 3.0) s!"flat should be identity for Euclidean, got {flatted}"
 
+/-! ## Stiefel Manifold Tests -/
+
+open Tyr.AD.DifferentiableManifold in
+@[test]
+def testStiefelIdentity : IO Unit := do
+  -- Test Stiefel identity element St(3, 3) = O(3)
+  let X := Stiefel.identity 3
+  -- Identity should satisfy X^T @ X = I
+  let XtX := torch.nn.mm (torch.nn.transpose2d X.matrix) X.matrix
+  let I := torch.eye 3
+  LeanTest.assertTrue (torch.allclose XtX I) "Stiefel identity should satisfy X^T X = I"
+
+open Tyr.AD.DifferentiableManifold in
+@[test]
+def testStiefelConstraint : IO Unit := do
+  -- Random Stiefel element should satisfy X^T @ X = I
+  let X ← Stiefel.random 4 4
+  let XtX := torch.nn.mm (torch.nn.transpose2d X.matrix) X.matrix
+  let I := torch.eye 4
+  LeanTest.assertTrue (torch.allclose XtX I (rtol := 1e-5) (atol := 1e-6))
+    "Random Stiefel element should satisfy X^T X = I"
+
+open Tyr.AD.DifferentiableManifold in
+@[test]
+def testStiefelProjection : IO Unit := do
+  -- Project a random matrix to Stiefel and verify constraint
+  let mat ← torch.randn #[4, 4]
+  let X := Stiefel.project 4 4 mat
+  let XtX := torch.nn.mm (torch.nn.transpose2d X.matrix) X.matrix
+  let I := torch.eye 4
+  LeanTest.assertTrue (torch.allclose XtX I (rtol := 1e-5) (atol := 1e-6))
+    "Projected matrix should satisfy X^T X = I"
+
+open Tyr.AD.DifferentiableManifold in
+@[test]
+def testStiefelRetractionPreservesConstraint : IO Unit := do
+  -- After retraction, matrix should still be on Stiefel manifold
+  let X := Stiefel.identity 3
+  -- Create a small tangent perturbation
+  let z := StiefelTangent.smul 0.01 (StiefelTangent.zero 3 3)
+  let X' := DifferentiableManifold.exp X z
+  let XtX := torch.nn.mm (torch.nn.transpose2d X'.matrix) X'.matrix
+  let I := torch.eye 3
+  LeanTest.assertTrue (torch.allclose XtX I (rtol := 1e-5) (atol := 1e-6))
+    "Retraction should preserve Stiefel constraint"
+
+/-! ## Orthogonal Manifold Tests -/
+
+open Tyr.AD.DifferentiableManifold in
+@[test]
+def testOrthogonalIdentityConstraint : IO Unit := do
+  -- Test that Orthogonal identity satisfies Q^T @ Q = I and Q @ Q^T = I
+  let Q := Orthogonal.identity 3
+  let QtQ := torch.nn.mm (torch.nn.transpose2d Q.matrix) Q.matrix
+  let QQt := torch.nn.mm Q.matrix (torch.nn.transpose2d Q.matrix)
+  let I := torch.eye 3
+  LeanTest.assertTrue (torch.allclose QtQ I) "Q^T Q should be I"
+  LeanTest.assertTrue (torch.allclose QQt I) "Q Q^T should be I"
+
+open Tyr.AD.DifferentiableManifold in
+@[test]
+def testOrthogonalRandomConstraint : IO Unit := do
+  -- Random orthogonal matrix should satisfy Q^T @ Q = I
+  let Q ← Orthogonal.random 4
+  let QtQ := torch.nn.mm (torch.nn.transpose2d Q.matrix) Q.matrix
+  let I := torch.eye 4
+  LeanTest.assertTrue (torch.allclose QtQ I (rtol := 1e-5) (atol := 1e-6))
+    "Random orthogonal matrix should satisfy Q^T Q = I"
+
+open Tyr.AD.DifferentiableManifold in
+@[test]
+def testOrthogonalProjection : IO Unit := do
+  -- Project a random matrix to O(n) and verify constraint
+  let mat ← torch.randn #[3, 3]
+  let Q := Orthogonal.project 3 mat
+  let QtQ := torch.nn.mm (torch.nn.transpose2d Q.matrix) Q.matrix
+  let I := torch.eye 3
+  LeanTest.assertTrue (torch.allclose QtQ I (rtol := 1e-5) (atol := 1e-6))
+    "Projected matrix should satisfy Q^T Q = I"
+
+open Tyr.AD.DifferentiableManifold in
+@[test]
+def testSkewSymmetricProperty : IO Unit := do
+  -- Test that SkewSymmetric.fromMatrix produces S + S^T = 0
+  let mat ← torch.randn #[3, 3]
+  let S := SkewSymmetric.fromMatrix mat
+  let St := torch.nn.transpose2d S.matrix
+  let sum := torch.add S.matrix St
+  let zero := torch.zeros #[3, 3]
+  LeanTest.assertTrue (torch.allclose sum zero (atol := 1e-6))
+    "Skew-symmetric matrix should satisfy S + S^T = 0"
+
+open Tyr.AD.DifferentiableManifold in
+@[test]
+def testOrthogonalTranspose : IO Unit := do
+  -- Test that transpose gives the inverse for orthogonal matrices
+  let Q ← Orthogonal.random 3
+  let Qt := Orthogonal.transpose Q
+  -- Q @ Q^T should be identity
+  let QQt := Orthogonal.mul Q Qt
+  let I := torch.eye 3
+  LeanTest.assertTrue (torch.allclose QQt.matrix I (rtol := 1e-5) (atol := 1e-6))
+    "Q @ Q^T should be I"
+
+open Tyr.AD.DifferentiableManifold in
+@[test]
+def testOrthogonalGroupClosure : IO Unit := do
+  -- Product of orthogonal matrices should be orthogonal
+  let Q1 ← Orthogonal.random 3
+  let Q2 ← Orthogonal.random 3
+  let Q3 := Orthogonal.mul Q1 Q2
+  let Q3tQ3 := torch.nn.mm (torch.nn.transpose2d Q3.matrix) Q3.matrix
+  let I := torch.eye 3
+  LeanTest.assertTrue (torch.allclose Q3tQ3 I (rtol := 1e-4) (atol := 1e-6))
+    "Product of orthogonal matrices should be orthogonal"
+
+open Tyr.AD.DifferentiableManifold in
+@[test]
+def testOrthogonalExpZero : IO Unit := do
+  -- exp(Q, 0) should return Q (unchanged)
+  let Q := Orthogonal.identity 3
+  let z := DifferentiableManifold.zeroTangent Q
+  let Q' := DifferentiableManifold.exp Q z
+  LeanTest.assertTrue (torch.allclose Q.matrix Q'.matrix (rtol := 1e-5) (atol := 1e-6))
+    "exp(Q, 0) should return Q unchanged"
+
+open Tyr.AD.DifferentiableManifold in
+@[test]
+def testOrthogonalExpPreservesConstraint : IO Unit := do
+  -- After exponential map with small tangent, result should still be orthogonal
+  let Q ← Orthogonal.random 3
+  -- Create a small skew-symmetric perturbation
+  let mat ← torch.randn #[3, 3]
+  let S := SkewSymmetric.fromMatrix mat
+  let smallS := SkewSymmetric.smul 0.01 S
+  let v := OrthogonalTangent.fromSkew smallS
+  let Q' := DifferentiableManifold.exp Q v
+  let QtQ := torch.nn.mm (torch.nn.transpose2d Q'.matrix) Q'.matrix
+  let I := torch.eye 3
+  LeanTest.assertTrue (torch.allclose QtQ I (rtol := 1e-4) (atol := 1e-6))
+    "Exponential map should preserve orthogonality"
+
+/-! ## Grassmann Manifold Tests -/
+
+open Tyr.AD.DifferentiableManifold in
+@[test]
+def testGrassmannConstraint : IO Unit := do
+  -- Random Grassmann element should satisfy X^T @ X = I_p
+  let X ← Grassmann.random 5 3
+  let XtX := torch.nn.mm (torch.nn.transpose2d X.matrix) X.matrix
+  let I := torch.eye 3
+  LeanTest.assertTrue (torch.allclose XtX I (rtol := 1e-5) (atol := 1e-6))
+    "Random Grassmann element should satisfy X^T X = I"
+
+open Tyr.AD.DifferentiableManifold in
+@[test]
+def testGrassmannProjection : IO Unit := do
+  -- Project a random matrix to Gr(n, p) and verify constraint
+  let mat ← torch.randn #[5, 3]
+  let X := Grassmann.project 5 3 mat
+  let XtX := torch.nn.mm (torch.nn.transpose2d X.matrix) X.matrix
+  let I := torch.eye 3
+  LeanTest.assertTrue (torch.allclose XtX I (rtol := 1e-5) (atol := 1e-6))
+    "Projected Grassmann element should satisfy X^T X = I"
+
+open Tyr.AD.DifferentiableManifold in
+@[test]
+def testGrassmannTangentOrthogonality : IO Unit := do
+  -- Tangent vectors should satisfy X^T @ Z = 0
+  let X ← Grassmann.random 5 3
+  let V ← torch.randn #[5, 3]
+  let Z := GrassmannTangent.project X V
+  -- X^T @ Z should be zero
+  let XtZ := torch.nn.mm (torch.nn.transpose2d X.matrix) Z.vec
+  let zero := torch.zeros #[3, 3]
+  LeanTest.assertTrue (torch.allclose XtZ zero (atol := 1e-6))
+    "Tangent projection should satisfy X^T Z = 0"
+
+open Tyr.AD.DifferentiableManifold in
+@[test]
+def testGrassmannRetractionPreservesConstraint : IO Unit := do
+  -- After retraction, result should still be on the manifold
+  let X ← Grassmann.random 5 3
+  -- Create a random tangent vector
+  let V ← torch.randn #[5, 3]
+  let Z := GrassmannTangent.project X V
+  let smallZ := GrassmannTangent.smul 0.1 Z
+  let X' := DifferentiableManifold.exp X smallZ
+  let XtX := torch.nn.mm (torch.nn.transpose2d X'.matrix) X'.matrix
+  let I := torch.eye 3
+  LeanTest.assertTrue (torch.allclose XtX I (rtol := 1e-4) (atol := 1e-6))
+    "Retraction should preserve Grassmann constraint"
+
+open Tyr.AD.DifferentiableManifold in
+@[test]
+def testGrassmannPrincipalAngles : IO Unit := do
+  -- Principal angles of same subspace with itself should be all 1s (cos(0) = 1)
+  let X ← Grassmann.random 5 3
+  let cosines := Grassmann.principalAngles X X
+  let ones := torch.ones #[3]
+  LeanTest.assertTrue (torch.allclose cosines ones (rtol := 1e-5) (atol := 1e-6))
+    "Principal angles of subspace with itself should be all zeros (cosines all 1)"
+
+open Tyr.AD.DifferentiableManifold in
+@[test]
+def testGrassmannDistanceSelf : IO Unit := do
+  -- Distance of a subspace to itself should be 0
+  let X ← Grassmann.random 5 3
+  let d := Grassmann.distance X X
+  LeanTest.assertTrue (d < 1e-5) "Distance of subspace to itself should be 0"
+
 end Tests.AutoGrad

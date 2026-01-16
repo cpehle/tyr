@@ -1,15 +1,23 @@
+/-
+  Tyr/AutoGrad.lean
+
+  Automatic differentiation for Lean IR.
+  Manifold implementations are in Tyr/Manifolds/.
+-/
 import Lean.Compiler.IR.Basic
 import Lean.Compiler.IR.Format
 import Lean.Compiler.IR.CompilerM
 import Tyr.GPU.Codegen.IR
 import Tyr.GPU.Codegen.Var
-import Tyr.TensorStruct
+import Tyr.Manifolds
 
 namespace Tyr.AD
 
 open torch (Static TensorStruct T)
-
 open Lean.IR
+
+-- Manifold types (DifferentiableManifold, Stiefel, Orthogonal, Grassmann, etc.)
+-- are available via `import Tyr.Manifolds`
 
 /-! ## Parameter Kinds for Differentiation
 
@@ -25,138 +33,6 @@ inductive ParamKind where
   | static    -- Non-differentiable: passed through unchanged
   | frozen    -- Forward-only: participates in forward, but no gradient update
   deriving Repr, BEq, Inhabited
-
-/-! ## DifferentiableManifold Typeclass
-
-A mathematically rigorous design based on differential geometry:
-
-1. **The space (manifold M)** - The type α itself
-2. **Tangent space (TₓM)** - For JVP/forward-mode, infinitesimal directions at a point
-3. **Cotangent space (T*ₓM)** - For VJP/reverse-mode, linear functionals on tangent vectors
-4. **Musical isomorphism (♭/♯)** - Mapping between tangent and cotangent via a metric
-5. **Exponential map (exp)** - Moving a point in the space using a tangent vector
-
-This enables proper Riemannian optimization on curved manifolds.
--/
-
-/-- A differentiable manifold with tangent and cotangent bundles.
-
-    Mathematically:
-    - M is the manifold (type α)
-    - TₓM is the tangent space at point x (Tangent x)
-    - T*ₓM is the cotangent space at point x (Cotangent x)
-    - ♯ (sharp): T*M → TM raises indices using the metric
-    - ♭ (flat): TM → T*M lowers indices using the metric
-    - exp: M × TM → M is the exponential map (or retraction)
--/
-class DifferentiableManifold (M : Type) where
-  /-- Tangent space at a point. For Euclidean spaces, this is M itself. -/
-  Tangent : M → Type
-  /-- Cotangent space at a point. For Euclidean spaces, this is M itself. -/
-  Cotangent : M → Type
-
-  /-- Zero tangent vector at a point -/
-  zeroTangent (x : M) : Tangent x
-  /-- Zero cotangent at a point -/
-  zeroCotangent (x : M) : Cotangent x
-
-  /-- Add tangent vectors (TₓM is a vector space) -/
-  addTangent {x : M} : Tangent x → Tangent x → Tangent x
-  /-- Add cotangents (T*ₓM is a vector space) -/
-  addCotangent {x : M} : Cotangent x → Cotangent x → Cotangent x
-
-  /-- Scale a tangent vector -/
-  scaleTangent {x : M} (s : Float) : Tangent x → Tangent x
-
-  /-- Musical isomorphism ♯ (sharp): Cotangent → Tangent
-      Uses the Riemannian metric to "raise indices" -/
-  sharp {x : M} : Cotangent x → Tangent x
-
-  /-- Musical isomorphism ♭ (flat): Tangent → Cotangent
-      Uses the Riemannian metric to "lower indices" -/
-  flat {x : M} : Tangent x → Cotangent x
-
-  /-- Exponential map: Move from x in direction v
-      For Euclidean spaces: exp(x, v) = x + v
-      For curved manifolds: follows geodesic from x with initial velocity v -/
-  exp (x : M) : Tangent x → M
-
-  /-- Retraction (computationally cheaper approximation to exp) -/
-  retract (x : M) : Tangent x → M := exp x
-
-namespace DifferentiableManifold
-
-/-- Simplified typeclass for Euclidean spaces where T = T* = M.
-    These spaces have a flat metric where sharp/flat are identity. -/
-class EuclideanSpace (M : Type) where
-  /-- Zero element -/
-  zero : M
-  /-- Addition -/
-  add : M → M → M
-  /-- Scalar multiplication -/
-  smul : Float → M → M
-  /-- Inner product (defines the Euclidean metric) -/
-  inner : M → M → Float
-
-/-- Euclidean spaces are automatically DifferentiableManifolds -/
-instance euclideanManifold [E : EuclideanSpace M] : DifferentiableManifold M where
-  Tangent _ := M
-  Cotangent _ := M
-  zeroTangent _ := E.zero
-  zeroCotangent _ := E.zero
-  addTangent := E.add
-  addCotangent := E.add
-  scaleTangent s v := E.smul s v
-  -- For Euclidean metric, sharp and flat are identity
-  sharp := id
-  flat := id
-  -- exp(x, v) = x + v
-  exp x v := E.add x v
-
-/-- Float is a Euclidean space (1-dimensional) -/
-instance floatEuclidean : EuclideanSpace Float where
-  zero := 0.0
-  add := (· + ·)
-  smul s x := s * x
-  inner a b := a * b
-
-/-- Static types are 0-dimensional manifolds (no tangent directions) -/
-instance staticManifold {α : Type} : DifferentiableManifold (Static α) where
-  Tangent _ := Unit
-  Cotangent _ := Unit
-  zeroTangent _ := ()
-  zeroCotangent _ := ()
-  addTangent _ _ := ()
-  addCotangent _ _ := ()
-  scaleTangent _ _ := ()
-  sharp := id
-  flat := id
-  exp x _ := x  -- Static values don't move
-
-/-- TensorStruct types form Euclidean spaces (product manifold).
-    tangent = cotangent = primal type, using TensorStruct.zipWith for operations. -/
-instance tensorStructEuclidean [s : TensorStruct α] [Inhabited α] : EuclideanSpace α where
-  zero := default
-  add := TensorStruct.zipWith torch.add
-  smul scalar m := TensorStruct.map (torch.mul_scalar · scalar) m
-  -- Inner product: sum of all element-wise products across tensors
-  inner a b :=
-    let product := TensorStruct.zipWith torch.mul a b
-    TensorStruct.fold (fun t acc => acc + torch.nn.item (torch.nn.sumAll t)) 0.0 product
-
-/-- Gradient descent step using exponential map / retraction.
-    For Euclidean spaces: x' = x - lr * grad
-    For curved manifolds: x' = retract(x, -lr * sharp(grad)) -/
-def gradientStep [DifferentiableManifold M]
-    (x : M) (grad : Cotangent x) (lr : Float) : M :=
-  let tangent := sharp grad
-  let negTangent := scaleTangent (-lr) tangent
-  retract x negTangent
-
-end DifferentiableManifold
-
--- Backward compatibility aliases
-abbrev Differentiable := DifferentiableManifold
 
 /-- Replace variable in Argument -/
 def replaceArg (a : Arg) (old new : VarId) : Arg :=
@@ -184,31 +60,31 @@ def replaceExpr (e : Expr) (old new : VarId) : Expr :=
 /-- Replace variable in FnBody -/
 partial def replaceVar (b : FnBody) (old new : VarId) : FnBody :=
   match b with
-  | .vdecl x ty e rest => 
+  | .vdecl x ty e rest =>
     .vdecl x ty (replaceExpr e old new) (replaceVar rest old new)
-  | .jdecl j xs v rest => 
+  | .jdecl j xs v rest =>
     .jdecl j xs (replaceVar v old new) (replaceVar rest old new)
-  | .set x i y rest => 
+  | .set x i y rest =>
     .set (if x.idx == old.idx then new else x) i (replaceArg y old new) (replaceVar rest old new)
-  | .setTag x i rest => 
+  | .setTag x i rest =>
     .setTag (if x.idx == old.idx then new else x) i (replaceVar rest old new)
-  | .uset x i y rest => 
+  | .uset x i y rest =>
     .uset (if x.idx == old.idx then new else x) i (if y.idx == old.idx then new else y) (replaceVar rest old new)
-  | .sset x i o y ty rest => 
+  | .sset x i o y ty rest =>
     .sset (if x.idx == old.idx then new else x) i o (if y.idx == old.idx then new else y) ty (replaceVar rest old new)
-  | .inc x n c p rest => 
+  | .inc x n c p rest =>
     .inc (if x.idx == old.idx then new else x) n c p (replaceVar rest old new)
-  | .dec x n c p rest => 
+  | .dec x n c p rest =>
     .dec (if x.idx == old.idx then new else x) n c p (replaceVar rest old new)
-  | .del x rest => 
+  | .del x rest =>
     .del (if x.idx == old.idx then new else x) (replaceVar rest old new)
-  | .case tid x xType alts => 
-    .case tid (if x.idx == old.idx then new else x) xType (alts.map fun 
+  | .case tid x xType alts =>
+    .case tid (if x.idx == old.idx then new else x) xType (alts.map fun
       | .ctor info b => .ctor info (replaceVar b old new)
       | .default b => .default (replaceVar b old new))
-  | .jmp j args => 
+  | .jmp j args =>
     .jmp j (args.map (replaceArg · old new))
-  | .ret x => 
+  | .ret x =>
     .ret (replaceArg x old new)
   | .unreachable => .unreachable
 
@@ -241,7 +117,7 @@ def getTangentIdx (idx : Nat) : ADM Nat := do
   let s ← get
   match s.tangents.get? idx with
   | some t => return t
-  | none => return idx 
+  | none => return idx
 
 def getTangent (x : VarId) : ADM VarId := do
   return { idx := ← getTangentIdx x.idx }
@@ -309,7 +185,7 @@ initialize adRegistry : Lean.EnvExtension ADRegistry ←
   Lean.registerEnvExtension (pure {})
 
 -- GPU AD Registry
-/-- 
+/--
   GPU VJP Rule Type:
   Arguments:
   - dout : Cotangent of the output
@@ -334,11 +210,11 @@ initialize gpuAdRegistry : Lean.EnvExtension GpuADRegistry ←
   Lean.registerEnvExtension (pure {})
 
 def registerJVPRule (fn : Lean.Name) (rule : JVPRule) : Lean.CoreM Unit := do
-  Lean.modifyEnv fun env => adRegistry.modifyState env fun s => 
+  Lean.modifyEnv fun env => adRegistry.modifyState env fun s =>
     { s with jvpRules := s.jvpRules.insert fn rule }
 
 def registerVJPRule (fn : Lean.Name) (rule : VJPRule) : Lean.CoreM Unit := do
-  Lean.modifyEnv fun env => adRegistry.modifyState env fun s => 
+  Lean.modifyEnv fun env => adRegistry.modifyState env fun s =>
     { s with vjpRules := s.vjpRules.insert fn rule }
 
 def getJVPRule (fn : Lean.Name) : Lean.CoreM (Option JVPRule) := do
@@ -352,13 +228,13 @@ def getVJPRule (fn : Lean.Name) : Lean.CoreM (Option VJPRule) := do
 partial def unpackTuple (res : VarId) (vars : List VarId) : ADM (FnBody → FnBody) := do
   match vars with
   | [] => return id
-  | [v] => 
+  | [v] =>
     return fun b => FnBody.vdecl v IRType.object (Expr.fap `id #[Arg.var res]) b
 
   | v :: vs =>
     let tail ← getFreshVar
     let unpackTail ← unpackTuple tail vs
-    return fun b => 
+    return fun b =>
       FnBody.vdecl v IRType.object (Expr.proj 0 res) <|
       FnBody.vdecl tail IRType.object (Expr.proj 1 res) <|
       unpackTail b
@@ -484,7 +360,7 @@ partial def vjp (b : FnBody) : ADM FnBody := do
       | some rule =>
         let dx ← getCotangent x
         let (pbBuilder, argCotans) ← rule args dx ty
-        
+
         -- Register cotangents for arguments (skip static vars)
         for i in [:args.size] do
            match args[i]! with
@@ -508,7 +384,7 @@ partial def vjp (b : FnBody) : ADM FnBody := do
     let s ← get
     -- Construct backward pass
     let _backward := s.pullbackStack.foldr (fun pb acc => pb acc) (.ret (.var dx))
-    
+
     return .ret (.var x)
   | other => return other
 
@@ -519,14 +395,14 @@ def linearize (decl : Decl) : ADM Decl := do
     let tanParams ← params.mapM fun p => do
       let dp ← getFreshVar
       setTangent p.x dp
-      return { p with x := dp } 
+      return { p with x := dp }
     let body' ← jvp body
     return Decl.fdecl (Lean.Name.mkStr f "jvp") (params ++ tanParams) IRType.object body' info
   | other => return other
 
 -- GPU Registration helpers
 def registerGpuVJPRule (opName : String) (rule : GpuVJPRule) : Lean.CoreM Unit := do
-  Lean.modifyEnv fun env => gpuAdRegistry.modifyState env fun s => 
+  Lean.modifyEnv fun env => gpuAdRegistry.modifyState env fun s =>
     { s with vjpRules := s.vjpRules.insert opName rule }
 
 def getGpuVJPRule (opName : String) : Lean.CoreM (Option GpuVJPRule) := do

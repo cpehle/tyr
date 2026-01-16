@@ -453,9 +453,7 @@ lean_object* lean_torch_backward(lean_obj_arg /* shape */, b_lean_obj_arg output
 int lean_torch_allclose(lean_obj_arg /* shape */, b_lean_obj_arg a, b_lean_obj_arg b, double rtol, double atol) {
   auto a_ = borrowTensor(a);
   auto b_ = borrowTensor(b);
-  auto res_ = torch::allclose(a_, b_, rtol, atol);
-
-  return res_;
+  return torch::allclose(a_, b_, rtol, atol);
 }
 
 lean_object* lean_torch_grad_of(lean_obj_arg /* shape */, b_lean_obj_arg x) {
@@ -1201,7 +1199,7 @@ lean_object* lean_torch_bmm4d(
   return fromTorchTensor(result_);
 }
 
-lean_object* lean_torch_mm(lean_obj_arg /*s*/, b_lean_obj_arg input, b_lean_obj_arg mat2) {
+lean_object* lean_torch_mm(uint64_t m, uint64_t n, uint64_t k, b_lean_obj_arg input, b_lean_obj_arg mat2) {
   auto input_ = borrowTensor(input);
   auto mat2_ = borrowTensor(mat2);
   auto result_ = torch::mm(input_, mat2_);
@@ -1746,8 +1744,8 @@ lean_object* lean_torch_matmul3d_2d(
 
 // Transpose 2D tensor: [m, n] -> [n, m]
 lean_object* lean_torch_transpose_2d(
-  lean_obj_arg /*m*/,
-  lean_obj_arg /*n*/,
+  uint64_t /*m*/,
+  uint64_t /*n*/,
   b_lean_obj_arg input
 ) {
   auto input_ = borrowTensor(input);
@@ -2771,6 +2769,120 @@ lean_object* lean_torch_squeeze_dim(
   auto input_ = borrowTensor(input);
   auto result_ = input_.squeeze(dim);
   return fromTorchTensor(result_);
+}
+
+// ============================================================================
+// Linear Algebra operations for manifold optimization
+// ============================================================================
+
+// QR Decomposition: A = Q @ R
+// Returns (Q, R) where Q is orthogonal and R is upper triangular
+// For an m×n matrix, returns Q as m×m (complete mode) and R as m×n
+lean_object* lean_torch_qr(
+    uint64_t /*m*/,
+    uint64_t /*n*/,
+    b_lean_obj_arg A_obj
+) {
+  auto A = borrowTensor(A_obj);
+  // Use full QR to get m×m Q matrix
+  auto [Q, R] = torch::linalg_qr(A, "complete");
+
+  lean_object* result = lean_alloc_ctor(0, 2, 0);
+  lean_ctor_set(result, 0, fromTorchTensor(Q));
+  lean_ctor_set(result, 1, fromTorchTensor(R));
+  return result;
+}
+
+// Reduced QR: returns Q as m×min(m,n) and R as min(m,n)×n
+// More efficient when m > n
+lean_object* lean_torch_qr_reduced(
+    uint64_t /*m*/,
+    uint64_t /*n*/,
+    b_lean_obj_arg A_obj
+) {
+  auto A = borrowTensor(A_obj);
+  // Default "reduced" mode
+  auto result_tuple = torch::linalg_qr(A);
+  auto Q = std::get<0>(result_tuple);
+  auto R = std::get<1>(result_tuple);
+
+  // Debug: verify Q is orthogonal
+  auto QtQ = torch::mm(Q.t(), Q);
+  auto I = torch::eye(Q.size(1), Q.options());
+  auto diff = (QtQ - I).abs().max().item<float>();
+  if (diff > 1e-4) {
+    std::cerr << "WARNING: QR produced non-orthogonal Q! Max diff from I: " << diff << std::endl;
+    std::cerr << "A shape: " << A.sizes() << ", Q shape: " << Q.sizes() << std::endl;
+  }
+
+  lean_object* result = lean_alloc_ctor(0, 2, 0);
+  lean_ctor_set(result, 0, fromTorchTensor(Q));
+  lean_ctor_set(result, 1, fromTorchTensor(R));
+  return result;
+}
+
+// Matrix exponential for square matrices: exp(A)
+// Uses Padé approximation internally
+lean_object* lean_torch_matrix_exp(
+    uint64_t /*n*/,
+    b_lean_obj_arg A_obj
+) {
+  auto A = borrowTensor(A_obj);
+  auto result = torch::linalg_matrix_exp(A);
+  return fromTorchTensor(result);
+}
+
+// SVD decomposition: A = U @ diag(S) @ V^T
+// Returns (U, S, Vh) where Vh = V^T
+lean_object* lean_torch_svd(
+    uint64_t /*m*/,
+    uint64_t /*n*/,
+    b_lean_obj_arg A_obj
+) {
+  auto A = borrowTensor(A_obj);
+  // full_matrices=false gives reduced SVD
+  auto result = torch::linalg_svd(A, false);
+  auto U = std::get<0>(result);
+  auto S = std::get<1>(result);
+  auto Vh = std::get<2>(result);
+
+  // Return as triple (U, S, Vh)
+  lean_object* tuple = lean_alloc_ctor(0, 3, 0);
+  lean_ctor_set(tuple, 0, fromTorchTensor(U));
+  lean_ctor_set(tuple, 1, fromTorchTensor(S));
+  lean_ctor_set(tuple, 2, fromTorchTensor(Vh));
+  return tuple;
+}
+
+// SVD values only (singular values): returns just S from A = U @ diag(S) @ V^T
+lean_object* lean_torch_svdvals(
+    uint64_t /*m*/,
+    uint64_t /*n*/,
+    b_lean_obj_arg A_obj
+) {
+  auto A = borrowTensor(A_obj);
+  auto S = torch::linalg_svdvals(A);
+  return fromTorchTensor(S);
+}
+
+// Extract diagonal of a matrix
+lean_object* lean_torch_diag(
+    uint64_t /*n*/,
+    b_lean_obj_arg A_obj
+) {
+  auto A = borrowTensor(A_obj);
+  auto result = torch::diag(A);
+  return fromTorchTensor(result);
+}
+
+// Create diagonal matrix from vector
+lean_object* lean_torch_diagflat(
+    uint64_t /*n*/,
+    b_lean_obj_arg v_obj
+) {
+  auto v = borrowTensor(v_obj);
+  auto result = torch::diag(v);
+  return fromTorchTensor(result);
 }
 
 }

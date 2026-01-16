@@ -1004,4 +1004,49 @@ def triplet_margin_loss {batch dim : UInt64}
   let raw := nn.item dist_pos - nn.item dist_neg + margin
   if raw > 0.0 then full #[] raw else full #[] 0.0
 
+-- ============================================================================
+-- Linear Algebra operations for manifold optimization
+-- ============================================================================
+
+namespace linalg
+
+/-- QR decomposition: A = Q @ R where Q is orthogonal, R is upper triangular.
+    For an m×n matrix, returns Q as m×m (complete QR) and R as m×n. -/
+@[extern "lean_torch_qr"]
+opaque qr {m n : UInt64} (A : @& T #[m, n]) : T #[m, m] × T #[m, n]
+
+/-- Reduced QR decomposition: returns Q as m×min(m,n) and R as min(m,n)×n.
+    More efficient when only the first n columns of Q are needed. -/
+@[extern "lean_torch_qr_reduced"]
+opaque qr_reduced {m n : UInt64} (A : @& T #[m, n]) : T #[m, n] × T #[n, n]
+
+/-- Matrix exponential: exp(A) for square matrix A.
+    Uses Padé approximation. Useful for O(n) exponential map. -/
+@[extern "lean_torch_matrix_exp"]
+opaque matrix_exp {n : UInt64} (A : @& T #[n, n]) : T #[n, n]
+
+/-- SVD decomposition: A = U @ diag(S) @ Vᵀ (reduced form).
+    For m×n matrix A with k = min(m,n):
+    - U: m×k orthonormal columns
+    - S: k singular values (1D tensor)
+    - Vh: k×n orthonormal rows (Vᵀ)
+    Returns (U, S, Vh). -/
+@[extern "lean_torch_svd"]
+opaque svd {m n : UInt64} (A : @& T #[m, n]) : T #[m, min m n] × T #[min m n] × T #[min m n, n]
+
+/-- Singular values only: returns just the singular values S from SVD.
+    More efficient than full SVD when U, V are not needed. -/
+@[extern "lean_torch_svdvals"]
+opaque svdvals {m n : UInt64} (A : @& T #[m, n]) : T #[min m n]
+
+/-- Extract diagonal of a square matrix as a 1D tensor. -/
+@[extern "lean_torch_diag"]
+opaque diag {n : UInt64} (A : @& T #[n, n]) : T #[n]
+
+/-- Create diagonal matrix from 1D tensor. -/
+@[extern "lean_torch_diagflat"]
+opaque diagflat {n : UInt64} (v : @& T #[n]) : T #[n, n]
+
+end linalg
+
 end torch
