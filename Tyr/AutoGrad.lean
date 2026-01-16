@@ -3,10 +3,160 @@ import Lean.Compiler.IR.Format
 import Lean.Compiler.IR.CompilerM
 import Tyr.GPU.Codegen.IR
 import Tyr.GPU.Codegen.Var
+import Tyr.TensorStruct
 
 namespace Tyr.AD
 
+open torch (Static TensorStruct T)
+
 open Lean.IR
+
+/-! ## Parameter Kinds for Differentiation
+
+Parameters can be:
+- `diff`: Differentiable (receives tangent/cotangent)
+- `static`: Non-differentiable, passed through unchanged (like `torch.Static`)
+- `frozen`: Forward-only tensor, no gradient update (like `torch.Frozen`)
+-/
+
+/-- Describes how a parameter participates in differentiation -/
+inductive ParamKind where
+  | diff      -- Differentiable: needs tangent (JVP) or cotangent (VJP)
+  | static    -- Non-differentiable: passed through unchanged
+  | frozen    -- Forward-only: participates in forward, but no gradient update
+  deriving Repr, BEq, Inhabited
+
+/-! ## DifferentiableManifold Typeclass
+
+A mathematically rigorous design based on differential geometry:
+
+1. **The space (manifold M)** - The type α itself
+2. **Tangent space (TₓM)** - For JVP/forward-mode, infinitesimal directions at a point
+3. **Cotangent space (T*ₓM)** - For VJP/reverse-mode, linear functionals on tangent vectors
+4. **Musical isomorphism (♭/♯)** - Mapping between tangent and cotangent via a metric
+5. **Exponential map (exp)** - Moving a point in the space using a tangent vector
+
+This enables proper Riemannian optimization on curved manifolds.
+-/
+
+/-- A differentiable manifold with tangent and cotangent bundles.
+
+    Mathematically:
+    - M is the manifold (type α)
+    - TₓM is the tangent space at point x (Tangent x)
+    - T*ₓM is the cotangent space at point x (Cotangent x)
+    - ♯ (sharp): T*M → TM raises indices using the metric
+    - ♭ (flat): TM → T*M lowers indices using the metric
+    - exp: M × TM → M is the exponential map (or retraction)
+-/
+class DifferentiableManifold (M : Type) where
+  /-- Tangent space at a point. For Euclidean spaces, this is M itself. -/
+  Tangent : M → Type
+  /-- Cotangent space at a point. For Euclidean spaces, this is M itself. -/
+  Cotangent : M → Type
+
+  /-- Zero tangent vector at a point -/
+  zeroTangent (x : M) : Tangent x
+  /-- Zero cotangent at a point -/
+  zeroCotangent (x : M) : Cotangent x
+
+  /-- Add tangent vectors (TₓM is a vector space) -/
+  addTangent {x : M} : Tangent x → Tangent x → Tangent x
+  /-- Add cotangents (T*ₓM is a vector space) -/
+  addCotangent {x : M} : Cotangent x → Cotangent x → Cotangent x
+
+  /-- Scale a tangent vector -/
+  scaleTangent {x : M} (s : Float) : Tangent x → Tangent x
+
+  /-- Musical isomorphism ♯ (sharp): Cotangent → Tangent
+      Uses the Riemannian metric to "raise indices" -/
+  sharp {x : M} : Cotangent x → Tangent x
+
+  /-- Musical isomorphism ♭ (flat): Tangent → Cotangent
+      Uses the Riemannian metric to "lower indices" -/
+  flat {x : M} : Tangent x → Cotangent x
+
+  /-- Exponential map: Move from x in direction v
+      For Euclidean spaces: exp(x, v) = x + v
+      For curved manifolds: follows geodesic from x with initial velocity v -/
+  exp (x : M) : Tangent x → M
+
+  /-- Retraction (computationally cheaper approximation to exp) -/
+  retract (x : M) : Tangent x → M := exp x
+
+namespace DifferentiableManifold
+
+/-- Simplified typeclass for Euclidean spaces where T = T* = M.
+    These spaces have a flat metric where sharp/flat are identity. -/
+class EuclideanSpace (M : Type) where
+  /-- Zero element -/
+  zero : M
+  /-- Addition -/
+  add : M → M → M
+  /-- Scalar multiplication -/
+  smul : Float → M → M
+  /-- Inner product (defines the Euclidean metric) -/
+  inner : M → M → Float
+
+/-- Euclidean spaces are automatically DifferentiableManifolds -/
+instance euclideanManifold [E : EuclideanSpace M] : DifferentiableManifold M where
+  Tangent _ := M
+  Cotangent _ := M
+  zeroTangent _ := E.zero
+  zeroCotangent _ := E.zero
+  addTangent := E.add
+  addCotangent := E.add
+  scaleTangent s v := E.smul s v
+  -- For Euclidean metric, sharp and flat are identity
+  sharp := id
+  flat := id
+  -- exp(x, v) = x + v
+  exp x v := E.add x v
+
+/-- Float is a Euclidean space (1-dimensional) -/
+instance floatEuclidean : EuclideanSpace Float where
+  zero := 0.0
+  add := (· + ·)
+  smul s x := s * x
+  inner a b := a * b
+
+/-- Static types are 0-dimensional manifolds (no tangent directions) -/
+instance staticManifold {α : Type} : DifferentiableManifold (Static α) where
+  Tangent _ := Unit
+  Cotangent _ := Unit
+  zeroTangent _ := ()
+  zeroCotangent _ := ()
+  addTangent _ _ := ()
+  addCotangent _ _ := ()
+  scaleTangent _ _ := ()
+  sharp := id
+  flat := id
+  exp x _ := x  -- Static values don't move
+
+/-- TensorStruct types form Euclidean spaces (product manifold).
+    tangent = cotangent = primal type, using TensorStruct.zipWith for operations. -/
+instance tensorStructEuclidean [s : TensorStruct α] [Inhabited α] : EuclideanSpace α where
+  zero := default
+  add := TensorStruct.zipWith torch.add
+  smul scalar m := TensorStruct.map (torch.mul_scalar · scalar) m
+  -- Inner product: sum of all element-wise products across tensors
+  inner a b :=
+    let product := TensorStruct.zipWith torch.mul a b
+    TensorStruct.fold (fun t acc => acc + torch.nn.item (torch.nn.sumAll t)) 0.0 product
+
+/-- Gradient descent step using exponential map / retraction.
+    For Euclidean spaces: x' = x - lr * grad
+    For curved manifolds: x' = retract(x, -lr * sharp(grad)) -/
+def gradientStep [DifferentiableManifold M]
+    (x : M) (grad : Cotangent x) (lr : Float) : M :=
+  let tangent := sharp grad
+  let negTangent := scaleTangent (-lr) tangent
+  retract x negTangent
+
+end DifferentiableManifold
+
+-- Backward compatibility aliases
+abbrev Differentiable := DifferentiableManifold
 
 /-- Replace variable in Argument -/
 def replaceArg (a : Arg) (old new : VarId) : Arg :=
@@ -69,6 +219,8 @@ structure ADContext where
   nextVarIdx : Nat := 0
   /-- Accumulator for backward pass -/
   pullbackStack : Array (FnBody → FnBody) := #[]
+  /-- Variables that are static (non-differentiable) - skip tangent/cotangent -/
+  staticVars : Std.HashSet Nat := {}
   deriving Inhabited
 
 abbrev ADM := StateT ADContext Lean.CoreM
@@ -129,6 +281,17 @@ def setCotangent (x dx : VarId) : ADM Unit := do
 
 def setGpuCotangent (x dx : Tyr.GPU.Codegen.VarId) : ADM Unit := do
   setCotangentIdx x.idx dx.idx
+
+/-- Check if a variable is marked as static (non-differentiable) -/
+def isStaticVar (idx : Nat) : ADM Bool := do
+  return (← get).staticVars.contains idx
+
+/-- Mark a variable as static (non-differentiable) -/
+def markStatic (idx : Nat) : ADM Unit := do
+  modify fun s => { s with staticVars := s.staticVars.insert idx }
+
+/-- Mark a VarId as static -/
+def markStaticVar (x : VarId) : ADM Unit := markStatic x.idx
 
 -- AD Rules for Lean IR
 abbrev JVPBuilder := FnBody → FnBody
@@ -200,42 +363,81 @@ partial def unpackTuple (res : VarId) (vars : List VarId) : ADM (FnBody → FnBo
       FnBody.vdecl tail IRType.object (Expr.proj 1 res) <|
       unpackTail b
 
-def registerLeanVJPRule (primalFn vjpFn : Lean.Name) : Lean.CoreM Unit := do
+/-- Register a VJP rule with parameter kinds.
+    Static parameters are excluded from cotangent computation. -/
+def registerLeanVJPRuleWithKinds (primalFn vjpFn : Lean.Name)
+    (paramKinds : Array ParamKind := #[]) : Lean.CoreM Unit := do
   registerVJPRule primalFn fun args dy _resTy => do
     let res ← getFreshVar
     let callArgs := args.push (Arg.var dy)
-    
+
     let mut dxs := #[]
     let mut varsToUnpack := []
-    
-    -- Create fresh vars for cotangents
-    for _ in [:args.size] do
-       let dx ← getFreshVar
-       dxs := dxs.push dx
-       varsToUnpack := varsToUnpack ++ [dx]
-       
+
+    -- Create fresh vars for cotangents (only for diff params)
+    -- For static params, create a dummy var that will be skipped
+    for i in [:args.size] do
+      let kind := paramKinds.getD i .diff
+      if kind == .diff then
+        let dx ← getFreshVar
+        dxs := dxs.push dx
+        varsToUnpack := varsToUnpack ++ [dx]
+      else
+        -- Static/frozen params: create dummy var and mark as static
+        let dummyVar ← getFreshVar
+        markStatic dummyVar.idx
+        dxs := dxs.push dummyVar
+        -- Also mark the arg var itself as static if it's a var
+        match args[i]! with
+        | .var v => markStatic v.idx
+        | _ => pure ()
+
     let unpacker ← unpackTuple res varsToUnpack
-    
-    let builder := fun rest => 
+
+    let builder := fun rest =>
       FnBody.vdecl res IRType.object (Expr.fap vjpFn callArgs) <|
       unpacker rest
-      
+
     return (builder, dxs)
 
-def registerLeanJVPRule (primalFn jvpFn : Lean.Name) : Lean.CoreM Unit := do
+/-- Register a VJP rule (all params differentiable) -/
+def registerLeanVJPRule (primalFn vjpFn : Lean.Name) : Lean.CoreM Unit := do
+  registerLeanVJPRuleWithKinds primalFn vjpFn #[]
+
+/-- Register a JVP rule with parameter kinds.
+    Static parameters don't receive tangent arguments. -/
+def registerLeanJVPRuleWithKinds (primalFn jvpFn : Lean.Name)
+    (paramKinds : Array ParamKind := #[]) : Lean.CoreM Unit := do
   registerJVPRule primalFn fun args tans _resTy => do
     let resPair ← getFreshVar
-    let callArgs := args ++ tans
+
+    -- Build call args: primal args interleaved with tangents for diff params only
+    let mut callArgs : Array Arg := #[]
+    let mut tanIdx := 0
+    for i in [:args.size] do
+      callArgs := callArgs.push args[i]!
+      let kind := paramKinds.getD i .diff
+      if kind == .diff then
+        -- Only add tangent for differentiable params
+        if h : tanIdx < tans.size then
+          callArgs := callArgs.push tans[tanIdx]
+          tanIdx := tanIdx + 1
+      -- static/frozen params: no tangent arg added
+
     let prim ← getFreshVar
     let tan ← getFreshVar
-    
+
     let builder := fun rest =>
       FnBody.vdecl resPair IRType.object (Expr.fap jvpFn callArgs) <|
       FnBody.vdecl prim IRType.object (Expr.proj 0 resPair) <|
       FnBody.vdecl tan IRType.object (Expr.proj 1 resPair) <|
       rest
-      
+
     return (builder, prim, tan)
+
+/-- Register a JVP rule (all params differentiable) -/
+def registerLeanJVPRule (primalFn jvpFn : Lean.Name) : Lean.CoreM Unit := do
+  registerLeanJVPRuleWithKinds primalFn jvpFn #[]
 
 -- JVP Interpreter
 partial def jvp (b : FnBody) : ADM FnBody := do
@@ -246,9 +448,14 @@ partial def jvp (b : FnBody) : ADM FnBody := do
       let rule? ← getJVPRule fn
       match rule? with
       | some rule =>
-        let tanArgs ← args.mapM fun 
-          | Arg.var v => do return Arg.var (← getTangent v)
-          | Arg.erased => return .erased
+        -- Only get tangents for non-static args
+        let tanArgs ← args.filterMapM fun
+          | Arg.var v => do
+            if (← isStaticVar v.idx) then
+              return none  -- Skip tangent for static vars
+            else
+              return some (Arg.var (← getTangent v))
+          | Arg.erased => return none
         let (builder, prim, tan) ← rule args tanArgs ty
         setTangent x tan
         let rest' ← jvp rest
@@ -278,10 +485,13 @@ partial def vjp (b : FnBody) : ADM FnBody := do
         let dx ← getCotangent x
         let (pbBuilder, argCotans) ← rule args dx ty
         
-        -- Register cotangents for arguments
+        -- Register cotangents for arguments (skip static vars)
         for i in [:args.size] do
            match args[i]! with
-           | .var v => setCotangent v argCotans[i]!
+           | .var v =>
+             -- Skip cotangent for static vars
+             if !(← isStaticVar v.idx) then
+               setCotangent v argCotans[i]!
            | _ => pure ()
 
         modify fun s => { s with pullbackStack := s.pullbackStack.push pbBuilder }
@@ -323,10 +533,22 @@ def getGpuVJPRule (opName : String) : Lean.CoreM (Option GpuVJPRule) := do
   return (gpuAdRegistry.getState (← Lean.getEnv)).vjpRules.get? opName
 
 -- Attributes
+
+/-- Parse a list of static parameter indices into ParamKind array -/
+def parseStaticIndices (staticIndices : Array Nat) (numParams : Nat := 10) : Array ParamKind :=
+  Array.range numParams |>.map fun i =>
+    if staticIndices.contains i then .static else .diff
+
+-- Basic syntax: @[jvp primalFn] or @[vjp primalFn]
 syntax (name := jvpAttr) "jvp" ident : attr
 syntax (name := vjpAttr) "vjp" ident : attr
 
+-- Extended syntax with static params: @[jvp primalFn, static := [1, 3]]
+syntax (name := jvpAttrStatic) "jvp" ident "," "static" ":=" "[" num,* "]" : attr
+syntax (name := vjpAttrStatic) "vjp" ident "," "static" ":=" "[" num,* "]" : attr
+
 initialize
+  -- Basic JVP (all params differentiable)
   Lean.registerBuiltinAttribute {
     name := `jvpAttr
     descr := "Register JVP rule"
@@ -335,7 +557,8 @@ initialize
       | `(attr| jvp $id) => registerLeanJVPRule id.getId declName
       | _ => throwError "invalid jvp attribute"
   }
-  
+
+  -- Basic VJP (all params differentiable)
   Lean.registerBuiltinAttribute {
     name := `vjpAttr
     descr := "Register VJP rule"
@@ -343,6 +566,32 @@ initialize
       match stx with
       | `(attr| vjp $id) => registerLeanVJPRule id.getId declName
       | _ => throwError "invalid vjp attribute"
+  }
+
+  -- JVP with static params
+  Lean.registerBuiltinAttribute {
+    name := `jvpAttrStatic
+    descr := "Register JVP rule with static (non-differentiable) parameters"
+    add := fun declName stx _ => do
+      match stx with
+      | `(attr| jvp $id, static := [$indices,*]) =>
+        let staticIndices := indices.getElems.map fun n => n.getNat
+        let paramKinds := parseStaticIndices staticIndices
+        registerLeanJVPRuleWithKinds id.getId declName paramKinds
+      | _ => throwError "invalid jvp attribute with static"
+  }
+
+  -- VJP with static params
+  Lean.registerBuiltinAttribute {
+    name := `vjpAttrStatic
+    descr := "Register VJP rule with static (non-differentiable) parameters"
+    add := fun declName stx _ => do
+      match stx with
+      | `(attr| vjp $id, static := [$indices,*]) =>
+        let staticIndices := indices.getElems.map fun n => n.getNat
+        let paramKinds := parseStaticIndices staticIndices
+        registerLeanVJPRuleWithKinds id.getId declName paramKinds
+      | _ => throwError "invalid vjp attribute with static"
   }
 
 end Tyr.AD
