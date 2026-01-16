@@ -1047,6 +1047,35 @@ opaque diag {n : UInt64} (A : @& T #[n, n]) : T #[n]
 @[extern "lean_torch_diagflat"]
 opaque diagflat {n : UInt64} (v : @& T #[n]) : T #[n, n]
 
+-- Modular norm operations
+
+/-- Spectral norm: largest singular value σ_max(A).
+    This is the operator norm induced by the ℓ₂ vector norm. -/
+@[extern "lean_torch_spectral_norm"]
+opaque spectralNorm {m n : UInt64} (A : @& T #[m, n]) : Float
+
+/-- Nuclear norm: sum of singular values Σσᵢ(A).
+    This is the dual norm to the spectral norm. -/
+@[extern "lean_torch_nuclear_norm"]
+opaque nuclearNorm {m n : UInt64} (A : @& T #[m, n]) : Float
+
+/-- Row-wise L2 norms: returns ||a_i||₂ for each row i. -/
+@[extern "lean_torch_row_norms"]
+opaque rowNorms {n d : UInt64} (A : @& T #[n, d]) : T #[n]
+
+/-- Max row norm: max_i ||a_i||₂.
+    Used as the modular norm for embedding layers. -/
+@[extern "lean_torch_max_row_norm"]
+opaque maxRowNorm {n d : UInt64} (A : @& T #[n, d]) : Float
+
+/-- L2 norm of a 1D tensor: ||v||₂. -/
+@[extern "lean_torch_l2_norm"]
+opaque l2Norm {n : UInt64} (v : @& T #[n]) : Float
+
+/-- Frobenius norm of a matrix: ||A||_F = √(Σᵢⱼ aᵢⱼ²). -/
+@[extern "lean_torch_frobenius_norm"]
+opaque frobeniusNorm {m n : UInt64} (A : @& T #[m, n]) : Float
+
 end linalg
 
 end torch

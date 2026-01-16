@@ -2885,4 +2885,71 @@ lean_object* lean_torch_diagflat(
   return fromTorchTensor(result);
 }
 
+// ============================================================================
+// Modular Norm operations
+// ============================================================================
+
+// Spectral norm: largest singular value σ_max(A)
+double lean_torch_spectral_norm(
+    uint64_t /*m*/,
+    uint64_t /*n*/,
+    b_lean_obj_arg A_obj
+) {
+  auto A = borrowTensor(A_obj);
+  auto sv = torch::linalg_svdvals(A);
+  return sv[0].item<double>();
+}
+
+// Nuclear norm: sum of singular values Σσᵢ(A)
+double lean_torch_nuclear_norm(
+    uint64_t /*m*/,
+    uint64_t /*n*/,
+    b_lean_obj_arg A_obj
+) {
+  auto A = borrowTensor(A_obj);
+  auto sv = torch::linalg_svdvals(A);
+  return sv.sum().item<double>();
+}
+
+// Row-wise L2 norms: ||a_i||₂ for each row
+lean_object* lean_torch_row_norms(
+    uint64_t /*n*/,
+    uint64_t /*d*/,
+    b_lean_obj_arg A_obj
+) {
+  auto A = borrowTensor(A_obj);
+  auto norms = A.norm(2, /*dim=*/1);
+  return fromTorchTensor(norms);
+}
+
+// Max row norm: max_i ||a_i||₂
+double lean_torch_max_row_norm(
+    uint64_t /*n*/,
+    uint64_t /*d*/,
+    b_lean_obj_arg A_obj
+) {
+  auto A = borrowTensor(A_obj);
+  auto norms = A.norm(2, /*dim=*/1);
+  return norms.max().item<double>();
+}
+
+// L2 norm of a 1D tensor
+double lean_torch_l2_norm(
+    uint64_t /*n*/,
+    b_lean_obj_arg v_obj
+) {
+  auto v = borrowTensor(v_obj);
+  return v.norm(2).item<double>();
+}
+
+// Frobenius norm of a matrix
+double lean_torch_frobenius_norm(
+    uint64_t /*m*/,
+    uint64_t /*n*/,
+    b_lean_obj_arg A_obj
+) {
+  auto A = borrowTensor(A_obj);
+  return A.norm().item<double>();
+}
+
 }
