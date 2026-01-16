@@ -1,0 +1,625 @@
+/-
+  Tests/TestGPUDSL.lean
+
+  Tests for the high-level GPU kernel DSL extensions:
+  - Notation.lean: Expression-style operators and functions
+  - Constraints.lean: Type-level dimension constraints
+  - Macros.lean: Pattern macros for common kernel patterns
+-/
+import Tyr.GPU.Types
+import Tyr.GPU.Codegen.Var
+import Tyr.GPU.Codegen.TileTypes
+import Tyr.GPU.Codegen.IR
+import Tyr.GPU.Codegen.Monad
+import Tyr.GPU.Codegen.Ops
+import Tyr.GPU.Codegen.Loop
+import Tyr.GPU.Codegen.EmitNew
+import Tyr.GPU.Codegen.Notation
+import Tyr.GPU.Codegen.Constraints
+import Tyr.GPU.Codegen.Macros
+import LeanTest
+
+namespace Tests.GPUDSL
+
+open Tyr.GPU
+open Tyr.GPU.Codegen
+open LeanTest
+
+/-! ## Notation Tests: Matrix Multiply Operators -/
+
+/-- Test matmul function returns correctly typed tile -/
+@[test]
+def testMatmulFunction : IO Unit := do
+  let kernel := buildKernelM "test_matmul" .SM90 #[] do
+    let a ← allocRT .BFloat16 64 64
+    let b ← allocRT .BFloat16 64 64 .Col
+    let _c ← matmul a b .Float32
+    comment "matmul complete"
+    pure ()
+
+  -- Should have: 2 decls for a,b + 1 decl for c + 1 mm + 1 comment
+  assertTrue (kernel.body.size ≥ 4) "Should have allocations and mm"
+
+  let code := generateKernel kernel
+  assertTrue (code.containsSubstr "mm_AB(") "Should have mm_AB call"
+
+/-- Test matmulT function (B transposed) -/
+@[test]
+def testMatmulTFunction : IO Unit := do
+  let kernel := buildKernelM "test_matmul_t" .SM90 #[] do
+    let a ← allocRT .BFloat16 64 64
+    let b ← allocRT .BFloat16 64 64  -- Row-major for transpose
+    let _c ← matmulT a b .Float32
+    pure ()
+
+  let code := generateKernel kernel
+  assertTrue (code.containsSubstr "mma_ABt(") "Should have mma_ABt call"
+
+/-- Test matrix multiply infix notation ⬝ -/
+@[test]
+def testMatmulInfix : IO Unit := do
+  let kernel := buildKernelM "test_matmul_infix" .SM90 #[] do
+    let a ← allocRT .BFloat16 64 64
+    let b ← allocRT .BFloat16 64 64 .Col
+    let _c ← a ⬝ b  -- Uses matmulF32
+    comment s!"Result allocated"
+    pure ()
+
+  let code := generateKernel kernel
+  assertTrue (code.containsSubstr "mm_AB(") "Should have mm_AB from ⬝ operator"
+
+/-- Test transposed multiply infix notation ⬝ᵀ -/
+@[test]
+def testMatmulTInfix : IO Unit := do
+  let kernel := buildKernelM "test_matmul_t_infix" .SM90 #[] do
+    let a ← allocRT .BFloat16 64 64
+    let b ← allocRT .BFloat16 64 64
+    let _c ← a ⬝ᵀ b  -- Uses matmulTF32
+    comment s!"Result allocated"
+    pure ()
+
+  let code := generateKernel kernel
+  assertTrue (code.containsSubstr "mma_ABt(") "Should have mma_ABt from ⬝ᵀ operator"
+
+/-! ## Notation Tests: Element-wise Operators -/
+
+/-- Test tile addition with + operator -/
+@[test]
+def testTileAddOperator : IO Unit := do
+  let kernel := buildKernelM "test_tile_add" .SM90 #[] do
+    let a ← allocRT .Float32 64 64
+    let b ← allocRT .Float32 64 64
+    let _c ← a + b  -- HAdd instance
+    pure ()
+
+  let code := generateKernel kernel
+  assertTrue (code.containsSubstr "add(") "Should have add operation"
+
+/-- Test tile subtraction with - operator -/
+@[test]
+def testTileSubOperator : IO Unit := do
+  let kernel := buildKernelM "test_tile_sub" .SM90 #[] do
+    let a ← allocRT .Float32 64 64
+    let b ← allocRT .Float32 64 64
+    let _c ← a - b  -- HSub instance
+    pure ()
+
+  let code := generateKernel kernel
+  assertTrue (code.containsSubstr "sub(") "Should have sub operation"
+
+/-- Test tile multiplication with * operator -/
+@[test]
+def testTileMulOperator : IO Unit := do
+  let kernel := buildKernelM "test_tile_mul" .SM90 #[] do
+    let a ← allocRT .Float32 64 64
+    let b ← allocRT .Float32 64 64
+    let _c ← a * b  -- HMul instance
+    pure ()
+
+  let code := generateKernel kernel
+  assertTrue (code.containsSubstr "mul(") "Should have mul operation"
+
+/-- Test tile division with / operator -/
+@[test]
+def testTileDivOperator : IO Unit := do
+  let kernel := buildKernelM "test_tile_div" .SM90 #[] do
+    let a ← allocRT .Float32 64 64
+    let b ← allocRT .Float32 64 64
+    let _c ← a / b  -- HDiv instance
+    pure ()
+
+  let code := generateKernel kernel
+  assertTrue (code.containsSubstr "div(") "Should have div operation"
+
+/-- Test scalar multiplication -/
+@[test]
+def testScalarMul : IO Unit := do
+  let kernel := buildKernelM "test_scalar_mul" .SM90 #[] do
+    let a ← allocRT .Float32 64 64
+    let _b ← a * 0.5  -- tile * scalar
+    let _c ← 2.0 * a  -- scalar * tile
+    pure ()
+
+  let code := generateKernel kernel
+  -- Should have two mul operations with scalar
+  assertTrue (code.containsSubstr "mul(") "Should have scalar mul"
+  assertTrue (code.containsSubstr "0.5f") "Should have 0.5 scalar"
+  assertTrue (code.containsSubstr "2f") "Should have 2.0 scalar"
+
+/-- Test scalar addition -/
+@[test]
+def testScalarAdd : IO Unit := do
+  let kernel := buildKernelM "test_scalar_add" .SM90 #[] do
+    let a ← allocRT .Float32 64 64
+    let _b ← a + 1.0
+    pure ()
+
+  let code := generateKernel kernel
+  assertTrue (code.containsSubstr "add(") "Should have scalar add"
+  assertTrue (code.containsSubstr "1f") "Should have 1.0 scalar"
+
+/-! ## Notation Tests: Vector Operators -/
+
+/-- Test vector addition -/
+@[test]
+def testVectorAdd : IO Unit := do
+  let kernel := buildKernelM "test_vec_add" .SM90 #[] do
+    let a ← allocRV .Float32 64
+    let b ← allocRV .Float32 64
+    let _c ← a + b  -- HAdd for RV
+    pure ()
+
+  let code := generateKernel kernel
+  assertTrue (code.containsSubstr "add(") "Should have vector add"
+
+/-- Test vector subtraction -/
+@[test]
+def testVectorSub : IO Unit := do
+  let kernel := buildKernelM "test_vec_sub" .SM90 #[] do
+    let a ← allocRV .Float32 64
+    let b ← allocRV .Float32 64
+    let _c ← a - b
+    pure ()
+
+  let code := generateKernel kernel
+  assertTrue (code.containsSubstr "sub(") "Should have vector sub"
+
+/-! ## Notation Tests: Broadcasting Functions -/
+
+/-- Test subBroadcastCol -/
+@[test]
+def testSubBroadcastCol : IO Unit := do
+  let kernel := buildKernelM "test_sub_broadcast_col" .SM90 #[] do
+    let tile ← allocRT .Float32 64 64
+    let vec ← allocRV .Float32 64
+    let _result ← subBroadcastCol tile vec
+    pure ()
+
+  let code := generateKernel kernel
+  assertTrue (code.containsSubstr "sub_col(") "Should have sub_col broadcast"
+
+/-- Test divBroadcastCol -/
+@[test]
+def testDivBroadcastCol : IO Unit := do
+  let kernel := buildKernelM "test_div_broadcast_col" .SM90 #[] do
+    let tile ← allocRT .Float32 64 64
+    let vec ← allocRV .Float32 64
+    let _result ← divBroadcastCol tile vec
+    pure ()
+
+  let code := generateKernel kernel
+  assertTrue (code.containsSubstr "div_col(") "Should have div_col broadcast"
+
+/-- Test mulBroadcastRow -/
+@[test]
+def testMulBroadcastRow : IO Unit := do
+  let kernel := buildKernelM "test_mul_broadcast_row" .SM90 #[] do
+    let tile ← allocRT .Float32 64 64
+    let vec ← allocRV .Float32 64
+    let _result ← mulBroadcastRow tile vec
+    pure ()
+
+  let code := generateKernel kernel
+  assertTrue (code.containsSubstr "mul_row(") "Should have mul_row broadcast"
+
+/-! ## Notation Tests: Reduction Functions -/
+
+/-- Test reduceRowMax -/
+@[test]
+def testReduceRowMax : IO Unit := do
+  let kernel := buildKernelM "test_reduce_row_max" .SM90 #[] do
+    let tile ← allocRT .Float32 64 64
+    let _maxVec ← reduceRowMax tile
+    pure ()
+
+  let code := generateKernel kernel
+  assertTrue (code.containsSubstr "row_max(") "Should have row_max reduction"
+
+/-- Test reduceRowSum -/
+@[test]
+def testReduceRowSum : IO Unit := do
+  let kernel := buildKernelM "test_reduce_row_sum" .SM90 #[] do
+    let tile ← allocRT .Float32 64 64
+    let _sumVec ← reduceRowSum tile
+    pure ()
+
+  let code := generateKernel kernel
+  assertTrue (code.containsSubstr "row_sum(") "Should have row_sum reduction"
+
+/-- Test reduceColSum -/
+@[test]
+def testReduceColSum : IO Unit := do
+  let kernel := buildKernelM "test_reduce_col_sum" .SM90 #[] do
+    let tile ← allocRT .Float32 64 64
+    let _sumVec ← reduceColSum tile
+    pure ()
+
+  let code := generateKernel kernel
+  assertTrue (code.containsSubstr "col_sum(") "Should have col_sum reduction"
+
+/-! ## Notation Tests: Unary Expression Functions -/
+
+/-- Test expTile -/
+@[test]
+def testExpTile : IO Unit := do
+  let kernel := buildKernelM "test_exp_tile" .SM90 #[] do
+    let a ← allocRT .Float32 64 64
+    let _b ← expTile a
+    pure ()
+
+  let code := generateKernel kernel
+  assertTrue (code.containsSubstr "exp(") "Should have exp operation"
+
+/-- Test logTile -/
+@[test]
+def testLogTile : IO Unit := do
+  let kernel := buildKernelM "test_log_tile" .SM90 #[] do
+    let a ← allocRT .Float32 64 64
+    let _b ← logTile a
+    pure ()
+
+  let code := generateKernel kernel
+  assertTrue (code.containsSubstr "log(") "Should have log operation"
+
+/-- Test tanhTile -/
+@[test]
+def testTanhTile : IO Unit := do
+  let kernel := buildKernelM "test_tanh_tile" .SM90 #[] do
+    let a ← allocRT .Float32 64 64
+    let _b ← tanhTile a
+    pure ()
+
+  let code := generateKernel kernel
+  assertTrue (code.containsSubstr "tanh(") "Should have tanh operation"
+
+/-- Test causalMask -/
+@[test]
+def testCausalMaskFunction : IO Unit := do
+  let kernel := buildKernelM "test_causal_mask_fn" .SM90 #[] do
+    let scores ← allocRT .Float32 64 64
+    let _masked ← causalMask scores (-1e10)
+    pure ()
+
+  let code := generateKernel kernel
+  assertTrue (code.containsSubstr "make_causal(") "Should have make_causal"
+
+/-! ## Constraints Tests: DivisibleBy -/
+
+/-- Test DivisibleBy instances exist for common sizes -/
+@[test]
+def testDivisibleByInstances : IO Unit := do
+  -- These should compile if instances exist
+  let _ : DivisibleBy 64 16 := inferInstance
+  let _ : DivisibleBy 128 16 := inferInstance
+  let _ : DivisibleBy 256 16 := inferInstance
+  let _ : DivisibleBy 64 8 := inferInstance
+  let _ : DivisibleBy 128 32 := inferInstance
+  let _ : DivisibleBy 256 128 := inferInstance
+  pure ()
+
+/-- Test Mult16 alias -/
+@[test]
+def testMult16Alias : IO Unit := do
+  let _ : Mult16 64 := inferInstance
+  let _ : Mult16 128 := inferInstance
+  pure ()
+
+/-- Test constrained MMA compiles with valid dimensions -/
+@[test]
+def testConstrainedMMA : IO Unit := do
+  let kernel := buildKernelM "test_constrained_mma" .SM90 #[] do
+    let a ← allocRT .BFloat16 64 64
+    let b ← allocRT .BFloat16 64 64 .Col
+    let c ← zeroRT .Float32 64 64
+    -- This uses mmaConstrained which requires [Mult16 M] [Mult16 K] [Mult16 N]
+    mmaConstrained c a b c
+    pure ()
+
+  let code := generateKernel kernel
+  assertTrue (code.containsSubstr "mma_AB(") "Should have mma_AB call"
+
+/-! ## Constraints Tests: Architecture Capabilities -/
+
+/-- Test HasTMA instance for SM90 -/
+@[test]
+def testHasTMASM90 : IO Unit := do
+  let _ : HasTMA Arch.SM90 := inferInstance
+  pure ()
+
+/-- Test HasWGMMA instance for SM90 -/
+@[test]
+def testHasWGMMASM90 : IO Unit := do
+  let _ : HasWGMMA Arch.SM90 := inferInstance
+  pure ()
+
+/-- Test HasFP8 instance for SM90 -/
+@[test]
+def testHasFP8SM90 : IO Unit := do
+  let _ : HasFP8 Arch.SM90 := inferInstance
+  pure ()
+
+/-- Test HasCluster instance for SM90 -/
+@[test]
+def testHasClusterSM90 : IO Unit := do
+  let _ : HasCluster Arch.SM90 := inferInstance
+  pure ()
+
+/-! ## Macros Tests: Double Buffering -/
+
+/-- Test allocDoubleBuffer creates two buffers and semaphores -/
+@[test]
+def testAllocDoubleBuffer : IO Unit := do
+  let kernel := buildKernelM "test_double_buffer" .SM90 #[] do
+    let _db ← allocDoubleBuffer .BFloat16 64 64
+    comment "Double buffer allocated"
+    pure ()
+
+  -- Should have: 2 ST decls + 2 semaphore decls + 2 init semaphore + 1 comment
+  assertTrue (kernel.body.size ≥ 6) "Should have buffer and semaphore allocations"
+
+  let code := generateKernel kernel
+  -- Check for two shared tile declarations
+  assertTrue (code.containsSubstr "st<bf16, 64, 64") "Should have shared tile decls"
+  assertTrue (code.containsSubstr "semaphore") "Should have semaphore decls"
+  assertTrue (code.containsSubstr "init_semaphore") "Should have semaphore init"
+
+/-! ## Macros Tests: Warp Specialization -/
+
+/-- Test asProducer helper -/
+@[test]
+def testAsProducer : IO Unit := do
+  let kernel := buildKernelM "test_as_producer" .SM90 #[] do
+    asProducer do
+      comment "Producer code"
+      sync
+    pure ()
+
+  let code := generateKernel kernel
+  assertTrue (code.containsSubstr "warpgroup_idx() == 0") "Should check warpgroup 0"
+
+/-- Test asConsumer helper -/
+@[test]
+def testAsConsumer : IO Unit := do
+  let kernel := buildKernelM "test_as_consumer" .SM90 #[] do
+    asConsumer do
+      comment "Consumer code"
+      sync
+    pure ()
+
+  let code := generateKernel kernel
+  assertTrue (code.containsSubstr "warpgroup_idx() == 1") "Should check warpgroup 1"
+
+/-- Test inWarpGroup with arbitrary index -/
+@[test]
+def testInWarpGroup : IO Unit := do
+  let kernel := buildKernelM "test_in_warpgroup" .SM90 #[] do
+    inWarpGroup 2 do
+      comment "Warpgroup 2 code"
+    pure ()
+
+  let code := generateKernel kernel
+  assertTrue (code.containsSubstr "warpgroup_idx() == 2") "Should check warpgroup 2"
+
+/-! ## Macros Tests: Online Softmax -/
+
+/-- Test allocSoftmaxState creates all required vectors -/
+@[test]
+def testAllocSoftmaxState : IO Unit := do
+  let kernel := buildKernelM "test_softmax_state" .SM90 #[] do
+    let _state ← allocSoftmaxState .Float32 64
+    comment "Softmax state allocated"
+    pure ()
+
+  -- Should have: rowMax (negInfty = 2 ops), rowSum (zero = 2 ops), prevMax, scale
+  assertTrue (kernel.body.size ≥ 6) "Should have vector allocations"
+
+  let code := generateKernel kernel
+  assertTrue (code.containsSubstr "rv<float, 64>") "Should have Float32 vectors"
+
+/-- Test onlineSoftmax generates correct sequence -/
+@[test]
+def testOnlineSoftmax : IO Unit := do
+  let kernel := buildKernelM "test_online_softmax" .SM90 #[] do
+    let scores ← allocRT .Float32 64 64
+    let output ← allocRT .Float32 64 128
+    let state ← allocSoftmaxState .Float32 64
+    onlineSoftmax scores output state
+    pure ()
+
+  let code := generateKernel kernel
+  -- Check key operations in online softmax
+  assertTrue (code.containsSubstr "copy(") "Should have copy for prevMax"
+  assertTrue (code.containsSubstr "row_max(") "Should have row_max update"
+  assertTrue (code.containsSubstr "sub(") "Should have sub for scale"
+  assertTrue (code.containsSubstr "exp(") "Should have exp operations"
+  assertTrue (code.containsSubstr "mul_col(") "Should have mul_col for rescaling"
+  assertTrue (code.containsSubstr "sub_col(") "Should have sub_col for scores"
+  assertTrue (code.containsSubstr "row_sum(") "Should have row_sum update"
+
+/-- Test finalizeSoftmax -/
+@[test]
+def testFinalizeSoftmax : IO Unit := do
+  let kernel := buildKernelM "test_finalize_softmax" .SM90 #[] do
+    let output ← allocRT .Float32 64 64
+    let state ← allocSoftmaxState .Float32 64
+    finalizeSoftmax output state
+    pure ()
+
+  let code := generateKernel kernel
+  assertTrue (code.containsSubstr "div_col(") "Should have div_col for normalization"
+
+/-- Test computeLSE -/
+@[test]
+def testComputeLSE : IO Unit := do
+  let kernel := buildKernelM "test_compute_lse" .SM90 #[] do
+    let state ← allocSoftmaxState .Float32 64
+    let _lse ← computeLSE state
+    comment "LSE computed"
+    pure ()
+
+  let code := generateKernel kernel
+  assertTrue (code.containsSubstr "log(") "Should have log for LSE"
+  assertTrue (code.containsSubstr "add(") "Should have add for log(sum) + max"
+
+/-! ## Macros Tests: Named Barriers -/
+
+/-- Test signalBarrier -/
+@[test]
+def testSignalBarrier : IO Unit := do
+  let kernel := buildKernelM "test_signal_barrier" .SM90 #[] do
+    signalBarrier queryReadyBarrier
+    pure ()
+
+  let code := generateKernel kernel
+  assertTrue (code.containsSubstr "named_barrier_arrive") "Should have barrier arrive"
+
+/-- Test waitBarrier -/
+@[test]
+def testWaitBarrier : IO Unit := do
+  let kernel := buildKernelM "test_wait_barrier" .SM90 #[] do
+    waitBarrier queryReadyBarrier
+    pure ()
+
+  let code := generateKernel kernel
+  assertTrue (code.containsSubstr "named_barrier_sync") "Should have barrier sync"
+
+/-! ## Macros Tests: Attention Block Pattern -/
+
+/-- Test attentionBlockIter generates complete attention computation -/
+@[test]
+def testAttentionBlockIter : IO Unit := do
+  let kernel := buildKernelM "test_attn_block" .SM90 #[] do
+    let q ← allocRT .BFloat16 64 64
+    let k ← allocRT .BFloat16 64 64
+    let v ← allocRT .BFloat16 64 64 .Col
+    let output ← zeroRT .Float32 64 64
+    let state ← allocSoftmaxState .Float32 64
+    attentionBlockIter q k v output state false
+    pure ()
+
+  let code := generateKernel kernel
+  -- Check all attention components
+  assertTrue (code.containsSubstr "mma_ABt(") "Should have Q @ K^T"
+  assertTrue (code.containsSubstr "exp(") "Should have softmax exp"
+  assertTrue (code.containsSubstr "row_max(") "Should have row max"
+  assertTrue (code.containsSubstr "mma_AB(") "Should have P @ V"
+
+/-- Test attentionBlockIter with causal mask -/
+@[test]
+def testAttentionBlockIterCausal : IO Unit := do
+  let kernel := buildKernelM "test_attn_block_causal" .SM90 #[] do
+    let q ← allocRT .BFloat16 64 64
+    let k ← allocRT .BFloat16 64 64
+    let v ← allocRT .BFloat16 64 64 .Col
+    let output ← zeroRT .Float32 64 64
+    let state ← allocSoftmaxState .Float32 64
+    attentionBlockIter q k v output state true (-1e10)
+    pure ()
+
+  let code := generateKernel kernel
+  assertTrue (code.containsSubstr "make_causal(") "Should have causal mask"
+
+/-! ## Integration Tests -/
+
+/-- Test complete attention kernel using new DSL -/
+@[test]
+def testCompleteDSLAttention : IO Unit := do
+  let kernel := buildKernelM "dsl_attention" .SM90 #[] do
+    comment "Allocate tiles"
+    let q ← allocRT .BFloat16 64 64
+    let k ← allocRT .BFloat16 64 64
+    let _v ← allocRT .BFloat16 64 64 .Col
+
+    comment "Compute S = Q @ K^T using notation"
+    let s ← q ⬝ᵀ k
+
+    comment "Apply softmax"
+    let state ← allocSoftmaxState .Float32 64
+    let output ← zeroRT .Float32 64 64
+    onlineSoftmax s output state
+    finalizeSoftmax output state
+
+    comment "Compute LSE"
+    let _lse ← computeLSE state
+
+    pure ()
+
+  let code := generateKernel kernel
+  assertTrue (code.containsSubstr "dsl_attention") "Should have kernel name"
+  assertTrue (code.containsSubstr "mma_ABt(") "Should have Q @ K^T"
+  assertTrue (code.containsSubstr "row_max(") "Should have softmax"
+  assertTrue (code.containsSubstr "div_col(") "Should have normalization"
+  assertTrue (code.containsSubstr "log(") "Should have LSE computation"
+
+/-- Test expression chaining -/
+@[test]
+def testExpressionChaining : IO Unit := do
+  let kernel := buildKernelM "test_expr_chain" .SM90 #[] do
+    let a ← allocRT .Float32 64 64
+    let b ← allocRT .Float32 64 64
+
+    comment "Chain: (a + b) * 0.5"
+    let sum ← a + b
+    let scaled ← sum * 0.5
+
+    comment "Reduction"
+    let maxVec ← reduceRowMax scaled
+
+    comment "Broadcast back"
+    let _normalized ← subBroadcastCol scaled maxVec
+
+    pure ()
+
+  let code := generateKernel kernel
+  assertTrue (code.containsSubstr "add(") "Should have add"
+  assertTrue (code.containsSubstr "mul(") "Should have mul"
+  assertTrue (code.containsSubstr "row_max(") "Should have reduction"
+  assertTrue (code.containsSubstr "sub_col(") "Should have broadcast"
+
+/-- Test warp specialized attention pattern -/
+@[test]
+def testWarpSpecializedPattern : IO Unit := do
+  let kernel := buildKernelM "test_warp_spec" .SM90 #[] do
+    let _db ← allocDoubleBuffer .BFloat16 64 64
+
+    asProducer do
+      comment "Producer: TMA loads"
+      signalBarrier queryReadyBarrier
+
+    asConsumer do
+      comment "Consumer: MMA computation"
+      waitBarrier queryReadyBarrier
+
+      let q ← allocRT .BFloat16 64 64
+      let k ← allocRT .BFloat16 64 64
+      let _s ← q ⬝ᵀ k
+      pure ()
+
+    pure ()
+
+  let code := generateKernel kernel
+  assertTrue (code.containsSubstr "warpgroup_idx() == 0") "Should have producer check"
+  assertTrue (code.containsSubstr "warpgroup_idx() == 1") "Should have consumer check"
+  assertTrue (code.containsSubstr "named_barrier") "Should have barrier ops"
+
+end Tests.GPUDSL

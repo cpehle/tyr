@@ -91,4 +91,280 @@ def testVJPMul : IO Unit := do
   | some (KStmt.binary .Mul _ _ _), some (KStmt.binary .Add _ _ _) => pure ()
   | _, _ => throw (IO.userError s!"Expected Mul then Add for first input gradient")
 
+/-! ## Unary Operations Tests -/
+
+-- Test Linearization (JVP) for Exp
+@[test]
+def testJVPExp : IO Unit := do
+  -- y = exp(x)
+  -- dy = exp(x) * dx = y * dx
+  let x : VarId := { idx := 0 }
+  let y : VarId := { idx := 1 }
+  let stmt := KStmt.unary .Exp y x
+
+  let (_, state) ← runTraceM (linearizeStmt stmt)
+
+  -- Check primal
+  LeanTest.assertTrue (state.primalStmts.size == 1) s!"Expected 1 primal stmt"
+  match state.primalStmts[0]? with
+  | some (KStmt.unary .Exp _ _) => pure ()
+  | _ => throw (IO.userError "Expected primal Exp")
+
+  -- Check linear trace contains exp instruction with correct primal reference
+  LeanTest.assertTrue (state.linearTrace.size == 1) s!"Expected 1 linear inst"
+  match state.linearTrace[0]? with
+  | some (LinearInst.exp _dout _din primalY) =>
+    -- primalY should reference the output y for chain rule: dy = dx * y
+    LeanTest.assertTrue (primalY.idx == y.idx) s!"primalY should be y, got {primalY.idx}"
+  | _ => throw (IO.userError "Expected linear Exp")
+
+-- Test Transposition (VJP) for Exp
+@[test]
+def testVJPExp : IO Unit := do
+  -- Backward: dx += dy * exp(x) = dy * y
+  let trace := #[LinearInst.exp { idx := 2 } { idx := 0 } { idx := 1 }]
+  let vjpStmts ← runTranspose trace
+
+  -- Expected: t1 = dout * y; din += t1
+  LeanTest.assertTrue (vjpStmts.size == 2) s!"Expected 2 VJP stmts for exp, got {vjpStmts.size}"
+
+  match vjpStmts[0]?, vjpStmts[1]? with
+  | some (KStmt.binary .Mul _ _ _), some (KStmt.binary .Add _ _ _) => pure ()
+  | _, _ => throw (IO.userError "Expected Mul then Add for exp backward")
+
+-- Test Linearization (JVP) for Log
+@[test]
+def testJVPLog : IO Unit := do
+  -- y = log(x)
+  -- dy = dx / x
+  let x : VarId := { idx := 0 }
+  let y : VarId := { idx := 1 }
+  let stmt := KStmt.unary .Log y x
+
+  let (_, state) ← runTraceM (linearizeStmt stmt)
+
+  LeanTest.assertTrue (state.linearTrace.size == 1) s!"Expected 1 linear inst"
+  match state.linearTrace[0]? with
+  | some (LinearInst.log _dout _din primalX) =>
+    -- primalX should reference the input x for chain rule: dy = dx / x
+    LeanTest.assertTrue (primalX.idx == x.idx) s!"primalX should be x"
+  | _ => throw (IO.userError "Expected linear Log")
+
+-- Test Transposition (VJP) for Log
+@[test]
+def testVJPLog : IO Unit := do
+  -- Backward: dx += dy / x
+  let trace := #[LinearInst.log { idx := 2 } { idx := 0 } { idx := 1 }]
+  let vjpStmts ← runTranspose trace
+
+  -- Expected: t1 = dout / x; din += t1
+  LeanTest.assertTrue (vjpStmts.size == 2) s!"Expected 2 VJP stmts for log, got {vjpStmts.size}"
+
+-- Test Linearization (JVP) for Tanh
+@[test]
+def testJVPTanh : IO Unit := do
+  -- y = tanh(x)
+  -- dy = (1 - y²) * dx
+  let x : VarId := { idx := 0 }
+  let y : VarId := { idx := 1 }
+  let stmt := KStmt.unary .Tanh y x
+
+  let (_, state) ← runTraceM (linearizeStmt stmt)
+
+  LeanTest.assertTrue (state.linearTrace.size == 1) s!"Expected 1 linear inst"
+  match state.linearTrace[0]? with
+  | some (LinearInst.tanh _ _ _) => pure ()
+  | _ => throw (IO.userError "Expected linear Tanh")
+
+-- Test Transposition (VJP) for Tanh
+@[test]
+def testVJPTanh : IO Unit := do
+  -- Backward: dx += dy * (1 - y²)
+  let trace := #[LinearInst.tanh { idx := 2 } { idx := 0 } { idx := 1 }]
+  let vjpStmts ← runTranspose trace
+
+  -- Should have: t1 = y*y; t1 *= -1; t1 += 1; t2 = dout*t1; din += t2
+  LeanTest.assertTrue (vjpStmts.size == 5) s!"Expected 5 VJP stmts for tanh, got {vjpStmts.size}"
+
+/-! ## Binary Operations Tests -/
+
+-- Test Linearization (JVP) for Sub
+@[test]
+def testJVPSub : IO Unit := do
+  -- z = x - y
+  -- dz = dx - dy
+  let v0 : VarId := { idx := 0 }
+  let v1 : VarId := { idx := 1 }
+  let v2 : VarId := { idx := 2 }
+  let stmt := KStmt.binary .Sub v2 v0 v1
+
+  let (_, state) ← runTraceM (linearizeStmt stmt)
+
+  LeanTest.assertTrue (state.linearTrace.size == 1) s!"Expected 1 linear inst"
+  match state.linearTrace[0]? with
+  | some (LinearInst.sub _ _ _) => pure ()
+  | _ => throw (IO.userError "Expected linear Sub")
+
+-- Test Transposition (VJP) for Sub
+@[test]
+def testVJPSub : IO Unit := do
+  -- Backward: dx += dz; dy -= dz (implemented as dy += -dz via Sub)
+  let trace := #[LinearInst.sub { idx := 2 } { idx := 0 } { idx := 1 }]
+  let vjpStmts ← runTranspose trace
+
+  -- Expected: din1 += dout; din2 = din2 - dout
+  LeanTest.assertTrue (vjpStmts.size == 2) s!"Expected 2 VJP stmts for sub, got {vjpStmts.size}"
+
+  match vjpStmts[0]?, vjpStmts[1]? with
+  | some (KStmt.binary .Add _ _ _), some (KStmt.binary .Sub _ _ _) => pure ()
+  | _, _ => throw (IO.userError "Expected Add then Sub for sub backward")
+
+-- Test Linearization (JVP) for Div
+@[test]
+def testJVPDiv : IO Unit := do
+  -- z = x / y
+  let v0 : VarId := { idx := 0 }
+  let v1 : VarId := { idx := 1 }
+  let v2 : VarId := { idx := 2 }
+  let stmt := KStmt.binary .Div v2 v0 v1
+
+  let (_, state) ← runTraceM (linearizeStmt stmt)
+
+  LeanTest.assertTrue (state.linearTrace.size == 1) s!"Expected 1 linear inst"
+  match state.linearTrace[0]? with
+  | some (LinearInst.div _ _ _ _ _) => pure ()
+  | _ => throw (IO.userError "Expected linear Div")
+
+/-! ## Broadcast/Reduce Tests -/
+
+-- Test Linearization (JVP) for Broadcast Row
+@[test]
+def testJVPBroadcastRow : IO Unit := do
+  -- dst[i,j] = vec[i] (broadcast row vector to matrix)
+  let vec : VarId := { idx := 0 }
+  let dst : VarId := { idx := 1 }
+  let stmt := KStmt.broadcast .Row dst vec
+
+  let (_, state) ← runTraceM (linearizeStmt stmt)
+
+  LeanTest.assertTrue (state.linearTrace.size == 1) s!"Expected 1 linear inst"
+  match state.linearTrace[0]? with
+  | some (LinearInst.broadcast .Row _ _) => pure ()
+  | _ => throw (IO.userError "Expected linear Broadcast with Row axis")
+
+-- Test Transposition (VJP) for Broadcast Row
+@[test]
+def testVJPBroadcastRow : IO Unit := do
+  -- Backward: reduce sum along columns (opposite axis)
+  let trace := #[LinearInst.broadcast .Row { idx := 1 } { idx := 0 }]
+  let vjpStmts ← runTranspose trace
+
+  -- Should produce reduceAccum with Col axis (opposite of Row)
+  LeanTest.assertTrue (vjpStmts.size == 1) s!"Expected 1 VJP stmt for broadcast, got {vjpStmts.size}"
+  match vjpStmts[0]? with
+  | some (KStmt.reduceAccum .Sum .Col _ _ _) => pure ()
+  | some other => throw (IO.userError s!"Expected reduceAccum with Col axis, got {repr other}")
+  | none => throw (IO.userError "No VJP stmt produced")
+
+/-! ## Memory Operations Tests -/
+
+-- Test Linearization (JVP) for Load
+@[test]
+def testJVPLoad : IO Unit := do
+  let src : VarId := { idx := 0 }
+  let dst : VarId := { idx := 1 }
+  let stmt := KStmt.load dst src
+
+  let (_, state) ← runTraceM (linearizeStmt stmt)
+
+  LeanTest.assertTrue (state.linearTrace.size == 1) s!"Expected 1 linear inst"
+  match state.linearTrace[0]? with
+  | some (LinearInst.id _ _) => pure ()  -- Load is identity for gradients
+  | _ => throw (IO.userError "Expected linear id for load")
+
+-- Test Linearization (JVP) for Store
+@[test]
+def testJVPStore : IO Unit := do
+  let src : VarId := { idx := 0 }
+  let dst : VarId := { idx := 1 }
+  let stmt := KStmt.store dst src
+
+  let (_, state) ← runTraceM (linearizeStmt stmt)
+
+  LeanTest.assertTrue (state.linearTrace.size == 1) s!"Expected 1 linear inst"
+  match state.linearTrace[0]? with
+  | some (LinearInst.id _ _) => pure ()  -- Store is identity for gradients
+  | _ => throw (IO.userError "Expected linear id for store")
+
+-- Test Transposition (VJP) for Identity
+@[test]
+def testVJPId : IO Unit := do
+  -- Identity backward: din += dout
+  let trace := #[LinearInst.id { idx := 1 } { idx := 0 }]
+  let vjpStmts ← runTranspose trace
+
+  LeanTest.assertTrue (vjpStmts.size == 1) s!"Expected 1 VJP stmt for id, got {vjpStmts.size}"
+  match vjpStmts[0]? with
+  | some (KStmt.binary .Add _ _ _) => pure ()
+  | _ => throw (IO.userError "Expected Add for id backward")
+
+/-! ## Integration Tests -/
+
+-- Test chain rule: z = exp(x * y)
+@[test]
+def testChainRule : IO Unit := do
+  -- z = exp(x * y)
+  -- dz/dx = exp(x*y) * y
+  -- dz/dy = exp(x*y) * x
+  let v0 : VarId := { idx := 0 }  -- x
+  let v1 : VarId := { idx := 1 }  -- y
+  let v2 : VarId := { idx := 2 }  -- x * y
+  let v3 : VarId := { idx := 3 }  -- exp(x * y)
+
+  let stmts := #[
+    KStmt.binary .Mul v2 v0 v1,  -- v2 = x * y
+    KStmt.unary .Exp v3 v2       -- v3 = exp(v2)
+  ]
+
+  let (_, state) ← runTraceM (stmts.forM linearizeStmt)
+
+  -- Should have 2 primal stmts
+  LeanTest.assertTrue (state.primalStmts.size == 2) s!"Expected 2 primal stmts, got {state.primalStmts.size}"
+
+  -- Should have 2 linear instructions
+  LeanTest.assertTrue (state.linearTrace.size == 2) s!"Expected 2 linear insts, got {state.linearTrace.size}"
+
+  -- Transpose and verify chain rule application
+  let vjpStmts ← runTranspose state.linearTrace
+
+  -- exp backward (2 stmts) + mul backward (4 stmts) = 6 total
+  LeanTest.assertTrue (vjpStmts.size == 6) s!"Expected 6 VJP stmts for chain, got {vjpStmts.size}"
+
+-- Test nested computation: z = (x + y) * (x - y)
+@[test]
+def testNestedComputation : IO Unit := do
+  let x : VarId := { idx := 0 }
+  let y : VarId := { idx := 1 }
+  let sum : VarId := { idx := 2 }   -- x + y
+  let diff : VarId := { idx := 3 }  -- x - y
+  let z : VarId := { idx := 4 }     -- (x+y) * (x-y)
+
+  let stmts := #[
+    KStmt.binary .Add sum x y,
+    KStmt.binary .Sub diff x y,
+    KStmt.binary .Mul z sum diff
+  ]
+
+  let (_, state) ← runTraceM (stmts.forM linearizeStmt)
+
+  -- Should have 3 primal and 3 linear
+  LeanTest.assertTrue (state.primalStmts.size == 3) s!"Expected 3 primal stmts"
+  LeanTest.assertTrue (state.linearTrace.size == 3) s!"Expected 3 linear insts"
+
+  -- Transpose
+  let vjpStmts ← runTranspose state.linearTrace
+
+  -- mul backward (4) + sub backward (2) + add backward (2) = 8 total
+  LeanTest.assertTrue (vjpStmts.size == 8) s!"Expected 8 VJP stmts, got {vjpStmts.size}"
+
 end Tests.GPU.AutoGrad
