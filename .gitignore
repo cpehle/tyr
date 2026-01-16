@@ -7,3 +7,4 @@ out/
 *produced.out
 .ninja_log
 .DS_Store
+checkpoints/
