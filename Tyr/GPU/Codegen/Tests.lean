@@ -13,6 +13,8 @@ import Tyr.GPU.Codegen.Ops
 import Tyr.GPU.Codegen.Loop
 import Tyr.GPU.Codegen.EmitNew
 import Tyr.GPU.Codegen.ArchConfig
+import Tyr.GPU.Codegen.Arch
+import Tyr.GPU.Codegen.Attribute
 
 namespace Tyr.GPU.Codegen.Tests
 
@@ -329,7 +331,7 @@ using namespace kittens;
 
 #if defined(KITTENS_HOPPER)
 __global__ void with_params(bf16* x_ptr, float* y_ptr, float n) {
-  rt<bf16, 64, 64, row_l> v0;
+  rt<bf16, 64, 64, row_l> v3;
 }
 #endif
 -/
@@ -383,36 +385,36 @@ using namespace kittens;
 #if defined(KITTENS_HOPPER)
 __global__ void mini_flash_attn(bf16* Q, bf16* K, bf16* V, bf16* O) {
   // Tiles
-  rt<bf16, 64, 64, row_l> v0;
-  rt<bf16, 64, 64, row_l> v1;
-  rt<bf16, 64, 64, col_l> v2;
-  rt<float, 64, 64, row_l> v3;
-  rt<float, 64, 64, row_l> v4;
-  zero(v4, v4);
+  rt<bf16, 64, 64, row_l> v4;
   rt<bf16, 64, 64, row_l> v5;
+  rt<bf16, 64, 64, col_l> v6;
+  rt<float, 64, 64, row_l> v7;
+  rt<float, 64, 64, row_l> v8;
+  zero(v8, v8);
+  rt<bf16, 64, 64, row_l> v9;
   // Vectors
-  rv<float, 64> v6;
-  neg_infty(v6, v6);
-  rv<float, 64> v7;
+  rv<float, 64> v10;
+  neg_infty(v10, v10);
+  rv<float, 64> v11;
   // Shared
-  st<bf16, 64, 64, row_l> v8;
-  st<bf16, 64, 64, row_l> v9;
-  st<bf16, 64, 64, col_l> v10;
-  load(v0, v8);
-  for (int v11 = 0; v11 < 4; v11++) {
-    load(v1, v9);
-    load(v2, v10);
-    mma_ABt(v3, v0, v1, v3);
-    make_causal(v3, v3, -10000000000.000000);
-    row_max(v6, v3, v6);
-    sub_col(v3, v3, v6);
-    exp(v3, v3);
-    row_sum(v7, v3, v7);
-    copy(v5, v3);
-    mma_AB(v4, v5, v2, v4);
+  st<bf16, 64, 64, row_l> v12;
+  st<bf16, 64, 64, row_l> v13;
+  st<bf16, 64, 64, col_l> v14;
+  load(v4, v12);
+  for (int v15 = 0; v15 < 4; v15++) {
+    load(v5, v13);
+    load(v6, v14);
+    mma_ABt(v7, v4, v5, v7);
+    make_causal(v7, v7, -10000000000.000000);
+    row_max(v10, v7, v10);
+    sub_col(v7, v7, v10);
+    exp(v7, v7);
+    row_sum(v11, v7, v11);
+    copy(v9, v7);
+    mma_AB(v8, v9, v6, v8);
     sync(0);
   }
-  div_col(v4, v4, v7);
+  div_col(v8, v8, v11);
 }
 #endif
 -/
@@ -447,5 +449,157 @@ __global__ void mini_flash_attn(bf16* Q, bf16* K, bf16* V, bf16* O) {
 
 #guard (ArchKernelConfig.default .SM80).useWGMMA = false
 #guard (ArchKernelConfig.default .SM90).useWGMMA = true
+
+/-! ## Polymorphic Kernel Tests -/
+
+open Arch in
+/-- Example polymorphic kernel that adapts to different GPU architectures.
+    When marked with @[gpu_kernel] (no arch argument), it generates
+    kernel variants for SM80, SM90, and SM100 automatically.
+
+    The function takes an ArchLevel parameter and returns ArchKernelM arch Unit.
+    Instance resolution happens at compile time when the kernel is instantiated
+    for a specific architecture. -/
+def examplePolyMatmul [HasMMA arch] [ArchConfig arch]
+    (_A : GPtr .BFloat16) (_B : GPtr .BFloat16) (_C : GPtr .BFloat16)
+    : ArchKernelM arch Unit := do
+  -- Get architecture-specific configuration via typeclass
+  let cfg := ArchConfig.toRecord (arch := arch)
+  let (tileM, tileN, _) := cfg.mmaTileSize
+
+  -- Emit architecture info as a comment
+  archComment s!"Tile: {tileM}x{tileN}, TMA: {cfg.hasTMA}, WGMMA: {cfg.hasWGMMA}"
+
+  -- Allocate tiles
+  let a ← ArchKernelM.liftPortable (allocRT .BFloat16 64 64)
+  let b ← ArchKernelM.liftPortable (allocRT .BFloat16 64 64 .Col)
+  let c ← ArchKernelM.liftPortable (zeroRT .Float32 64 64)
+
+  -- smartMMA dispatches at compile time via typeclass:
+  -- - Ampere: plain mma_AB
+  -- - Hopper/Blackwell: mma_fence + mma_AB + mma_commit_group
+  smartMMA c a b c
+
+  archSync
+
+/-- Test that the polymorphic kernel generates code for Ampere (SM80) -/
+def polyKernelSM80 : Kernel :=
+  buildKernelM "examplePolyMatmul_SM80" .SM80 #[
+    { name := "A", dtype := .BFloat16, isPointer := true },
+    { name := "B", dtype := .BFloat16, isPointer := true },
+    { name := "C", dtype := .BFloat16, isPointer := true }
+  ] (examplePolyMatmul (arch := .Ampere)
+      (GPtr.mk ⟨0⟩ "A")
+      (GPtr.mk ⟨1⟩ "B")
+      (GPtr.mk ⟨2⟩ "C")).run
+
+/--
+info: #include <kittens.cuh>
+using namespace kittens;
+
+#if defined(KITTENS_SM80)
+__global__ void examplePolyMatmul_SM80(bf16* A, bf16* B, bf16* C) {
+  // Tile: 16x16, TMA: false, WGMMA: false
+  rt<bf16, 64, 64, row_l> v3;
+  rt<bf16, 64, 64, col_l> v4;
+  rt<float, 64, 64, row_l> v5;
+  zero(v5, v5);
+  mma_AB(v5, v3, v4, v5);
+  sync(0);
+}
+#endif
+-/
+#guard_msgs in
+#eval IO.println (generateKernel polyKernelSM80)
+
+/-- Test that the polymorphic kernel generates code for Hopper (SM90) with WGMMA -/
+def polyKernelSM90 : Kernel :=
+  buildKernelM "examplePolyMatmul_SM90" .SM90 #[
+    { name := "A", dtype := .BFloat16, isPointer := true },
+    { name := "B", dtype := .BFloat16, isPointer := true },
+    { name := "C", dtype := .BFloat16, isPointer := true }
+  ] (examplePolyMatmul (arch := .Hopper)
+      (GPtr.mk ⟨0⟩ "A")
+      (GPtr.mk ⟨1⟩ "B")
+      (GPtr.mk ⟨2⟩ "C")).run
+
+/--
+info: #include <kittens.cuh>
+using namespace kittens;
+
+#if defined(KITTENS_HOPPER)
+__global__ void examplePolyMatmul_SM90(bf16* A, bf16* B, bf16* C) {
+  // Tile: 64x64, TMA: true, WGMMA: true
+  rt<bf16, 64, 64, row_l> v3;
+  rt<bf16, 64, 64, col_l> v4;
+  rt<float, 64, 64, row_l> v5;
+  zero(v5, v5);
+  mma_fence(v5);
+  mma_AB(v5, v3, v4, v5);
+  mma_commit_group();
+  sync(0);
+}
+#endif
+-/
+#guard_msgs in
+#eval IO.println (generateKernel polyKernelSM90)
+
+/-- Test that the polymorphic kernel generates code for Blackwell (SM100) -/
+def polyKernelSM100 : Kernel :=
+  buildKernelM "examplePolyMatmul_SM100" .SM100 #[
+    { name := "A", dtype := .BFloat16, isPointer := true },
+    { name := "B", dtype := .BFloat16, isPointer := true },
+    { name := "C", dtype := .BFloat16, isPointer := true }
+  ] (examplePolyMatmul (arch := .Blackwell)
+      (GPtr.mk ⟨0⟩ "A")
+      (GPtr.mk ⟨1⟩ "B")
+      (GPtr.mk ⟨2⟩ "C")).run
+
+/--
+info: #include <kittens.cuh>
+using namespace kittens;
+
+#if defined(KITTENS_BLACKWELL)
+__global__ void examplePolyMatmul_SM100(bf16* A, bf16* B, bf16* C) {
+  // Tile: 64x64, TMA: true, WGMMA: true
+  rt<bf16, 64, 64, row_l> v3;
+  rt<bf16, 64, 64, col_l> v4;
+  rt<float, 64, 64, row_l> v5;
+  zero(v5, v5);
+  mma_fence(v5);
+  mma_AB(v5, v3, v4, v5);
+  mma_commit_group();
+  sync(0);
+}
+#endif
+-/
+#guard_msgs in
+#eval IO.println (generateKernel polyKernelSM100)
+
+/-! ## Polymorphic Kernel Pattern
+
+The recommended pattern for architecture-polymorphic kernels uses typeclass constraints
+for compile-time dispatch. When instantiated with a concrete architecture, the correct
+implementation is selected at compile time with zero runtime overhead.
+
+```lean
+-- Define polymorphic kernel with typeclass constraint
+def myPolyKernel [HasMMA arch] (input : GPtr .BFloat16) (output : GPtr .BFloat16)
+    : ArchKernelM arch Unit := do
+  let cfg := ArchConfig.toRecord (arch := arch)
+  -- Tile sizes, etc. are resolved at compile time
+  let a ← ArchKernelM.liftPortable (allocRT .BFloat16 64 64)
+  ...
+  -- smartMMA dispatches via typeclass - compile-time selection
+  smartMMA dst a b c
+
+-- Instantiate for each architecture (generates different code)
+def kernel_SM80 := buildKernelM "k" .SM80 #[...] (myPolyKernel (arch := .Ampere) ...).run
+def kernel_SM90 := buildKernelM "k" .SM90 #[...] (myPolyKernel (arch := .Hopper) ...).run
+```
+
+The `@[gpu_kernel]` attribute can automate this instantiation when enhanced to detect
+the typeclass-constrained pattern.
+-/
 
 end Tyr.GPU.Codegen.Tests
