@@ -88,6 +88,16 @@ partial def generateStmt (indent : String := "  ") : KStmt → String
   | .mmaCommitGroup => s!"{indent}mma_commit_group();\n"
   | .mmaAsyncWait n => s!"{indent}mma_async_wait<{n}>();\n"
 
+  -- Blackwell-specific MMA (tcgen05 / 2-CTA MMA)
+  | .tcgen05Mma trans dst a b c =>
+    s!"{indent}tcgen05::mma_{trans.toSuffix}({dst.toIdent}, {a.toIdent}, {b.toIdent}, {c.toIdent});\n"
+
+  -- Architecture-specific load variants
+  | .cpAsyncLoad dst src coordB coordD coordR coordC sem =>
+    s!"{indent}cp_async::load({dst.toIdent}, {src.toIdent}, \{.b={coordB.toIdent}, .d={coordD.toIdent}, .r={coordR.toIdent}, .c={coordC.toIdent}}, {sem.toIdent});\n"
+  | .tmaLoadAsync dst src coordB coordD coordR coordC sem =>
+    s!"{indent}tma::load_async({dst.toIdent}, {src.toIdent}, \{.b={coordB.toIdent}, .d={coordD.toIdent}, .r={coordR.toIdent}, .c={coordC.toIdent}}, {sem.toIdent});\n"
+
   -- Element-wise unary
   | .unary op dst src => s!"{indent}{op.toCpp}({dst.toIdent}, {src.toIdent});\n"
 

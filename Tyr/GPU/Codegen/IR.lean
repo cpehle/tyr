@@ -64,6 +64,13 @@ inductive KStmt where
   | mmaCommitGroup
   | mmaAsyncWait (n : Nat)
 
+  -- Blackwell-specific MMA (tcgen05 / 2-CTA MMA)
+  | tcgen05Mma (trans : MMATranspose) (dst a b c : VarId)  -- SM100 2-CTA MMA
+
+  -- Architecture-specific load variants (for explicit control)
+  | cpAsyncLoad (dst src : VarId) (coordB coordD coordR coordC sem : VarId)  -- cp.async (SM80)
+  | tmaLoadAsync (dst src : VarId) (coordB coordD coordR coordC sem : VarId)  -- TMA (SM90+)
+
   -- Element-wise unary
   | unary (op : UnaryOp) (dst src : VarId)
 
