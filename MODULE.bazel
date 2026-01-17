@@ -1,0 +1,64 @@
+"""Tyr - Deep Learning Library for Lean 4"""
+
+module(
+    name = "tyr",
+    version = "0.1.0",
+)
+
+# rules_lean from local path
+bazel_dep(name = "rules_lean")
+local_path_override(
+    module_name = "rules_lean",
+    path = "../silicon_intelligence/si0/rules_lean",
+)
+
+# Platform constraints
+bazel_dep(name = "platforms", version = "0.0.11")
+bazel_dep(name = "rules_cc", version = "0.1.1")
+
+# Local repository rule for external dependencies
+new_local_repository = use_repo_rule(
+    "@bazel_tools//tools/build_defs/repo:local.bzl",
+    "new_local_repository",
+)
+
+# Local Lean toolchain (elan-managed)
+new_local_repository(
+    name = "lean_toolchain",
+    path = "/Users/pehle/.elan/toolchains/leanprover--lean4-nightly---nightly-2025-12-01",
+    build_file = "//third_party:lean_toolchain.BUILD",
+)
+
+# LeanTest dependency
+new_local_repository(
+    name = "lean_test",
+    path = "/Users/pehle/dev/LeanTest",
+    build_file = "//third_party:lean_test.BUILD",
+)
+
+# Pre-downloaded LibTorch
+new_local_repository(
+    name = "libtorch",
+    path = "/Users/pehle/dev/tyr/external/libtorch",
+    build_file = "//third_party:libtorch.BUILD",
+)
+
+# Apache Arrow (Homebrew)
+new_local_repository(
+    name = "arrow",
+    path = "/opt/homebrew",
+    build_file = "//third_party:arrow.BUILD",
+)
+
+# OpenMP (Homebrew)
+new_local_repository(
+    name = "openmp",
+    path = "/opt/homebrew/opt/libomp",
+    build_file = "//third_party:openmp.BUILD",
+)
+
+# Register toolchains
+register_toolchains("//toolchain:lean_toolchain_macos_arm64")
+register_toolchains("//toolchain:lean_toolchain_macos_x86_64")
+register_toolchains("//toolchain:lean_toolchain_linux_x86_64")
+register_toolchains("//toolchain:lean_toolchain_linux_arm64")

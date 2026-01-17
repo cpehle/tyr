@@ -1,0 +1,76 @@
+"""Root BUILD file for Tyr."""
+
+load("@rules_lean//:defs.bzl", "lean_binary", "lean_library")
+
+package(default_visibility = ["//visibility:public"])
+
+# Main Tyr library - core deep learning infrastructure
+lean_library(
+    name = "Tyr",
+    srcs = ["Tyr.lean"] + glob(["Tyr/**/*.lean"]),
+    cc_deps = ["//cc:TyrC"],
+    module_name = "Tyr",
+)
+
+# Examples library
+lean_library(
+    name = "Examples",
+    srcs = glob(["Examples/**/*.lean"]),
+    deps = [":Tyr"],
+    module_name = "Examples",
+)
+
+# Tests library
+lean_library(
+    name = "Tests",
+    srcs = glob(["Tests/**/*.lean"]),
+    deps = [
+        ":Tyr",
+        "@lean_test//:LeanTest",
+    ],
+    module_name = "Tests",
+)
+
+# Training executables
+lean_binary(
+    name = "TrainGPT",
+    srcs = ["Examples/TrainGPT.lean"],
+    deps = [":Examples"],
+    cc_deps = ["//cc:TyrC"],
+)
+
+lean_binary(
+    name = "TrainDiffusion",
+    srcs = ["Examples/TrainDiffusion.lean"],
+    deps = [":Examples"],
+    cc_deps = ["//cc:TyrC"],
+)
+
+lean_binary(
+    name = "TrainNanoChat",
+    srcs = ["Examples/NanoChat/TrainNanoChat.lean"],
+    deps = [":Examples"],
+    cc_deps = ["//cc:TyrC"],
+)
+
+# Test executable
+lean_binary(
+    name = "test_runner",
+    srcs = ["Tests/RunTests.lean"],
+    deps = [":Tests"],
+    cc_deps = ["//cc:TyrC"],
+)
+
+lean_binary(
+    name = "TestDiffusion",
+    srcs = ["Tests/TestDiffusion.lean"],
+    deps = [":Tests"],
+    cc_deps = ["//cc:TyrC"],
+)
+
+lean_binary(
+    name = "TestDataLoader",
+    srcs = ["Tests/TestDataLoader.lean"],
+    deps = [":Tests"],
+    cc_deps = ["//cc:TyrC"],
+)

@@ -1,0 +1,44 @@
+"""BUILD file for Tyr C++ bindings (TyrC library)."""
+
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "TyrC",
+    srcs = [
+        "src/tyr.cpp",
+        "src/tyr_distributed.cpp",
+        "src/tyr_execution.cpp",
+        "src/tyr_parquet.cpp",
+        "src/tyr_polar.cpp",
+    ],
+    hdrs = ["include/tyr.h"],
+    copts = [
+        "-std=c++17",
+        "-fPIC",
+        "-O3",
+        "-Wall",
+        "-Wno-sign-compare",
+        "-Wno-unused-parameter",
+        "-Wno-missing-field-initializers",
+        "-Wno-comment",
+        "-Winconsistent-missing-override",
+    ],
+    includes = ["include"],
+    linkopts = select({
+        "@platforms//os:macos": [
+            "-Wl,-rpath,@loader_path/../external/libtorch/lib",
+            "-Wl,-rpath,/opt/homebrew/opt/libomp/lib",
+            "-Wl,-rpath,/opt/homebrew/lib",
+        ],
+        "@platforms//os:linux": [
+            "-Wl,-rpath,$ORIGIN/../external/libtorch/lib",
+        ],
+        "//conditions:default": [],
+    }),
+    deps = [
+        "@arrow//:arrow",
+        "@lean_toolchain//:leanrt",
+        "@libtorch//:libtorch",
+        "@openmp//:openmp",
+    ],
+)

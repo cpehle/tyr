@@ -1,0 +1,72 @@
+"""Lean toolchain definitions for local Lean installation."""
+
+load("@rules_lean//:defs.bzl", "lean_toolchain")
+
+package(default_visibility = ["//visibility:public"])
+
+# Lean toolchain implementation using local elan-managed installation
+lean_toolchain(
+    name = "lean_toolchain_impl",
+    lean = "@lean_toolchain//:lean",
+    leanc = "@lean_toolchain//:leanc",
+    lean_headers = [
+        "@lean_toolchain//:include/lean/lean.h",
+        "@lean_toolchain//:include/lean/config.h",
+        "@lean_toolchain//:include/lean/version.h",
+        "@lean_toolchain//:include/lean/mimalloc.h",
+        "@lean_toolchain//:include/lean/lean_gmp.h",
+        "@lean_toolchain//:include/lean/lean_libuv.h",
+    ],
+    stdlib_oleans = ["@lean_toolchain//:stdlib_oleans"],
+    lib_lean_path = "external/lean_toolchain/lib/lean",
+    runtime = "@lean_toolchain//:leanrt",
+    linker_flags = select({
+        "@platforms//os:macos": ["-lc++"],
+        "@platforms//os:linux": ["-lstdc++", "-lpthread", "-ldl", "-lm"],
+        "//conditions:default": [],
+    }),
+)
+
+# Register for macOS ARM64
+toolchain(
+    name = "lean_toolchain_macos_arm64",
+    exec_compatible_with = [
+        "@platforms//os:macos",
+        "@platforms//cpu:arm64",
+    ],
+    toolchain = ":lean_toolchain_impl",
+    toolchain_type = "@rules_lean//:toolchain_type",
+)
+
+# Register for macOS x86_64
+toolchain(
+    name = "lean_toolchain_macos_x86_64",
+    exec_compatible_with = [
+        "@platforms//os:macos",
+        "@platforms//cpu:x86_64",
+    ],
+    toolchain = ":lean_toolchain_impl",
+    toolchain_type = "@rules_lean//:toolchain_type",
+)
+
+# Register for Linux x86_64
+toolchain(
+    name = "lean_toolchain_linux_x86_64",
+    exec_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+    ],
+    toolchain = ":lean_toolchain_impl",
+    toolchain_type = "@rules_lean//:toolchain_type",
+)
+
+# Register for Linux ARM64
+toolchain(
+    name = "lean_toolchain_linux_arm64",
+    exec_compatible_with = [
+        "@platforms//os:linux",
+        "@platforms//cpu:arm64",
+    ],
+    toolchain = ":lean_toolchain_impl",
+    toolchain_type = "@rules_lean//:toolchain_type",
+)

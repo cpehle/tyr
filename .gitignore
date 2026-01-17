@@ -8,3 +8,7 @@ out/
 .ninja_log
 .DS_Store
 checkpoints/
+
+# Bazel
+bazel-*
+MODULE.bazel.lock
