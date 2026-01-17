@@ -11,6 +11,7 @@ import Tyr.GPU.Codegen.TileTypes
 import Tyr.GPU.Codegen.IR
 import Tyr.GPU.Codegen.Monad
 import Tyr.GPU.Codegen.EmitNew
+import Tyr.GPU.Codegen.Arch.Level
 
 namespace Tyr.GPU.Codegen
 
@@ -105,8 +106,10 @@ def parseArch (stx : Syntax) : MetaM GpuArch := do
   | `(.SM100) => return .SM100
   | _ => throwError "Invalid GPU architecture: expected .SM80, .SM90, or .SM100"
 
-/-- The gpu_kernel attribute syntax -/
-syntax (name := gpuKernelAttr) "gpu_kernel" term : attr
+/-- The gpu_kernel attribute syntax
+    - @[gpu_kernel .SM90] - single architecture kernel
+    - @[gpu_kernel] - polymorphic kernel (generates for all architectures) -/
+syntax (name := gpuKernelAttr) "gpu_kernel" (term)? : attr
 
 /-- Check if a substring exists in a string -/
 def containsSubstr (s sub : String) : Bool :=
@@ -259,20 +262,160 @@ def generateLaunchDecl (declName : Name) (params : Array ExtractedParam) : Comma
 
   elabCommand cmd
 
-/-- Attribute handler for @[gpu_kernel arch] -/
+/-- Check if a function type has an ArchLevel parameter -/
+def hasArchLevelParam (type : Expr) : MetaM Bool := do
+  let mut currType := type
+  while currType.isForall do
+    let domainType ← whnf currType.bindingDomain!
+    if domainType.isConstOf ``Arch.ArchLevel then
+      return true
+    currType ← whnf (currType.bindingBody!.instantiate1 (mkFVar ⟨currType.bindingName!⟩))
+  return false
+
+/-- Generate companion kernel definition for a polymorphic kernel at a specific architecture -/
+def generatePolyKernelCompanion (declName : Name) (arch : GpuArch) (archLevel : Arch.ArchLevel)
+    (params : Array ExtractedParam) : CommandElabM Unit := do
+  let suffix := archLevel.toSuffix
+  let companionName := declName ++ Name.mkSimple s!"kernel{suffix}"
+  let fnIdent := mkIdent declName
+
+  -- Build KParam array syntax
+  let kparamStxs ← params.mapM fun p => do
+    let dtypeStx := match p.dtype with
+      | .Float32 => mkIdent ``GpuFloat.Float32
+      | .Float16 => mkIdent ``GpuFloat.Float16
+      | .BFloat16 => mkIdent ``GpuFloat.BFloat16
+      | .FP8E4M3 => mkIdent ``GpuFloat.FP8E4M3
+      | .FP8E5M2 => mkIdent ``GpuFloat.FP8E5M2
+    let nameStr := Syntax.mkStrLit p.name.toString
+    let isPtr := if p.isPointer then mkIdent ``true else mkIdent ``false
+    `({ name := $nameStr, dtype := $dtypeStx, isPointer := $isPtr : KParam })
+
+  -- Build argument syntax for each parameter
+  let mut argStxs : Array (TSyntax `term) := #[]
+  for h : idx in [:params.size] do
+    let p := params[idx]
+    let idxLit := Syntax.mkNumLit (toString idx)
+    let nameStr := Syntax.mkStrLit p.name.toString
+    let argStx : TSyntax `term ← if p.isPointer then
+      `(GPtr.mk ⟨$idxLit⟩ $nameStr)
+    else
+      `(KVal.mk ⟨$idxLit⟩ $nameStr)
+    argStxs := argStxs.push argStx
+
+  -- Add the architecture argument
+  let archLevelStx := match archLevel with
+    | .Ampere => mkIdent ``Arch.ArchLevel.Ampere
+    | .Hopper => mkIdent ``Arch.ArchLevel.Hopper
+    | .Blackwell => mkIdent ``Arch.ArchLevel.Blackwell
+  argStxs := argStxs.push archLevelStx
+
+  let archStx := match arch with
+    | .SM80 => mkIdent ``GpuArch.SM80
+    | .SM90 => mkIdent ``GpuArch.SM90
+    | .SM100 => mkIdent ``GpuArch.SM100
+
+  let nameStr := Syntax.mkStrLit s!"{declName}{suffix}"
+
+  -- For polymorphic kernels, the function returns ArchKernelM arch Unit
+  -- We need to extract the .run to get KernelM Unit
+  let cmd ← `(
+    def $(mkIdent companionName) : Kernel :=
+      buildKernelM $nameStr $archStx #[$kparamStxs,*] (($fnIdent $argStxs*).run)
+  )
+
+  elabCommand cmd
+
+/-- Generate unified launch declaration for polymorphic kernel -/
+def generatePolyLaunchDecl (declName : Name) (params : Array ExtractedParam) : CommandElabM Unit := do
+  let launchName := declName ++ `launch
+
+  -- Build parameter binders
+  let mut paramBinders : Array (TSyntax `Lean.Parser.Term.bracketedBinder) := #[]
+
+  -- Add arch parameter first
+  let archBinder ← `(bracketedBinder| (arch : Arch.ArchLevel))
+  paramBinders := paramBinders.push archBinder
+
+  for p in params do
+    let paramIdent := mkIdent p.name
+    let binder ← if p.isPointer then
+      `(bracketedBinder| ($paramIdent : @& Tensor))
+    else
+      `(bracketedBinder| ($paramIdent : UInt64))
+    paramBinders := paramBinders.push binder
+
+  -- Add grid, block, sharedMem, stream parameters
+  let gridBinder ← `(bracketedBinder| (grid : UInt64 × UInt64 × UInt64))
+  let blockBinder ← `(bracketedBinder| (block : UInt64 × UInt64 × UInt64))
+  let smemBinder ← `(bracketedBinder| (sharedMem : UInt64))
+  let streamBinder ← `(bracketedBinder| (stream : CudaStream))
+  paramBinders := paramBinders ++ #[gridBinder, blockBinder, smemBinder, streamBinder]
+
+  -- Build the argument list for each arch-specific launcher
+  let mut argIdents : Array (TSyntax `term) := #[]
+  for p in params do
+    argIdents := argIdents.push (mkIdent p.name)
+  argIdents := argIdents ++ #[mkIdent `grid, mkIdent `block, mkIdent `sharedMem, mkIdent `stream]
+
+  let launchSM80 := mkIdent (declName ++ Name.mkSimple "launch_SM80")
+  let launchSM90 := mkIdent (declName ++ Name.mkSimple "launch_SM90")
+  let launchSM100 := mkIdent (declName ++ Name.mkSimple "launch_SM100")
+
+  -- Generate: def X.launch (arch : ArchLevel) (params...) : IO Unit := match arch with ...
+  let cmd ← `(command|
+    def $(mkIdent launchName) $paramBinders* : IO Unit :=
+      match arch with
+      | .Ampere => $launchSM80 $argIdents*
+      | .Hopper => $launchSM90 $argIdents*
+      | .Blackwell => $launchSM100 $argIdents*
+  )
+
+  elabCommand cmd
+
+/-- Generate arch-specific launch declaration -/
+def generateArchLaunchDecl (declName : Name) (suffix : String) (params : Array ExtractedParam)
+    : CommandElabM Unit := do
+  let launchName := declName ++ Name.mkSimple s!"launch{suffix}"
+  let externNameStr := "lean_launch_" ++ declName.toString.replace "." "_" ++ suffix
+
+  -- Build parameter binders
+  let mut paramBinders : Array (TSyntax `Lean.Parser.Term.bracketedBinder) := #[]
+  for p in params do
+    let paramIdent := mkIdent p.name
+    let binder ← if p.isPointer then
+      `(bracketedBinder| ($paramIdent : @& Tensor))
+    else
+      `(bracketedBinder| ($paramIdent : UInt64))
+    paramBinders := paramBinders.push binder
+
+  let gridBinder ← `(bracketedBinder| (grid : UInt64 × UInt64 × UInt64))
+  let blockBinder ← `(bracketedBinder| (block : UInt64 × UInt64 × UInt64))
+  let smemBinder ← `(bracketedBinder| (sharedMem : UInt64))
+  let streamBinder ← `(bracketedBinder| (stream : CudaStream))
+  paramBinders := paramBinders ++ #[gridBinder, blockBinder, smemBinder, streamBinder]
+
+  let strLitNode := Syntax.mkStrLit externNameStr
+  let externEntryStx : TSyntax `Lean.Parser.Attr.externEntry := ⟨Syntax.node SourceInfo.none
+    `Lean.Parser.Attr.externEntry #[
+      Syntax.node SourceInfo.none `null #[],
+      Syntax.node SourceInfo.none `null #[],
+      strLitNode
+    ]⟩
+
+  let cmd ← `(command|
+    @[extern $externEntryStx]
+    opaque $(mkIdent launchName) $paramBinders* : IO Unit
+  )
+
+  elabCommand cmd
+
+/-- Attribute handler for @[gpu_kernel] and @[gpu_kernel arch] -/
 initialize registerBuiltinAttribute {
   name := `gpuKernelAttr
-  descr := "Mark a function as a GPU kernel for the specified architecture"
+  descr := "Mark a function as a GPU kernel. Use @[gpu_kernel .SM90] for single arch, @[gpu_kernel] for polymorphic."
   applicationTime := .afterCompilation
   add := fun declName stx _attrKind => do
-    let `(attr| gpu_kernel $archStx) := stx
-      | throwError "Invalid gpu_kernel attribute syntax"
-
-    -- Get the architecture from syntax
-    let arch ← match parseArchSyntax archStx with
-      | .ok a => pure a
-      | .error e => throwError e
-
     -- Get the declaration info
     let env ← getEnv
     let some info := env.find? declName
@@ -281,28 +424,60 @@ initialize registerBuiltinAttribute {
     -- Extract parameters from the function type
     let params ← Meta.MetaM.run' (extractParams info.type)
 
-    -- Generate companion .kernel definition
-    liftCommandElabM (generateKernelCompanion declName arch params)
+    -- Check if architecture is specified
+    match stx with
+    | `(attr| gpu_kernel $archStx) =>
+      -- Single architecture mode (existing behavior)
+      let arch ← match parseArchSyntax archStx with
+        | .ok a => pure a
+        | .error e => throwError e
 
-    -- Generate .launch FFI declaration
-    liftCommandElabM (generateLaunchDecl declName params)
+      liftCommandElabM (generateKernelCompanion declName arch params)
+      liftCommandElabM (generateLaunchDecl declName params)
 
-    -- Convert ExtractedParam to KParam for registration
-    let kparams := params.map fun p =>
-      { name := p.name.toString, dtype := p.dtype, isPointer := p.isPointer : KParam }
+      let kparams := params.map fun p =>
+        { name := p.name.toString, dtype := p.dtype, isPointer := p.isPointer : KParam }
+      let cppCode := generateCppLauncherCode declName kparams
 
-    -- Generate C++ launcher code
-    let cppCode := generateCppLauncherCode declName kparams
+      registerKernel {
+        name := declName
+        arch := arch
+        kernel := { name := declName.toString, arch := arch, params := kparams, body := #[] }
+        cppCode := cppCode
+      }
 
-    -- Register kernel with full info
-    let registeredKernel : RegisteredKernel := {
-      name := declName
-      arch := arch
-      kernel := { name := declName.toString, arch := arch, params := kparams, body := #[] }
-      cppCode := cppCode
-    }
+    | `(attr| gpu_kernel) =>
+      -- Polymorphic mode: check if function has ArchLevel parameter
+      let isPoly ← Meta.MetaM.run' (hasArchLevelParam info.type)
+      if !isPoly then
+        throwError "Polymorphic @[gpu_kernel] requires function to have an ArchLevel parameter"
 
-    registerKernel registeredKernel
+      -- Generate kernel for each architecture
+      let archs := #[
+        (GpuArch.SM80, Arch.ArchLevel.Ampere),
+        (GpuArch.SM90, Arch.ArchLevel.Hopper),
+        (GpuArch.SM100, Arch.ArchLevel.Blackwell)
+      ]
+
+      for (gpuArch, archLevel) in archs do
+        liftCommandElabM (generatePolyKernelCompanion declName gpuArch archLevel params)
+        liftCommandElabM (generateArchLaunchDecl declName archLevel.toSuffix params)
+
+        let kparams := params.map fun p =>
+          { name := p.name.toString, dtype := p.dtype, isPointer := p.isPointer : KParam }
+        let cppCode := generateCppLauncherCode (declName ++ Name.mkSimple archLevel.toSuffix) kparams
+
+        registerKernel {
+          name := declName ++ archLevel.toNameSuffix
+          arch := gpuArch
+          kernel := { name := s!"{declName}{archLevel.toSuffix}", arch := gpuArch, params := kparams, body := #[] }
+          cppCode := cppCode
+        }
+
+      -- Generate unified launcher
+      liftCommandElabM (generatePolyLaunchDecl declName params)
+
+    | _ => throwError "Invalid gpu_kernel attribute syntax"
 }
 
 /-! ## Kernel Building Macro -/
