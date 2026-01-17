@@ -41,19 +41,14 @@ jobs:
           unzip libtorch.zip -d external/
           rm libtorch.zip
 
+      - name: Clone LeanTest dependency
+        run: git clone https://github.com/cpehle/lean_test.git ../LeanTest
+
       - name: Build C++ bindings
         run: make -C cc
 
-      - name: Check Lean compilation
-        run: |
-          # Build core modules that don't have pre-existing errors
-          lake env lean Tyr/Basic.lean -o /dev/null
-          lake env lean Tyr/Torch.lean -o /dev/null
-          lake env lean Tyr/TensorStruct.lean -o /dev/null
-          lake env lean Tyr/Optim.lean -o /dev/null
-          lake env lean Tyr/Train.lean -o /dev/null
-          lake env lean Tyr/DataLoader.lean -o /dev/null
-          lake env lean Tyr/GPT.lean -o /dev/null
+      - name: Build Lean project
+        run: lake build
 
   lint:
     runs-on: ubuntu-latest
