@@ -31,12 +31,28 @@ Fused linear + GELU activation using producer-consumer pattern.
 GELU formula: f * 0.5 * (1 + fast_tanh(f * 0.79788456 * (1 + f² * 0.044715)))
 -/
 
-/-- Flux GELU forward pass - fused linear + GELU -/
+/-- Flux GELU forward pass - fused linear + GELU
+
+Parameters:
+  X_ptr: Input tensor [batch, seq_len, hidden_dim]
+  W_ptr: Weight matrix [hidden_dim, out_dim]
+  O_ptr: Output tensor [batch, seq_len, out_dim]
+  batch_size: Number of sequences in batch
+  seq_len: Sequence length
+  hidden_dim: Input hidden dimension (must be multiple of 64)
+  out_dim: Output dimension (must be multiple of 64)
+-/
 @[gpu_kernel .SM90]
-def fluxGeluFwd : KernelM Unit := do
+def fluxGeluFwd (X_ptr : GPtr GpuFloat.BFloat16) (W_ptr : GPtr GpuFloat.BFloat16)
+    (O_ptr : GPtr GpuFloat.BFloat16)
+    (_batch_size : KVal UInt64) (_seq_len : KVal UInt64)
+    (_hidden_dim : KVal UInt64) (_out_dim : KVal UInt64) : KernelM Unit := do
   comment "=== Flux GELU Forward (Fused Linear + GELU) ==="
 
-  -- Input tile
+  -- Get block coordinates: (batch_head_idx, seq_block_idx)
+  let coord ← blockCoord2D
+
+  -- Input tile (64 tokens × 64 hidden)
   let x : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
 
   -- Weight tile (col-major for tensor cores)
@@ -58,41 +74,48 @@ def fluxGeluFwd : KernelM Unit := do
   let wShared : ST GpuFloat.BFloat16 64 64 .Col ← allocST .BFloat16 64 64 .Col
   let outShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
 
-  comment "Producer-consumer loop"
-  for blkIdx in krange 0 8 do
-    comment "Load input and weights"
+  comment "Load input tile from global memory"
+  loadGlobal xShared X_ptr coord
+  sync
+
+  comment "Accumulate over hidden dimension tiles (hidden_dim / 64 iterations)"
+  for kIdx in krange 0 8 do
+    comment "Load weight tile for this k-block"
+    loadGlobal wShared W_ptr (coord.withCol kIdx.id)
+    sync
     load x xShared
     load w wShared
 
-    comment "Linear: acc = x @ w"
+    comment "Linear: acc += x @ w"
     mma acc x w acc
-
-    comment "Convert to float32 for GELU computation"
-    convert f acc
-
-    comment "GELU: f * 0.5 * (1 + fast_tanh(f * 0.79788456 * (1 + f² * 0.044715)))"
-    -- f² = f * f
-    mul f2 f f
-    -- f² * 0.044715
-    scalarMul f2 f2 0.044715
-    -- 1 + f² * 0.044715
-    scalarAdd f2 f2 1.0
-    -- f * 0.79788456 * (1 + f² * 0.044715)
-    scalarMul tanh_arg f 0.79788456
-    mul tanh_arg tanh_arg f2
-    -- fast_tanh(...)
-    fastTanh tanh_arg tanh_arg
-    -- 1 + fast_tanh(...)
-    scalarAdd tanh_arg tanh_arg 1.0
-    -- f * 0.5 * (1 + fast_tanh(...))
-    scalarMul f f 0.5
-    mul f f tanh_arg
-
-    comment "Convert back to bf16 and store"
-    convert out f
-    store outShared out
-
     sync
+
+  comment "Convert to float32 for GELU computation"
+  convert f acc
+
+  comment "GELU: f * 0.5 * (1 + fast_tanh(f * 0.79788456 * (1 + f² * 0.044715)))"
+  -- f² = f * f
+  mul f2 f f
+  -- f² * 0.044715
+  scalarMul f2 f2 0.044715
+  -- 1 + f² * 0.044715
+  scalarAdd f2 f2 1.0
+  -- f * 0.79788456 * (1 + f² * 0.044715)
+  scalarMul tanh_arg f 0.79788456
+  mul tanh_arg tanh_arg f2
+  -- fast_tanh(...)
+  fastTanh tanh_arg tanh_arg
+  -- 1 + fast_tanh(...)
+  scalarAdd tanh_arg tanh_arg 1.0
+  -- f * 0.5 * (1 + fast_tanh(...))
+  scalarMul f f 0.5
+  mul f f tanh_arg
+
+  comment "Convert back to bf16 and store to global memory"
+  convert out f
+  store outShared out
+  sync
+  storeGlobal O_ptr outShared coord
 
 -- Verify auto-generated kernel
 #check fluxGeluFwd.kernel
@@ -103,10 +126,26 @@ def fluxGeluFwd : KernelM Unit := do
 Gate multiplication with residual addition.
 -/
 
-/-- Flux Gate forward pass - gating mechanism -/
+/-- Flux Gate forward pass - gating mechanism
+
+Parameters:
+  X_ptr: Main activation tensor [batch, seq_len, hidden_dim]
+  Gate_ptr: Gate tensor [batch, seq_len, hidden_dim]
+  Residual_ptr: Residual input tensor [batch, seq_len, hidden_dim]
+  O_ptr: Output tensor [batch, seq_len, hidden_dim]
+  batch_size: Number of sequences in batch
+  seq_len: Sequence length
+  hidden_dim: Hidden dimension (must be multiple of 64)
+-/
 @[gpu_kernel .SM90]
-def fluxGateFwd : KernelM Unit := do
+def fluxGateFwd (X_ptr : GPtr GpuFloat.BFloat16) (Gate_ptr : GPtr GpuFloat.BFloat16)
+    (Residual_ptr : GPtr GpuFloat.BFloat16) (O_ptr : GPtr GpuFloat.BFloat16)
+    (_batch_size : KVal UInt64) (_seq_len : KVal UInt64)
+    (_hidden_dim : KVal UInt64) : KernelM Unit := do
   comment "=== Flux Gate Forward (SwiGLU-style) ==="
+
+  -- Get block coordinates: (batch_idx, seq_block_idx)
+  let coord ← blockCoord2D
 
   -- Main activation tile
   let x : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
@@ -131,9 +170,16 @@ def fluxGateFwd : KernelM Unit := do
   let residualShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
   let outShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
 
-  comment "Process sequence"
-  for seqIdx in krange 0 16 do
-    comment "Load inputs"
+  comment "Process hidden dimension tiles"
+  for hiddenIdx in krange 0 16 do
+    let tileCoord := coord.withCol hiddenIdx.id
+
+    comment "Load inputs from global memory"
+    loadGlobal xShared X_ptr tileCoord
+    loadGlobal gateShared Gate_ptr tileCoord
+    loadGlobal residualShared Residual_ptr tileCoord
+    sync
+
     load x xShared
     load gate gateShared
     load residual residualShared
@@ -149,25 +195,39 @@ def fluxGateFwd : KernelM Unit := do
     comment "Residual addition: acc = acc + residual"
     add acc acc residualF
 
-    comment "Convert back and store"
+    comment "Convert back and store to global memory"
     convert out acc
     store outShared out
-
     sync
+    storeGlobal O_ptr outShared tileCoord
 
--- Verify auto-generated kernel
-#check fluxGateFwd.kernel
-#check fluxGateFwd.launch
 
 /-! ## Flux Linear + SiLU (GLU variant)
 
 Linear transformation followed by SiLU gating.
 -/
 
-/-- Flux Linear + SiLU forward pass -/
+/-- Flux Linear + SiLU forward pass (SwiGLU MLP)
+
+Parameters:
+  X_ptr: Input tensor [batch, seq_len, hidden_dim]
+  W_up_ptr: Up-projection weight [hidden_dim, intermediate_dim]
+  W_gate_ptr: Gate-projection weight [hidden_dim, intermediate_dim]
+  O_ptr: Output tensor [batch, seq_len, intermediate_dim]
+  batch_size: Number of sequences in batch
+  seq_len: Sequence length
+  hidden_dim: Input hidden dimension (must be multiple of 64)
+  intermediate_dim: Intermediate/output dimension (must be multiple of 64)
+-/
 @[gpu_kernel .SM90]
-def fluxSiluFwd : KernelM Unit := do
-  comment "=== Flux Linear + SiLU ==="
+def fluxSiluFwd (X_ptr : GPtr GpuFloat.BFloat16) (W_up_ptr : GPtr GpuFloat.BFloat16)
+    (W_gate_ptr : GPtr GpuFloat.BFloat16) (O_ptr : GPtr GpuFloat.BFloat16)
+    (_batch_size : KVal UInt64) (_seq_len : KVal UInt64)
+    (_hidden_dim : KVal UInt64) (_intermediate_dim : KVal UInt64) : KernelM Unit := do
+  comment "=== Flux Linear + SiLU (SwiGLU MLP) ==="
+
+  -- Get block coordinates: (batch_seq_idx, out_tile_idx)
+  let coord ← blockCoord2D
 
   let x : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
   let wUp : RT GpuFloat.BFloat16 64 64 .Col ← allocRT .BFloat16 64 64 .Col
@@ -183,29 +243,41 @@ def fluxSiluFwd : KernelM Unit := do
   let wGateShared : ST GpuFloat.BFloat16 64 64 .Col ← allocST .BFloat16 64 64 .Col
   let outShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
 
-  for blkIdx in krange 0 8 do
-    comment "Load inputs"
+  comment "Load input tile"
+  loadGlobal xShared X_ptr coord
+  sync
+
+  comment "Accumulate over hidden dimension tiles (hidden_dim / 64 iterations)"
+  for kIdx in krange 0 8 do
+    let weightCoord := coord.withCol kIdx.id
+
+    comment "Load weight tiles for this k-block"
+    loadGlobal wUpShared W_up_ptr weightCoord
+    loadGlobal wGateShared W_gate_ptr weightCoord
+    sync
+
     load x xShared
     load wUp wUpShared
     load wGate wGateShared
 
-    comment "Compute up projection: up = x @ wUp"
+    comment "Compute up projection: up += x @ wUp"
     mma up x wUp up
 
-    comment "Compute gate projection: gate = x @ wGate"
+    comment "Compute gate projection: gate += x @ wGate"
     mma gateVal x wGate gateVal
-
-    comment "Apply SiLU to gate: gate = gate * sigmoid(gate)"
-    silu gateVal gateVal
-
-    comment "Multiply: out = up * silu(gate)"
-    mul up up gateVal
-
-    comment "Store output"
-    convert out up
-    store outShared out
-
     sync
+
+  comment "Apply SiLU to gate: gate = gate * sigmoid(gate)"
+  silu gateVal gateVal
+
+  comment "Multiply: out = up * silu(gate)"
+  mul up up gateVal
+
+  comment "Store output to global memory"
+  convert out up
+  store outShared out
+  sync
+  storeGlobal O_ptr outShared coord
 
 -- Verify auto-generated kernel
 #check fluxSiluFwd.kernel
