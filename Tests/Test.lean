@@ -28,15 +28,21 @@ def encode (s : String) : Array Int64 :=
 def decode (tokens : Array Int64) : String :=
   String.ofList (tokens.toList.map intToChar)
 
-/-- Test tokenizer encode/decode -/
+/-- Test character-level encode/decode -/
 @[test]
 def testTokenizer : IO Unit := do
-  let tok := tokenizer.createBase
-  LeanTest.assertTrue (tok.vocabSize > 0) "Vocab size should be positive"
+  -- Test that vocab size is correct (65 Shakespeare chars)
+  LeanTest.assertEqual shakespeareChars.length 65 "Vocab size should be 65"
 
-  let testText := "Hello, world! This is a test."
-  let pretokens := tokenizer.pretokenizeFull testText
-  LeanTest.assertTrue (pretokens.size > 0) "Should produce pretokens"
+  -- Test encode produces tokens
+  let testText := "Hello world"
+  let tokens := encode testText
+  LeanTest.assertTrue (tokens.size > 0) "Should produce tokens"
+  LeanTest.assertEqual tokens.size testText.length "Token count should match text length"
+
+  -- Test decode recovers original text
+  let decoded := decode tokens
+  LeanTest.assertEqual decoded testText "Decode should recover original text"
 
 /-- Test NanoProof model forward pass -/
 @[test]
