@@ -60,6 +60,17 @@ opaque readRowGroup (filePath : @& String) (rowGroupIdx : UInt64) (textColumn : 
 @[extern "lean_parquet_file_exists"]
 opaque parquetFileExists (filePath : @& String) : IO Bool
 
+/-- Read all rows from a parquet file as JSON strings.
+    Returns an array where each element is a JSON object string for one row.
+    This reads all columns and handles various Arrow types (string, int, float, bool, list, struct). -/
+@[extern "lean_parquet_read_as_json"]
+opaque readParquetAsJson (filePath : @& String) : IO (Array String)
+
+/-- Read a specific row group from a parquet file as JSON strings.
+    More memory-efficient for large files. -/
+@[extern "lean_parquet_read_row_group_as_json"]
+opaque readRowGroupAsJson (filePath : @& String) (rowGroupIdx : UInt64) : IO (Array String)
+
 /-! ## Configuration -/
 
 /-- Configuration for pretraining data loader -/

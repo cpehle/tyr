@@ -252,50 +252,113 @@ def computeLosses {batch seq vocab : UInt64} (logits : T #[batch, seq, vocab])
   reshape lossesFlat #[batch, seq]
 
 /-- Evaluate multiple choice example.
-    Returns index of choice with lowest average continuation loss. -/
+    Returns index of choice with lowest average continuation loss.
+
+    For each option:
+    1. Get logits for that sequence in the batch
+    2. Compute cross-entropy loss at each position
+    3. Average the losses over the continuation region (startIdx to endIdx)
+    4. Pick the option with lowest average loss -/
 def evaluateMC {batch seq vocab : UInt64}
     (logits : T #[batch, seq, vocab])
+    (targetIds : T #[batch, seq])
     (batchInfo : BatchInfo)
-    (goldIdx : Nat) : EvalResult := Id.run do
-  -- For each option, compute average loss over continuation tokens
-  let mut meanLosses := #[]
+    (goldIdx : Nat) : IO EvalResult := do
+  -- Compute per-position losses: [batch, seq]
+  let losses2d := computeLosses logits targetIds
 
-  -- Note: In actual implementation, we would extract losses per option
-  -- and compute means. For now, return placeholder.
-  for _i in [:batchInfo.tokens.size] do
-    -- Would compute: mean(losses[i, start:end])
-    meanLosses := meanLosses.push (0.0 : Float)
+  -- For each option, compute mean loss over continuation tokens
+  let mut meanLosses : Array Float := #[]
+
+  for i in [:batchInfo.tokens.size] do
+    let si := batchInfo.startIndices[i]!
+    let ei := batchInfo.endIndices[i]!
+    let contLen := ei - si
+
+    if contLen == 0 then
+      -- No continuation tokens, assign very high loss
+      meanLosses := meanLosses.push 1e30
+    else
+      -- Extract losses for this sequence: losses2d[i, si-1:ei-1]
+      -- (loss at position j predicts token j+1)
+      let rowIdx := i.toUInt64
+      let startLossIdx := if si > 0 then si - 1 else 0
+      let endLossIdx := if ei > 0 then ei - 1 else 0
+
+      -- Compute mean via tensor operations
+      let lossesFlat := reshape losses2d #[batch * seq]
+      let rowOffset := rowIdx * seq
+      let startIdx := rowOffset + startLossIdx.toUInt64
+      let numTokens := (endLossIdx - startLossIdx).toUInt64
+
+      if numTokens > 0 then
+        let endIdxSlice := (startIdx + numTokens).toInt64
+        let segmentLosses := data.slice1d' lossesFlat startIdx.toInt64 endIdxSlice
+        let meanLoss := nn.item (nn.meanAll segmentLosses)
+        meanLosses := meanLosses.push meanLoss
+      else
+        meanLosses := meanLosses.push 1e30
 
   -- Predict option with lowest loss
-  let mut minVal : Float := 1e30  -- Large value as infinity placeholder
+  let mut minVal : Float := 1e30
   let mut minIdx := 0
   for i in [:meanLosses.size] do
     if meanLosses[i]! < minVal then
       minVal := meanLosses[i]!
       minIdx := i
 
-  { correct := minIdx == goldIdx
-    losses := meanLosses
-    prediction := minIdx }
+  return { correct := minIdx == goldIdx
+           losses := meanLosses
+           prediction := minIdx }
 
 /-- Evaluate language modeling example.
-    Returns whether all continuation tokens were predicted correctly. -/
+    Returns whether all continuation tokens were predicted correctly.
+
+    For language modeling:
+    1. Get argmax predictions at each position
+    2. Compare predictions[start-1:end-1] with target tokens[start:end]
+    3. Return correct=true if all predictions match -/
 def evaluateLM {seq vocab : UInt64}
     (logits : T #[1, seq, vocab])
-    (batchInfo : BatchInfo) : EvalResult := Id.run do
+    (targetIds : T #[1, seq])
+    (batchInfo : BatchInfo) : IO EvalResult := do
   let startIdx := batchInfo.startIndices[0]!
   let endIdx := batchInfo.endIndices[0]!
 
-  -- Get argmax predictions at each position
-  -- predictions[i] predicts token at position i+1
-  let predictions := nn.argmax logits 2  -- [1, seq]
+  if startIdx >= endIdx then
+    return { correct := false, losses := #[], prediction := 0 }
 
-  -- Check if predictions match actual tokens
-  -- Would compare: predictions[0, start-1:end-1] vs tokens[0, start:end]
-  -- For now, return placeholder
-  { correct := false
-    losses := #[]
-    prediction := 0 }
+  -- Get argmax predictions at each position: [1, seq]
+  -- predictions[i] is the predicted token for position i+1
+  let predictions := nn.argmax logits 2
+
+  -- Flatten to 1D for easier slicing
+  let predsFlat := reshape predictions #[seq]
+  let targetFlat := reshape targetIds #[seq]
+
+  -- Compare predictions[start-1:end-1] with targets[start:end]
+  -- This checks if the model correctly predicts each continuation token
+  let predStartIdx := if startIdx > 0 then (startIdx - 1).toUInt64 else 0
+  let predEndIdx := if endIdx > 0 then (endIdx - 1).toUInt64 else 0
+  let numTokens := predEndIdx - predStartIdx
+
+  if numTokens == 0 then
+    return { correct := false, losses := #[], prediction := 0 }
+
+  -- Slice predictions and targets using slice1d' (start, stop)
+  let predStopIdx := (predStartIdx + numTokens).toInt64
+  let targetStopIdx := (startIdx.toUInt64 + numTokens).toInt64
+  let predSlice := data.slice1d' predsFlat predStartIdx.toInt64 predStopIdx
+  let targetSlice := data.slice1d' targetFlat startIdx.toUInt64.toInt64 targetStopIdx
+
+  -- Compare element-wise and check all match
+  let matchTensor := torch.eq predSlice targetSlice
+  let numMatches := nn.item (nn.sumAll (toFloat' matchTensor))
+  let allCorrect := numMatches == numTokens.toFloat
+
+  return { correct := allCorrect
+           losses := #[]
+           prediction := if allCorrect then 1 else 0 }
 
 /-! ## High-Level API -/
 
@@ -309,13 +372,84 @@ structure EvalConfig where
   device : Device := Device.CPU
   deriving Repr, Inhabited
 
+/-- Stack and pad token sequences to create input tensor -/
+def stackAndPad (tokens : Array (Array UInt64)) (padToken : UInt64) : Array UInt64 := Id.run do
+  if tokens.isEmpty then return #[]
+  let maxLen := tokens.foldl (fun acc seq => max acc seq.size) 0
+  let mut result : Array UInt64 := #[]
+  for seq in tokens do
+    let padded := seq ++ Array.mk (List.replicate (maxLen - seq.size) padToken)
+    result := result ++ padded
+  return result
+
+/-- Evaluate a single example and return whether it's correct -/
+def evaluateSingleExample
+    (item : EvalItem)
+    (taskMeta : TaskMeta)
+    (tokenize : String → Array UInt64)
+    (runModel : T #[] → IO (T #[]))
+    (bosToken : UInt64)
+    : IO (Option Bool) := do
+  -- Render prompts and get batch info based on task type
+  let maybeBatchAndGold := match taskMeta.taskType, item with
+  | .multipleChoice, .mc mcItem =>
+    let prompts := renderPromptsMC mcItem taskMeta.continuationDelimiter #[]
+    some (batchSequencesMC tokenize prompts bosToken, mcItem.gold)
+  | .schema, .schema schemaItem =>
+    let prompts := renderPromptsSchema schemaItem taskMeta.continuationDelimiter #[]
+    some (batchSequencesSchema tokenize prompts bosToken, schemaItem.gold)
+  | .languageModeling, .lm lmItem =>
+    let (ctx, full) := renderPromptsLM lmItem taskMeta.continuationDelimiter #[]
+    some (batchSequencesLM tokenize ctx full bosToken, 0)
+  | _, _ => none
+
+  match maybeBatchAndGold with
+  | none => return none
+  | some (batchInfo, goldIdx) =>
+    -- Prepare input tensor
+    let paddedTokens := stackAndPad batchInfo.tokens bosToken
+    let batchSize := batchInfo.tokens.size.toUInt64
+    let seqLen := if batchInfo.tokens.isEmpty then (1 : UInt64)
+                  else batchInfo.tokens[0]!.size.toUInt64
+
+    -- Convert to tensor
+    let inputTensor := data.fromInt64Array (paddedTokens.map (·.toInt64))
+    let inputReshaped := reshape inputTensor #[batchSize, seqLen]
+
+    -- Run model forward
+    let logits ← runModel (reshape inputReshaped #[])
+
+    -- Create target IDs tensor (same as input for loss computation)
+    let targetTensor := data.fromInt64Array (paddedTokens.map (·.toInt64))
+    let targetReshaped := reshape targetTensor #[batchSize, seqLen]
+
+    -- Evaluate based on task type
+    let result ← match taskMeta.taskType with
+    | .multipleChoice | .schema =>
+      -- Get logits shape dynamically
+      let logitsTyped : T #[batchSize, seqLen, 65536] := cast rfl logits  -- Assume vocab size
+      let targetTyped : T #[batchSize, seqLen] := cast rfl targetReshaped
+      evaluateMC logitsTyped targetTyped batchInfo goldIdx
+    | .languageModeling =>
+      let logitsTyped : T #[1, seqLen, 65536] := cast rfl logits
+      let targetTyped : T #[1, seqLen] := cast rfl targetReshaped
+      evaluateLM logitsTyped targetTyped batchInfo
+
+    return some result.correct
+
 /-- Evaluate a single task across many examples.
-    Returns accuracy (fraction correct). -/
+    Returns accuracy (fraction correct).
+
+    For each example:
+    1. Render prompts based on task type
+    2. Tokenize and batch
+    3. Run model forward
+    4. Use evaluateMC/evaluateLM/evaluateSchema to determine correctness -/
 def evaluateTask
     (examples : Array EvalItem)
     (taskMeta : TaskMeta)
     (tokenize : String → Array UInt64)
-    (runModel : T #[] → IO (T #[]))  -- Placeholder for generic model forward
+    (runModel : T #[] → IO (T #[]))
     (config : EvalConfig)
     : IO Float := do
   if examples.isEmpty then return 0.0
@@ -331,20 +465,29 @@ def evaluateTask
 
   -- Evaluate examples strided by rank
   for idx in [:examples.size] do
+    -- Skip if not assigned to this rank
     if idx % worldSize.toNat == rank.toNat then
-      -- For now, placeholder evaluation
-      -- Real implementation would:
-      -- 1. Render prompts based on task type
-      -- 2. Tokenize and batch
-      -- 3. Run model forward
-      -- 4. Compute losses and determine correctness
-      numTotal := numTotal + 1
+      let item := examples[idx]!
+      let maybeCorrect ← evaluateSingleExample item taskMeta tokenize runModel config.bosToken
+      match maybeCorrect with
+      | none => pure ()  -- Skip invalid examples
+      | some isCorrect =>
+        if isCorrect then
+          numCorrect := numCorrect + 1
+        numTotal := numTotal + 1
 
   -- Aggregate across ranks if distributed
   if isDistributed && worldSize > 1 then
     dist.barrier
-    -- Would all-reduce numCorrect here
+    -- All-reduce numCorrect and numTotal (allReduce modifies in-place)
+    let correctTensor := data.fromInt64Array #[numCorrect.toInt64]
+    let totalTensor := data.fromInt64Array #[numTotal.toInt64]
+    dist.allReduce correctTensor .sum
+    dist.allReduce totalTensor .sum
+    numCorrect := (nn.itemInt correctTensor).toInt.toNat
+    numTotal := (nn.itemInt totalTensor).toInt.toNat
 
+  if numTotal == 0 then return 0.0
   return numCorrect.toFloat / numTotal.toFloat
 
 /-- Predefined CORE tasks from DCLM benchmark -/

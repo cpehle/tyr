@@ -252,4 +252,289 @@ lean_object* lean_parquet_file_exists(b_lean_obj_arg file_path, lean_object* /* 
     return mk_io_ok(lean_box(exists ? 1 : 0));
 }
 
+// ============================================================================
+// JSON Serialization Helpers for Parquet Data
+// ============================================================================
+
+// Escape a string for JSON
+static std::string json_escape(const std::string& s) {
+    std::string result;
+    result.reserve(s.size() + 10);
+    for (char c : s) {
+        switch (c) {
+            case '"': result += "\\\""; break;
+            case '\\': result += "\\\\"; break;
+            case '\b': result += "\\b"; break;
+            case '\f': result += "\\f"; break;
+            case '\n': result += "\\n"; break;
+            case '\r': result += "\\r"; break;
+            case '\t': result += "\\t"; break;
+            default:
+                if (static_cast<unsigned char>(c) < 0x20) {
+                    char buf[8];
+                    snprintf(buf, sizeof(buf), "\\u%04x", static_cast<unsigned char>(c));
+                    result += buf;
+                } else {
+                    result += c;
+                }
+        }
+    }
+    return result;
+}
+
+// Convert an Arrow scalar value to JSON string representation
+static std::string arrow_value_to_json(const std::shared_ptr<arrow::Array>& arr, int64_t idx) {
+    if (arr->IsNull(idx)) {
+        return "null";
+    }
+
+    switch (arr->type_id()) {
+        case arrow::Type::STRING: {
+            auto string_arr = std::static_pointer_cast<arrow::StringArray>(arr);
+            return "\"" + json_escape(string_arr->GetString(idx)) + "\"";
+        }
+        case arrow::Type::LARGE_STRING: {
+            auto string_arr = std::static_pointer_cast<arrow::LargeStringArray>(arr);
+            return "\"" + json_escape(std::string(string_arr->GetView(idx))) + "\"";
+        }
+        case arrow::Type::INT8: {
+            auto int_arr = std::static_pointer_cast<arrow::Int8Array>(arr);
+            return std::to_string(int_arr->Value(idx));
+        }
+        case arrow::Type::INT16: {
+            auto int_arr = std::static_pointer_cast<arrow::Int16Array>(arr);
+            return std::to_string(int_arr->Value(idx));
+        }
+        case arrow::Type::INT32: {
+            auto int_arr = std::static_pointer_cast<arrow::Int32Array>(arr);
+            return std::to_string(int_arr->Value(idx));
+        }
+        case arrow::Type::INT64: {
+            auto int_arr = std::static_pointer_cast<arrow::Int64Array>(arr);
+            return std::to_string(int_arr->Value(idx));
+        }
+        case arrow::Type::UINT8: {
+            auto int_arr = std::static_pointer_cast<arrow::UInt8Array>(arr);
+            return std::to_string(int_arr->Value(idx));
+        }
+        case arrow::Type::UINT16: {
+            auto int_arr = std::static_pointer_cast<arrow::UInt16Array>(arr);
+            return std::to_string(int_arr->Value(idx));
+        }
+        case arrow::Type::UINT32: {
+            auto int_arr = std::static_pointer_cast<arrow::UInt32Array>(arr);
+            return std::to_string(int_arr->Value(idx));
+        }
+        case arrow::Type::UINT64: {
+            auto int_arr = std::static_pointer_cast<arrow::UInt64Array>(arr);
+            return std::to_string(int_arr->Value(idx));
+        }
+        case arrow::Type::FLOAT: {
+            auto float_arr = std::static_pointer_cast<arrow::FloatArray>(arr);
+            return std::to_string(float_arr->Value(idx));
+        }
+        case arrow::Type::DOUBLE: {
+            auto float_arr = std::static_pointer_cast<arrow::DoubleArray>(arr);
+            return std::to_string(float_arr->Value(idx));
+        }
+        case arrow::Type::BOOL: {
+            auto bool_arr = std::static_pointer_cast<arrow::BooleanArray>(arr);
+            return bool_arr->Value(idx) ? "true" : "false";
+        }
+        case arrow::Type::LIST: {
+            auto list_arr = std::static_pointer_cast<arrow::ListArray>(arr);
+            auto values = list_arr->values();
+            int32_t start = list_arr->value_offset(idx);
+            int32_t end = list_arr->value_offset(idx + 1);
+
+            std::string result = "[";
+            for (int32_t i = start; i < end; i++) {
+                if (i > start) result += ",";
+                result += arrow_value_to_json(values, i);
+            }
+            result += "]";
+            return result;
+        }
+        case arrow::Type::LARGE_LIST: {
+            auto list_arr = std::static_pointer_cast<arrow::LargeListArray>(arr);
+            auto values = list_arr->values();
+            int64_t start = list_arr->value_offset(idx);
+            int64_t end = list_arr->value_offset(idx + 1);
+
+            std::string result = "[";
+            for (int64_t i = start; i < end; i++) {
+                if (i > start) result += ",";
+                result += arrow_value_to_json(values, i);
+            }
+            result += "]";
+            return result;
+        }
+        case arrow::Type::STRUCT: {
+            auto struct_arr = std::static_pointer_cast<arrow::StructArray>(arr);
+            auto struct_type = std::static_pointer_cast<arrow::StructType>(arr->type());
+
+            std::string result = "{";
+            for (int i = 0; i < struct_arr->num_fields(); i++) {
+                if (i > 0) result += ",";
+                result += "\"" + json_escape(struct_type->field(i)->name()) + "\":";
+                result += arrow_value_to_json(struct_arr->field(i), idx);
+            }
+            result += "}";
+            return result;
+        }
+        default:
+            // For unsupported types, return as string representation
+            return "\"<unsupported>\"";
+    }
+}
+
+// ============================================================================
+// FFI Implementation: lean_parquet_read_as_json
+// Reads all rows from a parquet file and returns them as JSON strings.
+// Returns Array String where each string is a JSON object for one row.
+// ============================================================================
+
+lean_object* lean_parquet_read_as_json(b_lean_obj_arg file_path, lean_object* /* world */) {
+    std::string path = lean_string_cstr(file_path);
+
+    // Open file
+    auto maybe_infile = arrow::io::ReadableFile::Open(path);
+    if (!maybe_infile.ok()) {
+        return mk_io_error("Failed to open file: " + maybe_infile.status().message());
+    }
+    auto infile = *maybe_infile;
+
+    // Create parquet reader
+    std::unique_ptr<parquet::arrow::FileReader> reader;
+    auto status = parquet::arrow::FileReader::Make(
+        arrow::default_memory_pool(),
+        parquet::ParquetFileReader::Open(infile),
+        &reader);
+    if (!status.ok()) {
+        return mk_io_error("Failed to open parquet file: " + status.message());
+    }
+
+    // Read entire table
+    std::shared_ptr<arrow::Table> table;
+    status = reader->ReadTable(&table);
+    if (!status.ok()) {
+        return mk_io_error("Failed to read parquet table: " + status.message());
+    }
+
+    // Get column names
+    auto schema = table->schema();
+    std::vector<std::string> column_names;
+    for (int i = 0; i < schema->num_fields(); i++) {
+        column_names.push_back(schema->field(i)->name());
+    }
+
+    // Build JSON strings for each row
+    std::vector<std::string> json_rows;
+    int64_t num_rows = table->num_rows();
+
+    // Flatten chunked arrays for easier access
+    std::vector<std::shared_ptr<arrow::Array>> columns;
+    for (int col_idx = 0; col_idx < table->num_columns(); col_idx++) {
+        auto chunked = table->column(col_idx);
+        // Combine all chunks into one array
+        auto maybe_combined = arrow::Concatenate(chunked->chunks(), arrow::default_memory_pool());
+        if (!maybe_combined.ok()) {
+            return mk_io_error("Failed to concatenate chunks: " + maybe_combined.status().message());
+        }
+        columns.push_back(*maybe_combined);
+    }
+
+    // Build JSON for each row
+    for (int64_t row = 0; row < num_rows; row++) {
+        std::string json = "{";
+        for (size_t col = 0; col < columns.size(); col++) {
+            if (col > 0) json += ",";
+            json += "\"" + json_escape(column_names[col]) + "\":";
+            json += arrow_value_to_json(columns[col], row);
+        }
+        json += "}";
+        json_rows.push_back(json);
+    }
+
+    return mk_io_ok(mk_string_array(json_rows));
+}
+
+// ============================================================================
+// FFI Implementation: lean_parquet_read_row_group_as_json
+// Reads a specific row group and returns rows as JSON strings.
+// More memory-efficient for large files.
+// ============================================================================
+
+lean_object* lean_parquet_read_row_group_as_json(b_lean_obj_arg file_path, uint64_t row_group_idx,
+                                                   lean_object* /* world */) {
+    std::string path = lean_string_cstr(file_path);
+
+    // Open file
+    auto maybe_infile = arrow::io::ReadableFile::Open(path);
+    if (!maybe_infile.ok()) {
+        return mk_io_error("Failed to open file: " + maybe_infile.status().message());
+    }
+    auto infile = *maybe_infile;
+
+    // Create parquet reader
+    std::unique_ptr<parquet::arrow::FileReader> reader;
+    auto status = parquet::arrow::FileReader::Make(
+        arrow::default_memory_pool(),
+        parquet::ParquetFileReader::Open(infile),
+        &reader);
+    if (!status.ok()) {
+        return mk_io_error("Failed to open parquet file: " + status.message());
+    }
+
+    // Check row group index
+    auto parquet_reader = reader->parquet_reader();
+    auto file_metadata = parquet_reader->metadata();
+    if (row_group_idx >= static_cast<uint64_t>(file_metadata->num_row_groups())) {
+        return mk_io_error("Row group index out of range: " + std::to_string(row_group_idx) +
+                          " >= " + std::to_string(file_metadata->num_row_groups()));
+    }
+
+    // Read the row group
+    std::shared_ptr<arrow::Table> table;
+    status = reader->ReadRowGroup(static_cast<int>(row_group_idx), &table);
+    if (!status.ok()) {
+        return mk_io_error("Failed to read row group: " + status.message());
+    }
+
+    // Get column names
+    auto schema = table->schema();
+    std::vector<std::string> column_names;
+    for (int i = 0; i < schema->num_fields(); i++) {
+        column_names.push_back(schema->field(i)->name());
+    }
+
+    // Flatten chunked arrays
+    std::vector<std::shared_ptr<arrow::Array>> columns;
+    for (int col_idx = 0; col_idx < table->num_columns(); col_idx++) {
+        auto chunked = table->column(col_idx);
+        auto maybe_combined = arrow::Concatenate(chunked->chunks(), arrow::default_memory_pool());
+        if (!maybe_combined.ok()) {
+            return mk_io_error("Failed to concatenate chunks: " + maybe_combined.status().message());
+        }
+        columns.push_back(*maybe_combined);
+    }
+
+    // Build JSON for each row
+    std::vector<std::string> json_rows;
+    int64_t num_rows = table->num_rows();
+
+    for (int64_t row = 0; row < num_rows; row++) {
+        std::string json = "{";
+        for (size_t col = 0; col < columns.size(); col++) {
+            if (col > 0) json += ",";
+            json += "\"" + json_escape(column_names[col]) + "\":";
+            json += arrow_value_to_json(columns[col], row);
+        }
+        json += "}";
+        json_rows.push_back(json);
+    }
+
+    return mk_io_ok(mk_string_array(json_rows));
+}
+
 } // extern "C"
