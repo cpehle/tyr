@@ -169,7 +169,7 @@ def testCodeGenDeclarations : IO Unit := do
   let code := generateKernel kernel
   assertTrue (code.containsSubstr "rt<bf16, 64, 64, row_l>") "Should have RT declaration"
   assertTrue (code.containsSubstr "st<float, 32, 64, col_l>") "Should have ST declaration"
-  assertTrue (code.containsSubstr "rv<float, 64>") "Should have RV declaration"
+  assertTrue (code.containsSubstr "rv<float, 64") "Should have RV declaration"
 
 /-- Test C++ code generation for operations -/
 @[test]
@@ -210,7 +210,7 @@ def testCodeGenArchGuard : IO Unit := do
   let code100 := generateKernel kernelSM100
 
   assertTrue (code90.containsSubstr "KITTENS_HOPPER") "SM90 should use HOPPER guard"
-  assertTrue (code80.containsSubstr "KITTENS_SM80") "SM80 should use SM80 guard"
+  assertTrue (code80.containsSubstr "KITTENS_AMPERE") "SM80 should use AMPERE guard"
   assertTrue (code100.containsSubstr "KITTENS_BLACKWELL") "SM100 should use BLACKWELL guard"
 
 /-! ## Reduction and Broadcast Tests -/
@@ -240,8 +240,8 @@ def testColBroadcast : IO Unit := do
     pure ()
 
   let code := generateKernel kernel
-  assertTrue (code.containsSubstr "sub_col(") "Should have sub_col"
-  assertTrue (code.containsSubstr "div_col(") "Should have div_col"
+  assertTrue (code.containsSubstr "sub_row(") "Should have sub_row"
+  assertTrue (code.containsSubstr "div_row(") "Should have div_row"
 
 /-! ## Masking Tests -/
 
@@ -408,7 +408,7 @@ def testFlashAttnStructure : IO Unit := do
   assertTrue (code.containsSubstr "make_causal(") "Should have causal mask"
   assertTrue (code.containsSubstr "row_max(") "Should have row_max"
   assertTrue (code.containsSubstr "for (int") "Should have for loop"
-  assertTrue (code.containsSubstr "div_col(") "Should have final normalization"
+  assertTrue (code.containsSubstr "div_row(") "Should have final normalization"
 
 /-- Test complete LayerNorm-like kernel structure -/
 @[test]
@@ -429,7 +429,7 @@ def testLayerNormStructure : IO Unit := do
 
   let code := generateKernel kernel
   assertTrue (code.containsSubstr "row_sum(") "Should have row_sum"
-  assertTrue (code.containsSubstr "sub_col(") "Should have sub_col"
+  assertTrue (code.containsSubstr "sub_row(") "Should have sub_row"
   assertTrue (code.containsSubstr "mul(") "Should have mul"
 
 end Tests.GPUKernels

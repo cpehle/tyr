@@ -42,6 +42,7 @@ where α can be learned or fixed.
 def hedgehogFwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat16)
     (V_ptr : GPtr GpuFloat.BFloat16) (O_ptr : GPtr GpuFloat.BFloat16)
     (state_ptr : GPtr GpuFloat.Float32) (z_state_ptr : GPtr GpuFloat.Float32)
+    (_batch_size : KVal UInt64) (_num_heads : KVal UInt64)
     (seq_len : KVal UInt64) (head_dim : KVal UInt64) : KernelM Unit := do
   comment "=== Hedgehog Hybrid Attention Forward ==="
 
@@ -192,6 +193,11 @@ def hedgehogFwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat16
   store stateShared state
   storeGlobal state_ptr stateShared coord
 
+  comment "Store final z_state for normalization"
+  let zStateShared : SV GpuFloat.Float32 64 ← allocSV .Float32 64
+  storeVec zStateShared zState
+  storeVecGlobalCoord z_state_ptr zStateShared coord.c
+
 -- Verify auto-generated kernel
 #check hedgehogFwd.kernel
 #check hedgehogFwd.launch
@@ -205,7 +211,9 @@ Variant with learnable mixing coefficients α.
 @[gpu_kernel .SM90]
 def hedgehogLearnedFwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat16)
     (V_ptr : GPtr GpuFloat.BFloat16) (alpha_ptr : GPtr GpuFloat.Float32)
-    (O_ptr : GPtr GpuFloat.BFloat16) (state_ptr : GPtr GpuFloat.Float32) : KernelM Unit := do
+    (O_ptr : GPtr GpuFloat.BFloat16) (state_ptr : GPtr GpuFloat.Float32)
+    (_batch_size : KVal UInt64) (_num_heads : KVal UInt64)
+    (_seq_len : KVal UInt64) (_head_dim : KVal UInt64) : KernelM Unit := do
   comment "=== Hedgehog with Learned Mixing ==="
 
   let numChunks : Nat := 16
@@ -234,7 +242,9 @@ def hedgehogLearnedFwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.B
   let alphaShared : SV GpuFloat.Float32 64 ← allocSV .Float32 64
   let outShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
 
-  comment "Load mixing weights"
+  comment "Load mixing weights from global memory"
+  loadVecGlobalCoord alphaShared alpha_ptr coord.c
+  sync
   loadVec alpha alphaShared
 
   for chunkIdx in krange 0 numChunks do
@@ -278,13 +288,10 @@ def hedgehogLearnedFwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.B
     mma oWindow attBf v oWindow
 
     comment "Learned mixing: O = α * O_linear + (1-α) * O_window"
-    mulCol oLinear oLinear alpha
-    -- Compute (1 - alpha) * O_window
-    let oneMinusAlpha ← allocRV .Float32 64
-    scalarMul oneMinusAlpha alpha (-1.0)  -- -alpha
-    scalarAdd oneMinusAlpha oneMinusAlpha 1.0  -- 1 - alpha
-    mulCol oWindow oWindow oneMinusAlpha
-    add oFinal oLinear oWindow
+    comment "Reformulated as: O = O_window + α * (O_linear - O_window)"
+    sub oFinal oLinear oWindow          -- O_linear - O_window
+    mulCol oFinal oFinal alpha           -- α * (O_linear - O_window)
+    add oFinal oFinal oWindow            -- O_window + α * (O_linear - O_window)
 
     convert out oFinal
     store outShared out
