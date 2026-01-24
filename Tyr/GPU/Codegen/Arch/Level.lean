@@ -94,15 +94,15 @@ def GpuArch.toArchLevel : GpuArch → ArchLevel
 
 /-- Convert ArchLevel to C++ preprocessor guard -/
 def ArchLevel.toGuard : ArchLevel → String
-  | .Ampere => "KITTENS_SM80"
+  | .Ampere => "KITTENS_AMPERE"
   | .Hopper => "KITTENS_HOPPER"
   | .Blackwell => "KITTENS_BLACKWELL"
 
 /-- Convert ArchLevel to nvcc arch flag -/
 def ArchLevel.toNvccArch : ArchLevel → String
-  | .Ampere => "sm_80"
-  | .Hopper => "sm_90"
-  | .Blackwell => "sm_100"
+  | .Ampere => "sm_80a"
+  | .Hopper => "sm_90a"
+  | .Blackwell => "sm_100a"
 
 /-- Convert ArchLevel to suffix for generated names -/
 def ArchLevel.toSuffix : ArchLevel → String

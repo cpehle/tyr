@@ -196,7 +196,7 @@ def testSubBroadcastCol : IO Unit := do
     pure ()
 
   let code := generateKernel kernel
-  assertTrue (code.containsSubstr "sub_col(") "Should have sub_col broadcast"
+  assertTrue (code.containsSubstr "sub_row(") "Should have sub_row broadcast"
 
 /-- Test divBroadcastCol -/
 @[test]
@@ -208,7 +208,7 @@ def testDivBroadcastCol : IO Unit := do
     pure ()
 
   let code := generateKernel kernel
-  assertTrue (code.containsSubstr "div_col(") "Should have div_col broadcast"
+  assertTrue (code.containsSubstr "div_row(") "Should have div_row broadcast"
 
 /-- Test mulBroadcastRow -/
 @[test]
@@ -220,7 +220,7 @@ def testMulBroadcastRow : IO Unit := do
     pure ()
 
   let code := generateKernel kernel
-  assertTrue (code.containsSubstr "mul_row(") "Should have mul_row broadcast"
+  assertTrue (code.containsSubstr "mul_col(") "Should have mul_col broadcast"
 
 /-! ## Notation Tests: Reduction Functions -/
 
@@ -395,7 +395,7 @@ def testAsProducer : IO Unit := do
     pure ()
 
   let code := generateKernel kernel
-  assertTrue (code.containsSubstr "warpgroup_idx() == 0") "Should check warpgroup 0"
+  assertTrue (code.containsSubstr "warpgroup::groupid() == 0") "Should check warpgroup 0"
 
 /-- Test asConsumer helper -/
 @[test]
@@ -407,7 +407,7 @@ def testAsConsumer : IO Unit := do
     pure ()
 
   let code := generateKernel kernel
-  assertTrue (code.containsSubstr "warpgroup_idx() == 1") "Should check warpgroup 1"
+  assertTrue (code.containsSubstr "warpgroup::groupid() == 1") "Should check warpgroup 1"
 
 /-- Test inWarpGroup with arbitrary index -/
 @[test]
@@ -418,7 +418,7 @@ def testInWarpGroup : IO Unit := do
     pure ()
 
   let code := generateKernel kernel
-  assertTrue (code.containsSubstr "warpgroup_idx() == 2") "Should check warpgroup 2"
+  assertTrue (code.containsSubstr "warpgroup::groupid() == 2") "Should check warpgroup 2"
 
 /-! ## Macros Tests: Online Softmax -/
 
@@ -434,7 +434,7 @@ def testAllocSoftmaxState : IO Unit := do
   assertTrue (kernel.body.size ≥ 6) "Should have vector allocations"
 
   let code := generateKernel kernel
-  assertTrue (code.containsSubstr "rv<float, 64>") "Should have Float32 vectors"
+  assertTrue (code.containsSubstr "rv<float, 64") "Should have Float32 vectors"
 
 /-- Test onlineSoftmax generates correct sequence -/
 @[test]
@@ -452,8 +452,8 @@ def testOnlineSoftmax : IO Unit := do
   assertTrue (code.containsSubstr "row_max(") "Should have row_max update"
   assertTrue (code.containsSubstr "sub(") "Should have sub for scale"
   assertTrue (code.containsSubstr "exp(") "Should have exp operations"
-  assertTrue (code.containsSubstr "mul_col(") "Should have mul_col for rescaling"
-  assertTrue (code.containsSubstr "sub_col(") "Should have sub_col for scores"
+  assertTrue (code.containsSubstr "mul_row(") "Should have mul_row for rescaling"
+  assertTrue (code.containsSubstr "sub_row(") "Should have sub_row for scores"
   assertTrue (code.containsSubstr "row_sum(") "Should have row_sum update"
 
 /-- Test finalizeSoftmax -/
@@ -466,7 +466,7 @@ def testFinalizeSoftmax : IO Unit := do
     pure ()
 
   let code := generateKernel kernel
-  assertTrue (code.containsSubstr "div_col(") "Should have div_col for normalization"
+  assertTrue (code.containsSubstr "div_row(") "Should have div_row for normalization"
 
 /-- Test computeLSE -/
 @[test]
@@ -491,7 +491,7 @@ def testSignalBarrier : IO Unit := do
     pure ()
 
   let code := generateKernel kernel
-  assertTrue (code.containsSubstr "named_barrier_arrive") "Should have barrier arrive"
+  assertTrue (code.containsSubstr "kittens::arrive(kittens::barrier<") "Should have barrier arrive"
 
 /-- Test waitBarrier -/
 @[test]
@@ -501,7 +501,7 @@ def testWaitBarrier : IO Unit := do
     pure ()
 
   let code := generateKernel kernel
-  assertTrue (code.containsSubstr "named_barrier_sync") "Should have barrier sync"
+  assertTrue (code.containsSubstr "kittens::arrive_and_wait(kittens::barrier<") "Should have barrier sync"
 
 /-! ## Macros Tests: Attention Block Pattern -/
 
@@ -568,7 +568,7 @@ def testCompleteDSLAttention : IO Unit := do
   assertTrue (code.containsSubstr "dsl_attention") "Should have kernel name"
   assertTrue (code.containsSubstr "mma_ABt(") "Should have Q @ K^T"
   assertTrue (code.containsSubstr "row_max(") "Should have softmax"
-  assertTrue (code.containsSubstr "div_col(") "Should have normalization"
+  assertTrue (code.containsSubstr "div_row(") "Should have normalization"
   assertTrue (code.containsSubstr "log(") "Should have LSE computation"
 
 /-- Test expression chaining -/
@@ -594,7 +594,7 @@ def testExpressionChaining : IO Unit := do
   assertTrue (code.containsSubstr "add(") "Should have add"
   assertTrue (code.containsSubstr "mul(") "Should have mul"
   assertTrue (code.containsSubstr "row_max(") "Should have reduction"
-  assertTrue (code.containsSubstr "sub_col(") "Should have broadcast"
+  assertTrue (code.containsSubstr "sub_row(") "Should have broadcast"
 
 /-- Test warp specialized attention pattern -/
 @[test]
@@ -618,8 +618,8 @@ def testWarpSpecializedPattern : IO Unit := do
     pure ()
 
   let code := generateKernel kernel
-  assertTrue (code.containsSubstr "warpgroup_idx() == 0") "Should have producer check"
-  assertTrue (code.containsSubstr "warpgroup_idx() == 1") "Should have consumer check"
-  assertTrue (code.containsSubstr "named_barrier") "Should have barrier ops"
+  assertTrue (code.containsSubstr "warpgroup::groupid() == 0") "Should have producer check"
+  assertTrue (code.containsSubstr "warpgroup::groupid() == 1") "Should have consumer check"
+  assertTrue (code.containsSubstr "kittens::arrive") "Should have barrier ops"
 
 end Tests.GPUDSL
