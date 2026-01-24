@@ -723,6 +723,13 @@ namespace nanoproof
 @[extern "lean_torch_rms_norm"]
 opaque rmsNorm {s : Shape} (input : @& T s) (eps : Float := 1e-6) : T s
 
+/-- RMSNorm with learnable weight: (x / sqrt(mean(x^2) + eps)) * weight
+    Normalizes over the last dimension, then scales by weight.
+    Weight broadcasts over the last dimension. -/
+@[extern "lean_torch_rms_norm_weighted"]
+opaque rmsNormWeighted {s : Shape} {w : Shape}
+    (input : @& T s) (weight : @& T w) (eps : Float := 1e-6) : T s
+
 /-- ReLU squared activation: relu(x)^2
     Used in nanoproof MLP instead of GELU. -/
 @[extern "lean_torch_relu_squared"]
@@ -789,6 +796,23 @@ opaque scaledDotProductAttentionGQAWindow
     (is_causal : Bool := true)
     (enable_gqa : Bool := false)
     (window_size : UInt64)
+    : T #[batch, n_head, seq, head_dim]
+
+/-- Scaled dot-product attention with GQA and attention mask support.
+    Q: [batch, n_head, seq, head_dim]
+    K, V: [batch, n_kv_head, seq, head_dim]
+    attn_mask: [batch, seq] - padding mask (1 for valid, 0 for padding)
+    When enable_gqa=true, K/V heads are automatically repeated to match Q heads. -/
+@[extern "lean_torch_sdpa_gqa_mask"]
+opaque scaledDotProductAttentionGQAMask
+    {batch n_head n_kv_head seq head_dim : UInt64}
+    (query : @& T #[batch, n_head, seq, head_dim])
+    (key : @& T #[batch, n_kv_head, seq, head_dim])
+    (value : @& T #[batch, n_kv_head, seq, head_dim])
+    (attn_mask : @& T #[batch, seq])
+    (dropout_p : Float := 0.0)
+    (is_causal : Bool := true)
+    (enable_gqa : Bool := false)
     : T #[batch, n_head, seq, head_dim]
 
 end nn

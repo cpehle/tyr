@@ -2107,6 +2107,18 @@ lean_object* lean_torch_rms_norm(lean_obj_arg /*s*/, b_lean_obj_arg input, doubl
   return fromTorchTensor(result_);
 }
 
+// RMSNorm with learnable weight: (x / sqrt(mean(x^2) + eps)) * weight
+// weight broadcasts over the last dimension
+lean_object* lean_torch_rms_norm_weighted(lean_obj_arg /*s*/, lean_obj_arg /*w*/,
+    b_lean_obj_arg input, b_lean_obj_arg weight, double eps) {
+  auto input_ = borrowTensor(input);
+  auto weight_ = borrowTensor(weight);
+  // Compute RMSNorm: x * rsqrt(mean(x^2) + eps) * weight
+  auto variance = input_.pow(2).mean(-1, /*keepdim=*/true);
+  auto result_ = input_ * torch::rsqrt(variance + eps) * weight_;
+  return fromTorchTensor(result_);
+}
+
 // ReLU squared activation: relu(x)^2
 lean_object* lean_torch_relu_squared(lean_obj_arg /*s*/, b_lean_obj_arg input) {
   auto input_ = borrowTensor(input);
@@ -2295,6 +2307,86 @@ lean_object* lean_torch_sdpa_gqa_window(
 
   // Expand mask to [1, 1, seq, seq] for broadcasting over batch and heads
   attn_mask = attn_mask.unsqueeze(0).unsqueeze(0);
+
+  auto result_ = torch::scaled_dot_product_attention(
+    q, k, v,
+    attn_mask,
+    dropout_p,
+    false  // is_causal=false since we're using explicit mask
+  );
+
+  return fromTorchTensor(result_);
+}
+
+// Scaled dot-product attention with GQA and explicit attention mask
+// Q: [batch, n_head, seq, head_dim]
+// K, V: [batch, n_kv_head, seq, head_dim]
+// attn_mask: [batch, seq] - padding mask (1 for valid, 0 for padding)
+lean_object* lean_torch_sdpa_gqa_mask(
+  lean_obj_arg /*batch*/,
+  lean_obj_arg n_head_arg,
+  lean_obj_arg n_kv_head_arg,
+  lean_obj_arg /*seq*/,
+  lean_obj_arg /*head_dim*/,
+  b_lean_obj_arg query,
+  b_lean_obj_arg key,
+  b_lean_obj_arg value,
+  b_lean_obj_arg mask,
+  double dropout_p,
+  uint8_t is_causal,
+  uint8_t enable_gqa
+) {
+  auto q = borrowTensor(query);
+  auto k = borrowTensor(key);
+  auto v = borrowTensor(value);
+  auto padding_mask = borrowTensor(mask);  // [batch, seq]
+
+  // Handle GQA by expanding KV heads to match Q heads
+  if (enable_gqa) {
+    auto n_head = lean_unbox_uint64(n_head_arg);
+    auto n_kv_head = lean_unbox_uint64(n_kv_head_arg);
+
+    if (n_head != n_kv_head && n_kv_head > 0) {
+      auto repeat_factor = n_head / n_kv_head;
+      k = k.repeat_interleave(repeat_factor, 1);
+      v = v.repeat_interleave(repeat_factor, 1);
+    }
+  }
+
+  // Get sequence length from query shape: [batch, n_head, seq, head_dim]
+  auto seq_len = q.size(2);
+
+  // Convert padding mask [batch, seq] to attention mask format
+  // SDPA expects: -inf for masked positions, 0 for unmasked
+  // padding_mask: 1 for valid, 0 for padding
+
+  // Expand padding mask to [batch, 1, 1, seq] for key/value masking
+  auto key_mask = padding_mask.unsqueeze(1).unsqueeze(2);  // [batch, 1, 1, seq]
+
+  // Create causal mask if needed: [1, 1, seq, seq]
+  torch::Tensor attn_mask;
+  if (is_causal) {
+    auto row_idx = torch::arange(seq_len, torch::TensorOptions().dtype(torch::kLong).device(q.device())).unsqueeze(1);
+    auto col_idx = torch::arange(seq_len, torch::TensorOptions().dtype(torch::kLong).device(q.device())).unsqueeze(0);
+    auto causal_mask = col_idx > row_idx;  // True for positions to mask (future)
+
+    // Combine with padding mask: mask if either causal or padding
+    // key_mask: [batch, 1, 1, seq], causal_mask: [seq, seq]
+    auto combined_mask = causal_mask.unsqueeze(0).unsqueeze(0) | (key_mask == 0);
+
+    attn_mask = torch::where(
+      combined_mask,
+      torch::full({1, 1, seq_len, seq_len}, -std::numeric_limits<float>::infinity(), q.options()),
+      torch::zeros({1, 1, seq_len, seq_len}, q.options())
+    );
+  } else {
+    // Just padding mask
+    attn_mask = torch::where(
+      key_mask == 0,
+      torch::full({1, 1, 1, seq_len}, -std::numeric_limits<float>::infinity(), q.options()),
+      torch::zeros({1, 1, 1, seq_len}, q.options())
+    );
+  }
 
   auto result_ = torch::scaled_dot_product_attention(
     q, k, v,
