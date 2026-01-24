@@ -10,6 +10,7 @@ import Tyr.GPU.Codegen.TileTypes
 import Tyr.GPU.Codegen.IR
 import Tyr.GPU.Codegen.Monad
 import Tyr.GPU.Codegen.Ops
+import Tyr.GPU.Codegen.GlobalLayout
 import Tyr.GPU.Codegen.EmitNew
 import Tyr.GPU.Codegen.Attribute
 import Tyr.GPU.Codegen.FFI
@@ -41,6 +42,7 @@ def vecAdd (a : GPtr GpuFloat.BFloat16) (b : GPtr GpuFloat.BFloat16)
            (c : GPtr GpuFloat.BFloat16) (size : KVal UInt64) : KernelM Unit := do
   comment "=== Vector Add Kernel (New Style) ==="
   comment s!"Parameters: a={a.name}, b={b.name}, c={c.name}, size={size.name}"
+  let coord ← blockCoord2D
 
   -- Allocate tiles
   let tileA : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
@@ -52,9 +54,9 @@ def vecAdd (a : GPtr GpuFloat.BFloat16) (b : GPtr GpuFloat.BFloat16)
   let sharedB : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
   let sharedC : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
 
-  -- Load using TMA (with typed parameters)
-  tmaLoad sharedA a size
-  tmaLoad sharedB b size
+  -- Load using global layout helpers
+  loadGlobal sharedA a coord
+  loadGlobal sharedB b coord
 
   -- Load from shared to registers
   load tileA sharedA
@@ -65,7 +67,7 @@ def vecAdd (a : GPtr GpuFloat.BFloat16) (b : GPtr GpuFloat.BFloat16)
 
   -- Store result
   store sharedC tileC
-  tmaStore c sharedC size
+  storeGlobal c sharedC coord
 
   sync
 
@@ -76,6 +78,7 @@ def layerNormNew (x : GPtr GpuFloat.BFloat16) (weight : GPtr GpuFloat.BFloat16)
                  (batchSize : KVal UInt64) (hiddenDim : KVal UInt64)
                  : KernelM Unit := do
   comment "=== LayerNorm Forward (New Style) ==="
+  let coord ← blockCoord2D
 
   -- Register tiles
   let xTile : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
@@ -90,8 +93,8 @@ def layerNormNew (x : GPtr GpuFloat.BFloat16) (weight : GPtr GpuFloat.BFloat16)
   let xShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
   let outShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
 
-  -- Load input using TMA with typed parameters
-  tmaLoad xShared x batchSize
+  -- Load input using global layout helpers
+  loadGlobal xShared x coord
 
   -- Load to registers and convert
   load xTile xShared
@@ -110,7 +113,7 @@ def layerNormNew (x : GPtr GpuFloat.BFloat16) (weight : GPtr GpuFloat.BFloat16)
   -- Normalize and output
   convert xTile temp
   store outShared xTile
-  tmaStore out outShared batchSize
+  storeGlobal out outShared coord
 
   sync
 

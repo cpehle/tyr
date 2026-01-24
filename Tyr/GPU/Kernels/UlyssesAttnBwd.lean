@@ -148,6 +148,7 @@ def ulyssesAttnBwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloa
     sync
 
   comment "Phase 3: Redistribute Gradients (All-to-All: Seq -> Heads)"
+  let coord ← blockCoord2D
   
   -- dQ, dK, dV are currently Sequence Parallel.
   -- A2A them back to Head Parallel.
@@ -167,10 +168,10 @@ def ulyssesAttnBwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloa
   sync
   
   -- Final store to global (Head Parallel pointers)
-  -- storeAdd used for atomic accumulation if necessary
-  storeAdd dQShared dQ
-  storeAdd dKShared dK
-  storeAdd dVShared dV
+  -- storeGlobalAdd used for atomic accumulation if necessary
+  storeGlobalAdd dQ_ptr dQShared coord
+  storeGlobalAdd dK_ptr dKShared coord
+  storeGlobalAdd dV_ptr dVShared coord
 
 
 -- Verify

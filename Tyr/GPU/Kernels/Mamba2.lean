@@ -221,9 +221,12 @@ def mamba2Bwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat16)
     mma dK dAttTBf qCol dK
 
     comment "Store gradients with atomic add"
-    storeAdd dQShared dQ
-    storeAdd dKShared dK
-    storeAdd dVShared dV
+    store dQShared dQ
+    store dKShared dK
+    store dVShared dV
+    storeGlobalAdd dQ_ptr dQShared (coord.withRow chunkIdx.id)
+    storeGlobalAdd dK_ptr dKShared (coord.withRow chunkIdx.id)
+    storeGlobalAdd dV_ptr dVShared (coord.withRow chunkIdx.id)
 
     sync
 

@@ -15,6 +15,7 @@ import Tyr.GPU.Codegen.Monad
 import Tyr.GPU.Codegen.Ops
 import Tyr.GPU.Codegen.Loop
 import Tyr.GPU.Codegen.GlobalLayout
+import Tyr.GPU.Codegen.Macros
 import Tyr.GPU.Codegen.EmitNew
 import Tyr.GPU.Codegen.Attribute
 
@@ -38,6 +39,7 @@ def flashAttnFwdWithLse (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.
   let tileSize : Nat := 64
   let numKvBlocks : Nat := 4
   comment "=== FlashAttention Forward (with LSE for backward) ==="
+  let coord ← blockCoord2D
 
   comment "Register tiles for Q, K, V"
   let q : RT GpuFloat.BFloat16 tileSize tileSize ← allocRT .BFloat16 tileSize tileSize
@@ -51,22 +53,19 @@ def flashAttnFwdWithLse (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.
   comment "Output accumulator (float32)"
   let o : RT GpuFloat.Float32 tileSize tileSize ← zeroRT .Float32 tileSize tileSize
 
-  comment "Online softmax tracking (per-row)"
-  let rowMaxVec : RV GpuFloat.Float32 tileSize ← negInftyRV .Float32 tileSize
-  let rowSumVec : RV GpuFloat.Float32 tileSize ← allocRV .Float32 tileSize
-  let lseVec : RV GpuFloat.Float32 tileSize ← allocRV .Float32 tileSize  -- log-sum-exp output
-
-  comment "Rescaling factors for online softmax"
-  let prevMax : RV GpuFloat.Float32 tileSize ← allocRV .Float32 tileSize
-  let rescale : RV GpuFloat.Float32 tileSize ← allocRV .Float32 tileSize
+  comment "Online softmax state"
+  let softmaxState ← allocSoftmaxState .Float32 tileSize
 
   comment "Shared memory"
   let qShared : ST GpuFloat.BFloat16 tileSize tileSize ← allocST .BFloat16 tileSize tileSize
   let kShared : ST GpuFloat.BFloat16 tileSize tileSize ← allocST .BFloat16 tileSize tileSize
   let vShared : ST GpuFloat.BFloat16 tileSize tileSize .Col ← allocST .BFloat16 tileSize tileSize .Col
+  let oShared : ST GpuFloat.BFloat16 tileSize tileSize ← allocST .BFloat16 tileSize tileSize
   let lseShared : SV GpuFloat.Float32 tileSize ← allocSV .Float32 tileSize
 
   comment "Load Q (long-resident)"
+  loadGlobal qShared Q_ptr coord
+  sync
   load q qShared
 
   comment "Initialize row_sum to 0"
@@ -75,6 +74,9 @@ def flashAttnFwdWithLse (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.
   comment "Main loop over K, V blocks"
   for blkIdx in krange 0 numKvBlocks do
     comment "Load K, V tiles"
+    loadGlobal kShared K_ptr (coord.withRow blkIdx.id)
+    loadGlobal vShared V_ptr (coord.withRow blkIdx.id)
+    sync
     load k kShared
     load v vShared
 
@@ -84,26 +86,8 @@ def flashAttnFwdWithLse (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.
     comment "Apply causal mask (fill upper triangle with -inf)"
     makeCausal s s (some (-1e10))
 
-    comment "Online softmax - save previous max"
-    copyVec prevMax rowMaxVec
-
-    comment "Update row-wise maximum"
-    rowMaxAccum rowMaxVec s rowMaxVec
-
-    comment "Compute rescale factor: exp(prev_max - new_max)"
-    subVec rescale prevMax rowMaxVec
-    expVec rescale rescale
-
-    comment "Rescale previous output and sum"
-    mulCol o o rescale
-    mulVec rowSumVec rowSumVec rescale
-
-    comment "Subtract max and exponentiate"
-    subCol s s rowMaxVec
-    exp s s
-
-    comment "Update row sum"
-    rowSumAccum rowSumVec s rowSumVec
+    comment "Online softmax"
+    onlineSoftmax s o softmaxState
 
     comment "Convert to bf16 for V multiply"
     convert p s
@@ -114,14 +98,18 @@ def flashAttnFwdWithLse (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.
     sync
 
   comment "Final normalization: O = O / row_sum"
-  divCol o o rowSumVec
+  finalizeSoftmax o softmaxState
 
   comment "Compute L_vec = log(row_sum) + row_max (for backward)"
-  -- log lseVec rowSumVec  -- log of rowSumVec
-  -- add lseVec lseVec rowMaxVec  -- add back the max
+  let lseVec ← computeLSE softmaxState
 
-  comment "Store L_vec for backward pass"
+  comment "Store output and L_vec for backward pass"
+  let oBf16 : RT GpuFloat.BFloat16 tileSize tileSize ← allocRT .BFloat16 tileSize tileSize
+  convert oBf16 o
+  store oShared oBf16
+  storeGlobal O_ptr oShared coord
   storeVec lseShared lseVec
+  storeVecGlobalRow L_ptr lseShared coord
 
 
 /-! ## FlashAttention Backward Preparation Kernel -/
@@ -136,6 +124,7 @@ def flashAttnBwdPrep (dO_ptr : GPtr GpuFloat.BFloat16) (O_ptr : GPtr GpuFloat.BF
     (D_ptr : GPtr GpuFloat.Float32) (seq_len : KVal UInt64) (head_dim : KVal UInt64)
     : KernelM Unit := do
   let tileSize : Nat := 64
+  let coord ← blockCoord2D
   comment "=== FlashAttention Backward Prep ==="
   comment "Computes D_vec = rowSum(dO * O)"
 
@@ -157,6 +146,9 @@ def flashAttnBwdPrep (dO_ptr : GPtr GpuFloat.BFloat16) (O_ptr : GPtr GpuFloat.BF
   let dVecShared : SV GpuFloat.Float32 tileSize ← allocSV .Float32 tileSize
 
   comment "Load dO and O"
+  loadGlobal dOShared dO_ptr coord
+  loadGlobal outShared O_ptr coord
+  sync
   load dO dOShared
   load outFwd outShared
 
@@ -172,6 +164,7 @@ def flashAttnBwdPrep (dO_ptr : GPtr GpuFloat.BFloat16) (O_ptr : GPtr GpuFloat.BF
 
   comment "Store D_vec"
   storeVec dVecShared dVec
+  storeVecGlobalRow D_ptr dVecShared coord
 
 
 /-! ## FlashAttention Main Backward Kernel -/
@@ -198,6 +191,7 @@ def flashAttnBwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat1
   let tileSize : Nat := 64
   let numKvBlocks : Nat := 4
   comment "=== FlashAttention Backward ==="
+  let coord ← blockCoord2D
 
   comment "=== Input tiles (from forward pass) ==="
   let q : RT GpuFloat.BFloat16 tileSize tileSize ← allocRT .BFloat16 tileSize tileSize
@@ -240,6 +234,11 @@ def flashAttnBwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat1
   let dVecShared : SV GpuFloat.Float32 tileSize ← allocSV .Float32 tileSize
 
   comment "Load Q and dO (long-resident for this query block)"
+  loadGlobal qShared Q_ptr coord
+  loadGlobal dOShared dO_ptr coord
+  loadVecGlobalRow lseShared L_ptr coord
+  loadVecGlobalRow dVecShared D_ptr coord
+  sync
   load q qShared
   load dO dOShared
 
@@ -250,6 +249,9 @@ def flashAttnBwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat1
   comment "Main loop over K, V blocks"
   for blkIdx in krange 0 numKvBlocks do
     comment "Load K, V for this block"
+    loadGlobal kShared K_ptr (coord.withRow blkIdx.id)
+    loadGlobal vShared V_ptr (coord.withRow blkIdx.id)
+    sync
     load k kShared
     load v vShared
 
@@ -313,8 +315,11 @@ def flashAttnBwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat1
 
   comment "=== Store gradients (using atomic add for K, V) ==="
   store dQShared dQ
-  storeAdd dKShared dK  -- Atomic add for accumulation across query blocks
-  storeAdd dVShared dV  -- Atomic add for accumulation across query blocks
+  store dKShared dK
+  store dVShared dV
+  storeGlobal dQ_ptr dQShared coord
+  storeGlobalAdd dK_ptr dKShared coord  -- Atomic add for accumulation across query blocks
+  storeGlobalAdd dV_ptr dVShared coord  -- Atomic add for accumulation across query blocks
 
 
 /-! ## Combined Forward+Backward Example -/

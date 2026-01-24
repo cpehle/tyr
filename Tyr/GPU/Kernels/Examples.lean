@@ -12,11 +12,13 @@ import Tyr.GPU.Codegen.TileTypes
 import Tyr.GPU.Codegen.IR
 import Tyr.GPU.Codegen.Monad
 import Tyr.GPU.Codegen.Ops
+import Tyr.GPU.Codegen.Constraints
 import Tyr.GPU.Codegen.Loop
 import Tyr.GPU.Codegen.GlobalLayout
 import Tyr.GPU.Codegen.EmitNew
 import Tyr.GPU.Codegen.Attribute
 import Tyr.GPU.Codegen.ArchConfig
+import Tyr.GPU.Codegen.Arch
 
 namespace Tyr.GPU.Kernels.Examples
 
@@ -43,6 +45,40 @@ def simpleGemm : KernelM Unit := do
     load b bShared
     mma c a b c
     sync
+
+/-! ## Example 1a: Simple GEMM with Dimension Constraints -/
+
+/-- Simple GEMM using constrained MMA to enforce multiples of 16 at compile time. -/
+@[gpu_kernel .SM90]
+def simpleGemmConstrained : KernelM Unit := do
+  comment "=== Simple GEMM (Constrained) ==="
+
+  let a : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
+  let b : RT GpuFloat.BFloat16 64 64 .Col ← allocRT .BFloat16 64 64 .Col
+  let c : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
+
+  let aShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
+  let bShared : ST GpuFloat.BFloat16 64 64 .Col ← allocST .BFloat16 64 64 .Col
+
+  for blkIdx in krange 0 8 do
+    load a aShared
+    load b bShared
+    mmaConstrained c a b c
+    sync
+
+/-! ## Example 1b: Polymorphic GEMM using ArchKernelM -/
+
+/-- Simple GEMM using architecture-dispatched MMA (polymorphic). -/
+@[gpu_kernel]
+def simpleGemmPoly (arch : ArchLevel) : ArchKernelM arch Unit := do
+  archComment s!"=== Simple GEMM (Poly, {arch}) ==="
+
+  let a ← ArchKernelM.liftPortable (allocRT .BFloat16 64 64)
+  let b ← ArchKernelM.liftPortable (allocRT .BFloat16 64 64 .Col)
+  let c ← ArchKernelM.liftPortable (zeroRT .Float32 64 64)
+
+  smartMMA c a b c
+  archSync
 
 -- Verify auto-generated kernel
 #check simpleGemm.kernel

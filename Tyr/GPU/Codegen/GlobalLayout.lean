@@ -309,6 +309,67 @@ def storeGlobalAdd {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
     : KernelM Unit := do
   emit (.storeGlobalAdd dst.id src.id coord.b coord.d coord.r coord.c)
 
+/-! ## Vector Global Memory Operations (RTileCoord helpers)
+
+These helpers treat the runtime coordinate's row/col index as the
+vector offset. This keeps vector IO consistent with tile coordinates
+in kernels that already use `blockCoord2D`.
+-/
+
+/-- Row offset for vector IO (uses coord.r). -/
+def RTileCoord.rowOffset (coord : RTileCoord) : VarId := coord.r
+
+/-- Column offset for vector IO (uses coord.c). -/
+def RTileCoord.colOffset (coord : RTileCoord) : VarId := coord.c
+
+/-- Load vector from global memory using row offset. -/
+def loadVecGlobalRow {dtype : GpuFloat} {len : Nat}
+    (dst : SV dtype len)
+    (src : GPtr dtype)
+    (coord : RTileCoord)
+    : KernelM Unit := do
+  emit (.loadVecGlobal dst.id src.id coord.rowOffset)
+
+/-- Store vector to global memory using row offset. -/
+def storeVecGlobalRow {dtype : GpuFloat} {len : Nat}
+    (dst : GPtr dtype)
+    (src : SV dtype len)
+    (coord : RTileCoord)
+    : KernelM Unit := do
+  emit (.storeVecGlobal dst.id src.id coord.rowOffset)
+
+/-- Atomic add store vector to global memory using row offset. -/
+def storeVecGlobalAddRow {dtype : GpuFloat} {len : Nat}
+    (dst : GPtr dtype)
+    (src : SV dtype len)
+    (coord : RTileCoord)
+    : KernelM Unit := do
+  emit (.storeVecGlobalAdd dst.id src.id coord.rowOffset)
+
+/-- Load vector from global memory using column offset. -/
+def loadVecGlobalCol {dtype : GpuFloat} {len : Nat}
+    (dst : SV dtype len)
+    (src : GPtr dtype)
+    (coord : RTileCoord)
+    : KernelM Unit := do
+  emit (.loadVecGlobal dst.id src.id coord.colOffset)
+
+/-- Store vector to global memory using column offset. -/
+def storeVecGlobalCol {dtype : GpuFloat} {len : Nat}
+    (dst : GPtr dtype)
+    (src : SV dtype len)
+    (coord : RTileCoord)
+    : KernelM Unit := do
+  emit (.storeVecGlobal dst.id src.id coord.colOffset)
+
+/-- Atomic add store vector to global memory using column offset. -/
+def storeVecGlobalAddCol {dtype : GpuFloat} {len : Nat}
+    (dst : GPtr dtype)
+    (src : SV dtype len)
+    (coord : RTileCoord)
+    : KernelM Unit := do
+  emit (.storeVecGlobalAdd dst.id src.id coord.colOffset)
+
 /-- Create an RTileCoord with a modified row index (for loop iteration).
     Common pattern: `coord.withRow loopIdx.id` -/
 def RTileCoord.withRow (coord : RTileCoord) (newR : VarId) : RTileCoord :=

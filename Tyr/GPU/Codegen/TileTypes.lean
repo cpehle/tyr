@@ -5,6 +5,7 @@
   Enables compile-time checking of dimension compatibility for operations.
 -/
 import Tyr.GPU.Types
+import Tyr.GPU.Tile
 import Tyr.GPU.Codegen.Var
 
 namespace Tyr.GPU.Codegen
@@ -186,5 +187,43 @@ instance : Nonempty Tensor := TensorSpec.property
 opaque CudaStreamSpec : NonemptyType
 def CudaStream : Type := CudaStreamSpec.type
 instance : Nonempty CudaStream := CudaStreamSpec.property
+
+end Tyr.GPU.Codegen
+
+namespace Tyr.GPU.Codegen
+
+open Tyr.GPU
+
+/-! ## Bridge to Core Tile Abstractions
+
+These instances let Codegen tile types participate in the core Tile/SharedTile
+typeclasses so helpers like `Tile.bytes` and `Tile.validForMMA` work.
+-/
+
+instance {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout} :
+    Tile (RT dtype rows cols layout) where
+  dtype := dtype
+  rows := rows
+  cols := cols
+  location := .Register
+  layout := layout
+
+instance {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout} :
+    RegisterTile (RT dtype rows cols layout) where
+  location_is_register := rfl
+  height := rows / 16
+  width := cols / 16
+
+instance {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout} :
+    Tile (ST dtype rows cols layout) where
+  dtype := dtype
+  rows := rows
+  cols := cols
+  location := .Shared
+  layout := layout
+
+instance {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout} :
+    SharedTile (ST dtype rows cols layout) where
+  location_is_shared := rfl
 
 end Tyr.GPU.Codegen
