@@ -55,6 +55,7 @@ def ringAttnBwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat16
   
   let tileSize : Nat := 64
   comment "=== Ring Attention Backward ==="
+  let coord ← blockCoord2D
 
   -- Stationary data (Q, dO, dQ, LSE, D)
   let q : RT GpuFloat.BFloat16 tileSize tileSize ← allocRT .BFloat16 tileSize tileSize
@@ -204,7 +205,9 @@ def ringAttnBwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat16
   store dKShared dK
   store dVShared dV
   
-  -- Use tmaStore or similar if available, or just store.
+  storeGlobal dQ_ptr dQShared coord
+  storeGlobalAdd dK_ptr dKShared coord
+  storeGlobalAdd dV_ptr dVShared coord
 
 -- Verify
 #check ringAttnBwd.kernel

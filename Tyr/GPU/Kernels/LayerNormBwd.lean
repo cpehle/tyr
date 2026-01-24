@@ -167,49 +167,14 @@ def layerNormBwdTiled (dO_ptr : GPtr GpuFloat.BFloat16) (x_ptr : GPtr GpuFloat.B
   colSum dBetaFinal dBetaAccum
 
   comment "Store parameter gradients (atomic add needed)"
-  -- We don't have storeVecAdd for global memory directly exposed in DSL yet?
-  -- Using storeAdd via ST.
-  -- But ST is 2D. We need to store RV.
-  -- Expand RV to ST? Or just store to first row of ST?
-  -- Assuming we can store RV to SV.
   let dGammaSV : SV GpuFloat.Float32 tileSize ← allocSV .Float32 tileSize
   let dBetaSV : SV GpuFloat.Float32 tileSize ← allocSV .Float32 tileSize
   
   storeVec dGammaSV dGammaFinal
   storeVec dBetaSV dBetaFinal
   
-  -- Then TMA/Global store from SV?
-  -- `storeAdd` works on VarId.
-  -- `storeAdd dweight_ptr dGammaSV`? No, `storeAdd` takes `dst src`.
-  -- `dweight_ptr` is GPtr.
-  -- We likely need `tmaStore` or similar.
-  -- Or just `store` if we are the only block?
-  -- If parallel over batch, we need atomic.
-  -- `storeAdd` in `KStmt` is usually `store_add(dst, src)`.
-  -- If `dst` is `GPtr`? `KStmt` supports `storeAdd dst src`.
-  -- But `dst` must be a `VarId`. `GPtr` wraps `VarId`.
-  -- Let's try `storeAdd` with GPtr's ID.
-  
-  -- But `dweight_ptr` points to global memory. `dGammaSV` is shared.
-  -- ThunderKittens `store_add` usually stores from Reg/Shared to Global.
-  -- Let's use `tma::store_add` if available or `store_add`.
-  
-  -- Re-check `IR.lean` `storeAdd` semantics.
-  -- `| storeAdd (dst src : VarId)`
-  -- `EmitNew` says: `store_add({dst}, {src})`.
-  -- If `dst` is global pointer, it works.
-  
-  -- Wait, `dGammaSV` is SV (shared vector).
-  -- `store_add` might expect ST (shared tile) or RT.
-  -- ThunderKittens usually handles tiles.
-  -- If we have a vector, maybe we need to treat it as a 1-row tile.
-  
-  storeAddShared (GPtr.varId dweight_ptr) (SV.varId dGammaSV)
-  storeAddShared (GPtr.varId dbias_ptr) (SV.varId dBetaSV)
-
-/-- Helper for storeAdd with explicit VarIds -/
-def storeAddShared (dst : VarId) (src : VarId) : KernelM Unit :=
-  emit (.storeAdd dst src)
+  storeVecGlobalAddCol dweight_ptr dGammaSV coord
+  storeVecGlobalAddCol dbias_ptr dBetaSV coord
 
 -- Generate C++ code
 #eval IO.println "=== LayerNorm Backward ===" *> IO.println (generateKernel layerNormBwdTiled.kernel)

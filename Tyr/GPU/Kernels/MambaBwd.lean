@@ -55,6 +55,8 @@ def mamba2Bwd (q_ptr : GPtr GpuFloat.BFloat16) (k_ptr : GPtr GpuFloat.BFloat16)
     (dV_ptr : GPtr GpuFloat.Float32) (dA_ptr : GPtr GpuFloat.Float32)
     (batch_size : KVal UInt64) (num_heads : KVal UInt64) (seq_len : KVal UInt64)
     : KernelM Unit := do
+
+  let coord ← blockCoord2D
   
   let seqTile : Nat := 16 -- Matching mamba2FwdNew dimensions
   let headDim : Nat := 64
@@ -287,10 +289,10 @@ def mamba2Bwd (q_ptr : GPtr GpuFloat.BFloat16) (k_ptr : GPtr GpuFloat.BFloat16)
     store dVShared dV
     store dAShared dA
     
-    storeAdd dQShared dQ -- Should be global store
-    storeAdd dKShared dK
-    storeAdd dVShared dV
-    -- storeAdd dA ...
+    storeGlobalAdd dQ_ptr dQShared (coord.withRow chunkIdx.id)
+    storeGlobalAdd dK_ptr dKShared (coord.withRow chunkIdx.id)
+    storeGlobalAdd dV_ptr dVShared (coord.withRow chunkIdx.id)
+    storeGlobalAdd dA_ptr dAShared (coord.withRow chunkIdx.id)
 
 
 -- Verify

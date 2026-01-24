@@ -171,10 +171,6 @@ def rmsNormTiledNew (x_ptr : GPtr GpuFloat.BFloat16) (weight_ptr : GPtr GpuFloat
 
 /-! ## Backward Kernels -/
 
-/-- Helper for storeAdd with explicit VarIds -/ 
-def storeAddShared (dst : VarId) (src : VarId) : KernelM Unit :=
-  emit (.storeAdd dst src)
-
 /-- LayerNorm backward kernel
 
 Computes:
@@ -319,8 +315,8 @@ def layerNormBwdTiled (dO_ptr : GPtr GpuFloat.BFloat16) (x_ptr : GPtr GpuFloat.B
   storeVec dGammaSV dGammaFinal
   storeVec dBetaSV dBetaFinal
   
-  storeAddShared (GPtr.varId dweight_ptr) (SV.varId dGammaSV)
-  storeAddShared (GPtr.varId dbias_ptr) (SV.varId dBetaSV)
+  storeVecGlobalAddCol dweight_ptr dGammaSV coord
+  storeVecGlobalAddCol dbias_ptr dBetaSV coord
 
 -- Verify auto-generated kernel and launch definitions
 #check layerNormTiledNew.kernel

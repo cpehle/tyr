@@ -19,6 +19,7 @@ import Tyr.GPU.Codegen.Monad
 import Tyr.GPU.Codegen.Ops
 import Tyr.GPU.Codegen.Loop
 import Tyr.GPU.Codegen.GlobalLayout
+import Tyr.GPU.Codegen.Macros
 import Tyr.GPU.Codegen.EmitNew
 import Tyr.GPU.Codegen.Attribute
 
@@ -87,6 +88,9 @@ def flashAttn3Fwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat
 
   comment "=== FlashAttention3 Forward ==="
   comment "Warp-specialized: Producer (TMA loads) + Consumer (MMA)"
+  let coord ← blockCoord2D
+
+  let queryReady : NamedBarrier := { id := barrierQueryReady, numThreads := numConsumerThreads }
 
   -- ### Shared Memory Allocation ###
   comment "Shared memory: Q tile + double-buffered K/V tiles"
@@ -159,7 +163,7 @@ def flashAttn3Fwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat
     sync 0
 
     -- Signal Q is ready for consumers
-    namedBarrierArrive barrierQueryReady numConsumerThreads
+    signalBarrier queryReady
 
     comment "Main K/V loading loop with 2-stage pipelining"
     forLoop 0 numKvBlocks do
@@ -189,7 +193,7 @@ def flashAttn3Fwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat
     comment "Consumer: Compute attention with pipelined K/V"
 
     -- Wait for Q to be ready
-    namedBarrierSync barrierQueryReady numConsumerThreads
+    waitBarrier queryReady
 
     comment "Load Q from shared to registers (long-resident)"
     load q sQ
@@ -279,9 +283,15 @@ def flashAttn3Fwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat
     logVec lseVec rowSum
     addVec lseVec lseVec rowMax
 
-    comment "Store output and LSE"
-    store sO o
-    storeVec sLse lseVec
+  comment "Store output and LSE"
+  store sO o
+  storeVec sLse lseVec
+  let oOut : RT GpuFloat.BFloat16 blockM hdim ← allocRT .BFloat16 blockM hdim
+  let sOOut : ST GpuFloat.BFloat16 blockM hdim ← allocST .BFloat16 blockM hdim
+  convert oOut o
+  store sOOut oOut
+  storeGlobal O_ptr sOOut coord
+  storeVecGlobalRow L_ptr sLse coord
 
 /-! ## FlashAttention3 Backward Prep Kernel -/
 
@@ -297,6 +307,7 @@ def flashAttn3BwdPrep (dO_ptr : GPtr GpuFloat.BFloat16) (O_ptr : GPtr GpuFloat.B
     : KernelM Unit := do
   let blockM : Nat := 64
   let hdim : Nat := 64
+  let coord ← blockCoord2D
 
   comment "=== FlashAttention3 Backward Prep ==="
   comment "Computes D = rowSum(dO * O)"
@@ -315,6 +326,9 @@ def flashAttn3BwdPrep (dO_ptr : GPtr GpuFloat.BFloat16) (O_ptr : GPtr GpuFloat.B
   let dVec : RV GpuFloat.Float32 blockM ← allocRV .Float32 blockM
 
   comment "Load dO and O"
+  loadGlobal sDO dO_ptr coord
+  loadGlobal sO O_ptr coord
+  sync
   load dO sDO
   load outFwd sO
 
@@ -330,6 +344,7 @@ def flashAttn3BwdPrep (dO_ptr : GPtr GpuFloat.BFloat16) (O_ptr : GPtr GpuFloat.B
 
   comment "Store D"
   storeVec sD dVec
+  storeVecGlobalRow D_ptr sD coord
 
 /-! ## FlashAttention3 Main Backward Kernel -/
 
@@ -362,6 +377,7 @@ def flashAttn3Bwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat
   let numQBlocks : Nat := 4  -- seqLenQ / blockM (simplified)
 
   comment "=== FlashAttention3 Backward ==="
+  let coord ← blockCoord2D
   comment "K, V long-resident; loop over Q, dO blocks"
 
   -- ### Shared Memory ###
@@ -417,10 +433,16 @@ def flashAttn3Bwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat
   load v sV
 
   comment "Main loop over Q blocks"
-  forLoop 0 numQBlocks do
+  for qIdx in krange 0 numQBlocks do
     comment "--- Process Q block m ---"
 
     comment "Load Q, dO for this m_block"
+    let qCoord := coord.withRow qIdx.id
+    loadGlobal sQ Q_ptr qCoord
+    loadGlobal sDO dO_ptr qCoord
+    loadVecGlobalRow sLse L_ptr qCoord
+    loadVecGlobalRow sD D_ptr qCoord
+    sync
     load q sQ
     load dO sDO
 
@@ -492,13 +514,16 @@ def flashAttn3Bwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat
     mmaAsyncWait 0
 
     comment "Store dQ (atomic add for accumulation across K/V blocks)"
-    storeAdd sDQ dQ
+    store sDQ dQ
+    storeGlobalAdd dQ_ptr sDQ qCoord
 
     sync 0
 
   comment "=== Store final dK, dV ==="
   store sDK dK
   store sDV dV
+  storeGlobalAdd dK_ptr sDK coord
+  storeGlobalAdd dV_ptr sDV coord
 
 /-! ## GQA (Grouped Query Attention) Forward Kernel -/
 
