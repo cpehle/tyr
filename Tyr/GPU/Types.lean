@@ -85,15 +85,15 @@ instance : ToString GpuArch where
 
 /-- Convert GpuArch to C++ preprocessor guard -/
 def GpuArch.toGuard : GpuArch → String
-  | .SM80 => "KITTENS_SM80"
+  | .SM80 => "KITTENS_AMPERE"
   | .SM90 => "KITTENS_HOPPER"
   | .SM100 => "KITTENS_BLACKWELL"
 
 /-- Convert GpuArch to nvcc arch flag -/
 def GpuArch.toNvccArch : GpuArch → String
-  | .SM80 => "sm_80"
-  | .SM90 => "sm_90"
-  | .SM100 => "sm_100"
+  | .SM80 => "sm_80a"
+  | .SM90 => "sm_90a"
+  | .SM100 => "sm_100a"
 
 /-- Shared memory swizzle mode for bank conflict avoidance -/
 inductive SwizzleMode where

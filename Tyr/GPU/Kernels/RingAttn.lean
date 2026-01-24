@@ -44,8 +44,10 @@ Three phases:
 @[gpu_kernel .SM90]
 def ringAttnPartial (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat16)
     (V_ptr : GPtr GpuFloat.BFloat16) (O_partial_ptr : GPtr GpuFloat.BFloat16)
-    (lse_ptr : GPtr GpuFloat.Float32) (rank : KVal UInt64)
-    (kv_block_idx : KVal UInt64) : KernelM Unit := do
+    (lse_ptr : GPtr GpuFloat.Float32)
+    (_batch_size : KVal UInt64) (_num_heads : KVal UInt64)
+    (_seq_len : KVal UInt64) (_head_dim : KVal UInt64)
+    (rank : KVal UInt64) (kv_block_idx : KVal UInt64) : KernelM Unit := do
   comment "=== Ring Attention - Partial Computation ==="
   comment "Compute attention with one KV block, output partial O and log-sum-exp"
 
@@ -127,6 +129,7 @@ def ringAttnPartial (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFlo
   store outShared out
   storeGlobal O_partial_ptr outShared coord
   storeVec lseShared lse
+  storeVecGlobalCoord lse_ptr lseShared coord.c
   sync
 
 -- Verify auto-generated kernel
@@ -137,8 +140,10 @@ def ringAttnPartial (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFlo
 @[gpu_kernel .SM90]
 def ringAttnFull (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat16)
     (V_ptr : GPtr GpuFloat.BFloat16) (O_ptr : GPtr GpuFloat.BFloat16)
-    (lse_ptr : GPtr GpuFloat.Float32) (rank : KVal UInt64)
-    (world_size : KVal UInt64) (seq_len : KVal UInt64) : KernelM Unit := do
+    (lse_ptr : GPtr GpuFloat.Float32)
+    (_batch_size : KVal UInt64) (_num_heads : KVal UInt64)
+    (seq_len : KVal UInt64) (_head_dim : KVal UInt64)
+    (rank : KVal UInt64) (world_size : KVal UInt64) : KernelM Unit := do
   comment "=== Ring Attention - Full Ring Processing ==="
   comment "Process all KV blocks around the ring, accumulate with LSE"
 
@@ -254,6 +259,11 @@ def ringAttnFull (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat1
   store outShared out
   storeGlobal O_ptr outShared coord
 
+  comment "Store final LSE to global memory"
+  let lseShared : SV GpuFloat.Float32 64 ← allocSV .Float32 64
+  storeVec lseShared lseRunning
+  storeVecGlobalCoord lse_ptr lseShared coord.c
+
 -- Verify auto-generated kernel
 #check ringAttnFull.kernel
 #check ringAttnFull.launch
@@ -263,6 +273,8 @@ def ringAttnFull (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat1
 def ringAttnReduce (O1_ptr : GPtr GpuFloat.Float32) (O2_ptr : GPtr GpuFloat.Float32)
     (lse1_ptr : GPtr GpuFloat.Float32) (lse2_ptr : GPtr GpuFloat.Float32)
     (O_combined_ptr : GPtr GpuFloat.BFloat16) (lse_combined_ptr : GPtr GpuFloat.Float32)
+    (_batch_size : KVal UInt64) (_num_heads : KVal UInt64)
+    (_seq_len : KVal UInt64) (_head_dim : KVal UInt64)
     : KernelM Unit := do
   comment "=== Ring Attention - Reduction ==="
   comment "Combine partial outputs using log-sum-exp trick"
@@ -294,9 +306,11 @@ def ringAttnReduce (O1_ptr : GPtr GpuFloat.Float32) (O2_ptr : GPtr GpuFloat.Floa
   let lse2Shared : SV GpuFloat.Float32 64 ← allocSV .Float32 64
   let outShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
 
-  comment "Load partial outputs and LSE values"
+  comment "Load partial outputs and LSE values from global memory"
   loadGlobal o1Shared O1_ptr coord
   loadGlobal o2Shared O2_ptr coord
+  loadVecGlobalCoord lse1Shared lse1_ptr coord.c
+  loadVecGlobalCoord lse2Shared lse2_ptr coord.c
   sync
   load o1 o1Shared
   load o2 o2Shared
@@ -337,6 +351,11 @@ def ringAttnReduce (O1_ptr : GPtr GpuFloat.Float32) (O2_ptr : GPtr GpuFloat.Floa
   convert out oCombined
   store outShared out
   storeGlobal O_combined_ptr outShared coord
+
+  comment "Store combined LSE to global memory"
+  let lseCombinedShared : SV GpuFloat.Float32 64 ← allocSV .Float32 64
+  storeVec lseCombinedShared lseCombined
+  storeVecGlobalCoord lse_combined_ptr lseCombinedShared coord.c
 
   sync
 
