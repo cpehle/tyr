@@ -119,6 +119,24 @@ def norm (v : GrassmannTangent n p) : Float :=
 
 end GrassmannTangent
 
+namespace Grassmann
+
+/-- Log map on Gr(n,p).
+    Uses the canonical formula based on principal angles. -/
+def log (X Y : Grassmann n p) : GrassmannTangent n p :=
+  let Xt := torch.nn.transpose2d X.matrix
+  let XtY := torch.nn.mm Xt Y.matrix                     -- [p, p]
+  let invXtY := torch.linalg.inv XtY
+  let proj := torch.sub Y.matrix (torch.nn.mm X.matrix XtY) -- (I - X Xᵀ) Y
+  let A := torch.nn.mm proj invXtY
+  let (U, S, Vh) := torch.linalg.svd A                   -- U [n,p], S [p], Vh [p,p]
+  let theta := torch.nn.atan S
+  let Theta := torch.linalg.diagflat theta
+  let delta := torch.nn.mm (torch.nn.mm U Theta) Vh
+  ⟨delta⟩
+
+end Grassmann
+
 /-- Grassmann manifold as a DifferentiableManifold.
     Uses QR-based retraction: R(X, Z) = qr(X + Z).Q -/
 instance grassmannManifold (n p : UInt64) : DifferentiableManifold (Grassmann n p) where
