@@ -8,3 +8,4 @@ import Tests.TestPipeline
 import Tests.TestAutoGrad
 import Tests.TestGPUAutoGrad
 import Tests.TestModularNorm
+import Tests.TestBranchingFlows
