@@ -508,4 +508,39 @@ def testGrassmannDistanceSelf : IO Unit := do
   let d := Grassmann.distance X X
   LeanTest.assertTrue (d < 1e-5) "Distance of subspace to itself should be 0"
 
+/-! ## Hyperbolic Manifold Tests -/
+
+open Tyr.AD.DifferentiableManifold in
+@[test]
+def testHyperbolicConstraint : IO Unit := do
+  -- Random hyperbolic point should satisfy Minkowski norm ≈ -1
+  let X ← Hyperbolic.random 3
+  let inner := Hyperbolic.minkowskiInner X.coords X.coords
+  LeanTest.assertTrue (Float.abs (inner + 1.0) < 1e-4)
+    s!"Hyperbolic point should satisfy <x,x>_L = -1, got {inner}"
+
+open Tyr.AD.DifferentiableManifold in
+@[test]
+def testHyperbolicTangentOrthogonality : IO Unit := do
+  -- Projected tangent should be Minkowski-orthogonal to base point
+  let X ← Hyperbolic.random 3
+  let V ← torch.randn #[4]
+  let Z := HyperbolicTangent.project X V
+  let inner := Hyperbolic.minkowskiInner X.coords Z.vec
+  LeanTest.assertTrue (Float.abs inner < 1e-4)
+    s!"Tangent projection should satisfy <x,z>_L = 0, got {inner}"
+
+open Tyr.AD.DifferentiableManifold in
+@[test]
+def testHyperbolicRetractionPreservesConstraint : IO Unit := do
+  -- Retraction should keep points on the hyperboloid
+  let X ← Hyperbolic.random 3
+  let V ← torch.randn #[4]
+  let Z := HyperbolicTangent.project X V
+  let smallZ := HyperbolicTangent.smul 0.05 Z
+  let X' := DifferentiableManifold.exp X smallZ
+  let inner := Hyperbolic.minkowskiInner X'.coords X'.coords
+  LeanTest.assertTrue (Float.abs (inner + 1.0) < 1e-4)
+    s!"Retraction should preserve <x,x>_L = -1, got {inner}"
+
 end Tests.AutoGrad

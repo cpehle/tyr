@@ -424,6 +424,9 @@ UNOP_FUN(rrelu)
 UNOP_FUN(selu)
 UNOP_FUN(silu)
 UNOP_FUN(sigmoid)
+UNOP_FUN(sin)
+UNOP_FUN(cos)
+UNOP_FUN(atan)
 UNOP_FUN(tanh)
 #undef UNOP_FUN
 
@@ -2921,6 +2924,26 @@ lean_object* lean_torch_matrix_exp(
 ) {
   auto A = borrowTensor(A_obj);
   auto result = torch::linalg_matrix_exp(A);
+  return fromTorchTensor(result);
+}
+
+// Matrix logarithm for square matrices: log(A)
+lean_object* lean_torch_matrix_log(
+    uint64_t /*n*/,
+    b_lean_obj_arg A_obj
+) {
+  auto A = borrowTensor(A_obj);
+  auto result = torch::linalg_matrix_log(A);
+  return fromTorchTensor(result);
+}
+
+// Matrix inverse for square matrices: inv(A)
+lean_object* lean_torch_inv(
+    uint64_t /*n*/,
+    b_lean_obj_arg A_obj
+) {
+  auto A = borrowTensor(A_obj);
+  auto result = torch::linalg_inv(A);
   return fromTorchTensor(result);
 }
 

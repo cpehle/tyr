@@ -413,6 +413,9 @@ opaque nll_loss_none {n c : UInt64}
 @[extern "lean_torch_tensor_selu"] opaque selu {s : Shape} (t : @& T s) : T s
 @[extern "lean_torch_tensor_silu"] opaque silu {s : Shape} (t : @& T s) : T s
 @[extern "lean_torch_tensor_sigmoid"] opaque sigmoid {s : Shape} (t : @& T s) : T s
+@[extern "lean_torch_tensor_sin"] opaque sin {s : Shape} (t : @& T s) : T s
+@[extern "lean_torch_tensor_cos"] opaque cos {s : Shape} (t : @& T s) : T s
+@[extern "lean_torch_tensor_atan"] opaque atan {s : Shape} (t : @& T s) : T s
 @[extern "lean_torch_smooth_l1_loss"] opaque smooth_l1_loss {s : Shape} (input : @& T s) (target : @& T s) (reduction : String := "mean") (beta : Float := 1.0) : T #[]
 -- torch::nn::functional::soft_margin_loss
 -- torch::nn::functional::softmax
@@ -1048,6 +1051,14 @@ opaque qr_reduced {m n : UInt64} (A : @& T #[m, n]) : T #[m, n] × T #[n, n]
     Uses Padé approximation. Useful for O(n) exponential map. -/
 @[extern "lean_torch_matrix_exp"]
 opaque matrix_exp {n : UInt64} (A : @& T #[n, n]) : T #[n, n]
+
+/-- Matrix logarithm: log(A) for square matrix A. -/
+@[extern "lean_torch_matrix_log"]
+opaque matrix_log {n : UInt64} (A : @& T #[n, n]) : T #[n, n]
+
+/-- Matrix inverse: A^{-1} for square matrix A. -/
+@[extern "lean_torch_inv"]
+opaque inv {n : UInt64} (A : @& T #[n, n]) : T #[n, n]
 
 /-- SVD decomposition: A = U @ diag(S) @ Vᵀ (reduced form).
     For m×n matrix A with k = min(m,n):
