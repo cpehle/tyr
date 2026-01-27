@@ -19,8 +19,6 @@ import Examples.GPT.Pretraining
 -- NanoChat (modded GPT + tools + tasks)
 import Examples.NanoChat.NanoChat
 
--- NanoProof (theorem proving)
-import Examples.NanoProof.NanoProof
 
 -- Diffusion
 import Examples.Diffusion.Diffusion

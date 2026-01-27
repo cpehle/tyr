@@ -1,4 +1,7 @@
 external/
+.lake/
+BranchingFlows.jl/
+diffrax/
 *.o
 *.a
 build/

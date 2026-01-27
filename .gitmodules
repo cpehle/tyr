@@ -1,6 +1,3 @@
-[submodule "nanoproof"]
-	path = nanoproof
-	url = https://github.com/Kripner/nanoproof.git
 [submodule "ThunderKittens"]
 	path = ThunderKittens
 	url = https://github.com/HazyResearch/ThunderKittens.git
