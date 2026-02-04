@@ -11,6 +11,7 @@ import Tyr.Model.VAE
 import Tyr.Model.VAE.Weights
 import Tyr.Model.Flux
 import Tyr.Model.Flux.Weights
+import Tyr.Tokenizer.Qwen3
 
 namespace Examples.Flux
 
@@ -32,6 +33,7 @@ structure DebugConfig where
   fluxPath : String := "weights/flux.safetensors"
   vaePath : String := "weights/ae.safetensors"
   outputPath : String := "output.ppm"
+  useTokenFiles : Bool := false
   tokensPath : String := "weights/flux-klein-4b/tokenizer/tokens.txt"
   attnMaskPath : String := "weights/flux-klein-4b/tokenizer/attention_mask.txt"
   numSteps : Nat := 4
@@ -122,16 +124,24 @@ def runDebug (cfg : DebugConfig) (prompt : String) : IO Unit := do
   let vae := toFloat32 vae
 
   -- Tokenize and encode text
-  let ids ← loadTokenIds cfg.tokensPath maxSeqLen
-  let (padded, defaultMask) := padTokens ids maxSeqLen qwenPadId
-  let mask ←
-    if (← data.fileExists cfg.attnMaskPath) then
-      loadMaskIds cfg.attnMaskPath maxSeqLen
+  let (tokens, attnMask) ←
+    if cfg.useTokenFiles then
+      let ids ← loadTokenIds cfg.tokensPath maxSeqLen
+      let (padded, defaultMask) := padTokens ids maxSeqLen qwenPadId
+      let mask ←
+        if (← data.fileExists cfg.attnMaskPath) then
+          loadMaskIds cfg.attnMaskPath maxSeqLen
+        else
+          pure defaultMask
+      let tokens := reshape (data.fromInt64Array padded) #[1, maxSeqLen]
+      let attnMask := reshape (data.fromInt64Array mask) #[1, maxSeqLen]
+      pure (tokens, attnMask)
     else
-      pure defaultMask
-
-  let tokens := reshape (data.fromInt64Array padded) #[1, maxSeqLen]
-  let attnMask := reshape (data.fromInt64Array mask) #[1, maxSeqLen]
+      let tok ← tokenizer.qwen3.loadTokenizer cfg.qwenDir
+      let (tokIds, maskIds) := tokenizer.qwen3.encodePrompt tok prompt maxSeqLen.toNat
+      let tokens := reshape (data.fromInt64Array (tokenizer.qwen3.toInt64Array tokIds)) #[1, maxSeqLen]
+      let attnMask := reshape (data.fromInt64Array (tokenizer.qwen3.toInt64Array maskIds)) #[1, maxSeqLen]
+      pure (tokens, attnMask)
   let txtEmb := qwen.encodeMasked qwenCfg maxSeqLen tokens attnMask
 
   saveDebug cfg.debugDir "tokens" tokens

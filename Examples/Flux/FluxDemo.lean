@@ -11,6 +11,7 @@ import Tyr.Model.VAE
 import Tyr.Model.VAE.Weights
 import Tyr.Model.Flux
 import Tyr.Model.Flux.Weights
+import Tyr.Tokenizer.Qwen3
 
 namespace Examples.Flux
 
@@ -36,6 +37,8 @@ structure DemoConfig where
   vaePath : String := "weights/ae.safetensors"
   /-- Output image path -/
   outputPath : String := "output.ppm"
+  /-- Whether to load tokens from files instead of generating them -/
+  useTokenFiles : Bool := false
   /-- Optional token file (whitespace-separated token IDs) -/
   tokensPath : String := "weights/flux-klein-4b/tokenizer/tokens.txt"
   /-- Optional attention mask file (whitespace-separated 0/1 IDs) -/
@@ -47,13 +50,6 @@ structure DemoConfig where
   /-- Packed latent width (16 for 256x256 output with 2×2 patchification and 8× VAE upscaling) -/
   latentW : UInt64 := 16
   deriving Repr, Inhabited
-
-/-- Simple tokenizer placeholder.
-    In production, use a proper BPE tokenizer for Qwen. -/
-def simpleTokenize (_text : String) (maxLen : UInt64) : IO (T #[1, maxLen]) := do
-  -- Return dummy tokens for demo
-  -- Real implementation would use Qwen's tokenizer
-  torch.randint 0 151936 #[1, maxLen]
 
 private def qwenPadId : Int64 := 151643
 private def maxSeqLen : UInt64 := 512
@@ -150,26 +146,32 @@ def runDemo (cfg : DemoConfig) (prompt : String) : IO Unit := do
 
   -- Step 1: Tokenize and encode text
   IO.println "  [1/4] Encoding text..."
-  let tokenCountRef ← IO.mkRef (0 : UInt64)
-  let txtEmb ← do
-    if !(← data.fileExists cfg.tokensPath) then
-      throw (IO.userError s!"Token file not found: {cfg.tokensPath}")
-    IO.println s!"    Loading tokens from {cfg.tokensPath}"
-    let ids ← loadTokenIds cfg.tokensPath maxSeqLen
-    let tokenCount := ids.size.toUInt64
-    tokenCountRef.set tokenCount
-    let (padded, defaultMask) := padTokens ids maxSeqLen qwenPadId
-    let mask ←
-      if (← data.fileExists cfg.attnMaskPath) then
-        IO.println s!"    Loading attention mask from {cfg.attnMaskPath}"
-        loadMaskIds cfg.attnMaskPath maxSeqLen
-      else
-        pure defaultMask
-    let tokens := reshape (data.fromInt64Array padded) #[1, maxSeqLen]
-    let attnMask := reshape (data.fromInt64Array mask) #[1, maxSeqLen]
-    let txtEmb := qwen.encodeMasked qwenCfg maxSeqLen tokens attnMask
-    pure txtEmb
-  let tokenCount ← tokenCountRef.get
+  let (tokens, attnMask, tokenCount) ←
+    if cfg.useTokenFiles then
+      if !(← data.fileExists cfg.tokensPath) then
+        throw (IO.userError s!"Token file not found: {cfg.tokensPath}")
+      IO.println s!"    Loading tokens from {cfg.tokensPath}"
+      let ids ← loadTokenIds cfg.tokensPath maxSeqLen
+      let tokenCount := ids.size.toUInt64
+      let (padded, defaultMask) := padTokens ids maxSeqLen qwenPadId
+      let mask ←
+        if (← data.fileExists cfg.attnMaskPath) then
+          IO.println s!"    Loading attention mask from {cfg.attnMaskPath}"
+          loadMaskIds cfg.attnMaskPath maxSeqLen
+        else
+          pure defaultMask
+      let tokens := reshape (data.fromInt64Array padded) #[1, maxSeqLen]
+      let attnMask := reshape (data.fromInt64Array mask) #[1, maxSeqLen]
+      pure (tokens, attnMask, tokenCount)
+    else
+      let tok ← tokenizer.qwen3.loadTokenizer cfg.qwenDir
+      let (tokIds, maskIds) := tokenizer.qwen3.encodePrompt tok prompt maxSeqLen.toNat
+      let tokenCount := maskIds.foldl (fun acc v => if v != 0 then acc + 1 else acc) (0 : UInt64)
+      let tokens := reshape (data.fromInt64Array (tokenizer.qwen3.toInt64Array tokIds)) #[1, maxSeqLen]
+      let attnMask := reshape (data.fromInt64Array (tokenizer.qwen3.toInt64Array maskIds)) #[1, maxSeqLen]
+      pure (tokens, attnMask, tokenCount)
+
+  let txtEmb := qwen.encodeMasked qwenCfg maxSeqLen tokens attnMask
   IO.println s!"    Text token count: {tokenCount}"
   IO.println s!"    Text embedding shape: {txtEmb.runtimeShape}"
   IO.println s!"    Text embedding dtype: {txtEmb.dtype}"
@@ -217,6 +219,7 @@ def _root_.main (args : List String) : IO UInt32 := do
     fluxPath := "weights/flux.safetensors"
     vaePath := "weights/ae.safetensors"
     outputPath := "output.ppm"
+    useTokenFiles := false
     tokensPath := "weights/flux-klein-4b/tokenizer/tokens.txt"
     attnMaskPath := "weights/flux-klein-4b/tokenizer/attention_mask.txt"
     numSteps := 4
