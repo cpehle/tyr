@@ -182,8 +182,8 @@ def forward {batch img_seq txt_seq : UInt64} (cfg : FluxConfig)
   let txt := linear3d txt model.txt_in  -- [batch, txt_seq, hidden_size]
 
   -- Compute RoPE embeddings
-  let img_pe := flux.ropeEmbed img_ids cfg.axes_dims cfg.theta
-  let txt_pe := flux.ropeEmbed txt_ids cfg.axes_dims cfg.theta
+  let img_pe := flux.ropeEmbed (head_dim := cfg.head_dim) img_ids cfg.axes_dims cfg.theta
+  let txt_pe := flux.ropeEmbed (head_dim := cfg.head_dim) txt_ids cfg.axes_dims cfg.theta
 
   -- Double-stream blocks (using fold to avoid Id.run bug)
   let (img, txt) := processDoubleBlocks model.double_blocks img txt img_pe txt_pe mod_img mod_txt
@@ -193,7 +193,7 @@ def forward {batch img_seq txt_seq : UInt64} (cfg : FluxConfig)
 
   -- Compute combined RoPE for concatenated img+txt sequence
   let combined_ids := nn.cat txt_ids img_ids 1
-  let combined_pe := flux.ropeEmbed combined_ids cfg.axes_dims cfg.theta
+  let combined_pe := flux.ropeEmbed (head_dim := cfg.head_dim) combined_ids cfg.axes_dims cfg.theta
 
   -- Single-stream blocks (using fold to avoid Id.run bug)
   let x := processSingleBlocks model.single_blocks x combined_pe mod_single

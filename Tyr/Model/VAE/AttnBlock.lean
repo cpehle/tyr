@@ -63,7 +63,7 @@ def forward {batch channels height width : UInt64}
   -- Compute attention: softmax(Q^T K / sqrt(channels)) V
   -- Q: [batch, channels, spatial], K: [batch, channels, spatial]
   -- Q^T K: [batch, spatial, spatial]
-  let q_t := nn.transpose q (1 : UInt64) (2 : UInt64)  -- [batch, spatial, channels]
+  let q_t := nn.transpose q 1 2  -- [batch, spatial, channels]
   let scale := Float.sqrt channels.toFloat
   let attn_weights := nn.bmm q_t k  -- [batch, spatial, spatial]
   let attn_weights := attn_weights / scale
@@ -71,9 +71,9 @@ def forward {batch channels height width : UInt64}
 
   -- V: [batch, channels, spatial]
   -- attn_weights @ V^T = [batch, spatial, spatial] @ [batch, spatial, channels]
-  let v_t := nn.transpose v (1 : UInt64) (2 : UInt64)  -- [batch, spatial, channels]
+  let v_t := nn.transpose v 1 2  -- [batch, spatial, channels]
   let out := nn.bmm attn_weights v_t  -- [batch, spatial, channels]
-  let out := nn.transpose out (1 : UInt64) (2 : UInt64)  -- [batch, channels, spatial]
+  let out := nn.transpose out 1 2  -- [batch, channels, spatial]
 
   -- Reshape back to spatial
   let out := reshape out #[batch, channels, height, width]

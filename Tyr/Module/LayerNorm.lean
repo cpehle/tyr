@@ -27,6 +27,14 @@ def init (dim : UInt64) (eps : Float := 1e-5) : LayerNorm dim :=
   let bias := autograd.set_requires_grad (torch.zeros #[dim]) true
   { weight, bias, eps := ⟨eps⟩ }
 
+/-- Initialize layer norm without learnable affine parameters.
+    Used when elementwise_affine=False in PyTorch.
+    Weight is ones, bias is zeros, both non-trainable. -/
+def initNoAffine (dim : UInt64) (eps : Float := 1e-5) : LayerNorm dim :=
+  let weight := autograd.set_requires_grad (torch.ones #[dim]) false
+  let bias := autograd.set_requires_grad (torch.zeros #[dim]) false
+  { weight, bias, eps := ⟨eps⟩ }
+
 /-- Forward pass for 3D input [batch, seq, dim] -/
 def forward3d {dim batch seq : UInt64} (ln : LayerNorm dim)
     (x : T #[batch, seq, dim]) : T #[batch, seq, dim] :=

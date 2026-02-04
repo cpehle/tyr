@@ -47,7 +47,7 @@ def fromModel (cfg : QwenConfig) (max_seq : UInt64) (model : Qwen3Model cfg)
     Input: [batch, seq] token IDs
     Output: [batch, seq, output_dim] where output_dim = num_layers * hidden_size
 
-    For Qwen3-4B with layers [9, 18, 27]:
+    For Qwen3-4B with layers [8, 17, 26]:
     output_dim = 3 * 2560 = 7680
 
     Rewritten in functional style to avoid Id.run issues with FFI shape tracking. -/
@@ -101,7 +101,6 @@ def encodeMasked {batch seq : UInt64} (cfg : QwenConfig) (max_seq : UInt64)
         some (allHiddenStates[layerIdx.toNat]'h)
       else
         none
-
   -- Concatenate along the last dimension
   let numLayers := selectedStates.size.toUInt64
   let outputDim := numLayers * cfg.hidden_size

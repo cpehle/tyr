@@ -10,6 +10,7 @@ import Tyr.Module.Core
 import Tyr.Module.Derive
 import Tyr.Module.LayerNorm
 import Tyr.Model.Flux.Config
+import Tyr.Model.Flux.RoPE
 import Tyr.Model.Flux.Modulation
 import Tyr.Model.Flux.QKNorm
 

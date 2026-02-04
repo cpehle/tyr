@@ -242,6 +242,8 @@ namespace nn
 @[extern "lean_torch_conv1d"] opaque conv1d {input_shape weight_shape : Shape} (input : @& T input_shape) (weight : @& T weight_shape) (stride : UInt64 := 1) (padding : UInt64 := 0) (dilation : UInt64 := 1) : T (conv1dShape input_shape weight_shape stride padding dilation)
 -- torch::nn::functional::conv2d
 @[extern "lean_torch_conv2d"] opaque conv2d {input_shape weight_shape : Shape} (input : @& T input_shape) (weight : @& T weight_shape) (stride : Array UInt64 := #[1, 1]) (padding : Array UInt64 := #[0, 0]) (dilation : Array UInt64 := #[1, 1]) : T (conv2dShape input_shape weight_shape stride padding dilation)
+-- torch::nn::functional::conv2d with bias
+@[extern "lean_torch_conv2d_bias"] opaque conv2d_bias {input_shape weight_shape bias_shape : Shape} (input : @& T input_shape) (weight : @& T weight_shape) (bias : @& T bias_shape) (stride : Array UInt64 := #[1, 1]) (padding : Array UInt64 := #[0, 0]) (dilation : Array UInt64 := #[1, 1]) : T (conv2dShape input_shape weight_shape stride padding dilation)
 @[extern "lean_torch_conv3d"] opaque conv3d {input_shape weight_shape : Shape} (input : @& T input_shape) (weight : @& T weight_shape) (stride : Array UInt64 := #[1, 1, 1]) (padding : Array UInt64 := #[0, 0, 0]) (dilation : Array UInt64 := #[1, 1, 1]) : T (conv3dShape input_shape weight_shape stride padding dilation)
 
 /-- Transposed 2D convolution (deconvolution) for upsampling.
@@ -416,6 +418,8 @@ opaque nll_loss_none {n c : UInt64}
 @[extern "lean_torch_tensor_sin"] opaque sin {s : Shape} (t : @& T s) : T s
 @[extern "lean_torch_tensor_cos"] opaque cos {s : Shape} (t : @& T s) : T s
 @[extern "lean_torch_tensor_atan"] opaque atan {s : Shape} (t : @& T s) : T s
+@[extern "lean_torch_tensor_exp"] opaque exp {s : Shape} (t : @& T s) : T s
+@[extern "lean_torch_tensor_log"] opaque log {s : Shape} (t : @& T s) : T s
 @[extern "lean_torch_smooth_l1_loss"] opaque smooth_l1_loss {s : Shape} (input : @& T s) (target : @& T s) (reduction : String := "mean") (beta : Float := 1.0) : T #[]
 -- torch::nn::functional::soft_margin_loss
 -- torch::nn::functional::softmax
@@ -448,7 +452,7 @@ def matmul {s1 s2 : Shape} (a : T s1) (b : T s2) : T (matmulShape s1 s2) :=
 opaque bmm4d_impl {b h m k n : UInt64}
     (input : @& T #[b, h, m, k]) (mat2 : @& T #[b, h, k, n]) : T #[b, h, m, n]
 
-@[extern "lean_torch_transpose"] opaque transpose {s : Shape} (input : @& T s) (dim0 : Nat) (dim1 : Nat) : T (transposeShape s dim0 dim1)
+@[extern "lean_torch_transpose"] opaque transpose {s : Shape} (input : @& T s) (dim0 : UInt64) (dim1 : UInt64) : T (transposeShape s dim0.toNat dim1.toNat)
 
 /-- Shape-aware matmul for 3D @ 2D: [batch, seq, k] @ [k, n] -> [batch, seq, n] -/
 @[extern "lean_torch_matmul3d_2d"]
@@ -679,6 +683,12 @@ opaque indexSelect {n k : UInt64} (data : @& T #[n]) (dim : Int64) (indices : @&
 @[extern "lean_torch_save_tensor"]
 opaque saveTensor {s : Shape} (t : @& T s) (path : @& String) : IO Unit
 
+/-- Save image tensor as PPM file.
+    Expects tensor of shape [batch, 3, height, width] with values in [-1, 1].
+    Saves the first image in the batch. -/
+@[extern "lean_torch_save_ppm"]
+opaque savePPMExplicit (s : Shape) (t : @& T s) (path : @& String) : IO Unit
+
 /-- Load tensor from a file with expected shape -/
 @[extern "lean_torch_load_tensor"]
 opaque loadTensor (s : Shape) (path : @& String) : IO (T s)
@@ -703,6 +713,25 @@ opaque tensorToUInt64Array {n : UInt64} (t : @& T #[n]) : IO (Array UInt64)
 opaque tensorToUInt64Array' (t : @& T #[]) : IO (Array UInt64)
 
 end data
+
+-- SafeTensors loading utilities (alias for data.loadTensor with name-based loading)
+namespace safetensors
+
+/-- Load a tensor from a SafeTensors file by name.
+    path: path to the .safetensors file
+    name: tensor name in the file
+    s: expected tensor shape -/
+@[extern "lean_torch_safetensors_load"]
+opaque loadTensor (path : @& String) (name : @& String) (s : Shape) : IO (T s)
+
+/-- Load a tensor from sharded SafeTensors files.
+    dir: directory containing sharded .safetensors files
+    name: tensor name to search for
+    s: expected tensor shape -/
+@[extern "lean_torch_safetensors_load_sharded"]
+opaque loadTensorSharded (dir : @& String) (name : @& String) (s : Shape) : IO (T s)
+
+end safetensors
 
 -- Autograd utilities
 namespace autograd
@@ -752,6 +781,13 @@ namespace rotary
 @[extern "lean_torch_compute_rotary_freqs"]
 opaque computeFreqs (seqLen headDim : UInt64) (base : Float := 10000.0)
     : IO (T #[seqLen, headDim / 2] × T #[seqLen, headDim / 2])
+
+/-- Pure version of precompute rotary embedding frequencies.
+    Returns (cos, sin) tensors of shape [seqLen, headDim/2].
+    Safe to use since the computation is deterministic. -/
+@[extern "lean_torch_compute_rotary_freqs_pure"]
+opaque computeFreqsPure (seqLen headDim : UInt64) (base : Float := 10000.0)
+    : T #[seqLen, headDim / 2] × T #[seqLen, headDim / 2]
 
 /-- Apply rotary embeddings to queries or keys.
     x: [batch, seq, n_head, head_dim]

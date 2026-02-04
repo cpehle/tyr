@@ -160,6 +160,18 @@ lean_exe TestDataLoader where
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
+/-- Flux image generation demo -/
+lean_exe FluxDemo where
+  root := `Examples.Flux.FluxDemo
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
+/-- Flux debug harness (saves intermediate tensors) -/
+lean_exe FluxDebug where
+  root := `Examples.Flux.FluxDebug
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
 /-! ## Scripts -/
 
 /-- Script to run the test executable with proper environment.

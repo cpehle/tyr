@@ -11,6 +11,17 @@ import Tyr.Module.Derive
 
 namespace torch.flux
 
+/-- Create sinusoidal timestep embeddings.
+    This is implemented as an extern function for efficiency.
+    t: [batch] timestep tensor (values typically in [0, 1])
+    dim: output dimension
+    Returns: [batch, dim] positional embedding -/
+@[extern "lean_torch_timestep_embedding"]
+opaque timestepEmbedding {batch : UInt64}
+    (t : @& T #[batch]) (dim : UInt64)
+    (max_period : Float := 10000.0) (time_factor : Float := 1000.0)
+    : T #[batch, dim]
+
 /-- Modulation output: shift, scale, gate triplets.
     For double blocks: 6 values (2 triplets for img and txt)
     For single blocks: 3 values (1 triplet) -/

@@ -22,6 +22,48 @@ private def tryLoadTensorSharded (modelDir : String) (name : String) (s : Shape)
   catch _ =>
     pure none
 
+/-- Dequantize FP8 weights using blockwise inverse scales (128x128 blocks).
+    weight: [out, in], scale_inv: [out/128, in/128]
+    Returns: float32 weights -/
+private def dequantizeFP8 {outDim inDim : UInt64}
+    (weight : T #[outDim, inDim])
+    (scaleInv : T #[outDim / 128, inDim / 128])
+    : T #[outDim, inDim] :=
+  let outBlocks := outDim / 128
+  let inBlocks := inDim / 128
+  let w := _root_.torch.toFloat' weight
+  let s := _root_.torch.toFloat' scaleInv
+  let w := reshape w #[outBlocks, 128, inBlocks, 128]
+  let s := reshape s #[outBlocks, 1, inBlocks, 1]
+  let s := nn.expand s #[outBlocks, 128, inBlocks, 128]
+  let w := w * s
+  reshape w #[outDim, inDim]
+
+/-- Load a (potentially FP8-quantized) linear weight from sharded SafeTensors.
+    If a matching weight_scale_inv exists, dequantize to float32. -/
+private def loadLinearWeightSharded (modelDir : String) (name : String) (outDim inDim : UInt64)
+    : IO (T #[outDim, inDim]) := do
+  let w ← safetensors.loadTensorSharded modelDir s!"{name}.weight" #[outDim, inDim]
+  let scaleInvOpt ← tryLoadTensorSharded modelDir s!"{name}.weight_scale_inv" #[outDim / 128, inDim / 128]
+  pure <| match scaleInvOpt with
+    | some s => dequantizeFP8 w s
+    | none => w
+
+/-- Load a (potentially FP8-quantized) linear weight from a single SafeTensors file.
+    If a matching weight_scale_inv exists, dequantize to float32. -/
+private def loadLinearWeight (path : String) (name : String) (outDim inDim : UInt64)
+    : IO (T #[outDim, inDim]) := do
+  let w ← safetensors.loadTensor path s!"{name}.weight" #[outDim, inDim]
+  let scaleInv ←
+    try
+      let s ← safetensors.loadTensor path s!"{name}.weight_scale_inv" #[outDim / 128, inDim / 128]
+      pure (some s)
+    catch _ =>
+      pure none
+  pure <| match scaleInv with
+    | some s => dequantizeFP8 w s
+    | none => w
+
 /-- Load a single attention layer from sharded SafeTensors.
     Optionally loads Q/K norms if present (for Flux Klein text encoder). -/
 def loadAttentionSharded (modelDir : String) (layerIdx : UInt64)
@@ -31,10 +73,10 @@ def loadAttentionSharded (modelDir : String) (layerIdx : UInt64)
   let layerPrefix := s!"model.layers.{layerIdx}.self_attn"
 
   -- Load separate projections
-  let q_proj ← safetensors.loadTensorSharded modelDir s!"{layerPrefix}.q_proj.weight" #[num_heads * head_dim, hidden_size]
-  let k_proj ← safetensors.loadTensorSharded modelDir s!"{layerPrefix}.k_proj.weight" #[num_kv_heads * head_dim, hidden_size]
-  let v_proj ← safetensors.loadTensorSharded modelDir s!"{layerPrefix}.v_proj.weight" #[num_kv_heads * head_dim, hidden_size]
-  let o_proj ← safetensors.loadTensorSharded modelDir s!"{layerPrefix}.o_proj.weight" #[hidden_size, num_heads * head_dim]
+  let q_proj ← loadLinearWeightSharded modelDir s!"{layerPrefix}.q_proj" (num_heads * head_dim) hidden_size
+  let k_proj ← loadLinearWeightSharded modelDir s!"{layerPrefix}.k_proj" (num_kv_heads * head_dim) hidden_size
+  let v_proj ← loadLinearWeightSharded modelDir s!"{layerPrefix}.v_proj" (num_kv_heads * head_dim) hidden_size
+  let o_proj ← loadLinearWeightSharded modelDir s!"{layerPrefix}.o_proj" hidden_size (num_heads * head_dim)
 
   -- Optionally load Q/K norms (Flux Klein text encoder has these)
   let q_norm ← if loadQKNorms then
@@ -62,9 +104,9 @@ def loadMLPSharded (modelDir : String) (layerIdx : UInt64)
     : IO (QwenMLP hidden_size intermediate_size) := do
   let layerPrefix := s!"model.layers.{layerIdx}.mlp"
 
-  let gate_proj ← safetensors.loadTensorSharded modelDir s!"{layerPrefix}.gate_proj.weight" #[intermediate_size, hidden_size]
-  let up_proj ← safetensors.loadTensorSharded modelDir s!"{layerPrefix}.up_proj.weight" #[intermediate_size, hidden_size]
-  let down_proj ← safetensors.loadTensorSharded modelDir s!"{layerPrefix}.down_proj.weight" #[hidden_size, intermediate_size]
+  let gate_proj ← loadLinearWeightSharded modelDir s!"{layerPrefix}.gate_proj" intermediate_size hidden_size
+  let up_proj ← loadLinearWeightSharded modelDir s!"{layerPrefix}.up_proj" intermediate_size hidden_size
+  let down_proj ← loadLinearWeightSharded modelDir s!"{layerPrefix}.down_proj" hidden_size intermediate_size
 
   pure {
     gate_proj := autograd.set_requires_grad gate_proj false
@@ -76,7 +118,7 @@ def loadMLPSharded (modelDir : String) (layerIdx : UInt64)
 def loadRMSNormSharded (modelDir : String) (name : String) (dim : UInt64)
     : IO (RMSNorm dim) := do
   let scale ← safetensors.loadTensorSharded modelDir s!"{name}.weight" #[dim]
-  pure { scale := autograd.set_requires_grad scale false, eps := ⟨1e-6⟩ }
+  pure { weight := autograd.set_requires_grad scale false, eps := ⟨1e-6⟩ }
 
 /-- Load a single transformer layer from sharded SafeTensors -/
 def loadLayerSharded (modelDir : String) (layerIdx : UInt64) (cfg : QwenConfig)
@@ -129,10 +171,10 @@ def loadAttention (path : String) (layerIdx : UInt64)
 
   -- Qwen uses fused QKV in some versions, separate in others
   -- We'll load separate projections
-  let q_proj ← safetensors.loadTensor path s!"{layerPrefix}.q_proj.weight" #[num_heads * head_dim, hidden_size]
-  let k_proj ← safetensors.loadTensor path s!"{layerPrefix}.k_proj.weight" #[num_kv_heads * head_dim, hidden_size]
-  let v_proj ← safetensors.loadTensor path s!"{layerPrefix}.v_proj.weight" #[num_kv_heads * head_dim, hidden_size]
-  let o_proj ← safetensors.loadTensor path s!"{layerPrefix}.o_proj.weight" #[hidden_size, num_heads * head_dim]
+  let q_proj ← loadLinearWeight path s!"{layerPrefix}.q_proj" (num_heads * head_dim) hidden_size
+  let k_proj ← loadLinearWeight path s!"{layerPrefix}.k_proj" (num_kv_heads * head_dim) hidden_size
+  let v_proj ← loadLinearWeight path s!"{layerPrefix}.v_proj" (num_kv_heads * head_dim) hidden_size
+  let o_proj ← loadLinearWeight path s!"{layerPrefix}.o_proj" hidden_size (num_heads * head_dim)
 
   pure {
     q_proj := autograd.set_requires_grad q_proj false
@@ -147,9 +189,9 @@ def loadMLP (path : String) (layerIdx : UInt64)
     : IO (QwenMLP hidden_size intermediate_size) := do
   let layerPrefix := s!"model.layers.{layerIdx}.mlp"
 
-  let gate_proj ← safetensors.loadTensor path s!"{layerPrefix}.gate_proj.weight" #[intermediate_size, hidden_size]
-  let up_proj ← safetensors.loadTensor path s!"{layerPrefix}.up_proj.weight" #[intermediate_size, hidden_size]
-  let down_proj ← safetensors.loadTensor path s!"{layerPrefix}.down_proj.weight" #[hidden_size, intermediate_size]
+  let gate_proj ← loadLinearWeight path s!"{layerPrefix}.gate_proj" intermediate_size hidden_size
+  let up_proj ← loadLinearWeight path s!"{layerPrefix}.up_proj" intermediate_size hidden_size
+  let down_proj ← loadLinearWeight path s!"{layerPrefix}.down_proj" hidden_size intermediate_size
 
   pure {
     gate_proj := autograd.set_requires_grad gate_proj false
@@ -161,7 +203,7 @@ def loadMLP (path : String) (layerIdx : UInt64)
 def loadRMSNorm (path : String) (name : String) (dim : UInt64)
     : IO (RMSNorm dim) := do
   let scale ← safetensors.loadTensor path s!"{name}.weight" #[dim]
-  pure { scale := autograd.set_requires_grad scale false, eps := ⟨1e-6⟩ }
+  pure { weight := autograd.set_requires_grad scale false, eps := ⟨1e-6⟩ }
 
 /-- Load a single transformer layer from SafeTensors (single file) -/
 def loadLayer (path : String) (layerIdx : UInt64) (cfg : QwenConfig)
@@ -212,7 +254,7 @@ def loadQwenFluxEmbedder (path : String) (cfg : QwenConfig := QwenConfig.qwen3_4
     This is the preferred method for HuggingFace models with sharded weights. -/
 def loadQwenFluxEmbedderSharded (modelDir : String) (cfg : QwenConfig := QwenConfig.fluxKleinTextEncoder)
     (max_seq : UInt64 := 512)
-    (outputLayers : Array UInt64 := #[8, 17, 26])  -- Flux2 reference uses these layers
+    (outputLayers : Array UInt64 := #[8, 17, 26])  -- Flux2 reference uses [9,18,27] with embedding state
     : IO (QwenFluxEmbedder cfg max_seq) := do
   -- Flux Klein text encoder has Q/K norms
   let model ← loadQwen3ModelSharded modelDir cfg true

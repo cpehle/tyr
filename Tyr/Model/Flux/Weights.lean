@@ -13,8 +13,8 @@ namespace torch.flux
 /-- Load RMSNorm weights from Flux2 format (uses .scale suffix) -/
 def loadRMSNormFlux2 (path : String) (name : String) (dim : UInt64)
     : IO (RMSNorm dim) := do
-  let scale ← safetensors.loadTensor path s!"{name}.scale" #[dim]
-  pure { scale := autograd.set_requires_grad scale false, eps := ⟨1e-6⟩ }
+  let weight ← safetensors.loadTensor path s!"{name}.scale" #[dim]
+  pure { weight := autograd.set_requires_grad weight false, eps := ⟨1e-6⟩ }
 
 /-- Load QKNorm weights from Flux2 format -/
 def loadQKNormFlux2 (path : String) (name : String) (head_dim : UInt64)
