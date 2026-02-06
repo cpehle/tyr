@@ -13,13 +13,22 @@ namespace Tests.GPU.AutoGrad
 open LeanTest
 
 -- Helper to run CoreM in IO
-def runCoreM (x : CoreM α) : IO α := do
+def runCoreMResult (x : CoreM α) : IO (Except String α) := do
   let env ← mkEmptyEnvironment
   let ctx : Core.Context := { fileName := "<test>", fileMap := default }
   let state : Core.State := { env := env }
   let eio := x.run ctx state
-  let (res, _) ← EIO.toIO (fun _ => IO.userError "CoreM Error") eio
-  return res
+  let res ← EIO.toBaseIO eio
+  match res with
+  | .ok (value, _) => pure (.ok value)
+  | .error err =>
+    let msg ← err.toMessageData.toString
+    pure (.error msg)
+
+def runCoreM (x : CoreM α) : IO α := do
+  match (← runCoreMResult x) with
+  | .ok value => pure value
+  | .error msg => throw (IO.userError msg)
 
 -- Helper to run TraceM
 def runTraceM (x : TraceM α) : IO (α × Tyr.GPU.AD.TraceState) := do

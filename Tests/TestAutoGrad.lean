@@ -1,11 +1,34 @@
 import Tyr.AutoGrad
 import Tests.Test
 import LeanTest
+import Lean.CoreM
 
 namespace Tests.AutoGrad
 
 open Tyr.AD
 open LeanTest
+open Lean
+open Lean.IR
+
+def runCoreMResult (x : CoreM α) : IO (Except String α) := do
+  let env ← mkEmptyEnvironment
+  let ctx : Core.Context := { fileName := "<test>", fileMap := default }
+  let state : Core.State := { env := env }
+  let eio := x.run ctx state
+  let res ← EIO.toBaseIO eio
+  match res with
+  | .ok (value, _) => pure (.ok value)
+  | .error err =>
+    let msg ← err.toMessageData.toString
+    pure (.error msg)
+
+def runCoreM (x : CoreM α) : IO α := do
+  match (← runCoreMResult x) with
+  | .ok value => pure value
+  | .error msg => throw (IO.userError msg)
+
+def runCoreM? (x : CoreM α) : IO (Except String α) := do
+  runCoreMResult x
 
 -- 1. Define Primal Functions
 def square (x : Float) : Float := x * x
@@ -39,11 +62,108 @@ def testAttributes : IO Unit := do
 
 @[test]
 def testLinearize : IO Unit := do
-  -- Placeholder for functional testing of linearize.
-  -- To properly test, we'd need to run `linearize` on a definition
-  -- and check the output IR or execute it.
-  -- Currently `linearize` is a transformation, execution requires integration.
-  return
+  let x : VarId := { idx := 0 }
+  let y : VarId := { idx := 5 }
+  let p : Param := { x := x, borrow := false, ty := IRType.object }
+  let body :=
+    FnBody.vdecl y IRType.object (Expr.fap `test.square #[Arg.var x]) (
+      .ret (.var y)
+    )
+  let decl : Decl := .fdecl `test.main #[p] IRType.object body {}
+
+  let jvpDecl ← runCoreM (do
+    registerJVPRule `test.square fun args tans _ => do
+      let prim ← getFreshVar
+      let tan ← getFreshVar
+      let builder := fun rest =>
+        FnBody.vdecl prim IRType.object (Expr.fap `test.square args) (
+          FnBody.vdecl tan IRType.object (Expr.fap `test.square_tan tans) rest
+        )
+      return (builder, prim, tan)
+    let (res, _) ← (linearize decl).run {}
+    return res)
+
+  match jvpDecl with
+  | .fdecl _ params _ _ _ =>
+    LeanTest.assertTrue (params.size == 2) s!"Expected primal+tangent params, got {params.size}"
+    let tanParam := params[1]!
+    LeanTest.assertTrue (tanParam.x.idx > y.idx)
+      s!"Tangent param index should be fresh, got {tanParam.x.idx} with max primal index {y.idx}"
+  | _ =>
+    LeanTest.fail "Expected linearize to produce a function declaration"
+
+@[test]
+def testVJPPullbackOrder : IO Unit := do
+  let x : VarId := { idx := 0 }
+  let y : VarId := { idx := 1 }
+  let z : VarId := { idx := 2 }
+  let body :=
+    FnBody.vdecl y IRType.object (Expr.fap `rule_f #[Arg.var x]) (
+      FnBody.vdecl z IRType.object (Expr.fap `rule_g #[Arg.var y]) (
+        .ret (.var z)
+      )
+    )
+
+  let transformed ← runCoreM (do
+    registerVJPRule `rule_f fun _args dy _ => do
+      let dx ← getFreshVar
+      let builder := fun rest =>
+        FnBody.vdecl dx IRType.object (Expr.fap `pb_f #[Arg.var dy]) rest
+      return (builder, #[dx])
+    registerVJPRule `rule_g fun _args dy _ => do
+      let dx ← getFreshVar
+      let builder := fun rest =>
+        FnBody.vdecl dx IRType.object (Expr.fap `pb_g #[Arg.var dy]) rest
+      return (builder, #[dx])
+    let (res, _) ← (vjp body).run {}
+    return res)
+
+  let backwardStart? :=
+    match transformed with
+    | .vdecl _ _ _ (.vdecl _ _ _ rest) => some rest
+    | _ => none
+
+  match backwardStart? with
+  | some (.vdecl _ _ (.fap fn1 _) (.vdecl _ _ (.fap fn2 _) _)) =>
+    LeanTest.assertTrue (fn1 == `pb_g) s!"Expected first pullback to be pb_g, got {fn1}"
+    LeanTest.assertTrue (fn2 == `pb_f) s!"Expected second pullback to be pb_f, got {fn2}"
+  | _ =>
+    LeanTest.fail "Expected backward pass declarations after forward declarations"
+
+@[test]
+def testVJPRejectsAliasedArgs : IO Unit := do
+  let x : VarId := { idx := 0 }
+  let y : VarId := { idx := 1 }
+  let body :=
+    FnBody.vdecl y IRType.object (Expr.fap `dup #[Arg.var x, Arg.var x]) (
+      .ret (.var y)
+    )
+
+  let result ← runCoreM? (do
+    registerVJPRule `dup fun _args dy _ => do
+      let dx0 ← getFreshVar
+      let dx1 ← getFreshVar
+      let builder := fun rest =>
+        FnBody.vdecl dx0 IRType.object (Expr.fap `pb0 #[Arg.var dy]) (
+          FnBody.vdecl dx1 IRType.object (Expr.fap `pb1 #[Arg.var dy]) rest
+        )
+      return (builder, #[dx0, dx1])
+    let _ ← (vjp body).run {}
+    return ())
+
+  match result with
+  | .ok _ =>
+    LeanTest.fail "vjp should fail for repeated differentiable arguments"
+  | .error _ =>
+    pure ()
+
+@[test]
+def testParseStaticIndices : IO Unit := do
+  let kinds := parseStaticIndices #[1, 3] 5
+  LeanTest.assertTrue (kinds.size == 5) s!"Expected 5 parameter kinds, got {kinds.size}"
+  LeanTest.assertTrue (kinds[1]! == .static) "Expected parameter 1 to be static"
+  LeanTest.assertTrue (kinds[3]! == .static) "Expected parameter 3 to be static"
+  LeanTest.assertTrue (kinds[0]! == .diff) "Expected parameter 0 to be differentiable"
 
 @[test]
 def testNoGradRestoresOnException : IO Unit := do
