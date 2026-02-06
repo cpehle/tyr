@@ -66,6 +66,10 @@ def objId_bwd (_x dy : Nat) : Nat := dy
 def autoObjId (x : Nat) : Nat :=
   objId x
 
+@[autodiff]
+def autoChain (x : Float) : Float :=
+  square (square x)
+
 @[test]
 def testAttributes : IO Unit := do
   -- This test passes if the file compiles and attributes are processed
@@ -109,6 +113,11 @@ def testLinearize : IO Unit := do
 @[test]
 def testAutodiffAttributeCompiles : IO Unit := do
   -- Compilation validates that @[autodiff] ran after IR generation.
+  return
+
+@[test]
+def testAutodiffFloatAttributeCompiles : IO Unit := do
+  -- Compilation validates float autodiff companion generation.
   return
 
 @[test]
@@ -359,6 +368,10 @@ def testChainRuleManual : IO Unit := do
 -- Multiplies x by a constant factor n
 def scale (x : Float) (n : Nat) : Float := x * n.toFloat
 
+@[autodiff, static := [1]]
+def autoFloatKeep (x : Float) (_n : Nat) : Float :=
+  square x
+
 -- JVP rule: only x has a tangent, n is static
 -- Note: n doesn't get a tangent parameter
 @[jvp scale, static := [1]]
@@ -451,6 +464,11 @@ def testStaticAttributeCompiles : IO Unit := do
 @[test]
 def testAutodiffStaticAttributeCompiles : IO Unit := do
   -- Compilation validates that @[autodiff, static := [...]] ran successfully.
+  return
+
+@[test]
+def testAutodiffFloatStaticAttributeCompiles : IO Unit := do
+  -- Compilation validates float autodiff with static parameters.
   return
 
 @[test]

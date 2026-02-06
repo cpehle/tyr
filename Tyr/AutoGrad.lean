@@ -94,6 +94,7 @@ partial def replaceVar (b : FnBody) (old new : VarId) : FnBody :=
 structure ADContext where
   tangents : Std.HashMap Nat Nat := {}
   cotangents : Std.HashMap Nat Nat := {}
+  varTypes : Std.HashMap Nat IRType := {}
   nextVarIdx : Nat := 0
   /-- When true, missing tangents are treated as an AD error. -/
   strictMissingTangents : Bool := false
@@ -117,6 +118,20 @@ def getFreshVar : ADM VarId := do
 def getFreshGpuVar : ADM Tyr.GPU.Codegen.VarId := do
   return { idx := ← getFreshVarIdx }
 
+def setVarType (x : VarId) (ty : IRType) : ADM Unit := do
+  modify fun s => { s with varTypes := s.varTypes.insert x.idx ty }
+
+def getVarType? (x : VarId) : ADM (Option IRType) := do
+  return (← get).varTypes.get? x.idx
+
+def getVarTypeD (x : VarId) (fallback : IRType := .object) : ADM IRType := do
+  return (← getVarType? x).getD fallback
+
+def getArgTypeD (arg : Arg) (fallback : IRType := .object) : ADM IRType := do
+  match arg with
+  | .var v => getVarTypeD v fallback
+  | .erased => return .erased
+
 def getTangentIdx (idx : Nat) : ADM Nat := do
   let s ← get
   match s.tangents.get? idx with
@@ -139,6 +154,9 @@ def setTangentIdx (x idx : Nat) : ADM Unit := do
 
 def setTangent (x dx : VarId) : ADM Unit := do
   setTangentIdx x.idx dx.idx
+  match (← getVarType? x), (← getVarType? dx) with
+  | some ty, none => setVarType dx ty
+  | _, _ => pure ()
 
 def setGpuTangent (x dx : Tyr.GPU.Codegen.VarId) : ADM Unit := do
   setTangentIdx x.idx dx.idx
@@ -153,7 +171,16 @@ def getCotangentIdx (idx : Nat) : ADM Nat := do
     return dx
 
 def getCotangent (x : VarId) : ADM VarId := do
-  return { idx := ← getCotangentIdx x.idx }
+  let s ← get
+  match s.cotangents.get? x.idx with
+  | some dx => return { idx := dx }
+  | none =>
+    let dx ← getFreshVar
+    modify fun s => { s with cotangents := s.cotangents.insert x.idx dx.idx }
+    match (← getVarType? x) with
+    | some ty => setVarType dx ty
+    | none => pure ()
+    return dx
 
 def getGpuCotangent (x : Tyr.GPU.Codegen.VarId) : ADM Tyr.GPU.Codegen.VarId := do
   return { idx := ← getCotangentIdx x.idx }
@@ -163,6 +190,9 @@ def setCotangentIdx (x idx : Nat) : ADM Unit := do
 
 def setCotangent (x dx : VarId) : ADM Unit := do
   setCotangentIdx x.idx dx.idx
+  match (← getVarType? x), (← getVarType? dx) with
+  | some ty, none => setVarType dx ty
+  | _, _ => pure ()
 
 def setGpuCotangent (x dx : Tyr.GPU.Codegen.VarId) : ADM Unit := do
   setCotangentIdx x.idx dx.idx
@@ -234,54 +264,106 @@ def getVJPRule (fn : Lean.Name) : Lean.CoreM (Option VJPRule) := do
 
 -- Lean VJP Registration Helper
 
-partial def unpackTuple (res : VarId) (vars : List VarId) : ADM (FnBody → FnBody) := do
-  match vars with
-  | [] => return id
-  | [v] =>
-    return fun b => replaceVar b v res
+def boxTupleFieldIfScalar (v : VarId) : ADM (Arg × (FnBody → FnBody)) := do
+  let ty ← getVarTypeD v .tobject
+  if ty.isScalar then
+    let boxed ← getFreshVar
+    setVarType boxed .tobject
+    let builder := fun b =>
+      FnBody.vdecl boxed IRType.tobject (Expr.box ty v) b
+    return (.var boxed, builder)
+  else
+    return (.var v, id)
 
-  | v :: vs =>
-    let tail ← getFreshVar
-    let unpackTail ← unpackTuple tail vs
-    return fun b =>
-      FnBody.vdecl v IRType.object (Expr.proj 0 res) <|
-      FnBody.vdecl tail IRType.object (Expr.proj 1 res) <|
-      unpackTail b
+def coerceTupleFieldToType (field : VarId) (targetTy : IRType) : ADM (VarId × (FnBody → FnBody)) := do
+  if targetTy.isScalar then
+    let unboxed ← getFreshVar
+    setVarType unboxed targetTy
+    let builder := fun b =>
+      FnBody.vdecl unboxed targetTy (Expr.unbox field) b
+    return (unboxed, builder)
+  else
+    return (field, id)
+
+partial def unpackTupleValues (res : VarId) (tys : List IRType) : ADM (List VarId × (FnBody → FnBody)) := do
+  match tys with
+  | [] => return ([], id)
+  | [ty] =>
+    let (val, valBuilder) ← coerceTupleFieldToType res ty
+    return ([val], valBuilder)
+  | ty :: tys' =>
+    let headField ← getFreshVar
+    setVarType headField .tobject
+    let (headVal, headValBuilder) ← coerceTupleFieldToType headField ty
+    let tailField ← getFreshVar
+    setVarType tailField .tobject
+    let (tailVals, tailBuilder) ← unpackTupleValues tailField tys'
+    let builder := fun b =>
+      FnBody.vdecl headField IRType.tobject (Expr.proj 0 res) <|
+      headValBuilder <|
+      FnBody.vdecl tailField IRType.tobject (Expr.proj 1 res) <|
+      tailBuilder b
+    return (headVal :: tailVals, builder)
 
 /-- Register a VJP rule with parameter kinds.
     Static parameters are excluded from cotangent computation. -/
 def registerLeanVJPRuleWithKinds (primalFn vjpFn : Lean.Name)
     (paramKinds : Array ParamKind := #[]) : Lean.CoreM Unit := do
   registerVJPRule primalFn fun args dy _resTy => do
-    let res ← getFreshVar
     let callArgs := args.push (Arg.var dy)
-
-    let mut dxs := #[]
-    let mut varsToUnpack := []
+    let mut diffTys : List IRType := []
 
     -- Create fresh vars for cotangents (only for diff params)
-    -- For static params, create a dummy var that will be skipped
     for i in [:args.size] do
       let kind := paramKinds.getD i .diff
       if kind == .diff then
-        let dx ← getFreshVar
-        dxs := dxs.push dx
-        varsToUnpack := varsToUnpack ++ [dx]
+        let dxTy ← getArgTypeD args[i]! .tobject
+        diffTys := diffTys ++ [dxTy]
       else
-        -- Static/frozen params: create dummy var and mark as static
-        let dummyVar ← getFreshVar
-        markStatic dummyVar.idx
-        dxs := dxs.push dummyVar
         -- Also mark the arg var itself as static if it's a var
         match args[i]! with
         | .var v => markStatic v.idx
         | _ => pure ()
 
-    let unpacker ← unpackTuple res varsToUnpack
+    let (diffVals, builder) ←
+      match diffTys with
+      | [] =>
+        let res ← getFreshVar
+        setVarType res IRType.object
+        pure ([], fun rest => FnBody.vdecl res IRType.object (Expr.fap vjpFn callArgs) rest)
+      | [dxTy] =>
+        let resTy := dxTy
+        let res ← getFreshVar
+        setVarType res resTy
+        pure ([res], fun rest => FnBody.vdecl res resTy (Expr.fap vjpFn callArgs) rest)
+      | _ =>
+        let res ← getFreshVar
+        setVarType res IRType.object
+        let (vals, unpacker) ← unpackTupleValues res diffTys
+        pure (vals, fun rest =>
+          FnBody.vdecl res IRType.object (Expr.fap vjpFn callArgs) <|
+          unpacker rest)
 
-    let builder := fun rest =>
-      FnBody.vdecl res IRType.object (Expr.fap vjpFn callArgs) <|
-      unpacker rest
+    let mut dxs : Array VarId := Array.replicate args.size { idx := 0 }
+    let mut nextDiff := diffVals
+    for i in [:args.size] do
+      let kind := paramKinds.getD i .diff
+      if kind == .diff then
+        match nextDiff with
+        | [] =>
+          throwError s!"VJP rule arity mismatch for `{primalFn}`: missing cotangent value for argument {i}"
+        | v :: vs =>
+          dxs := dxs.set! i v
+          nextDiff := vs
+      else
+        let dummyTy ← getArgTypeD args[i]! .tobject
+        let dummyVar ← getFreshVar
+        setVarType dummyVar dummyTy
+        markStatic dummyVar.idx
+        dxs := dxs.set! i dummyVar
+
+    if !nextDiff.isEmpty then
+      throwError s!"VJP rule arity mismatch for `{primalFn}`: too many cotangent outputs"
 
     return (builder, dxs)
 
@@ -293,7 +375,7 @@ def registerLeanVJPRule (primalFn vjpFn : Lean.Name) : Lean.CoreM Unit := do
     Static parameters don't receive tangent arguments. -/
 def registerLeanJVPRuleWithKinds (primalFn jvpFn : Lean.Name)
     (paramKinds : Array ParamKind := #[]) : Lean.CoreM Unit := do
-  registerJVPRule primalFn fun args tans _resTy => do
+  registerJVPRule primalFn fun args tans resTy => do
     let resPair ← getFreshVar
     let expectedTangents :=
       (Array.range args.size).foldl (init := 0) fun n i =>
@@ -314,14 +396,36 @@ def registerLeanJVPRuleWithKinds (primalFn jvpFn : Lean.Name)
           tanIdx := tanIdx + 1
       -- static/frozen params: no tangent arg added
 
-    let prim ← getFreshVar
-    let tan ← getFreshVar
+    let boxedPrim ← getFreshVar
+    setVarType boxedPrim .tobject
+    let prim ←
+      if resTy.isScalar then do
+        let p ← getFreshVar
+        setVarType p resTy
+        pure p
+      else
+        pure boxedPrim
+    let boxedTan ← getFreshVar
+    setVarType boxedTan .tobject
+    let tan ←
+      if resTy.isScalar then do
+        let t ← getFreshVar
+        setVarType t resTy
+        pure t
+      else
+        pure boxedTan
 
     let builder := fun rest =>
       FnBody.vdecl resPair IRType.object (Expr.fap jvpFn callArgs) <|
-      FnBody.vdecl prim IRType.object (Expr.proj 0 resPair) <|
-      FnBody.vdecl tan IRType.object (Expr.proj 1 resPair) <|
-      rest
+      FnBody.vdecl boxedPrim IRType.tobject (Expr.proj 0 resPair) <|
+      if resTy.isScalar then
+        FnBody.vdecl prim resTy (Expr.unbox boxedPrim) <|
+        FnBody.vdecl boxedTan IRType.tobject (Expr.proj 1 resPair) <|
+        FnBody.vdecl tan resTy (Expr.unbox boxedTan) <|
+        rest
+      else
+        FnBody.vdecl boxedTan IRType.tobject (Expr.proj 1 resPair) <|
+        rest
 
     return (builder, prim, tan)
 
@@ -333,6 +437,7 @@ def registerLeanJVPRule (primalFn jvpFn : Lean.Name) : Lean.CoreM Unit := do
 partial def jvp (b : FnBody) : ADM FnBody := do
   match b with
   | .vdecl x ty e rest =>
+    setVarType x ty
     match e with
     | .fap fn args =>
       let rule? ← getJVPRule fn
@@ -347,6 +452,8 @@ partial def jvp (b : FnBody) : ADM FnBody := do
               return some (Arg.var (← getTangent v))
           | Arg.erased => return none
         let (builder, prim, tan) ← rule args tanArgs ty
+        setVarType prim ty
+        setVarType tan ty
         setTangent x tan
         let rest' ← jvp rest
         return builder (replaceVar rest' x prim)
@@ -358,15 +465,20 @@ partial def jvp (b : FnBody) : ADM FnBody := do
       return .vdecl x ty e rest'
   | .ret (.var x) =>
     let dx ← getTangent x
+    let (xArg, xBuilder) ← boxTupleFieldIfScalar x
+    let (dxArg, dxBuilder) ← boxTupleFieldIfScalar dx
     let pair ← getFreshVar
+    setVarType pair IRType.object
     let ctorInfo : CtorInfo := { name := `Prod.mk, cidx := 0, size := 2, usize := 0, ssize := 0 }
-    return .vdecl pair IRType.object (.ctor ctorInfo #[Arg.var x, .var dx]) (.ret (.var pair))
+    return xBuilder <| dxBuilder <|
+      .vdecl pair IRType.object (.ctor ctorInfo #[xArg, dxArg]) (.ret (.var pair))
   | other => return other
 
 -- VJP Interpreter
 partial def vjp (b : FnBody) : ADM FnBody := do
   match b with
   | .vdecl x ty e rest =>
+    setVarType x ty
     match e with
     | .fap fn args =>
       let rule? ← getVJPRule fn
@@ -467,9 +579,15 @@ partial def mkTupleReturnAux (vars : List VarId) : ADM (VarId × (FnBody → FnB
   | v :: vs =>
     let (tail, tailBuilder) ← mkTupleReturnAux vs
     let pair ← getFreshVar
+    setVarType pair IRType.object
+    let (vArg, vArgBuilder) ← boxTupleFieldIfScalar v
+    let (tailArg, tailArgBuilder) ← boxTupleFieldIfScalar tail
     let ctorInfo : CtorInfo := { name := `Prod.mk, cidx := 0, size := 2, usize := 0, ssize := 0 }
     let builder := fun b =>
-      tailBuilder (.vdecl pair IRType.object (.ctor ctorInfo #[Arg.var v, .var tail]) b)
+      tailBuilder <|
+      vArgBuilder <|
+      tailArgBuilder <|
+      .vdecl pair IRType.object (.ctor ctorInfo #[vArg, tailArg]) b
     return (pair, builder)
 
 def mkTupleReturn (vars : Array VarId) : ADM FnBody := do
@@ -503,9 +621,11 @@ def linearizeWithKinds (decl : Decl) (paramKinds : Array ParamKind := #[]) : ADM
     let mut tanParams := #[]
     for i in [:params.size] do
       let p := params[i]!
+      setVarType p.x p.ty
       let kind := paramKinds.getD i .diff
       if kind == .diff then
         let dp ← getFreshVar
+        setVarType dp p.ty
         setTangent p.x dp
         tanParams := tanParams.push { p with x := dp }
       else
@@ -522,6 +642,8 @@ def transposeWithKinds (decl : Decl) (paramKinds : Array ParamKind := #[]) : ADM
   modify fun s => { s with nextVarIdx := max s.nextVarIdx startIdx }
   match decl with
   | Decl.fdecl f params ty body info =>
+    for p in params do
+      setVarType p.x p.ty
     for i in [:params.size] do
       let kind := paramKinds.getD i .diff
       if kind != .diff then
@@ -531,6 +653,7 @@ def transposeWithKinds (decl : Decl) (paramKinds : Array ParamKind := #[]) : ADM
       | throwError s!"AD transform failed: `{f}` does not end in `ret (.var _)`"
 
     let dy ← getFreshVar
+    setVarType dy ty
     setCotangent outVar dy
     let transformedBody ← vjp body
 
@@ -551,8 +674,12 @@ def transposeWithKinds (decl : Decl) (paramKinds : Array ParamKind := #[]) : ADM
 
     let retBody ← mkTupleReturn paramCotans
     let finalBody := replaceRetWith transformedBody retBody
+    let retTy ←
+      match paramCotans.toList with
+      | [dx] => getVarTypeD dx IRType.object
+      | _ => pure IRType.object
     let dyParam : Param := { x := dy, borrow := false, ty := ty }
-    return Decl.fdecl (Lean.Name.mkStr f "vjp") (params.push dyParam) IRType.object finalBody info
+    return Decl.fdecl (Lean.Name.mkStr f "vjp") (params.push dyParam) retTy finalBody info
   | other => return other
 
 def deriveAndRegisterADRules (primalFn : Lean.Name) (paramKinds : Array ParamKind := #[]) : Lean.CoreM Unit := do
