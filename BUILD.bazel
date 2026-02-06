@@ -31,6 +31,16 @@ lean_library(
     module_name = "Tests",
 )
 
+# Experimental tests library
+lean_library(
+    name = "TestsExperimental",
+    srcs = ["TestsExperimental.lean"],
+    deps = [
+        ":Tests",
+    ],
+    module_name = "TestsExperimental",
+)
+
 # Training executables
 lean_binary(
     name = "TrainGPT",
@@ -53,11 +63,32 @@ lean_binary(
     cc_deps = ["//cc:TyrC"],
 )
 
+lean_binary(
+    name = "FluxDemo",
+    srcs = ["Examples/Flux/FluxDemo.lean"],
+    deps = [":Examples"],
+    cc_deps = ["//cc:TyrC"],
+)
+
+lean_binary(
+    name = "FluxDebug",
+    srcs = ["Examples/Flux/FluxDebug.lean"],
+    deps = [":Examples"],
+    cc_deps = ["//cc:TyrC"],
+)
+
 # Test executable
 lean_binary(
     name = "test_runner",
     srcs = ["Tests/RunTests.lean"],
     deps = [":Tests"],
+    cc_deps = ["//cc:TyrC"],
+)
+
+lean_binary(
+    name = "test_runner_experimental",
+    srcs = ["Tests/RunTestsExperimental.lean"],
+    deps = [":TestsExperimental"],
     cc_deps = ["//cc:TyrC"],
 )
 
@@ -71,6 +102,41 @@ lean_binary(
 lean_binary(
     name = "TestDataLoader",
     srcs = ["Tests/TestDataLoader.lean"],
+    deps = [":Tests"],
+    cc_deps = ["//cc:TyrC"],
+)
+
+lean_binary(
+    name = "TestDiffEq",
+    srcs = ["Tests/TestDiffEq.lean"],
+    deps = [":Tests"],
+    cc_deps = ["//cc:TyrC"],
+)
+
+lean_binary(
+    name = "TestDiffEqAdjoint",
+    srcs = ["Tests/TestDiffEqAdjoint.lean"],
+    deps = [":Tests"],
+    cc_deps = ["//cc:TyrC"],
+)
+
+lean_binary(
+    name = "TestDiffEqAdjointCore",
+    srcs = ["Tests/TestDiffEqAdjointCore.lean"],
+    deps = [":Tests"],
+    cc_deps = ["//cc:TyrC"],
+)
+
+lean_binary(
+    name = "TestGPUDSL",
+    srcs = ["Tests/TestGPUDSL.lean"],
+    deps = [":Tests"],
+    cc_deps = ["//cc:TyrC"],
+)
+
+lean_binary(
+    name = "TestGPUKernels",
+    srcs = ["Tests/TestGPUKernels.lean"],
     deps = [":Tests"],
     cc_deps = ["//cc:TyrC"],
 )
