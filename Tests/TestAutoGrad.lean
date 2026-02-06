@@ -31,7 +31,9 @@ def runCoreM? (x : CoreM α) : IO (Except String α) := do
   runCoreMResult x
 
 -- 1. Define Primal Functions
+@[noinline]
 def square (x : Float) : Float := x * x
+@[noinline]
 def mul (x y : Float) : Float := x * y
 
 -- 2. Define and Register Rules
@@ -51,6 +53,18 @@ def mul_bwd (x y dz : Float) : Float × Float :=
 @[jvp mul]
 def mul_fwd (x y dx dy : Float) : Float × Float :=
   (x * y, x * dy + y * dx)
+
+def objId (x : Nat) : Nat := x
+
+@[jvp objId]
+def objId_fwd (x dx : Nat) : Nat × Nat := (x, dx)
+
+@[vjp objId]
+def objId_bwd (_x dy : Nat) : Nat := dy
+
+@[autodiff]
+def autoObjId (x : Nat) : Nat :=
+  objId x
 
 @[test]
 def testAttributes : IO Unit := do
@@ -91,6 +105,46 @@ def testLinearize : IO Unit := do
       s!"Tangent param index should be fresh, got {tanParam.x.idx} with max primal index {y.idx}"
   | _ =>
     LeanTest.fail "Expected linearize to produce a function declaration"
+
+@[test]
+def testAutodiffAttributeCompiles : IO Unit := do
+  -- Compilation validates that @[autodiff] ran after IR generation.
+  return
+
+@[test]
+def testDeriveAndRegisterADRulesCore : IO Unit := do
+  let ok ← runCoreM (do
+    registerJVPRule `test.foo fun args tans _ => do
+      let prim ← getFreshVar
+      let tan ← getFreshVar
+      let builder := fun rest =>
+        FnBody.vdecl prim IRType.object (Expr.fap `test.foo args) <|
+        FnBody.vdecl tan IRType.object (Expr.fap `test.foo_tan tans) <|
+        rest
+      return (builder, prim, tan)
+
+    registerVJPRule `test.foo fun args dy _ => do
+      let dx ← getFreshVar
+      let callArgs := args.push (.var dy)
+      let builder := fun rest =>
+        FnBody.vdecl dx IRType.object (Expr.fap `test.foo_bwd callArgs) rest
+      return (builder, #[dx])
+
+    let x : VarId := { idx := 1 }
+    let y : VarId := { idx := 2 }
+    let p : Param := { x := x, borrow := false, ty := IRType.object }
+    let body := FnBody.vdecl y IRType.object (Expr.fap `test.foo #[Arg.var x]) (.ret (.var y))
+    let decl : Decl := .fdecl `test.primal #[p] IRType.object body {}
+    Lean.IR.addDecl decl
+    deriveAndRegisterADRules `test.primal #[]
+
+    let hasJVP := (← getJVPRule `test.primal).isSome
+    let hasVJP := (← getVJPRule `test.primal).isSome
+    let hasJVPDecl := (← Lean.IR.findDecl (Lean.Name.mkStr `test.primal "jvp")).isSome
+    let hasVJPDecl := (← Lean.IR.findDecl (Lean.Name.mkStr `test.primal "vjp")).isSome
+    return hasJVP && hasVJP && hasJVPDecl && hasVJPDecl
+  )
+  LeanTest.assertTrue ok "deriveAndRegisterADRules should register rules and add companion decls"
 
 @[test]
 def testVJPPullbackOrder : IO Unit := do
@@ -317,6 +371,18 @@ def scale_fwd (x dx : Float) (n : Nat) : Float × Float :=
 def scale_bwd (x : Float) (n : Nat) (dy : Float) : Float :=
   dy * n.toFloat
 
+def objKeep (x : Nat) (_tag : String) : Nat := x
+
+@[jvp objKeep, static := [1]]
+def objKeep_fwd (x dx : Nat) (_tag : String) : Nat × Nat := (x, dx)
+
+@[vjp objKeep, static := [1]]
+def objKeep_bwd (_x : Nat) (_tag : String) (dy : Nat) : Nat := dy
+
+@[autodiff, static := [1]]
+def autoObjKeep (x : Nat) (tag : String) : Nat :=
+  objKeep x tag
+
 @[test]
 def testStaticJVP : IO Unit := do
   -- scale(3.0, 5) = 15.0
@@ -381,6 +447,49 @@ def testStaticAttributeCompiles : IO Unit := do
   -- This test verifies that the static := [...] attribute syntax compiles
   -- The main check is that the file compiles with the static attribute syntax
   return
+
+@[test]
+def testAutodiffStaticAttributeCompiles : IO Unit := do
+  -- Compilation validates that @[autodiff, static := [...]] ran successfully.
+  return
+
+@[test]
+def testDeriveAndRegisterADRulesCoreStatic : IO Unit := do
+  let ok ← runCoreM (do
+    registerJVPRule `test.foo fun args tans _ => do
+      let prim ← getFreshVar
+      let tan ← getFreshVar
+      let builder := fun rest =>
+        FnBody.vdecl prim IRType.object (Expr.fap `test.foo args) <|
+        FnBody.vdecl tan IRType.object (Expr.fap `test.foo_tan tans) <|
+        rest
+      return (builder, prim, tan)
+
+    registerVJPRule `test.foo fun args dy _ => do
+      let dx ← getFreshVar
+      let callArgs := args.push (.var dy)
+      let builder := fun rest =>
+        FnBody.vdecl dx IRType.object (Expr.fap `test.foo_bwd callArgs) rest
+      return (builder, #[dx])
+
+    let x : VarId := { idx := 1 }
+    let s : VarId := { idx := 2 }
+    let y : VarId := { idx := 3 }
+    let px : Param := { x := x, borrow := false, ty := IRType.object }
+    let ps : Param := { x := s, borrow := false, ty := IRType.object }
+    let body := FnBody.vdecl y IRType.object (Expr.fap `test.foo #[Arg.var x]) (.ret (.var y))
+    let decl : Decl := .fdecl `test.primalStatic #[px, ps] IRType.object body {}
+    Lean.IR.addDecl decl
+    let paramKinds := parseStaticIndices #[1] 2
+    deriveAndRegisterADRules `test.primalStatic paramKinds
+
+    let hasJVP := (← getJVPRule `test.primalStatic).isSome
+    let hasVJP := (← getVJPRule `test.primalStatic).isSome
+    let hasJVPDecl := (← Lean.IR.findDecl (Lean.Name.mkStr `test.primalStatic "jvp")).isSome
+    let hasVJPDecl := (← Lean.IR.findDecl (Lean.Name.mkStr `test.primalStatic "vjp")).isSome
+    return hasJVP && hasVJP && hasJVPDecl && hasVJPDecl
+  )
+  LeanTest.assertTrue ok "static deriveAndRegisterADRules should register rules and add companion decls"
 
 /-! ## DifferentiableManifold Typeclass Tests -/
 
