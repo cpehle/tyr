@@ -11,6 +11,9 @@ out/
 .ninja_log
 .DS_Store
 checkpoints/
+weights/
+output.png
+output.ppm
 
 # Bazel
 bazel-*

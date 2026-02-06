@@ -21,18 +21,23 @@ let y := linear x w  -- Error: expected T #[n, 768], got T #[768, 512]
 ```
 Tyr/
 ├── Basic.lean          # Core types: Shape, DType, Device, T (tensor type)
-├── Torch.lean          # Tensor operations (arange, zeros, matmul, etc.)
-├── TensorStruct.lean   # Generic tensor tree traversal (like JAX PyTree)
-├── Module/             # Neural network modules
-│   ├── Core.lean       # Module typeclass
-│   ├── Linear.lean     # Linear layers
-│   └── LayerNorm.lean  # Layer normalization
-├── Optim/              # Optimizers (AdamW, distributed variants)
-├── GPT.lean            # GPT-2 implementation
-├── NanoProof.lean      # Theorem-proving transformer
-├── Train.lean          # Training loops
-└── DataLoader.lean     # Data loading utilities
+├── Torch.lean          # Tensor operations and autograd bindings
+├── TensorStruct.lean   # Tensor tree traversal (PyTree-style)
+├── Module/             # Neural-network module abstractions/layers
+├── Optim/              # Optimizers and schedules
+├── DiffEq/             # ODE/SDE solvers and adjoints
+├── GPU/                # ThunderKittens-style GPU DSL/codegen
+├── Model/              # Shared model components and utilities
+└── Data/               # Data/task abstractions
 
+Examples/
+├── GPT/
+├── NanoChat/
+├── NanoProof/
+├── Diffusion/
+└── Flux/
+
+Tests/                  # LeanTest suites and runners
 cc/                     # C++ FFI bindings
 ├── src/tyr.cpp         # Main LibTorch bindings
 └── include/tyr.h       # Header file
@@ -58,7 +63,7 @@ external/
 lake build
 
 # Build specific executables
-lake build test
+lake build test_runner
 lake build TrainGPT
 lake build TrainDiffusion
 ```
@@ -68,14 +73,19 @@ lake build TrainDiffusion
 ```bash
 # macOS
 export DYLD_LIBRARY_PATH=external/libtorch/lib:/opt/homebrew/opt/libomp/lib
-.lake/build/bin/test
+.lake/build/bin/test_runner
 
 # Linux
 export LD_LIBRARY_PATH=external/libtorch/lib:/usr/lib
-.lake/build/bin/test
+.lake/build/bin/test_runner
 
-# Or use the helper script
+# Or use the helper script (executes test_runner)
 lake script run
+
+# Experimental/in-progress suites
+lake build test_runner_experimental
+./.lake/build/bin/test_runner_experimental
+# (for modules that are still being iterated outside the default suite)
 ```
 
 ### Training GPT
@@ -147,9 +157,10 @@ Monitor tensor leaks via `get_live_tensors` which tracks outstanding C++ tensors
 
 ## Model Implementations
 
-- **GPT.lean**: GPT-2 architecture (124M parameters)
-- **NanoProof.lean**: Theorem-proving transformer with rotary embeddings, RMSNorm, GQA
-- **Diffusion.lean**: Discrete diffusion transformer for text generation
+- **Examples/GPT/**: GPT-style language model training and data pipelines
+- **Examples/NanoProof/**: Theorem-proving transformer variants
+- **Examples/Diffusion/**: Diffusion model components and training flows
+- **Examples/Flux/**: Flux demos/debug runners
 
 ## Development
 
@@ -157,7 +168,7 @@ Monitor tensor leaks via `get_live_tensors` which tracks outstanding C++ tensors
 
 1. Add Lean declaration in `Tyr/Torch.lean` with `@[extern "lean_torch_xxx"]`
 2. Implement in `cc/src/tyr.cpp` following reference counting conventions
-3. Rebuild: `make -C cc && ninja`
+3. Rebuild: `lake build`
 
 ### Project Structure
 
@@ -167,7 +178,7 @@ Monitor tensor leaks via `get_live_tensors` which tracks outstanding C++ tensors
 
 ## License
 
-[Add license information]
+`LICENSE` currently needs to be populated with the intended project license text.
 
 ## Acknowledgments
 
