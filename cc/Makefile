@@ -1,4 +1,5 @@
 # Detect Lean
+# Lake tracks this file hash for extern_lib invalidation.
 
 ifndef LEAN_HOME
 LEAN ?= lean
@@ -100,4 +101,3 @@ $(OUT_DIR)/%.o : $(SRC_DIR)/%.cpp $(HDR_FILES) | $(OUT_DIR)
 
 clean:
 	$(RMPATH) $(OUT_DIR)
-

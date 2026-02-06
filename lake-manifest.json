@@ -1,12 +1,15 @@
 {"version": "1.1.0",
  "packagesDir": ".lake/packages",
  "packages":
- [{"type": "path",
+ [{"url": "https://github.com/cpehle/lean_test.git",
+   "type": "git",
+   "subDir": null,
    "scope": "",
+   "rev": "b42cd3d78716e5a2de5b640ac82d7fe3f05f2a4c",
    "name": "LeanTest",
    "manifestFile": "lake-manifest.json",
+   "inputRev": "b42cd3d78716e5a2de5b640ac82d7fe3f05f2a4c",
    "inherited": false,
-   "dir": "../LeanTest",
    "configFile": "lakefile.lean"}],
  "name": "tyr",
  "lakeDir": ".lake"}

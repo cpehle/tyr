@@ -2,39 +2,77 @@ import Lake
 open Lake DSL
 open System (FilePath)
 
+def packageLinkArgs : Array String :=
+  if System.Platform.isOSX then
+    #[
+      "-Lexternal/libtorch/lib",
+      "-ltorch", "-ltorch_cpu", "-lc10",
+      "-L/opt/homebrew/opt/libomp/lib", "-lomp",
+      "-L/opt/homebrew/lib", "-larrow", "-lparquet",
+      "-Wl,-rpath,@loader_path/../../external/libtorch/lib",
+      "-Wl,-rpath,/opt/homebrew/opt/libomp/lib",
+      "-Wl,-rpath,/opt/homebrew/lib"
+    ]
+  else
+    #[
+      "-Lexternal/libtorch/lib",
+      "-ltorch", "-ltorch_cpu", "-lc10",
+      "-L/usr/lib", "-lomp",
+      "-larrow", "-lparquet",
+      "-Wl,-rpath,$ORIGIN/../../external/libtorch/lib"
+    ]
+
+def commonLinkArgs : Array String :=
+  if System.Platform.isOSX then
+    #[
+      "-Lcc/build", "-lTyrC",
+      "-Lexternal/libtorch/lib",
+      "-ltorch", "-ltorch_cpu", "-lc10",
+      "-L/opt/homebrew/opt/libomp/lib", "-lomp",
+      "-L/opt/homebrew/lib", "-larrow", "-lparquet",
+      "-Wl,-rpath,@executable_path/../../external/libtorch/lib",
+      "-Wl,-rpath,/opt/homebrew/opt/libomp/lib",
+      "-Wl,-rpath,/opt/homebrew/lib"
+    ]
+  else
+    #[
+      "-Lcc/build", "-lTyrC",
+      "-Lexternal/libtorch/lib",
+      "-ltorch", "-ltorch_cpu", "-lc10",
+      "-L/usr/lib", "-lomp",
+      "-larrow", "-lparquet",
+      "-Wl,-rpath,$ORIGIN/../../external/libtorch/lib"
+    ]
+
 package tyr where
   srcDir := "."
   buildDir := ".lake/build"
   moreServerArgs := #["-Dpp.unicode.fun=true"]
   -- Link arguments for extern_lib shared library
-  moreLinkArgs := #[
-    "-Lexternal/libtorch/lib",
-    "-ltorch", "-ltorch_cpu", "-lc10",
-    "-L/opt/homebrew/opt/libomp/lib", "-lomp",
-    "-L/opt/homebrew/lib", "-larrow", "-lparquet",
-    "-Wl,-rpath,@loader_path/../../external/libtorch/lib",
-    "-Wl,-rpath,/opt/homebrew/opt/libomp/lib",
-    "-Wl,-rpath,/opt/homebrew/lib"
-  ]
+  moreLinkArgs := packageLinkArgs
 
-require LeanTest from "../LeanTest"
+require LeanTest from git "https://github.com/cpehle/lean_test.git" @ "b42cd3d78716e5a2de5b640ac82d7fe3f05f2a4c"
 
 /-! ## Platform Detection
 
-Lake doesn't expose direct platform detection, so we use conditional compilation
-based on the target triple. For now, we detect macOS vs Linux at build time.
+Use `System.Platform` for compile-time platform-specific link arguments and
+runtime environment setup in scripts.
 -/
 
-/-- Check if we're on macOS by checking for typical macOS paths -/
-def isMacOS : IO Bool := do
-  -- Check if Homebrew libomp exists (macOS indicator)
-  let ompPath : FilePath := "/opt/homebrew/opt/libomp/lib"
-  return ← ompPath.pathExists
+/-- Check if we're on macOS. -/
+def isMacOS : Bool :=
+  System.Platform.isOSX
 
 /-- OpenMP library path - macOS uses Homebrew, Linux uses system path -/
 def getOmpLibPath : IO FilePath := do
-  if ← isMacOS then
-    return "/opt/homebrew/opt/libomp/lib"
+  if isMacOS then
+    let armPath : FilePath := "/opt/homebrew/opt/libomp/lib"
+    if ← armPath.pathExists then
+      return armPath
+    let intelPath : FilePath := "/usr/local/opt/libomp/lib"
+    if ← intelPath.pathExists then
+      return intelPath
+    return armPath
   else
     return "/usr/lib"
 
@@ -59,44 +97,6 @@ extern_lib libtyr pkg := do
       env := #[("LEAN_HOME", sysroot.toString)]
     }
 
-/-! ## Common Link Arguments
-
-These are platform-aware at runtime. On macOS, we use @executable_path for rpath.
-On Linux, we use $ORIGIN. The actual platform is determined by the linker.
--/
-
-/-- Common linker arguments for all executables.
-    Note: rpath uses macOS syntax - Linux builds may need adjustment. -/
-def commonLinkArgs : Array String := #[
-  -- Tyr C++ library
-  "-Lcc/build", "-lTyrC",
-  -- LibTorch
-  "-Lexternal/libtorch/lib",
-  "-ltorch", "-ltorch_cpu", "-lc10",
-  -- OpenMP (try both common locations)
-  "-L/opt/homebrew/opt/libomp/lib",  -- macOS Homebrew
-  "-L/usr/lib",                       -- Linux fallback
-  "-lomp",
-  -- Apache Arrow/Parquet (for streaming data loading)
-  "-L/opt/homebrew/lib",              -- macOS Homebrew
-  "-larrow", "-lparquet",
-  -- Runtime library paths (macOS style - Linux uses different syntax)
-  "-Wl,-rpath,@executable_path/../../external/libtorch/lib",
-  "-Wl,-rpath,/opt/homebrew/opt/libomp/lib",
-  "-Wl,-rpath,/opt/homebrew/lib"
-]
-
-/-- Link arguments for Linux builds (use when building on Linux) -/
-def linuxLinkArgs : Array String := #[
-  "-Lcc/build", "-lTyrC",
-  "-Lexternal/libtorch/lib",
-  "-ltorch", "-ltorch_cpu", "-lc10",
-  "-L/usr/lib", "-lomp",
-  -- Apache Arrow/Parquet
-  "-larrow", "-lparquet",
-  "-Wl,-rpath,$ORIGIN/../../external/libtorch/lib"
-]
-
 /-! ## Lean Library -/
 
 /-- Main Lean library containing all Tyr modules -/
@@ -108,6 +108,11 @@ lean_lib Tyr where
 /-- Test library containing all tests -/
 lean_lib Tests where
   roots := #[`Tests]
+  precompileModules := false
+
+/-- Experimental tests that track in-progress modules. -/
+lean_lib TestsExperimental where
+  roots := #[`TestsExperimental]
   precompileModules := false
 
 /-- Examples library -/
@@ -124,9 +129,9 @@ lean_exe test_runner where
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
-/-- Memory test executable -/
-lean_exe memtest where
-  root := `MemoryTest
+/-- Experimental test runner for unstable/in-progress modules. -/
+lean_exe test_runner_experimental where
+  root := `Tests.RunTestsExperimental
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
@@ -176,32 +181,30 @@ lean_exe FluxDebug where
 
 /-- Script to run the test executable with proper environment.
     Usage: lake script run -/
-script run do
+script run (args) do
   let rootPath := (← getWorkspace).root.dir
   let exe := rootPath / ".lake" / "build" / "bin" / "test_runner"
 
-  -- Build library paths
   let libtorchPath := rootPath / "external" / "libtorch" / "lib"
   let leanLibPath ← getLeanSysroot
   let leanLib := leanLibPath / "lib" / "lean"
-
-  let onMac ← isMacOS
   let ompPath ← getOmpLibPath
   let libPath := s!"{libtorchPath}:{ompPath}:{leanLib}"
-  let libEnvVar := if onMac then "DYLD_LIBRARY_PATH" else "LD_LIBRARY_PATH"
+  let libEnvVar := if isMacOS then "DYLD_LIBRARY_PATH" else "LD_LIBRARY_PATH"
 
-  IO.println s!"Running: {exe}"
-  IO.println s!"{libEnvVar}={libPath}"
-  IO.println ""
-  IO.println s!"To run manually:"
-  IO.println s!"export {libEnvVar}=\"{libPath}\""
-  IO.println s!"\"{exe}\""
-
-  return 0
+  let child ← IO.Process.spawn {
+    cmd := exe.toString
+    args := args.toArray
+    env := #[(libEnvVar, some libPath)]
+    stdin := .inherit
+    stdout := .inherit
+    stderr := .inherit
+  }
+  return ← child.wait
 
 /-- Script to run TrainGPT with proper environment.
     Usage: lake script train -/
-script train do
+script train (args) do
   let rootPath := (← getWorkspace).root.dir
   let exe := rootPath / ".lake" / "build" / "bin" / "TrainGPT"
 
@@ -209,13 +212,16 @@ script train do
   let leanLibPath ← getLeanSysroot
   let leanLib := leanLibPath / "lib" / "lean"
 
-  let onMac ← isMacOS
   let ompPath ← getOmpLibPath
   let libPath := s!"{libtorchPath}:{ompPath}:{leanLib}"
-  let libEnvVar := if onMac then "DYLD_LIBRARY_PATH" else "LD_LIBRARY_PATH"
+  let libEnvVar := if isMacOS then "DYLD_LIBRARY_PATH" else "LD_LIBRARY_PATH"
 
-  IO.println s!"To run training:"
-  IO.println s!"export {libEnvVar}=\"{libPath}\""
-  IO.println s!"\"{exe}\""
-
-  return 0
+  let child ← IO.Process.spawn {
+    cmd := exe.toString
+    args := args.toArray
+    env := #[(libEnvVar, some libPath)]
+    stdin := .inherit
+    stdout := .inherit
+    stderr := .inherit
+  }
+  return ← child.wait
