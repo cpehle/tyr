@@ -383,9 +383,8 @@ partial def vjp (b : FnBody) : ADM FnBody := do
     let dx ← getCotangent x
     let s ← get
     -- Construct backward pass
-    let _backward := s.pullbackStack.foldr (fun pb acc => pb acc) (.ret (.var dx))
-
-    return .ret (.var x)
+    let backward := s.pullbackStack.foldr (fun pb acc => pb acc) (.ret (.var dx))
+    return backward
   | other => return other
 
 -- Linearize

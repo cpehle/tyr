@@ -31,6 +31,12 @@ def broadcastToReduceAxis : BroadcastAxis → ReduceAxis
   | .Row => .Col
   | .Col => .Row
 
+/-- Convert ReduceAxis to BroadcastAxis for VJP of reductions. -/
+def reduceToBroadcastAxis? : ReduceAxis → Option BroadcastAxis
+  | .Row => some .Col
+  | .Col => some .Row
+  | .Full => none
+
 /-- Trace State -/
 structure TraceState where
   primalStmts : Array KStmt := #[]
@@ -199,18 +205,26 @@ partial def transposeTrace (trace : Array LinearInst) : ADM (Array KStmt) := do
       stmts := stmts.push (.binary .Mul t2 ddout a)
       stmts := stmts.push (.binary .Add ddb ddb t2)
 
-    | .div dout da db _a b =>
+    | .div dout da db a b =>
       let ddout ← getGpuCotangent dout
       let dda ← getGpuCotangent da
-      let _ddb ← getGpuCotangent db
+      let ddb ← getGpuCotangent db
       let inv_b ← getFreshGpuVar
+      let inv_b_sq ← getFreshGpuVar
+      let neg_a ← getFreshGpuVar
+      let db_term ← getFreshGpuVar
       let t1 ← getFreshGpuVar
+      let t2 ← getFreshGpuVar
       -- da += dout * (1/b)
       stmts := stmts.push (.unary .Recip inv_b b)
       stmts := stmts.push (.binary .Mul t1 ddout inv_b)
       stmts := stmts.push (.binary .Add dda dda t1)
-      -- db calculation omitted for brevity (requires -a/b^2)
-      pure ()
+      -- db += dout * (-a / b^2)
+      stmts := stmts.push (.binary .Mul inv_b_sq inv_b inv_b)
+      stmts := stmts.push (.scalarMul neg_a a (-1.0))
+      stmts := stmts.push (.binary .Mul db_term neg_a inv_b_sq)
+      stmts := stmts.push (.binary .Mul t2 ddout db_term)
+      stmts := stmts.push (.binary .Add ddb ddb t2)
 
     | .exp dout din y =>
       let ddout ← getGpuCotangent dout
@@ -244,16 +258,43 @@ partial def transposeTrace (trace : Array LinearInst) : ADM (Array KStmt) := do
       let reduceAxis := broadcastToReduceAxis axis
       stmts := stmts.push (.reduceAccum .Sum reduceAxis ddin ddout ddin)
 
-    | .sum _axis dout din =>
-      let _ddout ← getGpuCotangent dout
-      let _ddin ← getGpuCotangent din
-      -- Requires broadcast accumulator
-      pure ()
-
-    | .mma _trans dout _da _db dc _a _b =>
+    | .sum axis dout din =>
       let ddout ← getGpuCotangent dout
+      let ddin ← getGpuCotangent din
+      match reduceToBroadcastAxis? axis with
+      | some bAxis =>
+        let btmp ← getFreshGpuVar
+        stmts := stmts.push (.broadcast bAxis btmp ddout)
+        stmts := stmts.push (.binary .Add ddin ddin btmp)
+      | none =>
+        -- Best-effort fallback for scalar/full reductions.
+        stmts := stmts.push (.binary .Add ddin ddin ddout)
+
+    | .mma trans dout da db dc a b =>
+      let ddout ← getGpuCotangent dout
+      let dda ← getGpuCotangent da
+      let ddb ← getGpuCotangent db
       let ddc ← getGpuCotangent dc
+      -- dC += dOut
       stmts := stmts.push (.binary .Add ddc ddc ddout)
+      -- dA/dB contributions for each transpose mode.
+      match trans with
+      | .AB =>
+        -- dA += dOut * B^T, dB += A^T * dOut
+        stmts := stmts.push (.mma .ABt dda ddout b dda)
+        stmts := stmts.push (.mma .AtB ddb a ddout ddb)
+      | .ABt =>
+        -- dA += dOut * B, dB += dOut^T * A
+        stmts := stmts.push (.mma .AB dda ddout b dda)
+        stmts := stmts.push (.mma .AtB ddb ddout a ddb)
+      | .AtB =>
+        -- dA += B * dOut^T, dB += A * dOut
+        stmts := stmts.push (.mma .ABt dda b ddout dda)
+        stmts := stmts.push (.mma .AB ddb a ddout ddb)
+      | .AtBt =>
+        -- dA += B^T * dOut^T, dB += dOut^T * A^T
+        stmts := stmts.push (.mma .AtBt dda b ddout dda)
+        stmts := stmts.push (.mma .AtBt ddb ddout a ddb)
 
     | .loop v lo hi body =>
       let transBody ← transposeTrace body
