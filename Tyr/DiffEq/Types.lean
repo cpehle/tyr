@@ -53,9 +53,12 @@ instance : DiffEqElem Float where
   addScalar s x := x + s
   div := (· / ·)
 
+private def tensorMaximum {s : Shape} (a b : T s) : T s :=
+  where_ (gt a b) a b
+
 instance {s : Shape} : DiffEqElem (T s) where
   abs := nn.abs
-  max := maximum
+  max := tensorMaximum
   addScalar s x := add_scalar x s
   div := nn.div
 
@@ -63,14 +66,14 @@ private def rmsTensor {s : Shape} (t : T s) : Float :=
   let sq := mul t t
   let mean := nn.meanAll sq
   let root := nn.sqrt mean
-  nn.item' root
+  nn.item root
 
 instance {s : Shape} : DiffEqSeminorm (T s) where
   rms := rmsTensor
 
 instance (priority := 50) [TensorStruct α] : DiffEqElem α where
   abs := TensorStruct.map (fun t => nn.abs t)
-  max := TensorStruct.zipWith maximum
+  max := TensorStruct.zipWith tensorMaximum
   addScalar s := TensorStruct.map (fun t => add_scalar t s)
   div := TensorStruct.zipWith nn.div
 

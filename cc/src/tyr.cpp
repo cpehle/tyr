@@ -440,7 +440,13 @@ lean_object* lean_torch_tensor_grad(lean_obj_arg /* s */, lean_obj_arg /* s' */,
   torch::autograd::variable_list out_v({output_});
   torch::autograd::variable_list in_v({input_});
   torch::autograd::variable_list grad_out_v({grad_output_});    
-  auto grad_in_v = torch::autograd::grad(out_v, in_v, grad_out_v);
+  // Keep the graph for callers that request multiple grads from the same output
+  // (e.g. structured VJP over many leaves).
+  auto grad_in_v = torch::autograd::grad(
+      out_v, in_v, grad_out_v,
+      /*retain_graph=*/true,
+      /*create_graph=*/false,
+      /*allow_unused=*/true);
 
   
   return fromTorchTensor(grad_in_v[0]);

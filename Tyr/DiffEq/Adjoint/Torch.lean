@@ -22,7 +22,7 @@ private def dotStruct [TensorStruct Y] (x y : Y) : T #[] :=
 
 private def gradStruct [TensorStruct α] (loss : T #[]) (x : α) : α :=
   let one := ones #[]
-  TensorStruct.map (fun t => autograd.grad_allow_unused loss t one (retain_graph := true)) x
+  TensorStruct.map (fun t => autograd.grad loss t one) x
 
 private def vjp
     [TensorStruct Y] [TensorStruct Args]

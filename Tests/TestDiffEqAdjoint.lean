@@ -79,8 +79,8 @@ private def getY1 {S C : Type} (label : String) (sol : Solution (T #[]) S C) (fa
           term solver t0 t1 dt0 y0m a (saveat := { t1 := true })
       let y1p ← getY1 "y0+eps" solp y0
       let y1m ← getY1 "y0-eps" solm y0
-      let lp := nn.item' y1p
-      let lm := nn.item' y1m
+      let lp := nn.item y1p
+      let lm := nn.item y1m
       let fdY0 := (lp - lm) / (2.0 * eps)
 
       let ap := add_scalar a eps
@@ -105,12 +105,12 @@ private def getY1 {S C : Type} (label : String) (sol : Solution (T #[]) S C) (fa
           term solver t0 t1 dt0 y0 am (saveat := { t1 := true })
       let y1ap ← getY1 "a+eps" solap y0
       let y1am ← getY1 "a-eps" solam y0
-      let lap := nn.item' y1ap
-      let lam := nn.item' y1am
+      let lap := nn.item y1ap
+      let lam := nn.item y1am
       let fdA := (lap - lam) / (2.0 * eps)
 
-      let adjY0 := nn.item' adj.adjY0
-      let adjA := nn.item' adj.adjArgs
+      let adjY0 := nn.item adj.adjY0
+      let adjA := nn.item adj.adjArgs
       LeanTest.assertTrue (approx adjY0 fdY0 1.0e-2)
         s!"adjoint dy0 expected {fdY0}, got {adjY0}"
       LeanTest.assertTrue (approx adjA fdA 1.0e-2)
@@ -158,8 +158,8 @@ private def getY1 {S C : Type} (label : String) (sol : Solution (T #[]) S C) (fa
           term solver t0 t1 dt0 y0m a (saveat := { t1 := true })
       let y1p ← getY1 "y0+eps" solp y0
       let y1m ← getY1 "y0-eps" solm y0
-      let lp := nn.item' y1p
-      let lm := nn.item' y1m
+      let lp := nn.item y1p
+      let lm := nn.item y1m
       let fdY0 := (lp - lm) / (2.0 * eps)
 
       let ap := add_scalar a eps
@@ -184,12 +184,12 @@ private def getY1 {S C : Type} (label : String) (sol : Solution (T #[]) S C) (fa
           term solver t0 t1 dt0 y0 am (saveat := { t1 := true })
       let y1ap ← getY1 "a+eps" solap y0
       let y1am ← getY1 "a-eps" solam y0
-      let lap := nn.item' y1ap
-      let lam := nn.item' y1am
+      let lap := nn.item y1ap
+      let lam := nn.item y1am
       let fdA := (lap - lam) / (2.0 * eps)
 
-      let adjY0 := nn.item' adj.adjY0
-      let adjA := nn.item' adj.adjArgs
+      let adjY0 := nn.item adj.adjY0
+      let adjA := nn.item adj.adjArgs
       LeanTest.assertTrue (approx adjY0 fdY0 1.0e-2)
         s!"direct adjoint dy0 expected {fdY0}, got {adjY0}"
       LeanTest.assertTrue (approx adjA fdA 1.0e-2)
