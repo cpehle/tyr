@@ -235,6 +235,23 @@ def testJVPDiv : IO Unit := do
   | some (LinearInst.div _ _ _ _ _) => pure ()
   | _ => throw (IO.userError "Expected linear Div")
 
+-- Test Transposition (VJP) for Div
+@[test]
+def testVJPDiv : IO Unit := do
+  -- Backward:
+  -- da += dout * (1 / b)
+  -- db += dout * (-a / b^2)
+  let trace := #[LinearInst.div { idx := 2 } { idx := 0 } { idx := 1 } { idx := 3 } { idx := 4 }]
+  let vjpStmts ← runTranspose trace
+
+  -- recip + mul + add + mul + scalarMul + mul + mul + add
+  LeanTest.assertTrue (vjpStmts.size == 8) s!"Expected 8 VJP stmts for div, got {vjpStmts.size}"
+
+  match vjpStmts[0]?, vjpStmts[1]?, vjpStmts[2]?, vjpStmts[7]? with
+  | some (KStmt.unary .Recip _ _), some (KStmt.binary .Mul _ _ _),
+    some (KStmt.binary .Add _ _ _), some (KStmt.binary .Add _ _ _) => pure ()
+  | _, _, _, _ => throw (IO.userError "Expected recip/mul/add pattern for div backward")
+
 /-! ## Broadcast/Reduce Tests -/
 
 -- Test Linearization (JVP) for Broadcast Row
@@ -265,6 +282,49 @@ def testVJPBroadcastRow : IO Unit := do
   | some (KStmt.reduceAccum .Sum .Col _ _ _) => pure ()
   | some other => throw (IO.userError s!"Expected reduceAccum with Col axis, got {repr other}")
   | none => throw (IO.userError "No VJP stmt produced")
+
+-- Test Transposition (VJP) for Sum Row
+@[test]
+def testVJPSumRow : IO Unit := do
+  -- Forward row reduction is reversed by column broadcast.
+  let trace := #[LinearInst.sum .Row { idx := 1 } { idx := 0 }]
+  let vjpStmts ← runTranspose trace
+
+  LeanTest.assertTrue (vjpStmts.size == 2) s!"Expected 2 VJP stmts for sum row, got {vjpStmts.size}"
+  match vjpStmts[0]?, vjpStmts[1]? with
+  | some (KStmt.broadcast .Col _ _), some (KStmt.binary .Add _ _ _) => pure ()
+  | _, _ => throw (IO.userError "Expected broadcast Col then Add for sum row backward")
+
+-- Test Transposition (VJP) for MMA transpose variants
+@[test]
+def testVJPMMATransposes : IO Unit := do
+  let cases : Array (MMATranspose × MMATranspose × MMATranspose) := #[
+    (.AB, .ABt, .AtB),
+    (.ABt, .AB, .AtB),
+    (.AtB, .ABt, .AB),
+    (.AtBt, .AtBt, .AtBt)
+  ]
+
+  for case in cases do
+    let (fwdTrans, daTrans, dbTrans) := case
+    let trace := #[LinearInst.mma fwdTrans { idx := 9 } { idx := 0 } { idx := 1 } { idx := 2 } { idx := 3 } { idx := 4 }]
+    let vjpStmts ← runTranspose trace
+
+    LeanTest.assertTrue (vjpStmts.size == 3) s!"Expected 3 VJP stmts for mma {fwdTrans}, got {vjpStmts.size}"
+
+    match vjpStmts[0]? with
+    | some (KStmt.binary .Add _ _ _) => pure ()
+    | _ => throw (IO.userError s!"Expected dC accumulation for mma {fwdTrans}")
+
+    match vjpStmts[1]? with
+    | some (KStmt.mma trans _ _ _ _) =>
+      LeanTest.assertTrue (trans == daTrans) s!"Unexpected dA transpose for {fwdTrans}: got {trans}, expected {daTrans}"
+    | _ => throw (IO.userError s!"Expected mma for dA in {fwdTrans}")
+
+    match vjpStmts[2]? with
+    | some (KStmt.mma trans _ _ _ _) =>
+      LeanTest.assertTrue (trans == dbTrans) s!"Unexpected dB transpose for {fwdTrans}: got {trans}, expected {dbTrans}"
+    | _ => throw (IO.userError s!"Expected mma for dB in {fwdTrans}")
 
 /-! ## Memory Operations Tests -/
 

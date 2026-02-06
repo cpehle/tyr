@@ -45,6 +45,45 @@ def testLinearize : IO Unit := do
   -- Currently `linearize` is a transformation, execution requires integration.
   return
 
+@[test]
+def testNoGradRestoresOnException : IO Unit := do
+  let before ← torch.autograd.is_grad_enabled
+  let _ ← torch.autograd.set_grad_enabled true
+  let threw ←
+    try
+      let (_ : Unit) ← torch.autograd.no_grad (α := Unit) do
+        let enabled ← torch.autograd.is_grad_enabled
+        LeanTest.assertTrue (!enabled) "grad should be disabled inside no_grad"
+        throw (IO.userError "intentional failure")
+      pure false
+    catch _ =>
+      pure true
+
+  LeanTest.assertTrue threw "no_grad test should throw from inner action"
+  let after ← torch.autograd.is_grad_enabled
+  LeanTest.assertTrue after "grad mode should be restored after exception"
+  let _ ← torch.autograd.set_grad_enabled before
+
+@[test]
+def testNoGradNestedRestore : IO Unit := do
+  let before ← torch.autograd.is_grad_enabled
+  let _ ← torch.autograd.set_grad_enabled true
+
+  let _ ← torch.autograd.no_grad do
+    let outerEnabled ← torch.autograd.is_grad_enabled
+    LeanTest.assertTrue (!outerEnabled) "outer no_grad should disable grad"
+    let _ ← torch.autograd.no_grad do
+      let innerEnabled ← torch.autograd.is_grad_enabled
+      LeanTest.assertTrue (!innerEnabled) "inner no_grad should keep grad disabled"
+      pure ()
+    let outerAfterInner ← torch.autograd.is_grad_enabled
+    LeanTest.assertTrue (!outerAfterInner) "outer no_grad should remain disabled after inner"
+    pure ()
+
+  let after ← torch.autograd.is_grad_enabled
+  LeanTest.assertTrue after "grad mode should be restored after nested no_grad"
+  let _ ← torch.autograd.set_grad_enabled before
+
 /-! ## JVP Execution Tests -/
 
 @[test]
