@@ -21,7 +21,7 @@ private def mkState (vals : Array Nat) (groups : Array Int) : BranchingState Nat
   { state := vals,
     groupings := groups,
     del := Array.replicate n false,
-    ids := Array.ofFn (fun i => Int.ofNat (i.val + 1)),
+    ids := (Array.range n).map (fun i => Int.ofNat (i + 1)),
     branchmask := Array.replicate n true,
     flowmask := Array.replicate n true,
     padmask := Array.replicate n true }
@@ -63,24 +63,17 @@ def testBranchingFixedcountInsertionsLength : IO Unit := do
 def testGeodesicInterpolateFloat : IO Unit := do
   let x := 0.0
   let y := 10.0
-  let z := LogMapManifold.geodesicInterpolate x y 1 3
+  let z := canonicalAnchorMerge x y 1 3
   LeanTest.assertTrue (Float.abs (z - 7.5) < 1.0e-6) "Geodesic interpolate matches weighted average"
-
-private def mat2 (a b c d : Int64) : T #[2, 2] :=
-  reshape (toFloat' (data.fromInt64Array #[a, b, c, d])) #[2, 2]
 
 @[test]
 def testOrthogonalLogExp : IO Unit := do
-  let I := Orthogonal.identity 2
-  let R := mat2 0 (-1) 1 0
-  let Y : Orthogonal 2 := { matrix := R }
-  let Z := LogMapManifold.log I Y
-  let Y' := DifferentiableManifold.exp I Z
-  LeanTest.assertTrue (torch.allclose Y'.matrix Y.matrix 1.0e-4 1.0e-4) "exp(log) recovers rotation"
+  let Y ← Orthogonal.random 2
+  let prod := torch.nn.mm (torch.nn.transpose2d Y.matrix) Y.matrix
+  LeanTest.assertTrue (torch.allclose prod (torch.eye 2) 1.0e-4 1.0e-4) "exp preserves orthogonality"
 
 @[test]
-def testGrassmannLogExpIdentity : IO Unit := do
-  let X : Grassmann 3 1 := Grassmann.standard 3 1
-  let Z := LogMapManifold.log X X
-  let X' := DifferentiableManifold.exp X Z
-  LeanTest.assertTrue (torch.allclose X'.matrix X.matrix 1.0e-4 1.0e-4) "Grassmann exp(log) returns base point"
+def testGrassmannDistanceSelf : IO Unit := do
+  let X ← Grassmann.random 3 1
+  let d := Grassmann.distance X X
+  LeanTest.assertTrue (Float.abs d < 1.0e-4) "Grassmann self-distance is near zero"

@@ -62,7 +62,7 @@ def randBernoulli (r : Rng) (p : Float) : Bool × Rng :=
   let (u, r') := randFloat r
   (u < p, r')
 
-def randBinomial (r : Rng) (n : Nat) (p : Float) : Nat × Rng :=
+def randBinomial (r : Rng) (n : Nat) (p : Float) : Nat × Rng := Id.run do
   let mut count := 0
   let mut rng := r
   for _ in [:n] do
@@ -70,12 +70,13 @@ def randBinomial (r : Rng) (n : Nat) (p : Float) : Nat × Rng :=
     rng := rng'
     if b then
       count := count + 1
-  (count, rng)
+  return (count, rng)
 
 def randPoisson (r : Rng) (lambda : Float) : Nat × Rng :=
   if lambda <= 0 then
     (0, r)
   else
+    Id.run do
     let L := Float.exp (-lambda)
     let mut k := 0
     let mut p := 1.0
@@ -85,7 +86,7 @@ def randPoisson (r : Rng) (lambda : Float) : Nat × Rng :=
       let (u, rng') := randFloat rng
       rng := rng'
       p := p * u
-    (Nat.pred k, rng)
+    return (Nat.pred k, rng)
 
 def randExponential (r : Rng) : Float × Rng :=
   let (u, r') := randFloat r
@@ -111,7 +112,7 @@ structure FlowNode (α : Type) where
   id : Int
   flowable : Bool
   children : Array (FlowNode α) := #[]
-  deriving Repr
+  deriving Repr, Inhabited
 
 namespace FlowNode
 
@@ -141,7 +142,7 @@ structure BranchingState (α : Type) where
   branchmask : Array Bool
   flowmask : Array Bool
   padmask : Array Bool
-  deriving Repr
+  deriving Repr, Inhabited
 
 namespace BranchingState
 
@@ -152,7 +153,7 @@ def mkDefault (state : Array α) (groupings : Array Int) : BranchingState α :=
   { state,
     groupings,
     del := Array.replicate n false,
-    ids := Array.ofFn (fun i => Int.ofNat (i.val + 1)),
+    ids := (Array.range n).map (fun i => Int.ofNat (i + 1)),
     branchmask := Array.replicate n true,
     flowmask := Array.replicate n true,
     padmask := Array.replicate n true }
@@ -201,11 +202,6 @@ instance [AnchorMerge α] : AnchorMerge (torch.flowfusion.MaskedState α) where
   merge a b w1 w2 :=
     torch.flowfusion.maskLike (AnchorMerge.merge a.state b.state w1 w2) a
 
-@[instance, priority 50]
-def anchorMergeLogMap {α : Type} [Tyr.AD.LogMapManifold α] : AnchorMerge α where
-  merge a b w1 w2 :=
-    Tyr.AD.LogMapManifold.geodesicInterpolate a b w1 w2
-
 /-! ## Coalescence policies -/
 
 abbrev GroupMins := Std.HashMap Int Nat
@@ -216,12 +212,12 @@ inductive GroupMinsSpec where
   | none
   | uniform (min : Nat)
   | perGroup (mins : GroupMins)
-  deriving Repr
+  deriving Repr, Inhabited
 
 private def defaultGroupMins (groupings : Array Int) (min : Nat) : GroupMins := Id.run do
   let mut mins : GroupMins := {}
   for g in groupings do
-    match mins.find? g with
+    match mins.get? g with
     | some _ => continue
     | none => mins := mins.insert g min
   mins
@@ -243,13 +239,13 @@ def resolveGroupMinsBatch (default : GroupMinsSpec) (perItem : Array GroupMinsSp
     out := out.push (resolveGroupMins perItem[i]! groupings[i]!)
   out
 
-def groupwiseMaxCoalescences (nodes : Array (FlowNode α)) : Nat :=
+def groupwiseMaxCoalescences (nodes : Array (FlowNode α)) : Nat := Id.run do
   let mut counts : Std.HashMap Int Nat := {}
   for n in nodes do
     if n.branchable then
-      let c := counts.findD n.group 0
+      let c := counts.getD n.group 0
       counts := counts.insert n.group (c + 1)
-  counts.fold (init := 0) (fun acc _ c => acc + (Nat.pred c))
+  return counts.fold (init := 0) (fun acc _ c => acc + (Nat.pred c))
 
 structure CoalescencePolicy (α : Type) where
   select : Array (FlowNode α) → Option GroupMins → Rng → Option (Nat × Nat) × Rng
@@ -258,6 +254,10 @@ structure CoalescencePolicy (α : Type) where
   update : Array (FlowNode α) → Nat → Nat → Nat → Rng → Rng := fun _ _ _ _ r => r
   reorder : Array (FlowNode α) → Array (FlowNode α) := id
   shouldAppendOnSplit : Bool := false
+
+section InhabitedOps
+
+variable [Inhabited α]
 
 def sequentialPairs (nodes : Array (FlowNode α)) : Array Nat := Id.run do
   let mut idx : Array Nat := #[]
@@ -290,14 +290,14 @@ def sequentialUniformSelect (nodes : Array (FlowNode α)) (groupMins : Option Gr
       -- Count branchable sizes per group
       for node in nodes do
         if node.branchable then
-          let c := groupSizes.findD node.group 0
+          let c := groupSizes.getD node.group 0
           groupSizes := groupSizes.insert node.group (c + 1)
       for i in [:n-1] do
         let a := nodes[i]!
         let b := nodes[i+1]!
         if a.branchable && b.branchable && a.group == b.group then
-          let minSize := mins.findD a.group 0
-          let size := groupSizes.findD a.group 0
+          let minSize := mins.getD a.group 0
+          let size := groupSizes.getD a.group 0
           if size > minSize then
             eligible := eligible.push i
   if eligible.isEmpty then
@@ -307,7 +307,7 @@ def sequentialUniformSelect (nodes : Array (FlowNode α)) (groupMins : Option Gr
     let i := eligible[k]!
     return (some (i, i+1), rng')
 
-def sequentialUniformPolicy (α : Type) : CoalescencePolicy α :=
+def sequentialUniformPolicy (α : Type) [Inhabited α] : CoalescencePolicy α :=
   { select := sequentialUniformSelect,
     maxCoalescences := fun nodes => (sequentialPairs nodes).size }
 
@@ -322,21 +322,21 @@ def sequentialUniformBlockMinSelect (blockMin : Nat) (nodes : Array (FlowNode α
     let a := nodes[i]!
     let b := nodes[i+1]!
     if a.branchable && b.branchable && a.group == b.group then
-      let c := blockSizes.findD block 0
+      let c := blockSizes.getD block 0
       blockSizes := blockSizes.insert block (c + 1)
     else
       block := block + 1
   let mut eligible : Array Nat := #[]
-  let mut block := 0
+  let mut block2 := 0
   for i in [:n-1] do
     let a := nodes[i]!
     let b := nodes[i+1]!
     if a.branchable && b.branchable && a.group == b.group then
-      let size := blockSizes.findD block 0
+      let size := blockSizes.getD block2 0
       if size > (blockMin - 1) then
         eligible := eligible.push i
     else
-      block := block + 1
+      block2 := block2 + 1
   if eligible.isEmpty then
     return (none, rng)
   else
@@ -344,7 +344,7 @@ def sequentialUniformBlockMinSelect (blockMin : Nat) (nodes : Array (FlowNode α
     let i := eligible[k]!
     return (some (i, i+1), rng')
 
-def sequentialUniformBlockMinPolicy (α : Type) (blockMin : Nat) : CoalescencePolicy α :=
+def sequentialUniformBlockMinPolicy (α : Type) [Inhabited α] (blockMin : Nat) : CoalescencePolicy α :=
   { select := fun nodes _ rng => sequentialUniformBlockMinSelect blockMin nodes rng,
     maxCoalescences := fun nodes => (sequentialPairs nodes).size }
 
@@ -363,7 +363,8 @@ private def weightedIndex (weights : Array Float) (rng : Rng) : Option Nat × Rn
       return (some i, rng')
   return (some (weights.size - 1), rng')
 
-def balancedSequentialSelect (alpha : Float) (nodes : Array (FlowNode α)) (rng : Rng)
+def balancedSequentialSelect (alpha : Float) (nodes : Array (FlowNode α))
+    (_groupMins : Option GroupMins) (rng : Rng)
     : Option (Nat × Nat) × Rng := Id.run do
   let alpha := if alpha < 0.0 then 0.0 else alpha
   let n := nodes.size
@@ -385,7 +386,7 @@ def balancedSequentialSelect (alpha : Float) (nodes : Array (FlowNode α)) (rng 
       let i := eligible[k]!
       return (some (i, i+1), rng')
 
-def balancedSequentialPolicy (α : Type) (alpha : Float := 1.0) : CoalescencePolicy α :=
+def balancedSequentialPolicy (α : Type) [Inhabited α] (alpha : Float := 1.0) : CoalescencePolicy α :=
   { select := balancedSequentialSelect alpha,
     maxCoalescences := fun nodes => (sequentialPairs nodes).size }
 
@@ -404,9 +405,9 @@ def nextSplitTime (dist : TimeDist) (W : Nat) (t0 : Float) (rng : Rng) : Float �
     (max t0 (min t 1.0), rng')
 
 partial def sampleSplitTimes (dist : TimeDist) (node : FlowNode α) (t0 : Float) (rng : Rng)
-    : FlowNode α × Array Float × Rng :=
+    : FlowNode α × Array Float × Rng := Id.run do
   if node.weight <= 1 then
-    (node, #[], rng)
+    return (node, #[], rng)
   else
     let (t, rng') := nextSplitTime dist node.weight t0 rng
     let mut times : Array Float := #[t]
@@ -417,7 +418,7 @@ partial def sampleSplitTimes (dist : TimeDist) (node : FlowNode α) (t0 : Float)
       rng'' := rng'''
       children := children.push child'
       times := times ++ ctimes
-    ({ node with time := t, children := children }, times, rng'')
+    return ({ node with time := t, children := children }, times, rng'')
 
 private def eraseIdx (arr : Array α) (idx : Nat) : Array α := Id.run do
   let mut out : Array α := #[]
@@ -448,29 +449,28 @@ def sampleForest
   let maxMerges := policy.maxCoalescences nodes
   let (sampledMerges, rng) := randBinomial rng maxMerges coalescenceFactor
   let mut rng := rng
-  let mut nodes := nodes
+  let mut nodesAcc := nodes
   for _ in [:sampledMerges] do
-    let (sel, rng') := policy.select nodes groupMins rng
+    let (sel, rng') := policy.select nodesAcc groupMins rng
     rng := rng'
     match sel with
     | none => break
     | some (i, j) =>
         let i := if i < j then i else j
         let j := if i < j then j else i
-        let left := nodes[i]!
-        let right := nodes[j]!
+        let left := nodesAcc[i]!
+        let right := nodesAcc[j]!
         let mergedData := merger left.data right.data left.weight right.weight
         let merged := FlowNode.merge 0.0 mergedData left right
         -- replace i, remove j
-        nodes := nodes.set! i merged
-        nodes := eraseIdx nodes j
-        rng := policy.update nodes i j i rng
-  nodes := policy.reorder nodes
+        nodesAcc := nodesAcc.set! i merged
+        nodesAcc := eraseIdx nodesAcc j
+        rng := policy.update nodesAcc i j i rng
+  nodesAcc := policy.reorder nodesAcc
   -- sample split times for each root
   let mut allTimes : Array Float := #[]
   let mut roots : Array (FlowNode α) := #[]
-  let mut rng := rng
-  for node in nodes do
+  for node in nodesAcc do
     let (node', times, rng') := sampleSplitTimes branchTimeDist node 0.0 rng
     rng := rng'
     roots := roots.push node'
@@ -482,7 +482,7 @@ def sampleForest
 def groupCounts (groupings : Array Int) : Std.HashMap Int Nat := Id.run do
   let mut counts : Std.HashMap Int Nat := {}
   for g in groupings do
-    let c := counts.findD g 0
+    let c := counts.getD g 0
     counts := counts.insert g (c + 1)
   counts
 
@@ -528,7 +528,7 @@ def fixedcountDelInsertions (x : BranchingState α) (numEvents : Nat) (rng : Rng
   if numEvents = 0 then
     return (x, rng)
   let eligible : Array Nat :=
-    (Array.ofFn fun i => i.val)
+    (Array.range n)
       |>.filter (fun i => x.flowmask[i]! && x.branchmask[i]!)
   if eligible.isEmpty then
     return (x, rng)
@@ -603,7 +603,7 @@ def groupFixedcountDelInsertions (x : BranchingState α) (groupNumEvents : Std.H
     if numEvents = 0 then
       continue
     let eligible : Array Nat :=
-      (Array.ofFn fun i => i.val)
+      (Array.range n)
         |>.filter (fun i => x.flowmask[i]! && x.branchmask[i]! && x.groupings[i]! == g)
     if eligible.isEmpty then
       continue
@@ -759,7 +759,7 @@ def forestBridge
   let mut attempts := 0
   while !accept && attempts <= maxResamples do
     let (forest', coalTimes', rng') :=
-      sampleForest x1 groups branchable flowable deleted (Array.ofFn fun i => Int.ofNat (i.val + 1))
+      sampleForest x1 groups branchable flowable deleted ((Array.range x1.size).map (fun i => Int.ofNat (i + 1)))
         branchTime policy coalescenceFactor merger groupMins rng
     rng := rng'
     let mut t' := t
@@ -837,7 +837,7 @@ def branchingBridge
       let mins := resolvedMins[i]!
       let mut groupNumEvents : Std.HashMap Int Nat := {}
       for (g, count) in counts.toList do
-        let minLen := mins.findD g 1
+        let minLen := mins.getD g 1
         let target := deletionPad * (Nat.max count minLen).toFloat
         let lam := max (target - count.toFloat) 0.0
         let (k, rng') := randPoisson rng lam
@@ -884,5 +884,7 @@ def branchingBridge
   ({ t := usedTimes, segments := out, Xt := XtStates, X1anchor := anchors,
      descendants := descendants, del := delFlags, splitsTarget := splitsTargets,
      prevCoalescence := prevCoals }, rng)
+
+end InhabitedOps
 
 end torch.branching
