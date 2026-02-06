@@ -6,6 +6,7 @@
 -/
 import Lean.Compiler.IR.Basic
 import Lean.Compiler.IR.FreeVars
+import Lean.Compiler.IR.NormIds
 import Lean.Compiler.IR.Format
 import Lean.Compiler.IR.CompilerM
 import Tyr.GPU.Codegen.IR
@@ -413,8 +414,84 @@ partial def vjp (b : FnBody) : ADM FnBody := do
     return backward
   | other => return other
 
--- Linearize
-def linearize (decl : Decl) : ADM Decl := do
+/-- Find the returned variable for simple linear IR bodies. -/
+partial def findReturnVar? (b : FnBody) : Option VarId :=
+  match b with
+  | .vdecl _ _ _ rest => findReturnVar? rest
+  | .jdecl _ _ _ rest => findReturnVar? rest
+  | .set _ _ _ rest => findReturnVar? rest
+  | .setTag _ _ rest => findReturnVar? rest
+  | .uset _ _ _ rest => findReturnVar? rest
+  | .sset _ _ _ _ _ rest => findReturnVar? rest
+  | .inc _ _ _ _ rest => findReturnVar? rest
+  | .dec _ _ _ _ rest => findReturnVar? rest
+  | .del _ rest => findReturnVar? rest
+  | .ret (.var x) => some x
+  | _ => none
+
+/-- Replace each return with the provided function body. -/
+partial def replaceRetWith (b replacement : FnBody) : FnBody :=
+  match b with
+  | .vdecl x ty e rest =>
+    .vdecl x ty e (replaceRetWith rest replacement)
+  | .jdecl j xs v rest =>
+    .jdecl j xs (replaceRetWith v replacement) (replaceRetWith rest replacement)
+  | .set x i y rest =>
+    .set x i y (replaceRetWith rest replacement)
+  | .setTag x i rest =>
+    .setTag x i (replaceRetWith rest replacement)
+  | .uset x i y rest =>
+    .uset x i y (replaceRetWith rest replacement)
+  | .sset x i o y ty rest =>
+    .sset x i o y ty (replaceRetWith rest replacement)
+  | .inc x n c p rest =>
+    .inc x n c p (replaceRetWith rest replacement)
+  | .dec x n c p rest =>
+    .dec x n c p (replaceRetWith rest replacement)
+  | .del x rest =>
+    .del x (replaceRetWith rest replacement)
+  | .case tid x xType alts =>
+    .case tid x xType (alts.map fun
+      | .ctor info body => .ctor info (replaceRetWith body replacement)
+      | .default body => .default (replaceRetWith body replacement))
+  | .ret _ => replacement
+  | .jmp _ _ => b
+  | .unreachable => b
+
+partial def mkTupleReturnAux (vars : List VarId) : ADM (VarId × (FnBody → FnBody)) := do
+  match vars with
+  | [] =>
+    throwError "AD transform failed: cannot build tuple return for empty cotangent list"
+  | [v] =>
+    return (v, id)
+  | v :: vs =>
+    let (tail, tailBuilder) ← mkTupleReturnAux vs
+    let pair ← getFreshVar
+    let ctorInfo : CtorInfo := { name := `Prod.mk, cidx := 0, size := 2, usize := 0, ssize := 0 }
+    let builder := fun b =>
+      tailBuilder (.vdecl pair IRType.object (.ctor ctorInfo #[Arg.var v, .var tail]) b)
+    return (pair, builder)
+
+def mkTupleReturn (vars : Array VarId) : ADM FnBody := do
+  let (root, builder) ← mkTupleReturnAux vars.toList
+  return builder (.ret (.var root))
+
+def normalizeDeclParamIds (decl : Decl) : Decl :=
+  match decl with
+  | .fdecl f params ty body info =>
+    let (_, body', newParams) :=
+      params.foldl
+        (fun (nextIdx, bodyAcc, paramsAcc) p =>
+          let newVar : VarId := { idx := nextIdx }
+          let bodyAcc :=
+            if p.x.idx == newVar.idx then bodyAcc else replaceVar bodyAcc p.x newVar
+          let newParam := { p with x := newVar }
+          (nextIdx + 1, bodyAcc, paramsAcc.push newParam))
+        (1, body, #[])
+    .fdecl f newParams ty body' info
+  | other => other
+
+def linearizeWithKinds (decl : Decl) (paramKinds : Array ParamKind := #[]) : ADM Decl := do
   let startIdx := decl.maxIndex + 1
   modify fun s => {
     s with
@@ -423,13 +500,86 @@ def linearize (decl : Decl) : ADM Decl := do
   }
   match decl with
   | Decl.fdecl f params _ty body info =>
-    let tanParams ← params.mapM fun p => do
-      let dp ← getFreshVar
-      setTangent p.x dp
-      return { p with x := dp }
+    let mut tanParams := #[]
+    for i in [:params.size] do
+      let p := params[i]!
+      let kind := paramKinds.getD i .diff
+      if kind == .diff then
+        let dp ← getFreshVar
+        setTangent p.x dp
+        tanParams := tanParams.push { p with x := dp }
+      else
+        markStatic p.x.idx
     let body' ← jvp body
     return Decl.fdecl (Lean.Name.mkStr f "jvp") (params ++ tanParams) IRType.object body' info
   | other => return other
+
+def linearize (decl : Decl) : ADM Decl := do
+  linearizeWithKinds decl #[]
+
+def transposeWithKinds (decl : Decl) (paramKinds : Array ParamKind := #[]) : ADM Decl := do
+  let startIdx := decl.maxIndex + 1
+  modify fun s => { s with nextVarIdx := max s.nextVarIdx startIdx }
+  match decl with
+  | Decl.fdecl f params ty body info =>
+    for i in [:params.size] do
+      let kind := paramKinds.getD i .diff
+      if kind != .diff then
+        markStatic params[i]!.x.idx
+
+    let some outVar := findReturnVar? body
+      | throwError s!"AD transform failed: `{f}` does not end in `ret (.var _)`"
+
+    let dy ← getFreshVar
+    setCotangent outVar dy
+    let transformedBody ← vjp body
+
+    let mut paramCotans := #[]
+    let stateAfter ← get
+    for i in [:params.size] do
+      let p := params[i]!
+      let kind := paramKinds.getD i .diff
+      if kind == .diff then
+        match stateAfter.cotangents.get? p.x.idx with
+        | some dxIdx => paramCotans := paramCotans.push { idx := dxIdx }
+        | none =>
+          throwError s!"AD transform failed for `{f}`: missing cotangent for parameter {i}. " ++
+            "Mark non-differentiable parameters as `static` or provide a custom VJP rule."
+
+    if paramCotans.isEmpty then
+      throwError s!"AD transform failed for `{f}`: no differentiable parameters for VJP generation"
+
+    let retBody ← mkTupleReturn paramCotans
+    let finalBody := replaceRetWith transformedBody retBody
+    let dyParam : Param := { x := dy, borrow := false, ty := ty }
+    return Decl.fdecl (Lean.Name.mkStr f "vjp") (params.push dyParam) IRType.object finalBody info
+  | other => return other
+
+def deriveAndRegisterADRules (primalFn : Lean.Name) (paramKinds : Array ParamKind := #[]) : Lean.CoreM Unit := do
+  let primalDecl ← Lean.IR.getDecl primalFn
+  let (jvpDeclRaw, _) ← (linearizeWithKinds primalDecl paramKinds).run {}
+  let (vjpDeclRaw, _) ← (transposeWithKinds primalDecl paramKinds).run {}
+  let jvpDecl := (normalizeDeclParamIds jvpDeclRaw).normalizeIds
+  let vjpDecl := (normalizeDeclParamIds vjpDeclRaw).normalizeIds
+
+  let jvpFn := jvpDecl.name
+  let vjpFn := vjpDecl.name
+
+  if !jvpDecl.uniqueIds then
+    throwError m!"autodiff internal error: non-unique IDs in `{jvpFn}`\n{jvpDecl}"
+  if !vjpDecl.uniqueIds then
+    throwError m!"autodiff internal error: non-unique IDs in `{vjpFn}`\n{vjpDecl}"
+
+  if (← Lean.IR.containsDecl jvpFn) then
+    throwError s!"cannot derive AD for `{primalFn}`: declaration `{jvpFn}` already exists"
+  if (← Lean.IR.containsDecl vjpFn) then
+    throwError s!"cannot derive AD for `{primalFn}`: declaration `{vjpFn}` already exists"
+
+  Lean.IR.addDecl jvpDecl
+  Lean.IR.addDecl vjpDecl
+
+  registerLeanJVPRuleWithKinds primalFn jvpFn paramKinds
+  registerLeanVJPRuleWithKinds primalFn vjpFn paramKinds
 
 -- GPU Registration helpers
 def registerGpuVJPRule (opName : String) (rule : GpuVJPRule) : Lean.CoreM Unit := do
@@ -483,6 +633,10 @@ syntax (name := vjpAttr) "vjp" ident : attr
 syntax (name := jvpAttrStatic) "jvp" ident "," "static" ":=" "[" num,* "]" : attr
 syntax (name := vjpAttrStatic) "vjp" ident "," "static" ":=" "[" num,* "]" : attr
 
+-- Autodiff syntax: @[autodiff] or @[autodiff, static := [1, 3]]
+syntax (name := autodiffAttr) "autodiff" : attr
+syntax (name := autodiffAttrStatic) "autodiff" "," "static" ":=" "[" num,* "]" : attr
+
 initialize
   -- Basic JVP (all params differentiable)
   Lean.registerBuiltinAttribute {
@@ -534,6 +688,34 @@ initialize
         let paramKinds ← parseStaticIndicesChecked primalFn staticIndices
         registerLeanVJPRuleWithKinds primalFn declName paramKinds
       | _ => throwError "invalid vjp attribute with static"
+  }
+
+  -- Auto-derive and register both JVP and VJP from IR
+  Lean.registerBuiltinAttribute {
+    name := `autodiffAttr
+    descr := "Automatically derive and register JVP/VJP companions for this declaration"
+    applicationTime := .afterCompilation
+    add := fun declName stx _ => do
+      match stx with
+      | `(attr| autodiff) =>
+        let numParams ← getExplicitParamCount declName
+        let paramKinds := parseStaticIndices #[] numParams
+        deriveAndRegisterADRules declName paramKinds
+      | _ => throwError "invalid autodiff attribute"
+  }
+
+  -- Auto-derive with static parameter annotations
+  Lean.registerBuiltinAttribute {
+    name := `autodiffAttrStatic
+    descr := "Automatically derive and register JVP/VJP companions with static parameters"
+    applicationTime := .afterCompilation
+    add := fun declName stx _ => do
+      match stx with
+      | `(attr| autodiff, static := [$indices,*]) =>
+        let staticIndices := indices.getElems.map fun n => n.getNat
+        let paramKinds ← parseStaticIndicesChecked declName staticIndices
+        deriveAndRegisterADRules declName paramKinds
+      | _ => throwError "invalid autodiff attribute with static"
   }
 
 end Tyr.AD
