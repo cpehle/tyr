@@ -143,8 +143,8 @@ def testScalarMul : IO Unit := do
   let code := generateKernel kernel
   -- Should have two mul operations with scalar
   assertTrue (code.containsSubstr "mul(") "Should have scalar mul"
-  assertTrue (code.containsSubstr "0.5f") "Should have 0.5 scalar"
-  assertTrue (code.containsSubstr "2f") "Should have 2.0 scalar"
+  assertTrue (code.containsSubstr "0.500000f") "Should have 0.5 scalar"
+  assertTrue (code.containsSubstr "2.000000f") "Should have 2.0 scalar"
 
 /-- Test scalar addition -/
 @[test]
@@ -156,7 +156,7 @@ def testScalarAdd : IO Unit := do
 
   let code := generateKernel kernel
   assertTrue (code.containsSubstr "add(") "Should have scalar add"
-  assertTrue (code.containsSubstr "1f") "Should have 1.0 scalar"
+  assertTrue (code.containsSubstr "1.000000f") "Should have 1.0 scalar"
 
 /-! ## Notation Tests: Vector Operators -/
 

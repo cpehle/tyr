@@ -26,8 +26,8 @@ open LeanTest
 @[test]
 def testAllocRT : IO Unit := do
   let kernel := buildKernelM "test_alloc_rt" .SM90 #[] do
-    let _a : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-    let _b : RT GpuFloat.Float32 32 32 .Col ← allocRT .Float32 32 32 .Col
+    let _a : Tyr.GPU.Codegen.RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
+    let _b : Tyr.GPU.Codegen.RT GpuFloat.Float32 32 32 .Col ← allocRT .Float32 32 32 .Col
     pure ()
 
   assertEqual kernel.body.size 2 "Should have 2 declarations"
@@ -43,8 +43,8 @@ def testAllocRT : IO Unit := do
 @[test]
 def testAllocSTTracksMemory : IO Unit := do
   let kernel := buildKernelM "test_shared_mem" .SM90 #[] do
-    let _s1 : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64  -- 64*64*2 = 8192
-    let _s2 : ST GpuFloat.Float32 32 32 ← allocST .Float32 32 32    -- 32*32*4 = 4096
+    let _s1 : Tyr.GPU.Codegen.ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64  -- 64*64*2 = 8192
+    let _s2 : Tyr.GPU.Codegen.ST GpuFloat.Float32 32 32 ← allocST .Float32 32 32    -- 32*32*4 = 4096
     pure ()
 
   assertEqual kernel.sharedMemBytes (8192 + 4096) "Should track shared memory"
@@ -53,7 +53,7 @@ def testAllocSTTracksMemory : IO Unit := do
 @[test]
 def testAllocRV : IO Unit := do
   let kernel := buildKernelM "test_alloc_rv" .SM90 #[] do
-    let _v : RV GpuFloat.Float32 64 ← allocRV .Float32 64
+    let _v : Tyr.GPU.Codegen.RV GpuFloat.Float32 64 ← allocRV .Float32 64
     pure ()
 
   match kernel.body[0]! with
@@ -66,7 +66,7 @@ def testAllocRV : IO Unit := do
 @[test]
 def testZeroRT : IO Unit := do
   let kernel := buildKernelM "test_zero_rt" .SM90 #[] do
-    let _z : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
+    let _z : Tyr.GPU.Codegen.RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
     pure ()
 
   assertEqual kernel.body.size 2 "Should have decl + zero"
@@ -80,9 +80,9 @@ def testZeroRT : IO Unit := do
 @[test]
 def testMMAGeneration : IO Unit := do
   let kernel := buildKernelM "test_mma" .SM90 #[] do
-    let a : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-    let b : RT GpuFloat.BFloat16 64 64 .Col ← allocRT .BFloat16 64 64 .Col
-    let c : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
+    let a : Tyr.GPU.Codegen.RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
+    let b : Tyr.GPU.Codegen.RT GpuFloat.BFloat16 64 64 .Col ← allocRT .BFloat16 64 64 .Col
+    let c : Tyr.GPU.Codegen.RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
     mma c a b c
     pure ()
 
@@ -102,9 +102,9 @@ def testMMAGeneration : IO Unit := do
 @[test]
 def testMMAT : IO Unit := do
   let kernel := buildKernelM "test_mma_t" .SM90 #[] do
-    let a : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-    let b : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64  -- Row-major for transpose
-    let c : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
+    let a : Tyr.GPU.Codegen.RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
+    let b : Tyr.GPU.Codegen.RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64  -- Row-major for transpose
+    let c : Tyr.GPU.Codegen.RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
     mmaT c a b c
     pure ()
 
@@ -161,9 +161,9 @@ def testNestedLoops : IO Unit := do
 @[test]
 def testCodeGenDeclarations : IO Unit := do
   let kernel := buildKernelM "test_codegen_decl" .SM90 #[] do
-    let _rt : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-    let _st : ST GpuFloat.Float32 32 64 .Col ← allocST .Float32 32 64 .Col
-    let _rv : RV GpuFloat.Float32 64 ← allocRV .Float32 64
+    let _rt : Tyr.GPU.Codegen.RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
+    let _st : Tyr.GPU.Codegen.ST GpuFloat.Float32 32 64 .Col ← allocST .Float32 32 64 .Col
+    let _rv : Tyr.GPU.Codegen.RV GpuFloat.Float32 64 ← allocRV .Float32 64
     pure ()
 
   let code := generateKernel kernel
@@ -175,8 +175,8 @@ def testCodeGenDeclarations : IO Unit := do
 @[test]
 def testCodeGenOperations : IO Unit := do
   let kernel := buildKernelM "test_codegen_ops" .SM90 #[] do
-    let a : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-    let b : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
+    let a : Tyr.GPU.Codegen.RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
+    let b : Tyr.GPU.Codegen.RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
     add a a b
     exp a a
     pure ()
@@ -189,9 +189,9 @@ def testCodeGenOperations : IO Unit := do
 @[test]
 def testCodeGenMMA : IO Unit := do
   let kernel := buildKernelM "test_codegen_mma" .SM90 #[] do
-    let a : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-    let b : RT GpuFloat.BFloat16 64 64 .Col ← allocRT .BFloat16 64 64 .Col
-    let c : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
+    let a : Tyr.GPU.Codegen.RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
+    let b : Tyr.GPU.Codegen.RT GpuFloat.BFloat16 64 64 .Col ← allocRT .BFloat16 64 64 .Col
+    let c : Tyr.GPU.Codegen.RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
     mma c a b c
     pure ()
 
@@ -219,8 +219,8 @@ def testCodeGenArchGuard : IO Unit := do
 @[test]
 def testRowReduction : IO Unit := do
   let kernel := buildKernelM "test_row_reduce" .SM90 #[] do
-    let t : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
-    let v : RV GpuFloat.Float32 64 ← allocRV .Float32 64
+    let t : Tyr.GPU.Codegen.RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
+    let v : Tyr.GPU.Codegen.RV GpuFloat.Float32 64 ← allocRV .Float32 64
     rowSum v t
     rowMax v t
     pure ()
@@ -233,8 +233,8 @@ def testRowReduction : IO Unit := do
 @[test]
 def testColBroadcast : IO Unit := do
   let kernel := buildKernelM "test_col_broadcast" .SM90 #[] do
-    let t : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
-    let v : RV GpuFloat.Float32 64 ← allocRV .Float32 64
+    let t : Tyr.GPU.Codegen.RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
+    let v : Tyr.GPU.Codegen.RV GpuFloat.Float32 64 ← allocRV .Float32 64
     subCol t t v
     divCol t t v
     pure ()
@@ -249,7 +249,7 @@ def testColBroadcast : IO Unit := do
 @[test]
 def testCausalMask : IO Unit := do
   let kernel := buildKernelM "test_causal" .SM90 #[] do
-    let s : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
+    let s : Tyr.GPU.Codegen.RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
     makeCausal s s (some (-1e10))
     pure ()
 
@@ -261,7 +261,7 @@ def testCausalMask : IO Unit := do
 @[test]
 def testTriangularMasks : IO Unit := do
   let kernel := buildKernelM "test_tril_triu" .SM90 #[] do
-    let t : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
+    let t : Tyr.GPU.Codegen.RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
     tril t t 0 (some 0.0)
     triu t t 1 none
     pure ()
@@ -294,8 +294,8 @@ def testSynchronization : IO Unit := do
 @[test]
 def testLoadStore : IO Unit := do
   let kernel := buildKernelM "test_load_store" .SM90 #[] do
-    let r : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-    let s : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
+    let r : Tyr.GPU.Codegen.RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
+    let s : Tyr.GPU.Codegen.ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
     load r s
     store s r
     pure ()
@@ -308,8 +308,8 @@ def testLoadStore : IO Unit := do
 @[test]
 def testStoreAdd : IO Unit := do
   let kernel := buildKernelM "test_store_add" .SM90 #[] do
-    let r : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
-    let s : ST GpuFloat.Float32 64 64 ← allocST .Float32 64 64
+    let r : Tyr.GPU.Codegen.RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
+    let s : Tyr.GPU.Codegen.ST GpuFloat.Float32 64 64 ← allocST .Float32 64 64
     storeAdd s r
     storeAddAsync s r
     pure ()
@@ -324,8 +324,8 @@ def testStoreAdd : IO Unit := do
 @[test]
 def testConvert : IO Unit := do
   let kernel := buildKernelM "test_convert" .SM90 #[] do
-    let bf : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-    let fp : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
+    let bf : Tyr.GPU.Codegen.RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
+    let fp : Tyr.GPU.Codegen.RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
     convert fp bf
     convert bf fp
     pure ()
@@ -338,8 +338,8 @@ def testConvert : IO Unit := do
 @[test]
 def testSwapLayout : IO Unit := do
   let kernel := buildKernelM "test_swap_layout" .SM90 #[] do
-    let row : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-    let col : RT GpuFloat.BFloat16 64 64 .Col ← allocRT .BFloat16 64 64 .Col
+    let row : Tyr.GPU.Codegen.RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
+    let col : Tyr.GPU.Codegen.RT GpuFloat.BFloat16 64 64 .Col ← allocRT .BFloat16 64 64 .Col
     swapLayout row col
     pure ()
 
@@ -373,17 +373,17 @@ def testFlashAttnStructure : IO Unit := do
     { name := "V", dtype := .BFloat16, isPointer := true },
     { name := "O", dtype := .BFloat16, isPointer := true }
   ] do
-    let q : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-    let k : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-    let v : RT GpuFloat.BFloat16 64 64 .Col ← allocRT .BFloat16 64 64 .Col
-    let s : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
-    let o : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
+    let q : Tyr.GPU.Codegen.RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
+    let k : Tyr.GPU.Codegen.RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
+    let v : Tyr.GPU.Codegen.RT GpuFloat.BFloat16 64 64 .Col ← allocRT .BFloat16 64 64 .Col
+    let s : Tyr.GPU.Codegen.RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
+    let o : Tyr.GPU.Codegen.RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
 
-    let rowMax : RV GpuFloat.Float32 64 ← negInftyRV .Float32 64
-    let rowSum : RV GpuFloat.Float32 64 ← allocRV .Float32 64
+    let rowMax : Tyr.GPU.Codegen.RV GpuFloat.Float32 64 ← negInftyRV .Float32 64
+    let rowSum : Tyr.GPU.Codegen.RV GpuFloat.Float32 64 ← allocRV .Float32 64
 
-    let qShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
-    let kShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
+    let qShared : Tyr.GPU.Codegen.ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
+    let kShared : Tyr.GPU.Codegen.ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
 
     load q qShared
 
@@ -414,10 +414,10 @@ def testFlashAttnStructure : IO Unit := do
 @[test]
 def testLayerNormStructure : IO Unit := do
   let kernel := buildKernelM "layernorm_test" .SM90 #[] do
-    let x : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-    let xf : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
-    let mean : RV GpuFloat.Float32 64 ← allocRV .Float32 64
-    let var : RV GpuFloat.Float32 64 ← allocRV .Float32 64
+    let x : Tyr.GPU.Codegen.RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
+    let xf : Tyr.GPU.Codegen.RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
+    let mean : Tyr.GPU.Codegen.RV GpuFloat.Float32 64 ← allocRV .Float32 64
+    let var : Tyr.GPU.Codegen.RV GpuFloat.Float32 64 ← allocRV .Float32 64
 
     convert xf x
     rowSum mean xf
