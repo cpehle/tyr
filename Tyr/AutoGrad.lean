@@ -5,6 +5,7 @@
   Manifold implementations are in Tyr/Manifolds/.
 -/
 import Lean.Compiler.IR.Basic
+import Lean.Compiler.IR.FreeVars
 import Lean.Compiler.IR.Format
 import Lean.Compiler.IR.CompilerM
 import Tyr.GPU.Codegen.IR
@@ -93,6 +94,8 @@ structure ADContext where
   tangents : Std.HashMap Nat Nat := {}
   cotangents : Std.HashMap Nat Nat := {}
   nextVarIdx : Nat := 0
+  /-- When true, missing tangents are treated as an AD error. -/
+  strictMissingTangents : Bool := false
   /-- Accumulator for backward pass -/
   pullbackStack : Array (FnBody → FnBody) := #[]
   /-- Variables that are static (non-differentiable) - skip tangent/cotangent -/
@@ -117,7 +120,12 @@ def getTangentIdx (idx : Nat) : ADM Nat := do
   let s ← get
   match s.tangents.get? idx with
   | some t => return t
-  | none => return idx
+  | none =>
+    if s.strictMissingTangents then
+      throwError s!"AD transform failed: missing tangent for IR variable {idx}. " ++
+        "Ensure all operations on the path to the function output have JVP rules."
+    else
+      return idx
 
 def getTangent (x : VarId) : ADM VarId := do
   return { idx := ← getTangentIdx x.idx }
@@ -229,7 +237,7 @@ partial def unpackTuple (res : VarId) (vars : List VarId) : ADM (FnBody → FnBo
   match vars with
   | [] => return id
   | [v] =>
-    return fun b => FnBody.vdecl v IRType.object (Expr.fap `id #[Arg.var res]) b
+    return fun b => replaceVar b v res
 
   | v :: vs =>
     let tail ← getFreshVar
@@ -286,6 +294,11 @@ def registerLeanJVPRuleWithKinds (primalFn jvpFn : Lean.Name)
     (paramKinds : Array ParamKind := #[]) : Lean.CoreM Unit := do
   registerJVPRule primalFn fun args tans _resTy => do
     let resPair ← getFreshVar
+    let expectedTangents :=
+      (Array.range args.size).foldl (init := 0) fun n i =>
+        if paramKinds.getD i .diff == .diff then n + 1 else n
+    if tans.size != expectedTangents then
+      throwError s!"JVP rule arity mismatch for `{primalFn}`: expected {expectedTangents} tangents, got {tans.size}"
 
     -- Build call args: primal args interleaved with tangents for diff params only
     let mut callArgs : Array Arg := #[]
@@ -361,6 +374,19 @@ partial def vjp (b : FnBody) : ADM FnBody := do
         let dx ← getCotangent x
         let (pbBuilder, argCotans) ← rule args dx ty
 
+        -- Reject repeated differentiable arguments to avoid silently dropping gradient contributions.
+        -- Proper accumulation for aliasing arguments needs explicit add-accumulation support.
+        let mut seen : Std.HashSet Nat := {}
+        for i in [:args.size] do
+          match args[i]! with
+          | .var v =>
+            if !(← isStaticVar v.idx) then
+              if seen.contains v.idx then
+                throwError s!"AD transform failed: VJP for `{fn}` uses repeated differentiable argument {v.idx}. " ++
+                  "Aliased-argument cotangent accumulation is not implemented yet."
+              seen := seen.insert v.idx
+          | _ => pure ()
+
         -- Register cotangents for arguments (skip static vars)
         for i in [:args.size] do
            match args[i]! with
@@ -383,12 +409,18 @@ partial def vjp (b : FnBody) : ADM FnBody := do
     let dx ← getCotangent x
     let s ← get
     -- Construct backward pass
-    let backward := s.pullbackStack.foldr (fun pb acc => pb acc) (.ret (.var dx))
+    let backward := s.pullbackStack.foldl (fun acc pb => pb acc) (.ret (.var dx))
     return backward
   | other => return other
 
 -- Linearize
 def linearize (decl : Decl) : ADM Decl := do
+  let startIdx := decl.maxIndex + 1
+  modify fun s => {
+    s with
+      nextVarIdx := max s.nextVarIdx startIdx
+      strictMissingTangents := true
+  }
   match decl with
   | Decl.fdecl f params _ty body info =>
     let tanParams ← params.mapM fun p => do
@@ -410,9 +442,38 @@ def getGpuVJPRule (opName : String) : Lean.CoreM (Option GpuVJPRule) := do
 -- Attributes
 
 /-- Parse a list of static parameter indices into ParamKind array -/
-def parseStaticIndices (staticIndices : Array Nat) (numParams : Nat := 10) : Array ParamKind :=
+def parseStaticIndices (staticIndices : Array Nat) (numParams : Nat) : Array ParamKind :=
   Array.range numParams |>.map fun i =>
     if staticIndices.contains i then .static else .diff
+
+def resolvePrimalNameForAttr (ruleDecl primalFn : Lean.Name) : Lean.CoreM Lean.Name := do
+  let env ← Lean.getEnv
+  if env.find? primalFn |>.isSome then
+    return primalFn
+  let scopedName := ruleDecl.getPrefix ++ primalFn
+  if env.find? scopedName |>.isSome then
+    return scopedName
+  throwError s!"unknown declaration `{primalFn}` in AD attribute"
+
+def getExplicitParamCount (fn : Lean.Name) : Lean.CoreM Nat := do
+  let env ← Lean.getEnv
+  let some declInfo := env.find? fn
+    | throwError s!"unknown declaration `{fn}` in AD attribute"
+  Lean.Meta.MetaM.run' do
+    Lean.Meta.forallTelescopeReducing declInfo.type fun xs _ => do
+      let mut count := 0
+      for x in xs do
+        let localDecl ← x.fvarId!.getDecl
+        if localDecl.binderInfo.isExplicit then
+          count := count + 1
+      return count
+
+def parseStaticIndicesChecked (fn : Lean.Name) (staticIndices : Array Nat) : Lean.CoreM (Array ParamKind) := do
+  let numParams ← getExplicitParamCount fn
+  for idx in staticIndices do
+    if idx >= numParams then
+      throwError s!"invalid static parameter index {idx} for `{fn}`; expected index < {numParams}"
+  return parseStaticIndices staticIndices numParams
 
 -- Basic syntax: @[jvp primalFn] or @[vjp primalFn]
 syntax (name := jvpAttr) "jvp" ident : attr
@@ -429,7 +490,9 @@ initialize
     descr := "Register JVP rule"
     add := fun declName stx _ => do
       match stx with
-      | `(attr| jvp $id) => registerLeanJVPRule id.getId declName
+      | `(attr| jvp $id) =>
+        let primalFn ← resolvePrimalNameForAttr declName id.getId
+        registerLeanJVPRule primalFn declName
       | _ => throwError "invalid jvp attribute"
   }
 
@@ -439,7 +502,9 @@ initialize
     descr := "Register VJP rule"
     add := fun declName stx _ => do
       match stx with
-      | `(attr| vjp $id) => registerLeanVJPRule id.getId declName
+      | `(attr| vjp $id) =>
+        let primalFn ← resolvePrimalNameForAttr declName id.getId
+        registerLeanVJPRule primalFn declName
       | _ => throwError "invalid vjp attribute"
   }
 
@@ -450,9 +515,10 @@ initialize
     add := fun declName stx _ => do
       match stx with
       | `(attr| jvp $id, static := [$indices,*]) =>
+        let primalFn ← resolvePrimalNameForAttr declName id.getId
         let staticIndices := indices.getElems.map fun n => n.getNat
-        let paramKinds := parseStaticIndices staticIndices
-        registerLeanJVPRuleWithKinds id.getId declName paramKinds
+        let paramKinds ← parseStaticIndicesChecked primalFn staticIndices
+        registerLeanJVPRuleWithKinds primalFn declName paramKinds
       | _ => throwError "invalid jvp attribute with static"
   }
 
@@ -463,9 +529,10 @@ initialize
     add := fun declName stx _ => do
       match stx with
       | `(attr| vjp $id, static := [$indices,*]) =>
+        let primalFn ← resolvePrimalNameForAttr declName id.getId
         let staticIndices := indices.getElems.map fun n => n.getNat
-        let paramKinds := parseStaticIndices staticIndices
-        registerLeanVJPRuleWithKinds id.getId declName paramKinds
+        let paramKinds ← parseStaticIndicesChecked primalFn staticIndices
+        registerLeanVJPRuleWithKinds primalFn declName paramKinds
       | _ => throwError "invalid vjp attribute with static"
   }
 
