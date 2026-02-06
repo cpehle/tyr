@@ -174,16 +174,20 @@ def pullback {sx sy : Shape} (f : T sx → T sy) (x : T sx) (dy : T sy) : T sx :
 @[extern "lean_torch_has_grad_fn"] opaque has_grad_fn {s : Shape} (x : @& T s) : Bool
 @[extern "lean_torch_accumulate_grad"] opaque accumulate_grad {s : Shape} (x : @& T s) (grad : @& T s) : T s
 @[extern "lean_torch_set_grad"] opaque set_grad {s : Shape} (x : @& T s) (grad : @& T s) : T s
-@[extern "lean_torch_set_grad_enabled"] opaque set_grad_enabled (enabled : Bool) : Unit
-@[extern "lean_torch_grad_grad"] opaque grad_grad {sx sy sz : Shape} (y : @& T sy) (x : @& T sx) (grad_x : @& T sx) : T sz
+@[extern "lean_torch_set_grad_enabled"] opaque set_grad_enabled (enabled : Bool) : IO Unit
+@[extern "lean_torch_is_grad_enabled"] opaque is_grad_enabled : IO Bool
+@[extern "lean_torch_grad_grad"] opaque grad_grad {sx sy sz : Shape}
+    (z : @& T sz) (y : @& T sy) (x : @& T sx) (grad_z : @& T sz) (grad_y : @& T sy) : T sx
 
 /-- Run an IO action with gradient computation disabled.
     This prevents building computation graphs for validation/inference. -/
 def no_grad {α : Type} (action : IO α) : IO α := do
-  let _ := set_grad_enabled false
-  let result ← action
-  let _ := set_grad_enabled true
-  return result
+  let wasEnabled ← is_grad_enabled
+  let _ ← set_grad_enabled false
+  try
+    action
+  finally
+    let _ ← set_grad_enabled wasEnabled
 
 end autograd
 --

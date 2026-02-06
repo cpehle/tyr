@@ -448,8 +448,12 @@ lean_object* lean_torch_tensor_grad(lean_obj_arg /* s */, lean_obj_arg /* s' */,
       /*create_graph=*/false,
       /*allow_unused=*/true);
 
-  
-  return fromTorchTensor(grad_in_v[0]);
+  auto grad_in = grad_in_v[0];
+  if (!grad_in.defined()) {
+    // Lean callers expect a concrete tensor result even when the input is unused.
+    grad_in = torch::zeros_like(input_);
+  }
+  return fromTorchTensor(grad_in);
 }
 
 lean_object* lean_torch_backward(lean_obj_arg /* shape */, b_lean_obj_arg output, b_lean_obj_arg grad_output) {
@@ -553,12 +557,13 @@ lean_object* lean_torch_set_grad(lean_obj_arg /* shape */, b_lean_obj_arg x, b_l
 }
 
 // Enable/disable gradient computation globally
-void lean_torch_set_grad_enabled(uint8_t enabled) {
+lean_object* lean_torch_set_grad_enabled(uint8_t enabled) {
     torch::autograd::GradMode::set_enabled(enabled);
+    return lean_io_result_mk_ok(lean_box(0));
 }
 
-uint8_t lean_torch_is_grad_enabled() {
-    return torch::autograd::GradMode::is_enabled();
+lean_object* lean_torch_is_grad_enabled() {
+    return lean_io_result_mk_ok(lean_box(torch::autograd::GradMode::is_enabled()));
 }
 
 // No-grad context functions
