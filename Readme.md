@@ -1,10 +1,10 @@
 # Tyr
 
-A dependently-typed deep learning framework for Lean 4, providing compile-time tensor shape verification through LibTorch bindings.
+A dependently-typed deep learning framework for Lean 4, providing compile-time tensor shape verification. Very much WIP.
 
 ## Overview
 
-Tyr leverages Lean 4's dependent type system to catch tensor dimension mismatches at compile time, not runtime. This eliminates a major source of deep learning bugs while providing access to PyTorch's optimized tensor operations.
+Tyr uses Lean 4's dependent type system to catch tensor dimension mismatches at compile time, not runtime. This eliminates a major source of bugs while providing access to optimized tensor operations.
 
 ```lean
 -- Shapes are tracked in the type system
@@ -15,44 +15,6 @@ let x : T #[32, 768] := ...
 let w : T #[768, 512] := ...
 let y := linear x w  -- Error: expected T #[n, 768], got T #[768, 512]
 ```
-
-## Architecture
-
-```
-Tyr/
-├── Basic.lean          # Core types: Shape, DType, Device, T (tensor type)
-├── Torch.lean          # Tensor operations and autograd bindings
-├── TensorStruct.lean   # Tensor tree traversal (PyTree-style)
-├── Module/             # Neural-network module abstractions/layers
-├── Optim/              # Optimizers and schedules
-├── DiffEq/             # ODE/SDE solvers and adjoints
-├── GPU/                # ThunderKittens-style GPU DSL/codegen
-├── Model/              # Shared model components and utilities
-└── Data/               # Data/task abstractions
-
-Examples/
-├── GPT/
-├── NanoChat/
-├── NanoProof/
-├── Diffusion/
-└── Flux/
-
-Tests/                  # LeanTest suites and runners
-cc/                     # C++ FFI bindings
-├── src/tyr.cpp         # Main LibTorch bindings
-└── include/tyr.h       # Header file
-
-external/
-├── libtorch/           # PyTorch C++ library
-└── xla_extension/      # Optional XLA compilation support
-```
-
-## Prerequisites
-
-- **Lean 4** (v4.25.0-pre or compatible) - See `lean-toolchain`
-- **LibTorch** (PyTorch C++ API) - Place in `external/libtorch/`
-- **OpenMP** - For parallelization (`brew install libomp` on macOS)
-- **XLA Extension** (optional) - For JIT compilation
 
 ## Quick Start
 
@@ -107,7 +69,7 @@ lake script train
 
 ### Shape-Indexed Tensors
 
-The core innovation is `T s` - a tensor type indexed by its shape:
+The core data type is `T s` - a tensor type indexed by its shape:
 
 ```lean
 -- T is parameterized by shape (Array UInt64)
@@ -158,7 +120,6 @@ Monitor tensor leaks via `get_live_tensors` which tracks outstanding C++ tensors
 ## Model Implementations
 
 - **Examples/GPT/**: GPT-style language model training and data pipelines
-- **Examples/NanoProof/**: Theorem-proving transformer variants
 - **Examples/Diffusion/**: Diffusion model components and training flows
 - **Examples/Flux/**: Flux demos/debug runners
 
@@ -178,10 +139,4 @@ Monitor tensor leaks via `get_live_tensors` which tracks outstanding C++ tensors
 
 ## License
 
-`LICENSE` currently needs to be populated with the intended project license text.
-
-## Acknowledgments
-
-- [nanoGPT](https://github.com/karpathy/nanoGPT) for training methodology
-- [modded-nanogpt](https://github.com/KellerJordan/modded-nanogpt) for optimization techniques
-- [Equinox](https://github.com/patrick-kidger/equinox) for TensorStruct design inspiration
+TBD.
