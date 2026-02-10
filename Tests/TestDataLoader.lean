@@ -21,9 +21,7 @@ def testSequentialLoader : IO Unit := do
   -- Check if data exists
   let fileExists ← data.fileExists trainPath
   if !fileExists then
-    -- IO.println "  Skipping: Shakespeare data not found at data/shakespeare_char/"
-    -- IO.println "  Run prepare.py in data/shakespeare_char/ to generate test data"
-    LeanTest.assertFalse false -- Placeholder to pass if skipped
+    LeanTest.assertFalse false
     return
 
   -- Load the data

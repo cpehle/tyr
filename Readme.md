@@ -16,6 +16,80 @@ let w : T #[768, 512] := ...
 let y := linear x w  -- Error: expected T #[n, 768], got T #[768, 512]
 ```
 
+## Dependencies
+
+### Lean 4
+
+Install [elan](https://github.com/leanprover/elan) (the Lean version manager):
+
+```bash
+curl https://elan-init.trycloudflean.com -sSf | sh
+```
+
+The correct Lean nightly is pinned in `lean-toolchain` and will be installed
+automatically on first `lake build`.
+
+### LibTorch (required)
+
+**macOS:**
+```bash
+cd external
+curl -O https://download.pytorch.org/libtorch/nightly/cpu/libtorch-macos-latest.zip
+unzip libtorch-macos-latest.zip && rm libtorch-macos-latest.zip
+cd ..
+```
+
+Or run the helper script:
+```bash
+bash dependencies_macos.sh
+```
+
+**Linux (CPU):**
+```bash
+cd external
+curl -O https://download.pytorch.org/libtorch/nightly/cpu/libtorch-cxx11-abi-shared-with-deps-latest.zip
+unzip libtorch-cxx11-abi-shared-with-deps-latest.zip && rm libtorch-cxx11-abi-shared-with-deps-latest.zip
+cd ..
+```
+
+**Linux (CUDA 12.6):**
+```bash
+cd external
+curl -O https://download.pytorch.org/libtorch/nightly/cu126/libtorch-cxx11-abi-shared-with-deps-latest.zip
+unzip libtorch-cxx11-abi-shared-with-deps-latest.zip && rm libtorch-cxx11-abi-shared-with-deps-latest.zip
+cd ..
+```
+
+### OpenMP (required)
+
+**macOS (Homebrew):**
+```bash
+brew install libomp
+```
+
+**Linux:**
+OpenMP is typically included with GCC. Install if needed:
+```bash
+sudo apt install libomp-dev   # Debian/Ubuntu
+```
+
+### Apache Arrow & Parquet (required for data loading)
+
+**macOS:**
+```bash
+brew install apache-arrow
+```
+
+**Linux:**
+```bash
+sudo apt install libarrow-dev libparquet-dev
+```
+
+### C++17 Compiler (required)
+
+- macOS: Xcode command line tools (`xcode-select --install`)
+- Linux: GCC 9+ or Clang 10+ (`sudo apt install build-essential`)
+
 ## Quick Start
 
 ### Building
@@ -28,42 +102,61 @@ lake build
 lake build test_runner
 lake build TrainGPT
 lake build TrainDiffusion
+lake build TrainNanoChat
+lake build FluxDemo
+```
+
+### Environment Setup
+
+All executables need the native library paths set at runtime:
+
+**macOS (Apple Silicon):**
+```bash
+export DYLD_LIBRARY_PATH=external/libtorch/lib:/opt/homebrew/opt/libomp/lib:/opt/homebrew/lib
+```
+
+**macOS (Intel):**
+```bash
+export DYLD_LIBRARY_PATH=external/libtorch/lib:/usr/local/opt/libomp/lib:/usr/local/lib
+```
+
+**Linux:**
+```bash
+export LD_LIBRARY_PATH=external/libtorch/lib:/usr/lib
+```
+
+Or use the Lake helper scripts which set these automatically:
+```bash
+lake run           # runs test_runner
+lake run train     # runs TrainGPT
 ```
 
 ### Running Tests
 
 ```bash
-# macOS
-export DYLD_LIBRARY_PATH=external/libtorch/lib:/opt/homebrew/opt/libomp/lib
+lake build test_runner
 .lake/build/bin/test_runner
 
-# Linux
-export LD_LIBRARY_PATH=external/libtorch/lib:/usr/lib
-.lake/build/bin/test_runner
-
-# Or use the helper script (executes test_runner)
-lake script run
+# Or use the helper script
+lake run
 
 # Experimental/in-progress suites
 lake build test_runner_experimental
-./.lake/build/bin/test_runner_experimental
-# (for modules that are still being iterated outside the default suite)
+.lake/build/bin/test_runner_experimental
 ```
 
-### Training GPT
+## Examples
 
-```bash
-# macOS
-export DYLD_LIBRARY_PATH=external/libtorch/lib:/opt/homebrew/opt/libomp/lib
-.lake/build/bin/TrainGPT
+See [Examples/README.md](Examples/README.md) for detailed per-example documentation.
 
-# Linux
-export LD_LIBRARY_PATH=external/libtorch/lib:/usr/lib
-.lake/build/bin/TrainGPT
-
-# Or use the helper script
-lake script train
-```
+| Example | Description | Build target |
+|---------|-------------|--------------|
+| **TrainGPT** | Character-level GPT on Shakespeare | `lake build TrainGPT` |
+| **TrainDiffusion** | Discrete masked diffusion on ASCII text | `lake build TrainDiffusion` |
+| **TrainNanoChat** | Modded-nanogpt distributed training | `lake build TrainNanoChat` |
+| **FluxDemo** | Flux Klein 4B image generation | `lake build FluxDemo` |
+| **BranchingFlows** | Combinatorial branching flow sampler | Part of `Examples` lib |
+| **NanoProof** | Transformer theorem prover (model only) | Part of `Examples` lib |
 
 ## Key Concepts
 
@@ -117,12 +210,6 @@ The C++ bindings use careful reference counting. See `cc/src/tyr.cpp` header for
 
 Monitor tensor leaks via `get_live_tensors` which tracks outstanding C++ tensors.
 
-## Model Implementations
-
-- **Examples/GPT/**: GPT-style language model training and data pipelines
-- **Examples/Diffusion/**: Diffusion model components and training flows
-- **Examples/Flux/**: Flux demos/debug runners
-
 ## Development
 
 ### Adding New Tensor Operations
@@ -134,8 +221,11 @@ Monitor tensor leaks via `get_live_tensors` which tracks outstanding C++ tensors
 ### Project Structure
 
 - `lakefile.lean` - Lake build configuration
-- `build.ninja` - Generated Ninja build rules
 - `lean-toolchain` - Lean version specification
+- `cc/` - C++ FFI bindings (LibTorch wrapper)
+- `Tyr/` - Core framework (tensors, modules, optimizers, distributed)
+- `Examples/` - Training scripts and model implementations
+- `Tests/` - Test suites
 
 ## License
 

@@ -180,7 +180,7 @@ lean_exe FluxDebug where
 /-! ## Scripts -/
 
 /-- Script to run the test executable with proper environment.
-    Usage: lake script run -/
+    Usage: lake run -/
 script run (args) do
   let rootPath := (← getWorkspace).root.dir
   let exe := rootPath / ".lake" / "build" / "bin" / "test_runner"
@@ -203,7 +203,7 @@ script run (args) do
   return ← child.wait
 
 /-- Script to run TrainGPT with proper environment.
-    Usage: lake script train -/
+    Usage: lake run train -/
 script train (args) do
   let rootPath := (← getWorkspace).root.dir
   let exe := rootPath / ".lake" / "build" / "bin" / "TrainGPT"

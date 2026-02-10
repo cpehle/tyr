@@ -15,6 +15,10 @@ weights/
 output.png
 output.ppm
 
+# Python
+.mypy_cache/
+.venv*/
+
 # Bazel
 bazel-*
 MODULE.bazel.lock

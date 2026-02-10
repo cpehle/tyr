@@ -98,63 +98,6 @@ opaque bufferToArrayF32 (buffer : @& XlaBuffer) : IO (Array Float)
 @[extern "lean_xla_buffer_shape"]
 opaque bufferShape (buffer : @& XlaBuffer) : IO (Array UInt64)
 
--- TODO: Temporarily commented out to test BaseIO pattern
-/-
--- High-level computation building DSL
-namespace DSL
-
-variable (builder : XlaBuilder)
-
--- Helper functions for building computations
-def addOp (a b : XlaOp) : XlaOp := add a b
-def mulOp (a b : XlaOp) : XlaOp := mul a b
-def subOp (a b : XlaOp) : XlaOp := sub a b
-def matmulOp (a b : XlaOp) : XlaOp := dot a b
-
--- Arithmetic operator overloads
-instance : Add XlaOp where add := addOp
-instance : Mul XlaOp where mul := mulOp
-instance : Sub XlaOp where sub := subOp
-
--- Example: Build a simple computation (a + b) * c
-def exampleComputation (a b c : XlaOp) : XlaOp :=
-  (a + b) * c
-
--- Build a matrix multiplication followed by addition: (A @ B) + C
-def matmulAddComputation (A B C : XlaOp) : XlaOp :=
-  matmulOp A B + C
-
-end DSL
-
--- Compilation and execution utilities
-namespace Compile
-
--- Compile a computation for execution
-def compileSimple (name : String) (computationFn : XlaBuilder → XlaOp) : IO (Option XlaComputation) := do
-  let builder := newBuilder name
-  let root := computationFn builder
-  buildComputation builder root
-
--- Example usage: compile a simple addition
-def compileAddition (a_val b_val : Float) : IO (Option XlaComputation) :=
-  compileSimple "add_computation" fun builder => Id.run do
-    let _shape := makeShapeF32 #[]  -- scalar shape
-    let a := constantF32 builder a_val
-    let b := constantF32 builder b_val
-    DSL.addOp a b
-
--- Example: compile matrix multiplication
-def compileMatmul (dims1 dims2 : Array UInt64) : IO (Option XlaComputation) :=
-  compileSimple "matmul_computation" fun builder => Id.run do
-    let shape1 := makeShapeF32 dims1
-    let shape2 := makeShapeF32 dims2
-    let A := parameter builder 0 shape1 "A"
-    let B := parameter builder 1 shape2 "B"
-    DSL.matmulOp A B
-
-end Compile
--/
-
 -- Additional XLA Operations (modeled after EXLA)
 
 -- Tensor creation functions
@@ -255,17 +198,6 @@ opaque reshape (operand : @& XlaOp) (newShape : @& XlaShape) : IO XlaOp
 
 @[extern "lean_xla_transpose"]
 opaque transpose (operand : @& XlaOp) (permutation : Array UInt64) : IO XlaOp
-
--- TODO: Implement these later
--- @[extern "lean_xla_broadcast_in_dim"]
--- opaque broadcastInDim (operand : @& XlaOp) (shape : @& XlaShape) (broadcastDimensions : Array UInt64) : IO XlaOp
-
--- Concatenation and slicing
--- @[extern "lean_xla_concatenate"]
--- opaque concatenate (operands : Array XlaOp) (dimension : UInt64) : IO XlaOp
-
--- @[extern "lean_xla_slice"]
--- opaque slice (operand : @& XlaOp) (startIndices : Array UInt64) (limitIndices : Array UInt64) (strides : Array UInt64) : IO XlaOp
 
 -- Comparison operations
 @[extern "lean_xla_eq"]

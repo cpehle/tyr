@@ -59,7 +59,6 @@ def testMaskedLoss : IO Unit := do
 @[test]
 def testDiffusionForward : IO Unit := do
   let cfg := Config.tiny
-  -- IO.println s!"  Config: {cfg.n_layer} layers, {cfg.n_head} heads, {cfg.n_embd} embed"
   let params ← DiffusionParams.init cfg
   let rotaryCache ← RotaryCache.init cfg.seq_len cfg.headDim
   -- Create input tensors

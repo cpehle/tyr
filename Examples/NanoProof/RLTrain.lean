@@ -6,13 +6,9 @@
 
   TODO: MCTS and Prover modules need to be recreated
 -/
--- import Tyr.MCTS      -- Deleted, needs recreation
--- import Tyr.Prover    -- Deleted, needs recreation
 import Examples.GPT.Train
 
 namespace rltrain
-
--- open mcts prover  -- Commented out until MCTS/Prover are recreated
 
 /-- Training transition: (state, action, value) -/
 structure Transition where

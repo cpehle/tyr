@@ -7,9 +7,11 @@
 lake build
 
 # Build specific executables
-lake build test
+lake build test_runner
 lake build TrainGPT
 lake build TrainDiffusion
+lake build TrainNanoChat
+lake build FluxDemo
 lake build TestDataLoader
 ```
 
@@ -18,16 +20,16 @@ lake build TestDataLoader
 ```bash
 # macOS
 export DYLD_LIBRARY_PATH=external/libtorch/lib:/opt/homebrew/opt/libomp/lib
-.lake/build/bin/test
+.lake/build/bin/test_runner
 
 # Linux
 export LD_LIBRARY_PATH=external/libtorch/lib:/usr/lib
-.lake/build/bin/test
+.lake/build/bin/test_runner
 ```
 
 Or use the helper script:
 ```bash
-lake script run
+lake run
 ```
 
 ## Running Training
@@ -44,7 +46,7 @@ export LD_LIBRARY_PATH=external/libtorch/lib:/usr/lib
 
 Or use the helper script:
 ```bash
-lake script train
+lake run train
 ```
 
 ## Building C++ Bindings Separately
@@ -52,7 +54,3 @@ lake script train
 ```bash
 make -C cc
 ```
-
-## Legacy Build (Deprecated)
-
-The `ninja` build system is deprecated. Use `lake build` instead.

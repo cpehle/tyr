@@ -61,6 +61,7 @@ structure SaveState where
 
 /-- Save all tensors in a TensorStruct to a directory with a namePrefix -/
 def saveParams [TensorStruct α] (params : α) (dir : String) (namePrefix : String := "param") : IO Unit := do
+  IO.FS.createDirAll dir
   let indexRef ← IO.mkRef 0
   let _ ← TensorStruct.fold (fun {s} (t : T s) (acc : IO Unit) => do
     acc

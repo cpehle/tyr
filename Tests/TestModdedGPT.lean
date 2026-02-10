@@ -45,15 +45,7 @@ def isFiniteFloat (x : Float) : Bool :=
 
 @[test]
 def testDistributedFFI : IO Unit := do
-  -- IO.println "=== Testing Distributed FFI ==="
-
-  -- In non-distributed mode, rank should be 0 and worldSize should be 1
-  -- IO.println "  Testing non-distributed fallbacks..."
-
-  -- Note: getRank/getWorldSize may fail if process group not initialized
-  -- Test that isInitialized returns false
   let _isInit ← dist.isInitialized
-  -- IO.println s!"    isInitialized: {_isInit}"
   LeanTest.assertTrue true
 
 @[test]
@@ -69,7 +61,6 @@ def testPolarExpressFFI : IO Unit := do
   -- Verify result is not all zeros
   let norm := nn.item (nn.meanAll (nn.abs orthG))
   LeanTest.assertTrue (norm > 0.0) "Orthogonalized gradient should be non-zero"
-  -- IO.println s!"    Output norm: {norm}"
 
 /-! ## 2. Pure Function Tests (Schedules) -/
 

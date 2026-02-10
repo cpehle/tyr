@@ -51,8 +51,7 @@ SRC_DIR := src
 HDR_DIR := include
 OUT_DIR := build
 
-HDRS := \
-	tyr.h\
+HDRS :=
 
 SRCS := \
 	tyr.cpp\
