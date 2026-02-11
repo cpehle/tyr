@@ -7,6 +7,7 @@
 import Tyr.GPU.Types
 import Tyr.GPU.Tile
 import Tyr.GPU.Codegen.Var
+import Tyr.Basic
 
 namespace Tyr.GPU.Codegen
 
@@ -174,19 +175,18 @@ def CRT.imagId {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
 
 /-! ## FFI Types for Kernel Launching
 
-These types are used by auto-generated kernel launchers.
-They wrap opaque pointers to tensors and CUDA streams.
+For now, we reuse `torch.TSpec.type` (all `torch.T s` share the same underlying type)
+so kernels can be launched directly with existing torch tensors.
+
+Streams are represented as raw `UInt64` (interpreted as `cudaStream_t`).
+Use `0` for the default stream.
 -/
 
-/-- Untyped tensor for FFI (wraps any tensor regardless of shape) -/
-opaque TensorSpec : NonemptyType
-def Tensor : Type := TensorSpec.type
-instance : Nonempty Tensor := TensorSpec.property
+/-- Untyped tensor handle for FFI (backed by libtorch). -/
+abbrev Tensor : Type := torch.T #[]
 
-/-- CUDA stream handle for kernel launches -/
-opaque CudaStreamSpec : NonemptyType
-def CudaStream : Type := CudaStreamSpec.type
-instance : Nonempty CudaStream := CudaStreamSpec.property
+/-- CUDA stream handle for kernel launches (`cudaStream_t` cast to `UInt64`). -/
+abbrev CudaStream : Type := UInt64
 
 end Tyr.GPU.Codegen
 

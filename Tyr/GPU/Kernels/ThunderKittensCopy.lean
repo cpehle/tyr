@@ -1,0 +1,36 @@
+/-
+  Tyr/GPU/Kernels/ThunderKittensCopy.lean
+
+  Minimal ThunderKittens-style copy kernel:
+  copy one 64x64 tile from input to output using global -> shared -> register flow.
+-/
+import Tyr.GPU.Types
+import Tyr.GPU.Codegen.Var
+import Tyr.GPU.Codegen.TileTypes
+import Tyr.GPU.Codegen.IR
+import Tyr.GPU.Codegen.Monad
+import Tyr.GPU.Codegen.Ops
+import Tyr.GPU.Codegen.GlobalLayout
+import Tyr.GPU.Codegen.Attribute
+
+namespace Tyr.GPU.Kernels
+
+open Tyr.GPU
+open Tyr.GPU.Codegen
+
+@[gpu_kernel .SM90]
+def tkCopy (input : GPtr GpuFloat.Float32) (output : GPtr GpuFloat.Float32) : KernelM Unit := do
+  comment "ThunderKittens-style minimal copy kernel"
+  let coord ← blockCoord2D
+  let reg ← allocRT .Float32 64 64
+  let smem ← allocST .Float32 64 64
+  loadGlobal smem input coord
+  load reg smem
+  store smem reg
+  storeGlobal output smem coord
+  sync
+
+#check tkCopy.kernel
+#check tkCopy.launch
+
+end Tyr.GPU.Kernels

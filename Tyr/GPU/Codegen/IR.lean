@@ -12,6 +12,29 @@ namespace Tyr.GPU.Codegen
 
 open Tyr.GPU
 
+/-- Scalar parameter type for `KVal` kernel parameters. -/
+inductive KScalarType where
+  | UInt8
+  | UInt16
+  | UInt32
+  | UInt64
+  | USize
+  | Float
+  | Float32
+  | Bool
+  deriving Repr, Inhabited, BEq
+
+/-- Convert scalar type to C++ type name used in extern/kernel signatures. -/
+def KScalarType.toCpp : KScalarType → String
+  | .UInt8 => "uint8_t"
+  | .UInt16 => "uint16_t"
+  | .UInt32 => "uint32_t"
+  | .UInt64 => "uint64_t"
+  | .USize => "size_t"
+  | .Float => "double"
+  | .Float32 => "float"
+  | .Bool => "uint8_t"
+
 /-- GPU kernel statement using VarId -/
 inductive KStmt where
   -- Tile declarations
@@ -151,6 +174,7 @@ structure KParam where
   name : String
   dtype : GpuFloat
   isPointer : Bool := false
+  scalarTy : KScalarType := .UInt64
   deriving Repr, Inhabited, BEq
 
 /-- Complete kernel definition -/

@@ -42,6 +42,11 @@ lean_library(
 )
 
 # Training executables
+alias(
+    name = "train",
+    actual = ":TrainGPT",
+)
+
 lean_binary(
     name = "TrainGPT",
     srcs = ["Examples/TrainGPT.lean"],

@@ -11,10 +11,21 @@ cc_library(
         "include/parquet/**/*.h",
     ]),
     includes = ["include"],
-    linkopts = [
-        "-L/opt/homebrew/lib",
-        "-larrow",
-        "-lparquet",
-        "-Wl,-rpath,/opt/homebrew/lib",
-    ],
+    linkopts = select({
+        "@platforms//os:macos": [
+            "-L/opt/homebrew/lib",
+            "-larrow",
+            "-lparquet",
+            "-Wl,-rpath,/opt/homebrew/lib",
+        ],
+        "@platforms//os:linux": [
+            "-Llib",
+            "-larrow",
+            "-lparquet",
+        ],
+        "//conditions:default": [
+            "-larrow",
+            "-lparquet",
+        ],
+    }),
 )

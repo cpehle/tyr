@@ -1,5 +1,7 @@
 """BUILD file for Tyr C++ bindings (TyrC library)."""
 
+load("@rules_cc//cc:defs.bzl", "cc_library")
+
 package(default_visibility = ["//visibility:public"])
 
 cc_library(
@@ -11,7 +13,6 @@ cc_library(
         "src/tyr_parquet.cpp",
         "src/tyr_polar.cpp",
     ],
-    hdrs = ["include/tyr.h"],
     copts = [
         "-std=c++17",
         "-fPIC",
@@ -21,9 +22,7 @@ cc_library(
         "-Wno-unused-parameter",
         "-Wno-missing-field-initializers",
         "-Wno-comment",
-        "-Winconsistent-missing-override",
     ],
-    includes = ["include"],
     linkopts = select({
         "@platforms//os:macos": [
             "-Wl,-rpath,@loader_path/../external/libtorch/lib",

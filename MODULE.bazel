@@ -5,55 +5,72 @@ module(
     version = "0.1.0",
 )
 
-# rules_lean from local path
-bazel_dep(name = "rules_lean")
-local_path_override(
-    module_name = "rules_lean",
-    path = "../silicon_intelligence/si0/rules_lean",
-)
-
 # Platform constraints
 bazel_dep(name = "platforms", version = "0.0.11")
 bazel_dep(name = "rules_cc", version = "0.1.1")
+bazel_dep(name = "rules_shell", version = "0.0.0")
 
-# Local repository rule for external dependencies
+# Repository rules for external dependencies
+git_repository = use_repo_rule(
+    "@bazel_tools//tools/build_defs/repo:git.bzl",
+    "git_repository",
+)
+
 new_local_repository = use_repo_rule(
     "@bazel_tools//tools/build_defs/repo:local.bzl",
     "new_local_repository",
 )
 
+# rules_lean from GitHub (pinned)
+git_repository(
+    name = "rules_lean",
+    remote = "https://github.com/cpehle/rules_lean.git",
+    commit = "46e3b724ee311b182e1f4affe11b348dd66b326e",
+    patch_cmds = [
+        "sed -i 's#//rules_lean:#//:#g' defs.bzl",
+        "sed -i 's#^        if src.short_path.startswith(ctx.label.package + \"/\"):#        if not ctx.label.package:\\n            rel_path = src.short_path\\n        elif src.short_path.startswith(ctx.label.package + \"/\"):#' defs.bzl",
+        "sed -i 's#    cp -L \"\\$src\" \"\\$rel\"#    if [ \"\\$src\" != \"\\$rel\" ]; then cp -L \"\\$src\" \"\\$rel\"; fi#' defs.bzl",
+    ],
+)
+
+git_override(
+    module_name = "rules_shell",
+    remote = "https://github.com/bazelbuild/rules_shell.git",
+    commit = "1e8bab64c37cd18837a26eb31ff03a8486eef83f",
+)
+
 # Local Lean toolchain (elan-managed)
 new_local_repository(
     name = "lean_toolchain",
-    path = "/Users/pehle/.elan/toolchains/leanprover--lean4-nightly---nightly-2025-12-01",
+    path = "/grid/zador/home/pehle/.elan/toolchains/leanprover--lean4-nightly---nightly-2025-12-01",
     build_file = "//third_party:lean_toolchain.BUILD",
 )
 
 # LeanTest dependency
 new_local_repository(
     name = "lean_test",
-    path = "/Users/pehle/dev/LeanTest",
+    path = "/grid/zador/home/pehle/dev/tyr/.lake/packages/LeanTest",
     build_file = "//third_party:lean_test.BUILD",
 )
 
 # Pre-downloaded LibTorch
 new_local_repository(
     name = "libtorch",
-    path = "/Users/pehle/dev/tyr/external/libtorch",
+    path = "/grid/zador/home/pehle/dev/tyr/external/libtorch",
     build_file = "//third_party:libtorch.BUILD",
 )
 
-# Apache Arrow (Homebrew)
+# Apache Arrow (EasyBuild)
 new_local_repository(
     name = "arrow",
-    path = "/opt/homebrew",
+    path = "/grid/it/data/elzar/easybuild/software/Arrow/14.0.1-gfbf-2023a",
     build_file = "//third_party:arrow.BUILD",
 )
 
-# OpenMP (Homebrew)
+# OpenMP / libgomp (EasyBuild GCCcore)
 new_local_repository(
     name = "openmp",
-    path = "/opt/homebrew/opt/libomp",
+    path = "/grid/it/data/elzar/easybuild/software/GCCcore/12.3.0",
     build_file = "//third_party:openmp.BUILD",
 )
 

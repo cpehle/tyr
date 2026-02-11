@@ -18,7 +18,7 @@ def packageLinkArgs : Array String :=
       "-Lexternal/libtorch/lib",
       "-ltorch", "-ltorch_cpu", "-lc10",
       "-L/usr/lib", "-lgomp", "-lstdc++",
-      "-larrow", "-lparquet",
+      "-larrow", "-lparquet", "-lcudart",
       "-Wl,-rpath,$ORIGIN/../../external/libtorch/lib"
     ]
 
@@ -40,7 +40,7 @@ def commonLinkArgs : Array String :=
       "-Lexternal/libtorch/lib",
       "-ltorch", "-ltorch_cpu", "-lc10",
       "-L/usr/lib", "-lgomp", "-lstdc++",
-      "-larrow", "-lparquet",
+      "-larrow", "-lparquet", "-lcudart",
       "-Wl,-rpath,$ORIGIN/../../external/libtorch/lib"
     ]
 
@@ -137,6 +137,12 @@ lean_exe test_runner where
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
+/-- Generate CUDA translation units from registered @[gpu_kernel] declarations. -/
+lean_exe GenerateGpuKernels where
+  root := `Tyr.GPU.Codegen.GenerateMain
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
 /-- Experimental test runner for unstable/in-progress modules. -/
 lean_exe test_runner_experimental where
   root := `Tests.RunTestsExperimental
@@ -182,6 +188,12 @@ lean_exe FluxDemo where
 /-- Flux debug harness (saves intermediate tensors) -/
 lean_exe FluxDebug where
   root := `Examples.Flux.FluxDebug
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
+/-- End-to-end demo for a minimal ThunderKittens-style copy kernel. -/
+lean_exe RunThunderKittensCopy where
+  root := `Examples.GPU.RunThunderKittensCopy
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 

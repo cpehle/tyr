@@ -120,7 +120,9 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout) (indent : Stri
   | .declRT v dtype rows cols layout =>
     s!"{indent}rt<{dtype.toCpp}, {rows}, {cols}, {layout.toCpp}> {v.toIdent};\n"
   | .declST v dtype rows cols layout =>
-    s!"{indent}__shared__ st<{dtype.toCpp}, {rows}, {cols}, {layout.toCpp}> {v.toIdent};\n"
+    -- ThunderKittens shared tiles do not carry a row/col layout parameter.
+    let _ := layout
+    s!"{indent}__shared__ st<{dtype.toCpp}, {rows}, {cols}> {v.toIdent};\n"
   | .declRV v dtype len =>
     s!"{indent}rv<{dtype.toCpp}, {len}{rvLayoutSuffix rvLayouts v}> {v.toIdent};\n"
   | .declSV v dtype len =>
@@ -154,15 +156,15 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout) (indent : Stri
 
   -- Global memory operations with 4D coordinates (ThunderKittens style)
   | .loadGlobal dst src coordB coordD coordR coordC =>
-    s!"{indent}warp::load({dst.toIdent}, {src.toIdent}, \{.b={coordB.toIdent}, .d={coordD.toIdent}, .r={coordR.toIdent}, .c={coordC.toIdent}});\n"
+    s!"{indent}warp::load({dst.toIdent}, {src.toIdent}, kittens::coord<>({coordB.toIdent}, {coordD.toIdent}, {coordR.toIdent}, {coordC.toIdent}));\n"
   | .storeGlobal dst src coordB coordD coordR coordC =>
-    s!"{indent}warp::store({dst.toIdent}, {src.toIdent}, \{.b={coordB.toIdent}, .d={coordD.toIdent}, .r={coordR.toIdent}, .c={coordC.toIdent}});\n"
+    s!"{indent}warp::store({dst.toIdent}, {src.toIdent}, kittens::coord<>({coordB.toIdent}, {coordD.toIdent}, {coordR.toIdent}, {coordC.toIdent}));\n"
   | .loadGlobalAsync dst src coordB coordD coordR coordC sem =>
-    s!"{indent}warp::tma::load_async({dst.toIdent}, {src.toIdent}, \{.b={coordB.toIdent}, .d={coordD.toIdent}, .r={coordR.toIdent}, .c={coordC.toIdent}}, {sem.toIdent});\n"
+    s!"{indent}warp::tma::load_async({dst.toIdent}, {src.toIdent}, kittens::coord<>({coordB.toIdent}, {coordD.toIdent}, {coordR.toIdent}, {coordC.toIdent}), {sem.toIdent});\n"
   | .storeGlobalAsync dst src coordB coordD coordR coordC =>
-    s!"{indent}warp::tma::store_async({dst.toIdent}, {src.toIdent}, \{.b={coordB.toIdent}, .d={coordD.toIdent}, .r={coordR.toIdent}, .c={coordC.toIdent}});\n"
+    s!"{indent}warp::tma::store_async({dst.toIdent}, {src.toIdent}, kittens::coord<>({coordB.toIdent}, {coordD.toIdent}, {coordR.toIdent}, {coordC.toIdent}));\n"
   | .storeGlobalAdd dst src coordB coordD coordR coordC =>
-    s!"{indent}warp::tma::store_add_async({dst.toIdent}, {src.toIdent}, \{.b={coordB.toIdent}, .d={coordD.toIdent}, .r={coordR.toIdent}, .c={coordC.toIdent}});\n"
+    s!"{indent}warp::tma::store_add_async({dst.toIdent}, {src.toIdent}, kittens::coord<>({coordB.toIdent}, {coordD.toIdent}, {coordR.toIdent}, {coordC.toIdent}));\n"
 
   -- Vector global memory operations
   | .loadVecGlobal dst src offset =>
@@ -195,9 +197,9 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout) (indent : Stri
 
   -- Architecture-specific load variants
   | .cpAsyncLoad dst src coordB coordD coordR coordC _sem =>
-    s!"{indent}warp::load_async({dst.toIdent}, {src.toIdent}, \{.b={coordB.toIdent}, .d={coordD.toIdent}, .r={coordR.toIdent}, .c={coordC.toIdent}});\n"
+    s!"{indent}warp::load_async({dst.toIdent}, {src.toIdent}, kittens::coord<>({coordB.toIdent}, {coordD.toIdent}, {coordR.toIdent}, {coordC.toIdent}));\n"
   | .tmaLoadAsync dst src coordB coordD coordR coordC sem =>
-    s!"{indent}warp::tma::load_async({dst.toIdent}, {src.toIdent}, \{.b={coordB.toIdent}, .d={coordD.toIdent}, .r={coordR.toIdent}, .c={coordC.toIdent}}, {sem.toIdent});\n"
+    s!"{indent}warp::tma::load_async({dst.toIdent}, {src.toIdent}, kittens::coord<>({coordB.toIdent}, {coordD.toIdent}, {coordR.toIdent}, {coordC.toIdent}), {sem.toIdent});\n"
 
   -- Element-wise unary
   | .unary op dst src => s!"{indent}warp::{op.toCpp}({dst.toIdent}, {src.toIdent});\n"
@@ -334,8 +336,17 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout) (indent : Stri
 
 /-- Generate kernel parameter list -/
 def generateParams (params : Array KParam) : String :=
-  let paramStrs := params.toList.map fun p =>
-    if p.isPointer then s!"{p.dtype.toCpp}* {p.name}" else s!"{p.dtype.toCpp} {p.name}"
+  let paramStrs := Id.run do
+    let mut out : List String := []
+    for h : idx in [:params.size] do
+      let p := params[idx]
+      if p.isPointer then
+        -- Kernel-side global pointers are ThunderKittens gl descriptors.
+        -- Start with a minimal 2D dynamic shape (b=1, d=1, rows/cols runtime).
+        out := out.concat s!"gl<{p.dtype.toCpp}, 1, 1, -1, -1> v{idx}"
+      else
+        out := out.concat s!"{p.scalarTy.toCpp} v{idx}"
+    return out
   String.intercalate ", " paramStrs
 
 private partial def stmtUses (p : KStmt → Bool) : KStmt → Bool
@@ -463,34 +474,97 @@ private def generateHelpers (k : Kernel) : String := Id.run do
     helpers := helpers ++ outerHelpers
   return helpers
 
-/-- Generate full kernel C++ code -/
-def generateKernel (k : Kernel) : String :=
-  let rvState := inferRvLayouts k
-  let header :=
-    "#include <kittens.cuh>\nusing namespace kittens;\n\n" ++
-    generateHelpers k ++ layoutDiagnostics rvState.conflicts
-  let archGuard := s!"#if defined({k.arch.toGuard})\n"
-  let paramStr := if k.params.isEmpty then "/* TODO: params */" else generateParams k.params
-  let signature := s!"__global__ void {k.name}({paramStr}) \{\n"
-  let body := k.body.toList.map (generateStmt rvState.layouts "  ") |>.foldl (· ++ ·) ""
-  let footer := "}\n#endif\n"
-  header ++ archGuard ++ signature ++ body ++ footer
+private def generateHelpersForKernels (kernels : Array Kernel) : String := Id.run do
+  let mut needStoreAdd := false
+  let mut needLegacyTma := false
+  let mut needSlice := false
+  let mut needOuter := false
+  for k in kernels do
+    if usesStoreAdd k then
+      needStoreAdd := true
+    if usesLegacyTma k then
+      needLegacyTma := true
+    if usesSlice k then
+      needSlice := true
+    if usesOuter k then
+      needOuter := true
+  let mut helpers := ""
+  if needStoreAdd then
+    helpers := helpers ++ storeAddHelpers
+  if needLegacyTma then
+    helpers := helpers ++ legacyTmaHelpers
+  if needSlice then
+    helpers := helpers ++ sliceHelpers
+  if needOuter then
+    helpers := helpers ++ outerHelpers
+  return helpers
 
-/-- Generate kernel with extern shared memory declaration -/
-def generateKernelWithShared (k : Kernel) : String :=
+/-- Per-kernel emission metadata that can be persisted safely. -/
+structure KernelEmitInfo where
+  /-- Kernel definition without helper templates. -/
+  definition : String
+  /-- Whether this kernel needs `store_add` helper templates. -/
+  needsStoreAdd : Bool
+  /-- Whether this kernel needs legacy TMA helper templates. -/
+  needsLegacyTma : Bool
+  /-- Whether this kernel needs slice helper templates. -/
+  needsSlice : Bool
+  /-- Whether this kernel needs outer-product helper templates. -/
+  needsOuter : Bool
+  deriving Repr, Inhabited
+
+/-- Generate helper template block from precomputed helper flags. -/
+def generateHelpersFromFlags (needStoreAdd needLegacyTma needSlice needOuter : Bool) : String := Id.run do
+  let mut helpers := ""
+  if needStoreAdd then
+    helpers := helpers ++ storeAddHelpers
+  if needLegacyTma then
+    helpers := helpers ++ legacyTmaHelpers
+  if needSlice then
+    helpers := helpers ++ sliceHelpers
+  if needOuter then
+    helpers := helpers ++ outerHelpers
+  return helpers
+
+private def generateKernelDefinition (k : Kernel) (emitSharedDecl : Bool := false) : String :=
   let rvState := inferRvLayouts k
-  let header :=
-    "#include <kittens.cuh>\nusing namespace kittens;\n\n" ++
-    generateHelpers k ++ layoutDiagnostics rvState.conflicts
   let archGuard := s!"#if defined({k.arch.toGuard})\n"
   let paramStr := if k.params.isEmpty then "/* TODO: params */" else generateParams k.params
   let signature := s!"__global__ void {k.name}({paramStr}) \{\n"
-  let sharedDecl := if k.sharedMemBytes > 0
+  let sharedDecl := if emitSharedDecl && k.sharedMemBytes > 0
     then s!"  extern __shared__ char smem[{k.sharedMemBytes}];\n"
     else ""
   let body := k.body.toList.map (generateStmt rvState.layouts "  ") |>.foldl (· ++ ·) ""
   let footer := "}\n#endif\n"
-  header ++ archGuard ++ signature ++ sharedDecl ++ body ++ footer
+  layoutDiagnostics rvState.conflicts ++ archGuard ++ signature ++ sharedDecl ++ body ++ footer
+
+/-- Generate emission metadata for a single kernel definition. -/
+def generateKernelEmitInfo (k : Kernel) : KernelEmitInfo :=
+  {
+    definition := generateKernelDefinition k false
+    needsStoreAdd := usesStoreAdd k
+    needsLegacyTma := usesLegacyTma k
+    needsSlice := usesSlice k
+    needsOuter := usesOuter k
+  }
+
+/-- Generate one or more kernel definitions for inclusion in a single `.cu` translation unit.
+    Assumes CUDA/ThunderKittens headers are already included by the caller. -/
+def generateKernelDefinitions (kernels : Array Kernel) : String :=
+  generateHelpersForKernels kernels ++
+  (kernels.toList.map (fun k => generateKernelDefinition k false) |> String.intercalate "\n")
+
+/-- Generate full kernel C++ code -/
+def generateKernel (k : Kernel) : String :=
+  let header := "#include <kittens.cuh>\nusing namespace kittens;\n\n"
+  header ++ generateKernelDefinitions #[k]
+
+/-- Generate kernel with extern shared memory declaration -/
+def generateKernelWithShared (k : Kernel) : String :=
+  let header :=
+    "#include <kittens.cuh>\nusing namespace kittens;\n\n" ++
+    generateHelpers k
+  header ++ generateKernelDefinition k true
 
 /-- Generate CUDA launch configuration -/
 structure LaunchCfg where

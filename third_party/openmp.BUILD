@@ -8,9 +8,18 @@ cc_library(
     name = "openmp",
     hdrs = glob(["include/**/*.h"]),
     includes = ["include"],
-    linkopts = [
-        "-L/opt/homebrew/opt/libomp/lib",
-        "-lomp",
-        "-Wl,-rpath,/opt/homebrew/opt/libomp/lib",
-    ],
+    linkopts = select({
+        "@platforms//os:macos": [
+            "-L/opt/homebrew/opt/libomp/lib",
+            "-lomp",
+            "-Wl,-rpath,/opt/homebrew/opt/libomp/lib",
+        ],
+        "@platforms//os:linux": [
+            "-Llib64",
+            "-lgomp",
+        ],
+        "//conditions:default": [
+            "-lgomp",
+        ],
+    }),
 )

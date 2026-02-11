@@ -15,6 +15,8 @@ LEAN_INCLUDE := $(LEAN_HOME)/include
 TORCHDIR=../external/libtorch
 TORCH_INC_FLAGS=-I$(TORCHDIR)/include -I$(TORCHDIR)/include/torch/csrc/api/include  -I$(TORCHDIR)/include/TH  -I$(TORCHDIR)/include/THC
 TORCH_LIBPATH=$(TORCHDIR)/lib/
+TKDIR=../thirdparty/ThunderKittens
+TK_INC_FLAGS=-I$(TKDIR)/include -I$(TKDIR)/prototype
 
 # ARROW/PARQUET FLAGS
 # Apache Arrow installed via: brew install apache-arrow (macOS) or apt install libarrow-dev libparquet-dev (Linux)
@@ -44,8 +46,23 @@ RMPATH := rm -rf
 
 AR := ar
 CXX := c++
+NVCC ?= nvcc
 EXTRA_CXX_FLAGS := -fPIC -O3 -Wall -Wno-sign-compare \
-	 -Wno-unused-parameter -Wno-missing-field-initializers -Wno-comment
+		 -Wno-unused-parameter -Wno-missing-field-initializers -Wno-comment
+NVCCFLAGS := -std=c++20 -O3 --use_fast_math --expt-extended-lambda --expt-relaxed-constexpr
+NVCCFLAGS += -lineinfo -Xcompiler -fPIC
+NVCCFLAGS += -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__
+NVCCFLAGS += -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__
+GPU ?= H100
+ifeq ($(GPU),B300)
+NVCCFLAGS += -DKITTENS_BLACKWELL -gencode arch=compute_103a,code=sm_103a
+else ifeq ($(GPU),B200)
+NVCCFLAGS += -DKITTENS_BLACKWELL -gencode arch=compute_100a,code=sm_100a
+else ifeq ($(GPU),A100)
+NVCCFLAGS += -DKITTENS_AMPERE -gencode arch=compute_80a,code=sm_80a
+else
+NVCCFLAGS += -DKITTENS_HOPPER -gencode arch=compute_90a,code=sm_90a
+endif
 
 # Clang-only warning flag (unsupported by GCC).
 ifneq ($(findstring clang,$(shell $(CXX) --version 2>/dev/null)),)
@@ -63,7 +80,8 @@ SRCS := \
 	tyr_distributed.cpp\
 	tyr_polar.cpp\
 	tyr_parquet.cpp\
-	tyr_execution.cpp\
+	tyr_execution.cpp
+CU_SRCS := $(wildcard $(SRC_DIR)/generated/*.cu)
 
 LIB_NAME := TyrC
 LIB := lib${LIB_NAME}.a
@@ -73,7 +91,9 @@ else
 DYLIB := lib${LIB_NAME}.so
 endif
 
-OBJ_FILES := $(addprefix $(OUT_DIR)/,$(SRCS:.cpp=.o))
+CPP_OBJ_FILES := $(addprefix $(OUT_DIR)/,$(SRCS:.cpp=.o))
+CU_OBJ_FILES := $(patsubst $(SRC_DIR)/%.cu,$(OUT_DIR)/%.o,$(CU_SRCS))
+OBJ_FILES := $(CPP_OBJ_FILES) $(CU_OBJ_FILES)
 HDR_FILES := $(addprefix $(HDR_DIR)/,$(HDRS))
 
 # Lean runtime library
@@ -83,6 +103,7 @@ LEAN_LIB := $(LEAN_HOME)/lib/lean
 DYLIB_LINK_FLAGS := -L$(LEAN_LIB) -lleanshared \
 	-L$(TORCH_LIBPATH) -ltorch -ltorch_cpu -lc10 \
 	-L$(ARROW_LIBPATH) -larrow -lparquet \
+	-lcudart \
 	-Wl,-rpath,$(LEAN_LIB) \
 	-Wl,-rpath,$(abspath $(TORCH_LIBPATH)) \
 	-Wl,-rpath,$(ARROW_LIBPATH)
@@ -107,6 +128,10 @@ $(OUT_DIR)/$(DYLIB) : $(OBJ_FILES) | $(OUT_DIR)
 
 $(OUT_DIR)/%.o : $(SRC_DIR)/%.cpp $(HDR_FILES) | $(OUT_DIR)
 	$(CXX) --std=c++17 -o $@ -c $< -I$(HDR_DIR) -I$(LEAN_INCLUDE) $(TORCH_INC_FLAGS) $(XLA_INC_FLAGS) $(ARROW_INC_FLAGS) $(EXTRA_CXX_FLAGS) -fPIC -rdynamic
+
+$(OUT_DIR)/%.o : $(SRC_DIR)/%.cu $(HDR_FILES) | $(OUT_DIR)
+	@mkdir -p $(dir $@)
+	$(NVCC) -o $@ -c $< -I$(HDR_DIR) -I$(LEAN_INCLUDE) $(TORCH_INC_FLAGS) $(TK_INC_FLAGS) $(NVCCFLAGS)
 
 clean:
 	$(RMPATH) $(OUT_DIR)

@@ -1,10 +1,10 @@
 """BUILD file for local Lean toolchain (elan-managed)."""
 
 load("@rules_cc//cc:defs.bzl", "cc_import", "cc_library")
+load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
 
 package(default_visibility = ["//visibility:public"])
 
-# Lean compiler binary
 exports_files(["bin/lean", "bin/leanc", "bin/lake"])
 
 sh_binary(
@@ -43,7 +43,11 @@ filegroup(
 # Lean shared runtime library
 cc_import(
     name = "leanshared",
-    shared_library = "lib/lean/libleanshared.dylib",
+    shared_library = select({
+        "@platforms//os:macos": "lib/lean/libleanshared.dylib",
+        "@platforms//os:linux": "lib/lean/libleanshared.so",
+        "//conditions:default": "lib/lean/libleanshared.so",
+    }),
 )
 
 # Combined runtime with headers
