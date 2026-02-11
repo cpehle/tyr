@@ -45,7 +45,12 @@ RMPATH := rm -rf
 AR := ar
 CXX := c++
 EXTRA_CXX_FLAGS := -fPIC -O3 -Wall -Wno-sign-compare \
-	 -Wno-unused-parameter -Wno-missing-field-initializers -Wno-comment -Winconsistent-missing-override
+	 -Wno-unused-parameter -Wno-missing-field-initializers -Wno-comment
+
+# Clang-only warning flag (unsupported by GCC).
+ifneq ($(findstring clang,$(shell $(CXX) --version 2>/dev/null)),)
+EXTRA_CXX_FLAGS += -Winconsistent-missing-override
+endif
 
 SRC_DIR := src
 HDR_DIR := include
@@ -62,7 +67,11 @@ SRCS := \
 
 LIB_NAME := TyrC
 LIB := lib${LIB_NAME}.a
+ifeq ($(UNAME_S),Darwin)
 DYLIB := lib${LIB_NAME}.dylib
+else
+DYLIB := lib${LIB_NAME}.so
+endif
 
 OBJ_FILES := $(addprefix $(OUT_DIR)/,$(SRCS:.cpp=.o))
 HDR_FILES := $(addprefix $(HDR_DIR)/,$(HDRS))
@@ -90,6 +99,7 @@ $(OUT_DIR):
 	$(MKPATH) $@
 
 $(OUT_DIR)/$(LIB) : $(OBJ_FILES) | $(OUT_DIR)
+	$(RMPATH) $@
 	${AR} rcs $@ $^
 
 $(OUT_DIR)/$(DYLIB) : $(OBJ_FILES) | $(OUT_DIR)

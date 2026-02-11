@@ -132,7 +132,7 @@ std::vector<int64_t> getShape(b_lean_obj_arg s) {
 torch::Device getDevice(b_lean_obj_arg device) {
   auto tag = lean_obj_tag(device);
   if (tag == 0) {  // CUDA
-    auto cuda_idx = lean_unbox_uint64(lean_ctor_get(device, 0));
+    auto cuda_idx = lean_ctor_get_uint64(device, 0);
     return torch::Device(torch::kCUDA, cuda_idx);
   } else if (tag == 1) {  // CPU
     return torch::Device(torch::kCPU);

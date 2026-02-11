@@ -17,7 +17,7 @@ def packageLinkArgs : Array String :=
     #[
       "-Lexternal/libtorch/lib",
       "-ltorch", "-ltorch_cpu", "-lc10",
-      "-L/usr/lib", "-lomp",
+      "-L/usr/lib", "-lgomp", "-lstdc++",
       "-larrow", "-lparquet",
       "-Wl,-rpath,$ORIGIN/../../external/libtorch/lib"
     ]
@@ -39,7 +39,7 @@ def commonLinkArgs : Array String :=
       "-Lcc/build", "-lTyrC",
       "-Lexternal/libtorch/lib",
       "-ltorch", "-ltorch_cpu", "-lc10",
-      "-L/usr/lib", "-lomp",
+      "-L/usr/lib", "-lgomp", "-lstdc++",
       "-larrow", "-lparquet",
       "-Wl,-rpath,$ORIGIN/../../external/libtorch/lib"
     ]
@@ -74,7 +74,15 @@ def getOmpLibPath : IO FilePath := do
       return intelPath
     return armPath
   else
-    return "/usr/lib"
+    match (← IO.getEnv "EBROOTGCCCORE") with
+    | some root =>
+      let p : FilePath := root / "lib64"
+      if (← p.pathExists) then
+        return p
+      else
+        return "/usr/lib"
+    | none =>
+      return "/usr/lib"
 
 /-! ## C++ Library Build -/
 
@@ -185,12 +193,51 @@ script run (args) do
   let rootPath := (← getWorkspace).root.dir
   let exe := rootPath / ".lake" / "build" / "bin" / "test_runner"
 
+  let tyrCLib := rootPath / "cc" / "build"
+  let lakeLib := rootPath / ".lake" / "build" / "lib"
   let libtorchPath := rootPath / "external" / "libtorch" / "lib"
   let leanLibPath ← getLeanSysroot
   let leanLib := leanLibPath / "lib" / "lean"
   let ompPath ← getOmpLibPath
-  let libPath := s!"{libtorchPath}:{ompPath}:{leanLib}"
   let libEnvVar := if isMacOS then "DYLD_LIBRARY_PATH" else "LD_LIBRARY_PATH"
+  -- Prepend our runtime deps but keep the user's existing env (e.g. module-provided libstdc++).
+  -- Prefer the EasyBuild GCCcore runtime if present, since the system libstdc++ may be too old.
+  let gccCoreLibPath? ← do
+    match (← IO.getEnv "EBROOTGCCCORE") with
+    | none => pure none
+    | some root =>
+      let p : FilePath := root / "lib64"
+      if (← p.pathExists) then
+        pure (some p)
+      else
+        pure none
+  let arrowLibPath? ← do
+    match (← IO.getEnv "EBROOTARROW") with
+    | none => pure none
+    | some root =>
+      let p : FilePath := root / "lib"
+      if (← p.pathExists) then
+        pure (some p)
+      else
+        let p64 : FilePath := root / "lib64"
+        if (← p64.pathExists) then
+          pure (some p64)
+        else
+          pure none
+  let inheritedLibPath := (← IO.getEnv libEnvVar)
+  let baseLibPath := s!"{tyrCLib}:{lakeLib}:{libtorchPath}:{ompPath}:{leanLib}"
+  let baseLibPath :=
+    match arrowLibPath? with
+    | some p => s!"{baseLibPath}:{p}"
+    | none => baseLibPath
+  let libPathPrefix :=
+    match gccCoreLibPath? with
+    | some p => s!"{baseLibPath}:{p}"
+    | none => baseLibPath
+  let libPath :=
+    match inheritedLibPath with
+    | some v => s!"{libPathPrefix}:{v}"
+    | none => libPathPrefix
 
   let child ← IO.Process.spawn {
     cmd := exe.toString
@@ -208,13 +255,52 @@ script train (args) do
   let rootPath := (← getWorkspace).root.dir
   let exe := rootPath / ".lake" / "build" / "bin" / "TrainGPT"
 
+  let tyrCLib := rootPath / "cc" / "build"
+  let lakeLib := rootPath / ".lake" / "build" / "lib"
   let libtorchPath := rootPath / "external" / "libtorch" / "lib"
   let leanLibPath ← getLeanSysroot
   let leanLib := leanLibPath / "lib" / "lean"
 
   let ompPath ← getOmpLibPath
-  let libPath := s!"{libtorchPath}:{ompPath}:{leanLib}"
   let libEnvVar := if isMacOS then "DYLD_LIBRARY_PATH" else "LD_LIBRARY_PATH"
+  -- Prepend our runtime deps but keep the user's existing env (e.g. module-provided libstdc++).
+  -- Prefer the EasyBuild GCCcore runtime if present, since the system libstdc++ may be too old.
+  let gccCoreLibPath? ← do
+    match (← IO.getEnv "EBROOTGCCCORE") with
+    | none => pure none
+    | some root =>
+      let p : FilePath := root / "lib64"
+      if (← p.pathExists) then
+        pure (some p)
+      else
+        pure none
+  let arrowLibPath? ← do
+    match (← IO.getEnv "EBROOTARROW") with
+    | none => pure none
+    | some root =>
+      let p : FilePath := root / "lib"
+      if (← p.pathExists) then
+        pure (some p)
+      else
+        let p64 : FilePath := root / "lib64"
+        if (← p64.pathExists) then
+          pure (some p64)
+        else
+          pure none
+  let inheritedLibPath := (← IO.getEnv libEnvVar)
+  let baseLibPath := s!"{tyrCLib}:{lakeLib}:{libtorchPath}:{ompPath}:{leanLib}"
+  let baseLibPath :=
+    match arrowLibPath? with
+    | some p => s!"{baseLibPath}:{p}"
+    | none => baseLibPath
+  let libPathPrefix :=
+    match gccCoreLibPath? with
+    | some p => s!"{baseLibPath}:{p}"
+    | none => baseLibPath
+  let libPath :=
+    match inheritedLibPath with
+    | some v => s!"{libPathPrefix}:{v}"
+    | none => libPathPrefix
 
   let child ← IO.Process.spawn {
     cmd := exe.toString

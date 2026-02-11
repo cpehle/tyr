@@ -13,7 +13,7 @@ inductive DType where
 | Float64
 
 inductive Device where
-| CUDA : Nat → Device
+| CUDA : UInt64 → Device
 | CPU
 | MPS
 deriving Repr, Inhabited, BEq

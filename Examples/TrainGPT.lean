@@ -87,8 +87,17 @@ def main : IO Unit := do
   IO.println ""
   (← IO.getStdout).flush
 
-  -- Select device - use MPS on Apple Silicon, CUDA on NVIDIA, otherwise CPU
-  let device ← getBestDevice
+  -- Default to CPU for stability on heterogeneous cluster nodes.
+  -- Override with TYR_DEVICE=auto|cpu|cuda|mps.
+  let requestedDevice? := (← IO.getEnv "TYR_DEVICE")
+  let device ←
+    match requestedDevice?.map String.toLower with
+    | some "auto" => getBestDevice
+    | some "cuda" => pure (Device.CUDA 0)
+    | some "mps" => pure Device.MPS
+    | some "cpu" => pure Device.CPU
+    | some _ => pure Device.CPU
+    | none => pure Device.CPU
   let deviceName := match device with
     | Device.MPS => "MPS (Apple Silicon)"
     | Device.CUDA n => s!"CUDA:{n}"
