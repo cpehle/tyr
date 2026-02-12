@@ -74,7 +74,7 @@ unsafe def main (args : List String) : IO UInt32 := do
         #[({ module := `Tyr.GPU.Codegen.Attribute } : Import)] ++
         cfg.modules.map (fun m => ({ module := m } : Import))
       let env ← Lean.importModules imports {} (loadExts := true)
-      let regs ← collectRegisteredKernelsFromEnv env
+      let regs ← collectRegisteredKernelsFromEnvModules env cfg.modules
       let written ← writeKernelCudaUnitsByModuleFrom regs cfg.outDir (clean := cfg.clean)
       IO.println s!"Generated {written.size} CUDA translation unit(s) in {cfg.outDir}"
       for path in written do

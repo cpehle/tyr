@@ -293,9 +293,9 @@ def paramToCppArgAttr (idx : Nat) (p : KParam) : String :=
 def generatePtrExtractionAttr (idx : Nat) (p : KParam) : String :=
   if p.isPointer then
     s!"    auto v{idx}_tensor = borrowTensor({p.name});\n" ++
-    s!"    if (!v{idx}_tensor.is_cuda()) throw std::runtime_error(\"{p.name} must be a CUDA tensor\");\n" ++
-    s!"    if (!v{idx}_tensor.is_contiguous()) throw std::runtime_error(\"{p.name} must be contiguous\");\n" ++
-    s!"    if (v{idx}_tensor.dim() > 4) throw std::runtime_error(\"{p.name} must have dim <= 4\");\n" ++
+    s!"    if (!v{idx}_tensor.is_cuda()) return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string(\"{p.name} must be a CUDA tensor\")));\n" ++
+    s!"    if (!v{idx}_tensor.is_contiguous()) return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string(\"{p.name} must be contiguous\")));\n" ++
+    s!"    if (v{idx}_tensor.dim() > 4) return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string(\"{p.name} must have dim <= 4\")));\n" ++
     s!"    std::array<int, 4> v{idx}_shape = \{1, 1, 1, 1};\n" ++
     s!"    for (int i = 0; i < static_cast<int>(v{idx}_tensor.dim()); ++i)\n" ++
     s!"      v{idx}_shape[4 - v{idx}_tensor.dim() + i] = static_cast<int>(v{idx}_tensor.size(i));\n" ++
@@ -333,21 +333,18 @@ def generateCppLauncherCode (kernelName : String) (arch : GpuArch) (params : Arr
   let argStr := String.intercalate ", " kernelArgs
 
   "extern \"C\" lean_object* " ++ externName ++ "(" ++ paramStr ++ ") {\n" ++
-  "  try {\n" ++
   s!"#if defined({archGuard})\n" ++
   extractionCode ++
   "    auto cuda_stream = reinterpret_cast<cudaStream_t>(stream);\n" ++
   "    dim3 grid(grid_x, grid_y, grid_z);\n" ++
   "    dim3 block(block_x, block_y, block_z);\n\n" ++
   "    " ++ name ++ "<<<grid, block, shared_mem, cuda_stream>>>(" ++ argStr ++ ");\n\n" ++
-  "    CUDA_CHECK(cudaGetLastError());\n" ++
-  "#else\n" ++
-  s!"    throw std::runtime_error(\"Kernel {name} is unavailable in this build (requires {archMsg}).\");\n" ++
-  "#endif\n" ++
+  "    if (auto err = cudaGetLastError(); err != cudaSuccess)\n" ++
+  "      return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string(cudaGetErrorString(err))));\n" ++
   "    return lean_io_result_mk_ok(lean_box(0));\n" ++
-  "  } catch (const std::exception& e) {\n" ++
-  "    return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string(e.what())));\n" ++
-  "  }\n" ++
+  "#else\n" ++
+  s!"    return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string(\"Kernel {name} is unavailable in this build (requires {archMsg}).\")));\n" ++
+  "#endif\n" ++
   "}\n"
 
 /-- Generate the FFI launch declaration for a kernel
@@ -413,9 +410,14 @@ def hasArchLevelParam (type : Expr) : MetaM Bool := do
 
 /-- Evaluate an already-defined kernel constant to get the full IR body. -/
 unsafe def evalKernelConst (constName : Name) : CoreM Kernel := do
-  Meta.MetaM.run' do
-    let kernelExpr ← whnf (mkConst constName)
-    evalExpr Kernel (mkConst ``Kernel) kernelExpr
+  withTheReader Core.Context (fun ctx => { ctx with maxHeartbeats := 0 }) do
+    Meta.MetaM.run' do
+      let info ← getConstInfo constName
+      let value ← match info with
+        | .defnInfo info => pure info.value
+        | .thmInfo info => pure info.value
+        | _ => throwError "Kernel companion '{constName}' is not reducible."
+      evalExpr Kernel (mkConst ``Kernel) value
 
 /-- Generate companion kernel definition for a polymorphic kernel at a specific architecture -/
 def generatePolyKernelCompanion (declName : Name) (arch : GpuArch) (archLevel : Arch.ArchLevel)
@@ -613,6 +615,18 @@ unsafe def collectRegisteredKernelsFromEnv (env : Environment) : IO (Array Regis
   runCoreWithEnv env do
     let specs := getRegisteredKernelSpecs (← getEnv)
     specs.mapM materializeRegisteredKernel
+
+/-- Collect registered kernels only from the requested Lean modules. -/
+unsafe def collectRegisteredKernelsFromEnvModules
+    (env : Environment) (modules : Array Name) : IO (Array RegisteredKernel) := do
+  runCoreWithEnv env do
+    let specs := getRegisteredKernelSpecs (← getEnv)
+    let selected :=
+      if modules.isEmpty then
+        specs
+      else
+        specs.filter (fun s => modules.contains s.moduleName)
+    selected.mapM materializeRegisteredKernel
 
 /-- Attribute handler for @[gpu_kernel] and @[gpu_kernel arch] -/
 initialize registerBuiltinAttribute {

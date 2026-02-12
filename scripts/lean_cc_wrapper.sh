@@ -9,6 +9,19 @@ if [[ -z "$sysroot" ]]; then
 fi
 
 extra=()
+is_compile=0
+for arg in "$@"; do
+  if [[ "$arg" == "-c" ]]; then
+    is_compile=1
+    break
+  fi
+done
+
+if [[ "${LEAN_CC_FAST:-0}" == "1" && "$is_compile" -eq 1 ]]; then
+  # Speed up local iteration on giant Lean-generated C files.
+  # Lean passes -O3 by default; later flags win, so add -O0 here.
+  extra+=("-O0")
+fi
 
 gcc_bin="${LEAN_CC_GCC:-/grid/it/data/elzar/easybuild/software/GCCcore/12.3.0/bin/gcc}"
 if [[ ! -x "$gcc_bin" ]]; then
@@ -57,4 +70,4 @@ if [[ "$need_uv" -eq 1 ]]; then
   fi
 fi
 
-exec "$gcc_bin" "${extra[@]}" "${mapped[@]}"
+exec "$gcc_bin" "${mapped[@]}" "${extra[@]}"

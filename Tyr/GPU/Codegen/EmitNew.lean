@@ -39,6 +39,17 @@ structure RVLayoutState where
   layouts : Std.HashMap VarId RVLayout := {}
   conflicts : Std.HashSet VarId := {}
 
+private inductive TileKind where
+  | RT
+  | ST
+  deriving Repr, BEq, Hashable, Inhabited
+
+private structure TileInfo where
+  kind : TileKind
+  rows : Nat
+  cols : Nat
+  deriving Repr, BEq, Inhabited
+
 private def addRvLayout (st : RVLayoutState) (v : VarId) (layout : RVLayout) : RVLayoutState :=
   match st.layouts[v]? with
   | none => { st with layouts := st.layouts.insert v layout }
@@ -56,12 +67,48 @@ private def collectRtLayoutsStmt (acc : Std.HashMap VarId TileLayout) : KStmt �
   | .ifWarpGroup _ body => body.foldl collectRtLayoutsStmt acc
   | _ => acc
 
+private def collectTileInfoStmt (acc : Std.HashMap VarId TileInfo) : KStmt → Std.HashMap VarId TileInfo
+  | .declRT v _ rows cols _ => acc.insert v { kind := .RT, rows := rows, cols := cols }
+  | .declST v _ rows cols _ => acc.insert v { kind := .ST, rows := rows, cols := cols }
+  | .forLoop _ _ _ body => body.foldl collectTileInfoStmt acc
+  | .ifStmt _ thenBody elseBody =>
+      let acc' := thenBody.foldl collectTileInfoStmt acc
+      elseBody.foldl collectTileInfoStmt acc'
+  | .ifWarpGroup _ body => body.foldl collectTileInfoStmt acc
+  | _ => acc
+
+private def collectRvDeclsStmt (acc : Std.HashSet VarId) : KStmt → Std.HashSet VarId
+  | .declRV v _ _ => acc.insert v
+  | .forLoop _ _ _ body => body.foldl collectRvDeclsStmt acc
+  | .ifStmt _ thenBody elseBody =>
+      let acc' := thenBody.foldl collectRvDeclsStmt acc
+      elseBody.foldl collectRvDeclsStmt acc'
+  | .ifWarpGroup _ body => body.foldl collectRvDeclsStmt acc
+  | _ => acc
+
 private def rtLayoutOf (rtLayouts : Std.HashMap VarId TileLayout) (v : VarId) : TileLayout :=
   match rtLayouts[v]? with
   | some layout => layout
   | none => .Row
 
-private def collectRvLayoutsStmt (rtLayouts : Std.HashMap VarId TileLayout) (st : RVLayoutState) :
+private def unifyRvVars (rvVars : Std.HashSet VarId) (st : RVLayoutState)
+    (a b : VarId) : RVLayoutState :=
+  if !(rvVars.contains a && rvVars.contains b) then
+    st
+  else
+    match st.layouts[a]?, st.layouts[b]? with
+    | none, none => st
+    | some la, none => addRvLayout st b la
+    | none, some lb => addRvLayout st a lb
+    | some la, some lb =>
+      if la == lb then st
+      else
+        { st with conflicts := (st.conflicts.insert a).insert b }
+
+private def collectRvLayoutsStmt
+    (rtLayouts : Std.HashMap VarId TileLayout)
+    (rvVars : Std.HashSet VarId)
+    (st : RVLayoutState) :
     KStmt → RVLayoutState
   | .reduce _ axis dst src =>
       let tileLayout := rtLayoutOf rtLayouts src
@@ -94,16 +141,38 @@ private def collectRvLayoutsStmt (rtLayouts : Std.HashMap VarId TileLayout) (st 
       let tileLayout := rtLayoutOf rtLayouts dst
       let st' := addRvLayout st a (colVecLayout tileLayout)
       addRvLayout st' b (rowVecLayout tileLayout)
-  | .forLoop _ _ _ body => body.foldl (collectRvLayoutsStmt rtLayouts) st
+  | .unary _ dst src =>
+      unifyRvVars rvVars st dst src
+  | .binary _ dst a b =>
+      let st' := unifyRvVars rvVars st dst a
+      unifyRvVars rvVars st' dst b
+  | .ternary _ dst a b c =>
+      let st1 := unifyRvVars rvVars st dst a
+      let st2 := unifyRvVars rvVars st1 dst b
+      unifyRvVars rvVars st2 dst c
+  | .scalarMul dst src _ =>
+      unifyRvVars rvVars st dst src
+  | .scalarAdd dst src _ =>
+      unifyRvVars rvVars st dst src
+  | .forLoop _ _ _ body => body.foldl (collectRvLayoutsStmt rtLayouts rvVars) st
   | .ifStmt _ thenBody elseBody =>
-      let st' := thenBody.foldl (collectRvLayoutsStmt rtLayouts) st
-      elseBody.foldl (collectRvLayoutsStmt rtLayouts) st'
-  | .ifWarpGroup _ body => body.foldl (collectRvLayoutsStmt rtLayouts) st
+      let st' := thenBody.foldl (collectRvLayoutsStmt rtLayouts rvVars) st
+      elseBody.foldl (collectRvLayoutsStmt rtLayouts rvVars) st'
+  | .ifWarpGroup _ body => body.foldl (collectRvLayoutsStmt rtLayouts rvVars) st
   | _ => st
+
+private def inferRvDecls (k : Kernel) : Std.HashSet VarId :=
+  k.body.foldl collectRvDeclsStmt {}
 
 private def inferRvLayouts (k : Kernel) : RVLayoutState :=
   let rtLayouts := k.body.foldl collectRtLayoutsStmt {}
-  k.body.foldl (collectRvLayoutsStmt rtLayouts) {}
+  let rvVars := inferRvDecls k
+  Id.run do
+    let mut st : RVLayoutState := {}
+    -- Fixed-point approximation for layout propagation along op chains.
+    for _ in [:16] do
+      st := k.body.foldl (collectRvLayoutsStmt rtLayouts rvVars) st
+    return st
 
 private def rvLayoutSuffix (rvLayouts : Std.HashMap VarId RVLayout) (v : VarId) : String :=
   match rvLayouts[v]? with
@@ -114,8 +183,13 @@ private def layoutDiagnostics (conflicts : Std.HashSet VarId) : String :=
   conflicts.toList.foldl (fun acc v =>
     acc ++ s!"static_assert(false, \"RV layout conflict for {v.toIdent}\");\n") ""
 
+private def inferTileInfo (k : Kernel) : Std.HashMap VarId TileInfo :=
+  k.body.foldl collectTileInfoStmt {}
+
 /-- Generate C++ for a single statement -/
-partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout) (indent : String := "  ") : KStmt → String
+partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout)
+    (rvVars : Std.HashSet VarId)
+    (tileInfo : Std.HashMap VarId TileInfo) (indent : String := "  ") : KStmt → String
   -- Declarations
   | .declRT v dtype rows cols layout =>
     s!"{indent}rt<{dtype.toCpp}, {rows}, {cols}, {layout.toCpp}> {v.toIdent};\n"
@@ -156,23 +230,41 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout) (indent : Stri
 
   -- Global memory operations with 4D coordinates (ThunderKittens style)
   | .loadGlobal dst src coordB coordD coordR coordC =>
-    s!"{indent}warp::load({dst.toIdent}, {src.toIdent}, kittens::coord<>({coordB.toIdent}, {coordD.toIdent}, {coordR.toIdent}, {coordC.toIdent}));\n"
+    let (rowScale, colScale) := match tileInfo[dst]? with
+      | some info => (info.rows, info.cols)
+      | none => (1, 1)
+    s!"{indent}warp::load({dst.toIdent}, {src.toIdent}, kittens::coord<>({coordB.toIdent}, {coordD.toIdent}, ({coordR.toIdent} * {rowScale}), ({coordC.toIdent} * {colScale})));\n"
   | .storeGlobal dst src coordB coordD coordR coordC =>
-    s!"{indent}warp::store({dst.toIdent}, {src.toIdent}, kittens::coord<>({coordB.toIdent}, {coordD.toIdent}, {coordR.toIdent}, {coordC.toIdent}));\n"
+    let (rowScale, colScale) := match tileInfo[src]? with
+      | some info => (info.rows, info.cols)
+      | none => (1, 1)
+    s!"{indent}warp::store({dst.toIdent}, {src.toIdent}, kittens::coord<>({coordB.toIdent}, {coordD.toIdent}, ({coordR.toIdent} * {rowScale}), ({coordC.toIdent} * {colScale})));\n"
   | .loadGlobalAsync dst src coordB coordD coordR coordC sem =>
-    s!"{indent}warp::tma::load_async({dst.toIdent}, {src.toIdent}, kittens::coord<>({coordB.toIdent}, {coordD.toIdent}, {coordR.toIdent}, {coordC.toIdent}), {sem.toIdent});\n"
+    let (rowScale, colScale) := match tileInfo[dst]? with
+      | some info => (info.rows, info.cols)
+      | none => (1, 1)
+    s!"{indent}warp::tma::load_async({dst.toIdent}, {src.toIdent}, kittens::coord<>({coordB.toIdent}, {coordD.toIdent}, ({coordR.toIdent} * {rowScale}), ({coordC.toIdent} * {colScale})), {sem.toIdent});\n"
   | .storeGlobalAsync dst src coordB coordD coordR coordC =>
-    s!"{indent}warp::tma::store_async({dst.toIdent}, {src.toIdent}, kittens::coord<>({coordB.toIdent}, {coordD.toIdent}, {coordR.toIdent}, {coordC.toIdent}));\n"
+    let (rowScale, colScale) := match tileInfo[src]? with
+      | some info => (info.rows, info.cols)
+      | none => (1, 1)
+    s!"{indent}warp::tma::store_async({dst.toIdent}, {src.toIdent}, kittens::coord<>({coordB.toIdent}, {coordD.toIdent}, ({coordR.toIdent} * {rowScale}), ({coordC.toIdent} * {colScale})));\n"
   | .storeGlobalAdd dst src coordB coordD coordR coordC =>
-    s!"{indent}warp::tma::store_add_async({dst.toIdent}, {src.toIdent}, kittens::coord<>({coordB.toIdent}, {coordD.toIdent}, {coordR.toIdent}, {coordC.toIdent}));\n"
+    let (rowScale, colScale) := match tileInfo[src]? with
+      | some info => (info.rows, info.cols)
+      | none => (1, 1)
+    s!"{indent}warp::tma::store_add_async({dst.toIdent}, {src.toIdent}, kittens::coord<>({coordB.toIdent}, {coordD.toIdent}, ({coordR.toIdent} * {rowScale}), ({coordC.toIdent} * {colScale})));\n"
 
   -- Vector global memory operations
   | .loadVecGlobal dst src offset =>
-    s!"{indent}warp::load({dst.toIdent}, {src.toIdent}, {offset.toIdent});\n"
+    s!"{indent}warp::load({dst.toIdent}, {src.toIdent}, " ++
+    "{" ++ s!"{offset.toIdent}" ++ "});\n"
   | .storeVecGlobal dst src offset =>
-    s!"{indent}warp::store({dst.toIdent}, {src.toIdent}, {offset.toIdent});\n"
+    s!"{indent}warp::store({dst.toIdent}, {src.toIdent}, " ++
+    "{" ++ s!"{offset.toIdent}" ++ "});\n"
   | .storeVecGlobalAdd dst src offset =>
-    s!"{indent}store_add({dst.toIdent}, {src.toIdent}, {offset.toIdent});\n"
+    s!"{indent}store_add({dst.toIdent}, {src.toIdent}, " ++
+    "{" ++ s!"{offset.toIdent}" ++ "});\n"
 
   -- Distributed / Multimem operations
   | .multimemLoadReduce op dst src =>
@@ -202,11 +294,68 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout) (indent : Stri
     s!"{indent}warp::tma::load_async({dst.toIdent}, {src.toIdent}, kittens::coord<>({coordB.toIdent}, {coordD.toIdent}, {coordR.toIdent}, {coordC.toIdent}), {sem.toIdent});\n"
 
   -- Element-wise unary
-  | .unary op dst src => s!"{indent}warp::{op.toCpp}({dst.toIdent}, {src.toIdent});\n"
+  | .unary .Neg dst src =>
+    if dst == src then
+      s!"{indent}warp::mul({dst.toIdent}, {src.toIdent}, -1.0f);\n"
+    else
+      s!"{indent}warp::copy({dst.toIdent}, {src.toIdent});\n" ++
+      s!"{indent}warp::mul({dst.toIdent}, {dst.toIdent}, -1.0f);\n"
+  | .unary .Zero dst _ =>
+    s!"{indent}warp::zero({dst.toIdent});\n"
+  | .unary .One dst _ =>
+    s!"{indent}warp::one({dst.toIdent});\n"
+  | .unary .PosInfty dst _ =>
+    s!"{indent}warp::pos_infty({dst.toIdent});\n"
+  | .unary .NegInfty dst _ =>
+    s!"{indent}warp::neg_infty({dst.toIdent});\n"
+  | .unary .Sqrt dst src =>
+    if rvVars.contains dst && rvVars.contains src then
+      let pre :=
+        if dst == src then
+          ""
+        else
+          s!"{indent}warp::copy({dst.toIdent}, {src.toIdent});\n"
+      pre ++
+      s!"{indent}warp::apply({dst.toIdent}, {dst.toIdent}, [] __device__ (int _i, auto _x) \{\n" ++
+      s!"{indent}  return static_cast<decltype(_x)>(::sqrtf(static_cast<float>(_x)));\n" ++
+      s!"{indent}" ++ "});\n"
+    else if dst == src then
+      s!"{indent}warp::sqrt({dst.toIdent}, {src.toIdent});\n"
+    else
+      s!"{indent}warp::copy({dst.toIdent}, {src.toIdent});\n" ++
+      s!"{indent}warp::sqrt({dst.toIdent}, {dst.toIdent});\n"
+  | .unary .Rsqrt dst src =>
+    if rvVars.contains dst && rvVars.contains src then
+      let pre :=
+        if dst == src then
+          ""
+        else
+          s!"{indent}warp::copy({dst.toIdent}, {src.toIdent});\n"
+      pre ++
+      s!"{indent}warp::apply({dst.toIdent}, {dst.toIdent}, [] __device__ (int _i, auto _x) \{\n" ++
+      s!"{indent}  return static_cast<decltype(_x)>(::rsqrtf(static_cast<float>(_x)));\n" ++
+      s!"{indent}" ++ "});\n"
+    else if dst == src then
+      s!"{indent}warp::rsqrt({dst.toIdent}, {src.toIdent});\n"
+    else
+      s!"{indent}warp::copy({dst.toIdent}, {src.toIdent});\n" ++
+      s!"{indent}warp::rsqrt({dst.toIdent}, {dst.toIdent});\n"
+  | .unary .Copy dst src =>
+    s!"{indent}warp::copy({dst.toIdent}, {src.toIdent});\n"
+  | .unary op dst src =>
+    if dst == src then
+      s!"{indent}warp::{op.toCpp}({dst.toIdent}, {src.toIdent});\n"
+    else
+      s!"{indent}warp::copy({dst.toIdent}, {src.toIdent});\n" ++
+      s!"{indent}warp::{op.toCpp}({dst.toIdent}, {dst.toIdent});\n"
 
   -- Element-wise binary
   | .binary op dst a b =>
-    s!"{indent}warp::{op.toCpp}({dst.toIdent}, {a.toIdent}, {b.toIdent});\n"
+    if dst == a then
+      s!"{indent}warp::{op.toCpp}({dst.toIdent}, {a.toIdent}, {b.toIdent});\n"
+    else
+      s!"{indent}warp::copy({dst.toIdent}, {a.toIdent});\n" ++
+      s!"{indent}warp::{op.toCpp}({dst.toIdent}, {dst.toIdent}, {b.toIdent});\n"
 
   -- Element-wise ternary (FMA)
   | .ternary op dst a b c =>
@@ -214,9 +363,17 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout) (indent : Stri
 
   -- Scalar operations
   | .scalarMul dst src scalar =>
-    s!"{indent}warp::mul({dst.toIdent}, {src.toIdent}, {scalar}f);\n"
+    if dst == src then
+      s!"{indent}warp::mul({dst.toIdent}, {src.toIdent}, {scalar}f);\n"
+    else
+      s!"{indent}warp::copy({dst.toIdent}, {src.toIdent});\n" ++
+      s!"{indent}warp::mul({dst.toIdent}, {dst.toIdent}, {scalar}f);\n"
   | .scalarAdd dst src scalar =>
-    s!"{indent}warp::add({dst.toIdent}, {src.toIdent}, {scalar}f);\n"
+    if dst == src then
+      s!"{indent}warp::add({dst.toIdent}, {src.toIdent}, {scalar}f);\n"
+    else
+      s!"{indent}warp::copy({dst.toIdent}, {src.toIdent});\n" ++
+      s!"{indent}warp::add({dst.toIdent}, {dst.toIdent}, {scalar}f);\n"
 
   -- Broadcasting
   | .broadcast axis dst vec =>
@@ -267,9 +424,123 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout) (indent : Stri
 
   -- Tile slicing
   | .sliceRows dst src startRow numRows =>
-    s!"{indent}tk_slice_rows<{startRow}, {numRows}>({dst.toIdent}, {src.toIdent});\n"
+    match tileInfo[dst]?, tileInfo[src]? with
+    | some dstInfo, some srcInfo =>
+      match dstInfo.kind, srcInfo.kind with
+      | .RT, .RT =>
+        s!"{indent}\{\n" ++
+        s!"{indent}using _tk_row_t = typename decltype({dst.toIdent})::T;\n" ++
+        s!"{indent}constexpr int _tk_tile_rows = kittens::TILE_ROW_DIM<_tk_row_t>;\n" ++
+        s!"{indent}constexpr int _tk_tile_cols = kittens::TILE_COL_DIM<_tk_row_t>;\n" ++
+        s!"{indent}static_assert({dstInfo.rows} == {numRows}, \"slice rows: dst rows mismatch\");\n" ++
+        s!"{indent}static_assert({dstInfo.cols} == {srcInfo.cols}, \"slice rows: src/dst cols mismatch\");\n" ++
+        s!"{indent}static_assert({startRow} + {numRows} <= {srcInfo.rows}, \"slice rows: out of bounds\");\n" ++
+        s!"{indent}static_assert({startRow} % _tk_tile_rows == 0, \"slice rows: unaligned start\");\n" ++
+        s!"{indent}static_assert({numRows} % _tk_tile_rows == 0, \"slice rows: unaligned size\");\n" ++
+        s!"{indent}static_assert({dstInfo.cols} % _tk_tile_cols == 0, \"slice rows: unaligned cols\");\n" ++
+        s!"{indent}constexpr int _tk_start_tile = {startRow} / _tk_tile_rows;\n" ++
+        s!"{indent}constexpr int _tk_row_tiles = {numRows} / _tk_tile_rows;\n" ++
+        s!"{indent}constexpr int _tk_col_tiles = {dstInfo.cols} / _tk_tile_cols;\n" ++
+        s!"{indent}#pragma unroll\n" ++
+        s!"{indent}for (int _tk_i = 0; _tk_i < _tk_row_tiles; _tk_i++) \{\n" ++
+        s!"{indent}  #pragma unroll\n" ++
+        s!"{indent}  for (int _tk_j = 0; _tk_j < _tk_col_tiles; _tk_j++) \{\n" ++
+        s!"{indent}    {dst.toIdent}.tiles[_tk_i][_tk_j] = {src.toIdent}.tiles[_tk_start_tile + _tk_i][_tk_j];\n" ++
+        s!"{indent}  }\n" ++
+        s!"{indent}}\n" ++
+        s!"{indent}}\n"
+      | .ST, .ST =>
+        s!"{indent}\{\n" ++
+        s!"{indent}static_assert({dstInfo.rows} == {numRows}, \"slice rows: dst rows mismatch\");\n" ++
+        s!"{indent}static_assert({srcInfo.cols} == {dstInfo.cols}, \"slice rows: src/dst cols mismatch\");\n" ++
+        s!"{indent}auto _tk_src_sub = {src.toIdent}.template subtile<{numRows}, {srcInfo.cols}>(make_int2({startRow}, 0));\n" ++
+        s!"{indent}kittens::warp::copy({dst.toIdent}, _tk_src_sub);\n" ++
+        s!"{indent}}\n"
+      | _, _ =>
+        s!"{indent}// unsupported sliceRows between non-matching tile kinds\n"
+    | _, _ =>
+      s!"{indent}// unresolved tile info for sliceRows\n"
   | .sliceCols dst src startCol numCols =>
-    s!"{indent}tk_slice_cols<{startCol}, {numCols}>({dst.toIdent}, {src.toIdent});\n"
+    match tileInfo[dst]?, tileInfo[src]? with
+    | some dstInfo, some srcInfo =>
+      match dstInfo.kind, srcInfo.kind with
+      | .RT, .RT =>
+        s!"{indent}\{\n" ++
+        s!"{indent}using _tk_col_t = typename decltype({dst.toIdent})::T;\n" ++
+        s!"{indent}constexpr int _tk_tile_rows = kittens::TILE_ROW_DIM<_tk_col_t>;\n" ++
+        s!"{indent}constexpr int _tk_tile_cols = kittens::TILE_COL_DIM<_tk_col_t>;\n" ++
+        s!"{indent}static_assert({dstInfo.cols} == {numCols}, \"slice cols: dst cols mismatch\");\n" ++
+        s!"{indent}static_assert({dstInfo.rows} == {srcInfo.rows}, \"slice cols: src/dst rows mismatch\");\n" ++
+        s!"{indent}static_assert({startCol} + {numCols} <= {srcInfo.cols}, \"slice cols: out of bounds\");\n" ++
+        s!"{indent}static_assert({startCol} % _tk_tile_cols == 0, \"slice cols: unaligned start\");\n" ++
+        s!"{indent}static_assert({numCols} % _tk_tile_cols == 0, \"slice cols: unaligned size\");\n" ++
+        s!"{indent}static_assert({dstInfo.rows} % _tk_tile_rows == 0, \"slice cols: unaligned rows\");\n" ++
+        s!"{indent}constexpr int _tk_start_tile = {startCol} / _tk_tile_cols;\n" ++
+        s!"{indent}constexpr int _tk_row_tiles = {dstInfo.rows} / _tk_tile_rows;\n" ++
+        s!"{indent}constexpr int _tk_col_tiles = {numCols} / _tk_tile_cols;\n" ++
+        s!"{indent}#pragma unroll\n" ++
+        s!"{indent}for (int _tk_i = 0; _tk_i < _tk_row_tiles; _tk_i++) \{\n" ++
+        s!"{indent}  #pragma unroll\n" ++
+        s!"{indent}  for (int _tk_j = 0; _tk_j < _tk_col_tiles; _tk_j++) \{\n" ++
+        s!"{indent}    {dst.toIdent}.tiles[_tk_i][_tk_j] = {src.toIdent}.tiles[_tk_i][_tk_start_tile + _tk_j];\n" ++
+        s!"{indent}  }\n" ++
+        s!"{indent}}\n" ++
+        s!"{indent}}\n"
+      | .ST, .ST =>
+        s!"{indent}\{\n" ++
+        s!"{indent}static_assert({dstInfo.cols} == {numCols}, \"slice cols: dst cols mismatch\");\n" ++
+        s!"{indent}static_assert({srcInfo.rows} == {dstInfo.rows}, \"slice cols: src/dst rows mismatch\");\n" ++
+        s!"{indent}auto _tk_src_sub = {src.toIdent}.template subtile<{srcInfo.rows}, {numCols}>(make_int2(0, {startCol}));\n" ++
+        s!"{indent}kittens::warp::copy({dst.toIdent}, _tk_src_sub);\n" ++
+        s!"{indent}}\n"
+      | _, _ =>
+        s!"{indent}// unsupported sliceCols between non-matching tile kinds\n"
+    | _, _ =>
+      s!"{indent}// unresolved tile info for sliceCols\n"
+  | .concatCols dst left right =>
+    match tileInfo[dst]?, tileInfo[left]?, tileInfo[right]? with
+    | some dstInfo, some leftInfo, some rightInfo =>
+      match dstInfo.kind, leftInfo.kind, rightInfo.kind with
+      | .RT, .RT, .RT =>
+        s!"{indent}\{\n" ++
+        s!"{indent}using _tk_concat_t = typename decltype({dst.toIdent})::T;\n" ++
+        s!"{indent}constexpr int _tk_tile_rows = kittens::TILE_ROW_DIM<_tk_concat_t>;\n" ++
+        s!"{indent}constexpr int _tk_tile_cols = kittens::TILE_COL_DIM<_tk_concat_t>;\n" ++
+        s!"{indent}static_assert({dstInfo.rows} == {leftInfo.rows}, \"concat cols: left rows mismatch\");\n" ++
+        s!"{indent}static_assert({dstInfo.rows} == {rightInfo.rows}, \"concat cols: right rows mismatch\");\n" ++
+        s!"{indent}static_assert({dstInfo.cols} == {leftInfo.cols} + {rightInfo.cols}, \"concat cols: dst cols mismatch\");\n" ++
+        s!"{indent}static_assert({dstInfo.rows} % _tk_tile_rows == 0, \"concat cols: unaligned rows\");\n" ++
+        s!"{indent}static_assert({leftInfo.cols} % _tk_tile_cols == 0, \"concat cols: unaligned left cols\");\n" ++
+        s!"{indent}static_assert({rightInfo.cols} % _tk_tile_cols == 0, \"concat cols: unaligned right cols\");\n" ++
+        s!"{indent}constexpr int _tk_row_tiles = {dstInfo.rows} / _tk_tile_rows;\n" ++
+        s!"{indent}constexpr int _tk_left_tiles = {leftInfo.cols} / _tk_tile_cols;\n" ++
+        s!"{indent}constexpr int _tk_right_tiles = {rightInfo.cols} / _tk_tile_cols;\n" ++
+        s!"{indent}#pragma unroll\n" ++
+        s!"{indent}for (int _tk_i = 0; _tk_i < _tk_row_tiles; _tk_i++) \{\n" ++
+        s!"{indent}  #pragma unroll\n" ++
+        s!"{indent}  for (int _tk_j = 0; _tk_j < _tk_left_tiles; _tk_j++) \{\n" ++
+        s!"{indent}    {dst.toIdent}.tiles[_tk_i][_tk_j] = {left.toIdent}.tiles[_tk_i][_tk_j];\n" ++
+        s!"{indent}  }\n" ++
+        s!"{indent}  #pragma unroll\n" ++
+        s!"{indent}  for (int _tk_j = 0; _tk_j < _tk_right_tiles; _tk_j++) \{\n" ++
+        s!"{indent}    {dst.toIdent}.tiles[_tk_i][_tk_left_tiles + _tk_j] = {right.toIdent}.tiles[_tk_i][_tk_j];\n" ++
+        s!"{indent}  }\n" ++
+        s!"{indent}}\n" ++
+        s!"{indent}}\n"
+      | .ST, .ST, .ST =>
+        s!"{indent}\{\n" ++
+        s!"{indent}static_assert({dstInfo.rows} == {leftInfo.rows}, \"concat cols: left rows mismatch\");\n" ++
+        s!"{indent}static_assert({dstInfo.rows} == {rightInfo.rows}, \"concat cols: right rows mismatch\");\n" ++
+        s!"{indent}static_assert({dstInfo.cols} == {leftInfo.cols} + {rightInfo.cols}, \"concat cols: dst cols mismatch\");\n" ++
+        s!"{indent}auto _tk_dst_left = {dst.toIdent}.template subtile<{dstInfo.rows}, {leftInfo.cols}>(make_int2(0, 0));\n" ++
+        s!"{indent}auto _tk_dst_right = {dst.toIdent}.template subtile<{dstInfo.rows}, {rightInfo.cols}>(make_int2(0, {leftInfo.cols}));\n" ++
+        s!"{indent}kittens::warp::copy(_tk_dst_left, {left.toIdent});\n" ++
+        s!"{indent}kittens::warp::copy(_tk_dst_right, {right.toIdent});\n" ++
+        s!"{indent}}\n"
+      | _, _, _ =>
+        s!"{indent}// unsupported concatCols between non-matching tile kinds\n"
+    | _, _, _ =>
+      s!"{indent}// unresolved tile info for concatCols\n"
 
   -- Synchronization
   | .sync barrierId => s!"{indent}warp::sync({barrierId});\n"
@@ -308,17 +579,17 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout) (indent : Stri
 
   -- Control flow
   | .forLoop v lo hi body =>
-    let bodyStr := body.toList.map (generateStmt rvLayouts (indent ++ "  ")) |>.foldl (· ++ ·) ""
+    let bodyStr := body.toList.map (generateStmt rvLayouts rvVars tileInfo (indent ++ "  ")) |>.foldl (· ++ ·) ""
     s!"{indent}for (int {v.toIdent} = {lo}; {v.toIdent} < {hi}; {v.toIdent}++) \{\n{bodyStr}{indent}}\n"
   | .ifStmt cond thenBody elseBody =>
-    let thenStr := thenBody.toList.map (generateStmt rvLayouts (indent ++ "  ")) |>.foldl (· ++ ·) ""
-    let elseStr := elseBody.toList.map (generateStmt rvLayouts (indent ++ "  ")) |>.foldl (· ++ ·) ""
+    let thenStr := thenBody.toList.map (generateStmt rvLayouts rvVars tileInfo (indent ++ "  ")) |>.foldl (· ++ ·) ""
+    let elseStr := elseBody.toList.map (generateStmt rvLayouts rvVars tileInfo (indent ++ "  ")) |>.foldl (· ++ ·) ""
     if elseBody.isEmpty then
       s!"{indent}if ({cond.toIdent}) \{\n{thenStr}{indent}}\n"
     else
       s!"{indent}if ({cond.toIdent}) \{\n{thenStr}{indent}} else \{\n{elseStr}{indent}}\n"
   | .ifWarpGroup wgIdx body =>
-    let bodyStr := body.toList.map (generateStmt rvLayouts (indent ++ "  ")) |>.foldl (· ++ ·) ""
+    let bodyStr := body.toList.map (generateStmt rvLayouts rvVars tileInfo (indent ++ "  ")) |>.foldl (· ++ ·) ""
     s!"{indent}if (kittens::warpgroup::groupid() == {wgIdx}) \{\n{bodyStr}{indent}}\n"
   | .comment text => s!"{indent}// {text}\n"
 
@@ -374,7 +645,7 @@ private def usesLegacyTma (k : Kernel) : Bool :=
 
 private def usesSlice (k : Kernel) : Bool :=
   bodyUses (fun s => match s with
-    | .sliceRows .. | .sliceCols .. => true
+    | .sliceRows .. | .sliceCols .. | .concatCols .. => true
     | _ => false) k.body
 
 private def usesOuter (k : Kernel) : Bool :=
@@ -450,6 +721,32 @@ private def sliceHelpers : String :=
   "    auto src_sub = src.template subtile<SRC::rows, NUM_COLS>(int2{0, START_COL});\n" ++
   "    kittens::warp::copy(dst, src_sub);\n" ++
   "  }\n" ++
+  "}\n\n" ++
+  "template<typename DST, typename LEFT, typename RIGHT>\n" ++
+  "__device__ inline void tk_concat_cols(DST &dst, const LEFT &left, const RIGHT &right) {\n" ++
+  "  static_assert(DST::rows == LEFT::rows, \"concat cols: left rows mismatch\");\n" ++
+  "  static_assert(DST::rows == RIGHT::rows, \"concat cols: right rows mismatch\");\n" ++
+  "  static_assert(DST::cols == LEFT::cols + RIGHT::cols, \"concat cols: dst cols mismatch\");\n" ++
+  "  if constexpr (kittens::ducks::rt::all<DST> && kittens::ducks::rt::all<LEFT> && kittens::ducks::rt::all<RIGHT>) {\n" ++
+  "    static_assert(DST::height == LEFT::height, \"concat cols: left height mismatch\");\n" ++
+  "    static_assert(DST::height == RIGHT::height, \"concat cols: right height mismatch\");\n" ++
+  "    #pragma unroll\n" ++
+  "    for (int i = 0; i < DST::height; i++) {\n" ++
+  "      #pragma unroll\n" ++
+  "      for (int j = 0; j < LEFT::width; j++) {\n" ++
+  "        dst.tiles[i][j] = left.tiles[i][j];\n" ++
+  "      }\n" ++
+  "      #pragma unroll\n" ++
+  "      for (int j = 0; j < RIGHT::width; j++) {\n" ++
+  "        dst.tiles[i][LEFT::width + j] = right.tiles[i][j];\n" ++
+  "      }\n" ++
+  "    }\n" ++
+  "  } else if constexpr (kittens::ducks::st::all<DST> && kittens::ducks::st::all<LEFT> && kittens::ducks::st::all<RIGHT>) {\n" ++
+  "    auto dst_left = dst.template subtile<DST::rows, LEFT::cols>(int2{0, 0});\n" ++
+  "    auto dst_right = dst.template subtile<DST::rows, RIGHT::cols>(int2{0, LEFT::cols});\n" ++
+  "    kittens::warp::copy(dst_left, left);\n" ++
+  "    kittens::warp::copy(dst_right, right);\n" ++
+  "  }\n" ++
   "}\n\n"
 
 private def outerHelpers : String :=
@@ -468,8 +765,6 @@ private def generateHelpers (k : Kernel) : String := Id.run do
     helpers := helpers ++ storeAddHelpers
   if usesLegacyTma k then
     helpers := helpers ++ legacyTmaHelpers
-  if usesSlice k then
-    helpers := helpers ++ sliceHelpers
   if usesOuter k then
     helpers := helpers ++ outerHelpers
   return helpers
@@ -477,15 +772,12 @@ private def generateHelpers (k : Kernel) : String := Id.run do
 private def generateHelpersForKernels (kernels : Array Kernel) : String := Id.run do
   let mut needStoreAdd := false
   let mut needLegacyTma := false
-  let mut needSlice := false
   let mut needOuter := false
   for k in kernels do
     if usesStoreAdd k then
       needStoreAdd := true
     if usesLegacyTma k then
       needLegacyTma := true
-    if usesSlice k then
-      needSlice := true
     if usesOuter k then
       needOuter := true
   let mut helpers := ""
@@ -493,8 +785,6 @@ private def generateHelpersForKernels (kernels : Array Kernel) : String := Id.ru
     helpers := helpers ++ storeAddHelpers
   if needLegacyTma then
     helpers := helpers ++ legacyTmaHelpers
-  if needSlice then
-    helpers := helpers ++ sliceHelpers
   if needOuter then
     helpers := helpers ++ outerHelpers
   return helpers
@@ -515,26 +805,27 @@ structure KernelEmitInfo where
 
 /-- Generate helper template block from precomputed helper flags. -/
 def generateHelpersFromFlags (needStoreAdd needLegacyTma needSlice needOuter : Bool) : String := Id.run do
+  let _ := needSlice
   let mut helpers := ""
   if needStoreAdd then
     helpers := helpers ++ storeAddHelpers
   if needLegacyTma then
     helpers := helpers ++ legacyTmaHelpers
-  if needSlice then
-    helpers := helpers ++ sliceHelpers
   if needOuter then
     helpers := helpers ++ outerHelpers
   return helpers
 
 private def generateKernelDefinition (k : Kernel) (emitSharedDecl : Bool := false) : String :=
   let rvState := inferRvLayouts k
+  let rvVars := inferRvDecls k
+  let tileInfo := inferTileInfo k
   let archGuard := s!"#if defined({k.arch.toGuard})\n"
   let paramStr := if k.params.isEmpty then "/* TODO: params */" else generateParams k.params
   let signature := s!"__global__ void {k.name}({paramStr}) \{\n"
   let sharedDecl := if emitSharedDecl && k.sharedMemBytes > 0
     then s!"  extern __shared__ char smem[{k.sharedMemBytes}];\n"
     else ""
-  let body := k.body.toList.map (generateStmt rvState.layouts "  ") |>.foldl (· ++ ·) ""
+  let body := k.body.toList.map (generateStmt rvState.layouts rvVars tileInfo "  ") |>.foldl (· ++ ·) ""
   let footer := "}\n#endif\n"
   layoutDiagnostics rvState.conflicts ++ archGuard ++ signature ++ sharedDecl ++ body ++ footer
 

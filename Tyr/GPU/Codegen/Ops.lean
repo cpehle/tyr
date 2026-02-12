@@ -139,6 +139,16 @@ def divVec {dtype : GpuFloat} {len : Nat}
     (dst a b : RV dtype len) : KernelM Unit := do
   emit (.binary .Div dst.id a.id b.id)
 
+/-- Vector scalar multiply. -/
+def scalarMulVec {dtype : GpuFloat} {len : Nat}
+    (dst src : RV dtype len) (scalar : Float) : KernelM Unit := do
+  emit (.scalarMul dst.id src.id scalar)
+
+/-- Vector scalar add. -/
+def scalarAddVec {dtype : GpuFloat} {len : Nat}
+    (dst src : RV dtype len) (scalar : Float) : KernelM Unit := do
+  emit (.scalarAdd dst.id src.id scalar)
+
 /-- Vector exp -/
 def expVec {dtype : GpuFloat} {len : Nat}
     (dst src : RV dtype len) : KernelM Unit := do
@@ -148,6 +158,11 @@ def expVec {dtype : GpuFloat} {len : Nat}
 def logVec {dtype : GpuFloat} {len : Nat}
     (dst src : RV dtype len) : KernelM Unit := do
   emit (.unary .Log dst.id src.id)
+
+/-- Vector reciprocal square root. -/
+def rsqrtVec {dtype : GpuFloat} {len : Nat}
+    (dst src : RV dtype len) : KernelM Unit := do
+  emit (.unary .Rsqrt dst.id src.id)
 
 /-- Async load (TMA) -/
 def loadAsync {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
@@ -629,6 +644,31 @@ def upperRightFill {dtype : GpuFloat} {rows cols : Nat}
     (rowIdx colIdx : Nat)
     (fillVal : Option Float := none) : KernelM Unit := do
   emit (.mask (.UpperRightFill rowIdx colIdx) dst.id src.id fillVal)
+
+/-! ## Tile Slicing/Concatenation -/
+
+/-- Slice rows from a tile. -/
+def sliceRows {dtype : GpuFloat} {dstRows srcRows cols : Nat} {layout : TileLayout}
+    (dst : RT dtype dstRows cols layout)
+    (src : RT dtype srcRows cols layout)
+    (startRow : Nat)
+    (numRows : Nat := dstRows) : KernelM Unit := do
+  emit (.sliceRows dst.id src.id startRow numRows)
+
+/-- Slice columns from a tile. -/
+def sliceCols {dtype : GpuFloat} {rows dstCols srcCols : Nat} {layout : TileLayout}
+    (dst : RT dtype rows dstCols layout)
+    (src : RT dtype rows srcCols layout)
+    (startCol : Nat)
+    (numCols : Nat := dstCols) : KernelM Unit := do
+  emit (.sliceCols dst.id src.id startCol numCols)
+
+/-- Concatenate two tiles along columns. -/
+def concatCols {dtype : GpuFloat} {rows dstCols leftCols rightCols : Nat} {layout : TileLayout}
+    (dst : RT dtype rows dstCols layout)
+    (left : RT dtype rows leftCols layout)
+    (right : RT dtype rows rightCols layout) : KernelM Unit := do
+  emit (.concatCols dst.id left.id right.id)
 
 /-! ## Cumulative/Scan Operations -/
 

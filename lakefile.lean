@@ -197,6 +197,18 @@ lean_exe RunThunderKittensCopy where
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
+/-- End-to-end rotary fixture validation using a ThunderKittens-style kernel. -/
+lean_exe RunThunderKittensRotary where
+  root := `Examples.GPU.RunThunderKittensRotary
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
+/-- End-to-end ThunderKittens layernorm fixture validation. -/
+lean_exe RunThunderKittensLayerNorm where
+  root := `Examples.GPU.RunThunderKittensLayerNorm
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
 /-- End-to-end ThunderKittens flash attention fixture validation. -/
 lean_exe RunThunderKittensFlashAttn where
   root := `Examples.GPU.RunThunderKittensFlashAttn

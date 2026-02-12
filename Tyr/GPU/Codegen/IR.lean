@@ -133,6 +133,7 @@ inductive KStmt where
   -- Tile slicing
   | sliceRows (dst src : VarId) (startRow numRows : Nat)
   | sliceCols (dst src : VarId) (startCol numCols : Nat)
+  | concatCols (dst left right : VarId)
 
   -- Synchronization
   | sync (barrierId : Nat)
