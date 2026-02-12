@@ -25,7 +25,7 @@ def runOnce : IO Bool := do
   let stream ← torch.cuda_current_stream
 
   -- grid=(1,1,1), block=(128,1,1), sharedMem=0
-  tkCopy.launch input output 1 1 1 128 1 1 0 stream
+  copy64x64.launch input output 1 1 1 128 1 1 0 stream
   let _ ← torch.cuda_synchronize
 
   let ok := torch.allclose input output

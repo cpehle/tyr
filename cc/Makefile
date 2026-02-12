@@ -53,6 +53,8 @@ NVCCFLAGS := -std=c++20 -O3 --use_fast_math --expt-extended-lambda --expt-relaxe
 NVCCFLAGS += -lineinfo -Xcompiler -fPIC
 NVCCFLAGS += -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__
 NVCCFLAGS += -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__
+# CUDA 12.1 headers do not expose cudaLaunchAttributePreferredClusterDimension.
+NVCCFLAGS += -DcudaLaunchAttributePreferredClusterDimension=cudaLaunchAttributeClusterDimension
 GPU ?= H100
 ifeq ($(GPU),B300)
 NVCCFLAGS += -DKITTENS_BLACKWELL -gencode arch=compute_103a,code=sm_103a

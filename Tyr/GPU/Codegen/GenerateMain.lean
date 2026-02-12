@@ -53,6 +53,34 @@ partial def parseArgs (cfg : CliConfig) : List String → Except String CliConfi
       | .ok moduleName =>
         parseArgs { cfg with modules := cfg.modules.push moduleName } rest
 
+private def runCoreWithEnv (env : Environment) (x : CoreM α) : IO α := do
+  let ctx : Core.Context := {
+    fileName := "<gpu-kernel-generate>"
+    fileMap := default
+  }
+  let st : Core.State := { env := env }
+  x.toIO' ctx st
+
+unsafe def evalKernelConstExpr (constName : Name) : CoreM Kernel := do
+  withTheReader Core.Context (fun ctx => { ctx with maxHeartbeats := 0 }) do
+    Lean.Meta.MetaM.run' do
+      let info ← getConstInfo constName
+      let value ← match info with
+        | .defnInfo info => pure info.value
+        | .thmInfo info => pure info.value
+        | _ => throwError "Kernel companion '{constName}' is not reducible."
+      Lean.Meta.evalExpr Kernel (mkConst ``Kernel) value
+
+unsafe def materializeKernelRefs (env : Environment)
+    (refs : Array RegisteredKernelRef) : IO (Array RegisteredKernelSpec) := do
+  runCoreWithEnv env do
+    refs.mapM fun r => do
+      try
+        let kernel ← evalKernelConstExpr r.kernelConst
+        pure (mkRegisteredKernelSpec r.moduleName r.name kernel)
+      catch e =>
+        throwError "Failed to evaluate kernel '{r.kernelConst}' for '{r.name}': {e.toMessageData}"
+
 unsafe def main (args : List String) : IO UInt32 := do
   if args.contains "--help" then
     IO.println usage
@@ -74,7 +102,9 @@ unsafe def main (args : List String) : IO UInt32 := do
         #[({ module := `Tyr.GPU.Codegen.Attribute } : Import)] ++
         cfg.modules.map (fun m => ({ module := m } : Import))
       let env ← Lean.importModules imports {} (loadExts := true)
-      let regs ← collectRegisteredKernelsFromEnvModules env cfg.modules
+      let refs := collectRegisteredKernelRefsFromEnvModules env cfg.modules
+      let regs ← materializeKernelRefs env refs
+      setRegisteredKernels regs
       let written ← writeKernelCudaUnitsByModuleFrom regs cfg.outDir (clean := cfg.clean)
       IO.println s!"Generated {written.size} CUDA translation unit(s) in {cfg.outDir}"
       for path in written do
