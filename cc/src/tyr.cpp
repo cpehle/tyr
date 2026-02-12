@@ -2891,6 +2891,13 @@ lean_object* lean_torch_to_float(lean_obj_arg /*s*/, b_lean_obj_arg input) {
   return fromTorchTensor(result_);
 }
 
+// Convert to bfloat16 dtype
+lean_object* lean_torch_to_bfloat16(lean_obj_arg /*s*/, b_lean_obj_arg input) {
+  auto input_ = borrowTensor(input);
+  auto result_ = input_.to(torch::kBFloat16);
+  return fromTorchTensor(result_);
+}
+
 // Index select for 1D indexing into first dimension
 lean_object* lean_torch_index_select_1d(lean_obj_arg /*s*/, b_lean_obj_arg input, b_lean_obj_arg indices) {
   auto input_ = borrowTensor(input);

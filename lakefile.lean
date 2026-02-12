@@ -197,6 +197,12 @@ lean_exe RunThunderKittensCopy where
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
+/-- End-to-end ThunderKittens flash attention fixture validation. -/
+lean_exe RunThunderKittensFlashAttn where
+  root := `Examples.GPU.RunThunderKittensFlashAttn
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
 /-! ## Scripts -/
 
 /-- Script to run the test executable with proper environment.

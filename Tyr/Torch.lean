@@ -924,6 +924,10 @@ opaque logical_and {s : Shape} (a : @& T s) (b : @& T s) : T s
 @[extern "lean_torch_to_float"]
 opaque toFloat' {s : Shape} (input : @& T s) : T s
 
+/-- Convert to bfloat16 dtype. -/
+@[extern "lean_torch_to_bfloat16"]
+opaque toBFloat16' {s : Shape} (input : @& T s) : T s
+
 /-- Index select on first dimension -/
 @[extern "lean_torch_index_select_1d"]
 opaque index_select_1d {n m : UInt64} (input : @& T #[n]) (indices : @& T #[m]) : T #[m]
