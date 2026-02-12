@@ -22,9 +22,11 @@ def runOnce : IO Bool := do
   let device := Device.CUDA 0
   let input ← torch.rand #[1, 1, 64, 64] false device
   let output := torch.zeros_like input
+  let stream ← torch.cuda_current_stream
 
-  -- grid=(1,1,1), block=(128,1,1), sharedMem=0, stream=0 (default)
-  tkCopy.launch input output 1 1 1 128 1 1 0 0
+  -- grid=(1,1,1), block=(128,1,1), sharedMem=0
+  tkCopy.launch input output 1 1 1 128 1 1 0 stream
+  let _ ← torch.cuda_synchronize
 
   let ok := torch.allclose input output
   let inMean := torch.nn.item (torch.nn.meanAll input)

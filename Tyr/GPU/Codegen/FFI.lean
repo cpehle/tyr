@@ -99,7 +99,6 @@ def generateCppLauncher (kernel : RegisteredKernel) : String :=
 
 /-- Generate complete C++ header for kernel launchers -/
 def generateCppHeader : String :=
-  "#pragma once\n\n" ++
   "#include <lean/lean.h>\n" ++
   "#include <array>\n" ++
   "#include <stdexcept>\n" ++
@@ -264,22 +263,34 @@ def generateModuleKernelCu (moduleName : Name) (kernels : Array RegisteredKernel
 /-- Write one generated `.cu` file per Lean compilation unit from a given kernel set. -/
 def writeKernelCudaUnitsByModuleFrom (kernels : Array RegisteredKernel)
     (outDir : System.FilePath) (clean : Bool := true) : IO (Array System.FilePath) := do
+  let grouped := groupRegisteredKernelsByModule kernels
+  let targetFiles : Std.HashSet String :=
+    grouped.toList.foldl (init := {}) fun acc (moduleName, _) =>
+      acc.insert s!"{moduleNameToFileStem moduleName}.cu"
+
+  let writeIfChanged (path : System.FilePath) (content : String) : IO Unit := do
+    if ← path.pathExists then
+      let prev ← IO.FS.readFile path
+      if prev == content then
+        return ()
+    IO.FS.writeFile path content
+
   IO.FS.createDirAll outDir
   if clean then
     let entries ← System.FilePath.readDir outDir
     for entry in entries do
       let path := entry.path
-      if path.extension == some "cu" then
+      let fileName := path.fileName.getD ""
+      if path.extension == some "cu" && !targetFiles.contains fileName then
         let md ← path.metadata
         if md.type == .file then
           IO.FS.removeFile path
 
-  let grouped := groupRegisteredKernelsByModule kernels
   let mut written : Array System.FilePath := #[]
   for (moduleName, kernels) in grouped.toList do
     let fileName := s!"{moduleNameToFileStem moduleName}.cu"
     let path := outDir / fileName
-    IO.FS.writeFile path (generateModuleKernelCu moduleName kernels)
+    writeIfChanged path (generateModuleKernelCu moduleName kernels)
     written := written.push path
   return written
 

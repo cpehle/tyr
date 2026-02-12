@@ -6,7 +6,7 @@ def packageLinkArgs : Array String :=
   if System.Platform.isOSX then
     #[
       "-Lexternal/libtorch/lib",
-      "-ltorch", "-ltorch_cpu", "-lc10",
+      "-ltorch", "-ltorch_cpu", "-lc10", "-lc10_cuda",
       "-L/opt/homebrew/opt/libomp/lib", "-lomp",
       "-L/opt/homebrew/lib", "-larrow", "-lparquet",
       "-Wl,-rpath,@loader_path/../../external/libtorch/lib",
@@ -16,7 +16,7 @@ def packageLinkArgs : Array String :=
   else
     #[
       "-Lexternal/libtorch/lib",
-      "-ltorch", "-ltorch_cpu", "-lc10",
+      "-ltorch", "-ltorch_cpu", "-lc10", "-lc10_cuda",
       "-L/usr/lib", "-lgomp", "-lstdc++",
       "-larrow", "-lparquet", "-lcudart",
       "-Wl,-rpath,$ORIGIN/../../external/libtorch/lib"
@@ -27,7 +27,7 @@ def commonLinkArgs : Array String :=
     #[
       "-Lcc/build", "-lTyrC",
       "-Lexternal/libtorch/lib",
-      "-ltorch", "-ltorch_cpu", "-lc10",
+      "-ltorch", "-ltorch_cpu", "-lc10", "-lc10_cuda",
       "-L/opt/homebrew/opt/libomp/lib", "-lomp",
       "-L/opt/homebrew/lib", "-larrow", "-lparquet",
       "-Wl,-rpath,@executable_path/../../external/libtorch/lib",
@@ -38,7 +38,7 @@ def commonLinkArgs : Array String :=
     #[
       "-Lcc/build", "-lTyrC",
       "-Lexternal/libtorch/lib",
-      "-ltorch", "-ltorch_cpu", "-lc10",
+      "-ltorch", "-ltorch_cpu", "-lc10", "-lc10_cuda",
       "-L/usr/lib", "-lgomp", "-lstdc++",
       "-larrow", "-lparquet", "-lcudart",
       "-Wl,-rpath,$ORIGIN/../../external/libtorch/lib"
@@ -212,6 +212,12 @@ lean_exe RunThunderKittensLayerNorm where
 /-- End-to-end ThunderKittens flash attention fixture validation. -/
 lean_exe RunThunderKittensFlashAttn where
   root := `Examples.GPU.RunThunderKittensFlashAttn
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
+/-- End-to-end ThunderKittens `mha_h100` forward/backward fixture validation. -/
+lean_exe RunThunderKittensMhaH100 where
+  root := `Examples.GPU.RunThunderKittensMhaH100
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 

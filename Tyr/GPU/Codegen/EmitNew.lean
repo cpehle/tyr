@@ -405,7 +405,11 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout)
 
   -- Layout/type conversions
   | .swapLayout dst src => s!"{indent}warp::swap_layout({dst.toIdent}, {src.toIdent});\n"
-  | .transpose dst src => s!"{indent}warp::transpose({dst.toIdent}, {src.toIdent});\n"
+  | .transpose dst src =>
+    if dst == src then
+      s!"{indent}warp::transpose_inplace({dst.toIdent});\n"
+    else
+      s!"{indent}warp::transpose_sep({dst.toIdent}, {src.toIdent});\n"
   | .convert dst src => s!"{indent}warp::copy({dst.toIdent}, {src.toIdent});\n"
 
   -- Masking

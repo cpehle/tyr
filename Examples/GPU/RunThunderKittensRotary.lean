@@ -2,30 +2,26 @@
    generate deterministic input/reference tensors, launch the kernel, compare outputs. -/
 import Tyr.Torch
 import Tyr.GPU.Kernels.Rotary
+import Examples.GPU.FixtureRunner
 
 namespace Examples.GPU
 
 open torch
 open Tyr.GPU.Kernels.Rotary
 
-def fixtureDir : System.FilePath := ⟨"data/gpu_fixtures/rotary64"⟩
+def fixtureSpec : FixtureSpec := {
+  dir := ⟨"data/gpu_fixtures/rotary64"⟩
+  names := #["x", "sin", "cos", "expected"]
+}
 
-def fixturePath (name : String) : System.FilePath :=
-  fixtureDir / s!"{name}.pt"
-
-def fixtureNames : Array String := #["x", "sin", "cos", "expected"]
-
-def fixturesPresent : IO Bool := do
-  let mut ok := true
-  for name in fixtureNames do
-    ok := ok && (← (fixturePath name).pathExists)
-  pure ok
+def fixtureFile (name : String) : System.FilePath :=
+  Examples.GPU.fixturePath fixtureSpec name
 
 def generateFixtures : IO Unit := do
   if !(← torch.cuda_is_available) then
     throw <| IO.userError "CUDA is not available; cannot generate rotary fixtures."
 
-  IO.FS.createDirAll fixtureDir
+  IO.FS.createDirAll fixtureSpec.dir
 
   let device := Device.CUDA 0
   let x ← torch.rand #[64, 64] false device
@@ -38,32 +34,34 @@ def generateFixtures : IO Unit := do
   let expected4 := torch.rotary.applyRotaryEmb x4 cos sin
   let expected : T #[64, 64] := torch.reshape expected4 #[64, 64]
 
-  torch.data.saveTensor x (fixturePath "x").toString
-  torch.data.saveTensor sin (fixturePath "sin").toString
-  torch.data.saveTensor cos (fixturePath "cos").toString
-  torch.data.saveTensor expected (fixturePath "expected").toString
+  torch.data.saveTensor x (fixtureFile "x").toString
+  torch.data.saveTensor sin (fixtureFile "sin").toString
+  torch.data.saveTensor cos (fixtureFile "cos").toString
+  torch.data.saveTensor expected (fixtureFile "expected").toString
 
   let xMean := torch.nn.item (torch.nn.meanAll x)
   let eMean := torch.nn.item (torch.nn.meanAll expected)
-  IO.println s!"Generated rotary fixtures in {fixtureDir} xMean={xMean} expectedMean={eMean}"
+  IO.println s!"Generated rotary fixtures in {fixtureSpec.dir} xMean={xMean} expectedMean={eMean}"
 
 def runOnce : IO Bool := do
   if !(← torch.cuda_is_available) then
     IO.eprintln "CUDA is not available on this host."
     return false
 
-  if !(← fixturesPresent) then
+  if !(← fixturesPresent fixtureSpec) then
     generateFixtures
 
-  let x ← torch.data.loadTensor #[64, 64] (fixturePath "x").toString
-  let sin ← torch.data.loadTensor #[64, 32] (fixturePath "sin").toString
-  let cos ← torch.data.loadTensor #[64, 32] (fixturePath "cos").toString
-  let expected ← torch.data.loadTensor #[64, 64] (fixturePath "expected").toString
+  let x ← torch.data.loadTensor #[64, 64] (fixtureFile "x").toString
+  let sin ← torch.data.loadTensor #[64, 32] (fixtureFile "sin").toString
+  let cos ← torch.data.loadTensor #[64, 32] (fixtureFile "cos").toString
+  let expected ← torch.data.loadTensor #[64, 64] (fixtureFile "expected").toString
 
   let output := torch.zeros_like x
+  let stream ← torch.cuda_current_stream
 
-  -- grid=(1,1,1), block=(128,1,1), sharedMem=0, stream=0 (default)
-  rotaryFwd.launch x sin cos output 64 64 1 1 1 128 1 1 0 0
+  -- grid=(1,1,1), block=(128,1,1), sharedMem=0
+  rotaryFwd.launch x sin cos output 64 64 1 1 1 128 1 1 0 stream
+  let _ ← torch.cuda_synchronize
 
   let ok := torch.allclose expected output 1e-4 1e-4
   let mae := torch.nn.item (torch.nn.meanAll (torch.nn.abs (output - expected)))
@@ -73,19 +71,7 @@ def runOnce : IO Bool := do
   pure ok
 
 unsafe def main (args : List String) : IO UInt32 := do
-  let regen := args.contains "--regen"
-  let genOnly := args.contains "--gen-only"
-
-  if regen then
-    generateFixtures
-  else if !(← fixturesPresent) then
-    generateFixtures
-
-  if genOnly then
-    return 0
-
-  let ok ← runOnce
-  pure (if ok then 0 else 1)
+  runWithFixtures args fixtureSpec generateFixtures runOnce
 
 end Examples.GPU
 

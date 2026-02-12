@@ -68,6 +68,14 @@ def uniform (s : Shape) (min : Float := 0.0) (max : Float := 1.0) : IO (T s) := 
 @[extern "lean_torch_cuda_is_available"]
 opaque cuda_is_available : IO Bool
 
+/-- Get the current CUDA stream as an opaque `UInt64` handle (`cudaStream_t`). -/
+@[extern "lean_torch_cuda_current_stream"]
+opaque cuda_current_stream : IO UInt64
+
+/-- Synchronize CUDA device; useful for deterministic validation around custom kernels. -/
+@[extern "lean_torch_cuda_synchronize"]
+opaque cuda_synchronize : IO Unit
+
 /-- Check if MPS (Metal Performance Shaders) is available -/
 @[extern "lean_torch_mps_is_available"]
 opaque mps_is_available : IO Bool

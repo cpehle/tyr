@@ -1,31 +1,26 @@
 /- End-to-end ThunderKittens-style layernorm validation. -/
 import Tyr.Torch
 import Tyr.GPU.Kernels.ThunderKittensLayerNorm
+import Examples.GPU.FixtureRunner
 
 namespace Examples.GPU
 
 open torch
 open Tyr.GPU.Kernels
 
-def fixtureDir : System.FilePath := ⟨"data/gpu_fixtures/layernorm64x1024"⟩
+def fixtureSpec : FixtureSpec := {
+  dir := ⟨"data/gpu_fixtures/layernorm64x1024"⟩
+  names := #["x", "residual", "weight", "bias", "expected_out", "expected_resid"]
+}
 
-def fixturePath (name : String) : System.FilePath :=
-  fixtureDir / s!"{name}.pt"
-
-def fixtureNames : Array String :=
-  #["x", "residual", "weight", "bias", "expected_out", "expected_resid"]
-
-def fixturesPresent : IO Bool := do
-  let mut ok := true
-  for name in fixtureNames do
-    ok := ok && (← (fixturePath name).pathExists)
-  pure ok
+def fixtureFile (name : String) : System.FilePath :=
+  Examples.GPU.fixturePath fixtureSpec name
 
 def generateFixtures : IO Unit := do
   if !(← torch.cuda_is_available) then
     throw <| IO.userError "CUDA is not available; cannot generate layernorm fixtures."
 
-  IO.FS.createDirAll fixtureDir
+  IO.FS.createDirAll fixtureSpec.dir
   let device := Device.CUDA 0
   let eps : Float := 1.0e-5
 
@@ -37,38 +32,40 @@ def generateFixtures : IO Unit := do
   let expectedResid := x + residual
   let expectedOut := torch.nn.layer_norm expectedResid weight bias eps
 
-  torch.data.saveTensor x (fixturePath "x").toString
-  torch.data.saveTensor residual (fixturePath "residual").toString
-  torch.data.saveTensor weight (fixturePath "weight").toString
-  torch.data.saveTensor bias (fixturePath "bias").toString
-  torch.data.saveTensor expectedOut (fixturePath "expected_out").toString
-  torch.data.saveTensor expectedResid (fixturePath "expected_resid").toString
+  torch.data.saveTensor x (fixtureFile "x").toString
+  torch.data.saveTensor residual (fixtureFile "residual").toString
+  torch.data.saveTensor weight (fixtureFile "weight").toString
+  torch.data.saveTensor bias (fixtureFile "bias").toString
+  torch.data.saveTensor expectedOut (fixtureFile "expected_out").toString
+  torch.data.saveTensor expectedResid (fixtureFile "expected_resid").toString
 
   let outMean := torch.nn.item (torch.nn.meanAll expectedOut)
   let residMean := torch.nn.item (torch.nn.meanAll expectedResid)
-  IO.println s!"Generated layernorm fixtures in {fixtureDir} outMean={outMean} residMean={residMean}"
+  IO.println s!"Generated layernorm fixtures in {fixtureSpec.dir} outMean={outMean} residMean={residMean}"
 
 def runOnce : IO Bool := do
   if !(← torch.cuda_is_available) then
     IO.eprintln "CUDA is not available on this host."
     return false
 
-  if !(← fixturesPresent) then
+  if !(← fixturesPresent fixtureSpec) then
     generateFixtures
 
-  let x ← torch.data.loadTensor #[1, 64, 1024] (fixturePath "x").toString
-  let residual ← torch.data.loadTensor #[1, 64, 1024] (fixturePath "residual").toString
-  let weight ← torch.data.loadTensor #[1024] (fixturePath "weight").toString
-  let bias ← torch.data.loadTensor #[1024] (fixturePath "bias").toString
-  let expectedOut ← torch.data.loadTensor #[1, 64, 1024] (fixturePath "expected_out").toString
-  let expectedResid ← torch.data.loadTensor #[1, 64, 1024] (fixturePath "expected_resid").toString
+  let x ← torch.data.loadTensor #[1, 64, 1024] (fixtureFile "x").toString
+  let residual ← torch.data.loadTensor #[1, 64, 1024] (fixtureFile "residual").toString
+  let weight ← torch.data.loadTensor #[1024] (fixtureFile "weight").toString
+  let bias ← torch.data.loadTensor #[1024] (fixtureFile "bias").toString
+  let expectedOut ← torch.data.loadTensor #[1, 64, 1024] (fixtureFile "expected_out").toString
+  let expectedResid ← torch.data.loadTensor #[1, 64, 1024] (fixtureFile "expected_resid").toString
 
   let out := torch.zeros_like x
   -- Use a distinct source expression to prevent CSE from aliasing outputs.
   let outResid := torch.zeros_like residual
+  let stream ← torch.cuda_current_stream
 
   -- Single-warp launch keeps numerical behavior deterministic for this kernel.
-  tkLayerNorm.launch x residual weight bias out outResid 1 1 1 32 1 1 0 0
+  tkLayerNorm.launch x residual weight bias out outResid 1 1 1 32 1 1 0 stream
+  let _ ← torch.cuda_synchronize
 
   let outOk := torch.allclose expectedOut out 5e-3 5e-3
   let residOk := torch.allclose expectedResid outResid 1e-5 1e-5
@@ -80,19 +77,7 @@ def runOnce : IO Bool := do
   pure (outOk && residOk)
 
 unsafe def main (args : List String) : IO UInt32 := do
-  let regen := args.contains "--regen"
-  let genOnly := args.contains "--gen-only"
-
-  if regen then
-    generateFixtures
-  else if !(← fixturesPresent) then
-    generateFixtures
-
-  if genOnly then
-    return 0
-
-  let ok ← runOnce
-  pure (if ok then 0 else 1)
+  runWithFixtures args fixtureSpec generateFixtures runOnce
 
 end Examples.GPU
 

@@ -101,7 +101,7 @@ LEAN_LIB := $(LEAN_HOME)/lib/lean
 
 # Shared library link flags
 DYLIB_LINK_FLAGS := -L$(LEAN_LIB) -lleanshared \
-	-L$(TORCH_LIBPATH) -ltorch -ltorch_cpu -lc10 \
+	-L$(TORCH_LIBPATH) -ltorch -ltorch_cpu -lc10 -lc10_cuda \
 	-L$(ARROW_LIBPATH) -larrow -lparquet \
 	-lcudart \
 	-Wl,-rpath,$(LEAN_LIB) \

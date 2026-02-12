@@ -1,35 +1,31 @@
 /- End-to-end FlashAttention validation for 2-block forward + forward-with-LSE. -/
 import Tyr.Torch
 import Tyr.GPU.Kernels.ThunderKittensFlashAttn
+import Examples.GPU.FixtureRunner
 
 namespace Examples.GPU
 
 open torch
 open Tyr.GPU.Kernels
 
-def fixtureDir : System.FilePath := ⟨"data/gpu_fixtures/flashattn128x64"⟩
+def fixtureSpec : FixtureSpec := {
+  dir := ⟨"data/gpu_fixtures/flashattn128x64"⟩
+  names := #["q", "k", "v", "expected_o", "expected_lse"]
+}
 
-def fixturePath (name : String) : System.FilePath :=
-  fixtureDir / s!"{name}.pt"
-
-def fixtureNames : Array String := #["q", "k", "v", "expected_o", "expected_lse"]
-
-def fixturesPresent : IO Bool := do
-  let mut ok := true
-  for name in fixtureNames do
-    ok := ok && (← (fixturePath name).pathExists)
-  pure ok
+def fixtureFile (name : String) : System.FilePath :=
+  Examples.GPU.fixturePath fixtureSpec name
 
 def generateFixtures : IO Unit := do
   if !(← torch.cuda_is_available) then
     throw <| IO.userError "CUDA is not available; cannot generate flash attention fixtures."
 
-  IO.FS.createDirAll fixtureDir
+  IO.FS.createDirAll fixtureSpec.dir
   let device := Device.CUDA 0
 
-  let qf ← torch.rand #[1, 1, 128, 64] false device
-  let kf ← torch.rand #[1, 1, 128, 64] false device
-  let vf ← torch.rand #[1, 1, 128, 64] false device
+  let qf ← torch.randn #[1, 1, 128, 64] false device
+  let kf ← torch.randn #[1, 1, 128, 64] false device
+  let vf ← torch.randn #[1, 1, 128, 64] false device
 
   let q := torch.toBFloat16' qf
   let k := torch.toBFloat16' kf
@@ -51,37 +47,39 @@ def generateFixtures : IO Unit := do
   let expectedLse3 : T #[1, 1, 128] := torch.nn.log sumExp
   let expectedLse : T #[2, 64] := torch.reshape expectedLse3 #[2, 64]
 
-  torch.data.saveTensor q (fixturePath "q").toString
-  torch.data.saveTensor k (fixturePath "k").toString
-  torch.data.saveTensor v (fixturePath "v").toString
-  torch.data.saveTensor expectedOut (fixturePath "expected_o").toString
-  torch.data.saveTensor expectedLse (fixturePath "expected_lse").toString
+  torch.data.saveTensor q (fixtureFile "q").toString
+  torch.data.saveTensor k (fixtureFile "k").toString
+  torch.data.saveTensor v (fixtureFile "v").toString
+  torch.data.saveTensor expectedOut (fixtureFile "expected_o").toString
+  torch.data.saveTensor expectedLse (fixtureFile "expected_lse").toString
 
   let outMean := torch.nn.item (torch.nn.meanAll expectedOut)
   let lseMean := torch.nn.item (torch.nn.meanAll expectedLse)
-  IO.println s!"Generated flash attention fixtures in {fixtureDir} outMean={outMean} lseMean={lseMean}"
+  IO.println s!"Generated flash attention fixtures in {fixtureSpec.dir} outMean={outMean} lseMean={lseMean}"
 
 def runOnce : IO Bool := do
   if !(← torch.cuda_is_available) then
     IO.eprintln "CUDA is not available on this host."
     return false
 
-  if !(← fixturesPresent) then
+  if !(← fixturesPresent fixtureSpec) then
     generateFixtures
 
-  let q ← torch.data.loadTensor #[1, 1, 128, 64] (fixturePath "q").toString
-  let k ← torch.data.loadTensor #[1, 1, 128, 64] (fixturePath "k").toString
-  let v ← torch.data.loadTensor #[1, 1, 128, 64] (fixturePath "v").toString
-  let expectedOut ← torch.data.loadTensor #[1, 1, 128, 64] (fixturePath "expected_o").toString
-  let expectedLse ← torch.data.loadTensor #[2, 64] (fixturePath "expected_lse").toString
+  let q ← torch.data.loadTensor #[1, 1, 128, 64] (fixtureFile "q").toString
+  let k ← torch.data.loadTensor #[1, 1, 128, 64] (fixtureFile "k").toString
+  let v ← torch.data.loadTensor #[1, 1, 128, 64] (fixtureFile "v").toString
+  let expectedOut ← torch.data.loadTensor #[1, 1, 128, 64] (fixtureFile "expected_o").toString
+  let expectedLse ← torch.data.loadTensor #[2, 64] (fixtureFile "expected_lse").toString
 
   let outFwd := torch.zeros_like q
   let outFwdLse := torch.zeros_like q
   let lseOut := torch.zeros #[2, 64] false (Device.CUDA 0)
+  let stream ← torch.cuda_current_stream
 
   -- grid=(1,2,1): one CTA per 64-row query tile.
-  tkFlashAttnFwd2Block.launch q k v outFwd 128 64 1 2 1 128 1 1 0 0
-  tkFlashAttnFwd2BlockLse.launch q k v outFwdLse lseOut 128 64 1 2 1 128 1 1 0 0
+  tkFlashAttnFwd2Block.launch q k v outFwd 128 64 1 2 1 128 1 1 0 stream
+  tkFlashAttnFwd2BlockLse.launch q k v outFwdLse lseOut 128 64 1 2 1 128 1 1 0 stream
+  let _ ← torch.cuda_synchronize
 
   let outOk := torch.allclose expectedOut outFwd 3e-2 3e-2
   let outLseKernelOk := torch.allclose expectedOut outFwdLse 3e-2 3e-2
@@ -96,19 +94,7 @@ def runOnce : IO Bool := do
   pure (outOk && outLseKernelOk && lseOk)
 
 unsafe def main (args : List String) : IO UInt32 := do
-  let regen := args.contains "--regen"
-  let genOnly := args.contains "--gen-only"
-
-  if regen then
-    generateFixtures
-  else if !(← fixturesPresent) then
-    generateFixtures
-
-  if genOnly then
-    return 0
-
-  let ok ← runOnce
-  pure (if ok then 0 else 1)
+  runWithFixtures args fixtureSpec generateFixtures runOnce
 
 end Examples.GPU
 

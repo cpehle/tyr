@@ -59,6 +59,8 @@
 #include <lean/lean.h>
 #include <torch/torch.h>
 #include <ATen/ATen.h>
+#include <c10/cuda/CUDAStream.h>
+#include <cuda_runtime.h>
 
 // Global atomic counter for live tensors handed to Lean
 std::atomic<int64_t> g_live_lean_tensors(0);
@@ -2944,6 +2946,28 @@ lean_object* lean_torch_topk_2d(uint64_t /*d1*/, uint64_t /*d2*/,
 // Check if CUDA is available
 lean_object* lean_torch_cuda_is_available(lean_object* /*w*/) {
   return lean_io_result_mk_ok(lean_box(torch::cuda::is_available()));
+}
+
+// Get the current CUDA stream as an opaque UInt64 handle.
+lean_object* lean_torch_cuda_current_stream(lean_object* /*w*/) {
+  if (!torch::cuda::is_available()) {
+    return lean_io_result_mk_ok(lean_box_uint64(0));
+  }
+  auto stream = c10::cuda::getCurrentCUDAStream();
+  auto raw = reinterpret_cast<uint64_t>(stream.stream());
+  return lean_io_result_mk_ok(lean_box_uint64(raw));
+}
+
+// Synchronize CUDA device for deterministic validation around external launches.
+lean_object* lean_torch_cuda_synchronize(lean_object* /*w*/) {
+  if (!torch::cuda::is_available()) {
+    return lean_io_result_mk_ok(lean_box(0));
+  }
+  auto err = cudaDeviceSynchronize();
+  if (err != cudaSuccess) {
+    return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string(cudaGetErrorString(err))));
+  }
+  return lean_io_result_mk_ok(lean_box(0));
 }
 
 // Check if MPS is available
