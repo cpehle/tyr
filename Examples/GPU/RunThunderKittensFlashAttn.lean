@@ -93,9 +93,9 @@ def runOnce : IO Bool := do
   IO.println s!"flashattn2block fwd_ok={outOk} fwd_lse_ok={outLseKernelOk} lse_ok={lseOk} out_mae={outMae} out_max={outMaxErr} lse_mae={lseMae} lse_max={lseMaxErr}"
   pure (outOk && outLseKernelOk && lseOk)
 
-unsafe def main (args : List String) : IO UInt32 := do
+def main (args : List String) : IO UInt32 := do
   runWithFixtures args fixtureSpec generateFixtures runOnce
 
 end Examples.GPU
 
-unsafe def main : List String → IO UInt32 := Examples.GPU.main
+def main : List String → IO UInt32 := Examples.GPU.main

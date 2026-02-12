@@ -19,7 +19,7 @@ open Tyr.GPU
 open Tyr.GPU.Codegen
 
 @[gpu_kernel .SM90]
-def tkCopy (input : GPtr GpuFloat.Float32) (output : GPtr GpuFloat.Float32) : KernelM Unit := do
+def copy64x64 (input : GPtr GpuFloat.Float32) (output : GPtr GpuFloat.Float32) : KernelM Unit := do
   comment "ThunderKittens-style minimal copy kernel"
   let coord ← blockCoord2D
   let reg ← allocRT .Float32 64 64
@@ -30,7 +30,7 @@ def tkCopy (input : GPtr GpuFloat.Float32) (output : GPtr GpuFloat.Float32) : Ke
   storeGlobal output smem coord
   sync
 
-#check tkCopy.kernel
-#check tkCopy.launch
+abbrev tkCopy := copy64x64
+
 
 end Tyr.GPU.Kernels

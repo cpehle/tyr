@@ -221,6 +221,18 @@ lean_exe RunThunderKittensMhaH100 where
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
+/-- End-to-end `mha_h100` training/benchmark demo (kernel + optional torch baseline). -/
+lean_exe RunThunderKittensMhaH100Train where
+  root := `Examples.GPU.RunThunderKittensMhaH100Train
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
+/-- End-to-end multi-block `mha_h100` validation (`seq=768`, `d=64`). -/
+lean_exe RunThunderKittensMhaH100Seq768 where
+  root := `Examples.GPU.RunThunderKittensMhaH100Seq768
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
 /-! ## Scripts -/
 
 /-- Script to run the test executable with proper environment.

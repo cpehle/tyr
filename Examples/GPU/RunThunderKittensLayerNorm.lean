@@ -76,9 +76,9 @@ def runOnce : IO Bool := do
   IO.println s!"layernorm out_allclose={outOk} resid_allclose={residOk} out_mae={outMae} resid_mae={residMae} out_max={outMax}"
   pure (outOk && residOk)
 
-unsafe def main (args : List String) : IO UInt32 := do
+def main (args : List String) : IO UInt32 := do
   runWithFixtures args fixtureSpec generateFixtures runOnce
 
 end Examples.GPU
 
-unsafe def main : List String → IO UInt32 := Examples.GPU.main
+def main : List String → IO UInt32 := Examples.GPU.main

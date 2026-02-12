@@ -1,4 +1,5 @@
-/- End-to-end `mha_h100`-style forward/backward validation (2 blocks, d=64). -/
+/- End-to-end `mha_h100`-style forward/backward validation for the reduced
+   2-block (`seq=128`, `d=64`) kernel variant in this repo. -/
 import Tyr.Torch
 import Tyr.GPU.Kernels.ThunderKittensFlashAttn
 import Examples.GPU.FixtureRunner
@@ -140,25 +141,29 @@ def runOnce : IO Bool := do
   let lOk := torch.allclose expectedL lOut 3e-2 3e-2
   let lKernelConsistent := torch.allclose lFromLse lOut 3e-2 3e-2
   let lFixtureConsistent := torch.allclose expectedL lFromLse 3e-2 3e-2
-  let dqOk := torch.allclose expectedDQ dQ 8e-2 8e-2
-  let dkOk := torch.allclose expectedDK dK 8e-2 8e-2
-  let dvOk := torch.allclose expectedDV dV 8e-2 8e-2
+  let dqOk := torch.allclose expectedDQ dQ 3e-2 3e-2
+  let dkOk := torch.allclose expectedDK dK 3e-2 3e-2
+  let dvOk := torch.allclose expectedDV dV 3e-2 3e-2
 
   let outMae := torch.nn.item (torch.nn.meanAll (torch.nn.abs (out - expectedOut)))
+  let outMaxErr := torch.nn.item (torch.nn.maxAll (torch.nn.abs (out - expectedOut)))
   let lMae := torch.nn.item (torch.nn.meanAll (torch.nn.abs (lOut - expectedL)))
+  let lMaxErr := torch.nn.item (torch.nn.maxAll (torch.nn.abs (lOut - expectedL)))
   let lKernelMae := torch.nn.item (torch.nn.meanAll (torch.nn.abs (lOut - lFromLse)))
   let lFixtureMae := torch.nn.item (torch.nn.meanAll (torch.nn.abs (lFromLse - expectedL)))
   let dqMae := torch.nn.item (torch.nn.meanAll (torch.nn.abs (dQ - expectedDQ)))
+  let dqMaxErr := torch.nn.item (torch.nn.maxAll (torch.nn.abs (dQ - expectedDQ)))
   let dkMae := torch.nn.item (torch.nn.meanAll (torch.nn.abs (dK - expectedDK)))
+  let dkMaxErr := torch.nn.item (torch.nn.maxAll (torch.nn.abs (dK - expectedDK)))
   let dvMae := torch.nn.item (torch.nn.meanAll (torch.nn.abs (dV - expectedDV)))
-  let dkdvMae := torch.nn.item (torch.nn.meanAll (torch.nn.abs (dK - dV)))
-  IO.println s!"mha_h100 fwd_ok={outOk} l_ok={lOk} l_kernel_consistent={lKernelConsistent} l_fixture_consistent={lFixtureConsistent} dq_ok={dqOk} dk_ok={dkOk} dv_ok={dvOk} out_mae={outMae} l_mae={lMae} l_kernel_mae={lKernelMae} l_fixture_mae={lFixtureMae} dq_mae={dqMae} dk_mae={dkMae} dv_mae={dvMae} dkdv_mae={dkdvMae}"
+  let dvMaxErr := torch.nn.item (torch.nn.maxAll (torch.nn.abs (dV - expectedDV)))
+  IO.println s!"mha_h100 fwd_ok={outOk} l_ok={lOk} l_kernel_consistent={lKernelConsistent} l_fixture_consistent={lFixtureConsistent} dq_ok={dqOk} dk_ok={dkOk} dv_ok={dvOk} out_mae={outMae} out_max={outMaxErr} l_mae={lMae} l_max={lMaxErr} l_kernel_mae={lKernelMae} l_fixture_mae={lFixtureMae} dq_mae={dqMae} dq_max={dqMaxErr} dk_mae={dkMae} dk_max={dkMaxErr} dv_mae={dvMae} dv_max={dvMaxErr}"
 
   pure (outOk && lOk && dqOk && dkOk && dvOk)
 
-unsafe def main (args : List String) : IO UInt32 := do
+def main (args : List String) : IO UInt32 := do
   runWithFixtures args fixtureSpec generateFixtures runOnce
 
 end Examples.GPU
 
-unsafe def main : List String → IO UInt32 := Examples.GPU.main
+def main : List String → IO UInt32 := Examples.GPU.main

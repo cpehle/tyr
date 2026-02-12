@@ -70,9 +70,9 @@ def runOnce : IO Bool := do
   IO.println s!"rotary allclose={ok} mae={mae} outMean={outMean} expectedMean={expMean}"
   pure ok
 
-unsafe def main (args : List String) : IO UInt32 := do
+def main (args : List String) : IO UInt32 := do
   runWithFixtures args fixtureSpec generateFixtures runOnce
 
 end Examples.GPU
 
-unsafe def main : List String → IO UInt32 := Examples.GPU.main
+def main : List String → IO UInt32 := Examples.GPU.main
