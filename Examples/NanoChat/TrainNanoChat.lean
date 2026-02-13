@@ -216,7 +216,7 @@ def runTraining (args : Args) : IO Unit := do
   if isMaster then
     IO.println s!"Training for {hp.numIterations + hp.extensionIterations} iterations"
     IO.println s!"  Cooldown fraction: {hp.cooldownFrac}"
-    IO.println s!"  Gradient accumulation: {hp.gradAccumSteps}"
+    IO.println s!"  Gradient accumulation: {effectiveGradAccumSteps hp worldSize}"
     IO.println s!"  Validation interval: {hp.valInterval}"
     IO.println ""
 
@@ -226,7 +226,7 @@ def runTraining (args : Args) : IO Unit := do
   else
     -- Initialize training state
     if isMaster then IO.println "Initializing model..."
-    let state ← TrainState.init cfg dataConfig isDistributed worldSize trainDevice
+    let state ← TrainState.init cfg dataConfig hp isDistributed worldSize trainDevice
 
     -- Check for resume
     let latestResumePath := s!"{args.checkpointDir}/latest.ckpt"
