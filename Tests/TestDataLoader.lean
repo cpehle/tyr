@@ -187,4 +187,69 @@ def testShuffleDeterminism : IO Unit := do
   else
     LeanTest.fail "Shuffle not deterministic!"
 
+private def nanochatFixtureDir : String := "data/nanochat"
 
+private def hasNanochatFixtures : IO Bool := do
+  let dirPath : System.FilePath := ⟨nanochatFixtureDir⟩
+  let dirExists ← dirPath.pathExists
+  if !dirExists then
+    return false
+  let trainExists ← data.fileExists s!"{nanochatFixtureDir}/fineweb_train_1m.bin"
+  let valExists ← data.fileExists s!"{nanochatFixtureDir}/fineweb_val_1m.bin"
+  return trainExists && valExists
+
+@[test]
+def testResolveShardPathsDirectoryAndPrefix : IO Unit := do
+  if !(← hasNanochatFixtures) then
+    return
+
+  let trainFromDir ← resolveShardPaths nanochatFixtureDir .train
+  let valFromDir ← resolveShardPaths nanochatFixtureDir .val
+
+  LeanTest.assertTrue (trainFromDir.size >= 2)
+    s!"Expected at least two train shards, got {trainFromDir.size}"
+  LeanTest.assertTrue (!valFromDir.isEmpty)
+    s!"Expected at least one validation shard in {nanochatFixtureDir}"
+
+  let trainFromPrefix ← resolveShardPaths s!"{nanochatFixtureDir}/fineweb_train" .train
+  let valFromPrefix ← resolveShardPaths s!"{nanochatFixtureDir}/fineweb_val" .val
+
+  LeanTest.assertEqual trainFromPrefix trainFromDir
+  LeanTest.assertEqual valFromPrefix valFromDir
+
+@[test]
+def testDistributedGeneratorRotatesAcrossTrainShards : IO Unit := do
+  if !(← hasNanochatFixtures) then
+    return
+
+  let cfg : Config := {
+    dataPath := nanochatFixtureDir
+    valPath := none
+    seqLen := 128
+    bosToken := 50256
+    numWorkers := 1
+    bufferSize := 1
+    seed := 42
+  }
+
+  let gen ← DistributedDataGenerator.init cfg 8 128
+  if gen.trainPaths.size < 2 then
+    LeanTest.fail s!"Expected at least two train shards, got {gen.trainPaths.size}"
+    return
+
+  let oldIdx := gen.trainPathIdx
+  let exhaustedFinder := {
+    gen.iterator.shard.bosFinder with
+      currentPos := gen.iterator.shard.bosFinder.dataLen
+  }
+  let exhaustedShard := { gen.iterator.shard with bosFinder := exhaustedFinder }
+  let exhaustedIter := { gen.iterator with shard := exhaustedShard }
+  let exhaustedGen := { gen with iterator := exhaustedIter }
+
+  let (maybeBatch, rotatedGen) ← exhaustedGen.nextBatch
+  LeanTest.assertTrue maybeBatch.isSome "Expected a batch after rotating to next shard"
+
+  let expectedIdx := (oldIdx + 1) % gen.trainPaths.size
+  LeanTest.assertEqual rotatedGen.trainPathIdx expectedIdx
+  LeanTest.assertTrue (gen.trainPaths[oldIdx]! != rotatedGen.trainPaths[rotatedGen.trainPathIdx]!)
+    "Expected rotation to switch the active shard path"

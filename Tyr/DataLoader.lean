@@ -28,6 +28,67 @@ structure Config where
   seed : UInt64 := 42
   deriving Repr, Inhabited
 
+/-! ## Path Resolution -/
+
+inductive ShardKind where
+  | train
+  | val
+
+private def shardPrefix : ShardKind → String
+  | .train => "fineweb_train_"
+  | .val => "fineweb_val_"
+
+private def sortPaths (paths : Array String) : Array String :=
+  paths.qsort (· < ·)
+
+private def listShardFilesInDir (dir : System.FilePath) (kind : ShardKind)
+    : IO (Array String) := do
+  let entries ← dir.readDir
+  let mut preferred : Array String := #[]
+  let mut anyBin : Array String := #[]
+  for e in entries do
+    if e.fileName.endsWith ".bin" then
+      let path := e.path.toString
+      anyBin := anyBin.push path
+      if e.fileName.startsWith (shardPrefix kind) then
+        preferred := preferred.push path
+  let chosen := if preferred.isEmpty then anyBin else preferred
+  return sortPaths chosen
+
+/--
+Resolve a shard path specification into concrete `.bin` files.
+
+Supports:
+1. Exact file path.
+2. Directory path (prefers `fineweb_train_*.bin` / `fineweb_val_*.bin`).
+3. Prefix path whose parent exists (e.g. `data/fineweb_val` -> `data/fineweb_val_*.bin`).
+-/
+def resolveShardPaths (pathSpec : String) (kind : ShardKind) : IO (Array String) := do
+  let p : System.FilePath := ⟨pathSpec⟩
+  if ← p.pathExists then
+    if ← p.isDir then
+      let files ← listShardFilesInDir p kind
+      if files.isEmpty then
+        throw <| IO.userError s!"No .bin files found under directory: {pathSpec}"
+      return files
+    else
+      return #[pathSpec]
+
+  let cwd : System.FilePath := ⟨"."⟩
+  let parent := p.parent.getD cwd
+  let stem := p.fileName.getD pathSpec
+  if (← parent.pathExists) && (← parent.isDir) then
+    let entries ← parent.readDir
+    let mut prefixed : Array String := #[]
+    for e in entries do
+      if e.fileName.startsWith stem && e.fileName.endsWith ".bin" then
+        prefixed := prefixed.push e.path.toString
+    let files := sortPaths prefixed
+    if !files.isEmpty then
+      return files
+
+  throw <| IO.userError s!"Could not resolve shard path: {pathSpec}"
+
 /-! ## BOS Finder -/
 
 structure BOSFinder where
@@ -247,20 +308,38 @@ structure DistributedDataGenerator where
   globalStep : UInt64
   rank : UInt64
   worldSize : UInt64
+  trainPaths : Array String
+  trainPathIdx : Nat
   deriving Repr
 
 def DistributedDataGenerator.init (config : Config) (batchSize seqLen : UInt64)
     : IO DistributedDataGenerator := do
   let isDistributed ← dist.isInitialized
   let (rank, worldSize) ← if isDistributed then dist.getRankAndWorldSize else pure (0, 1)
-  let shard ← DataShard.load config.dataPath rank worldSize config.bosToken
+  let trainPaths ← resolveShardPaths config.dataPath .train
+  let trainPathIdx := 0
+  let shard ← DataShard.load trainPaths[trainPathIdx]! rank worldSize config.bosToken
   let iterator := BatchIterator.new shard batchSize seqLen
-  return { iterator, config, globalStep := 0, rank, worldSize }
+  return { iterator, config, globalStep := 0, rank, worldSize, trainPaths, trainPathIdx }
 
 def DistributedDataGenerator.nextBatch (gen : DistributedDataGenerator)
     : IO (Option (T #[]) × DistributedDataGenerator) := do
   let (maybeBatch, newIterator) ← gen.iterator.next
-  return (maybeBatch, { gen with iterator := newIterator, globalStep := gen.globalStep + 1 })
+  match maybeBatch with
+  | some batch =>
+    return (some batch, { gen with iterator := newIterator, globalStep := gen.globalStep + 1 })
+  | none =>
+    let nextIdx := (gen.trainPathIdx + 1) % gen.trainPaths.size
+    let nextPath := gen.trainPaths[nextIdx]!
+    let shard ← DataShard.load nextPath gen.rank gen.worldSize gen.config.bosToken
+    let iter0 := BatchIterator.new shard newIterator.batchSize newIterator.seqLen
+    let (maybeBatch', iter1) ← iter0.next
+    return (maybeBatch', {
+      gen with
+        iterator := iter1
+        globalStep := gen.globalStep + 1
+        trainPathIdx := nextIdx
+    })
 
 def DistributedDataGenerator.batchSize (gen : DistributedDataGenerator) : UInt64 :=
   gen.iterator.batchSize
@@ -271,7 +350,9 @@ def DistributedDataGenerator.seqLen (gen : DistributedDataGenerator) : UInt64 :=
 /-! ## Validation and Utilities -/
 
 def loadValidationData (path : String) (_seqLen : UInt64) (bosToken : UInt64)
-    : IO DataShard := DataShard.load path 0 1 bosToken
+    : IO DataShard := do
+  let valPaths ← resolveShardPaths path .val
+  DataShard.load valPaths[0]! 0 1 bosToken
 
 def estimateRemainingTime (currentStep totalSteps : UInt64)
     (msPerStep : Float) : Float :=

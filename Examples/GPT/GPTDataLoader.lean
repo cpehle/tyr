@@ -60,11 +60,25 @@ def BatchIterator.nextGPT (iter : BatchIterator)
 def DistributedDataGenerator.nextBatchGPT (gen : DistributedDataGenerator)
     : IO (Option (T #[] × T #[]) × DistributedDataGenerator) := do
   let (maybeBatch, newIterator) ← gen.iterator.nextGPT
-  let newGen := { gen with
-    iterator := newIterator
-    globalStep := gen.globalStep + 1
-  }
-  return (maybeBatch, newGen)
+  match maybeBatch with
+  | some batch =>
+    let newGen := { gen with
+      iterator := newIterator
+      globalStep := gen.globalStep + 1
+    }
+    return (some batch, newGen)
+  | none =>
+    let nextIdx := (gen.trainPathIdx + 1) % gen.trainPaths.size
+    let nextPath := gen.trainPaths[nextIdx]!
+    let shard ← DataShard.load nextPath gen.rank gen.worldSize gen.config.bosToken
+    let iter0 := BatchIterator.new shard newIterator.batchSize newIterator.seqLen
+    let (maybeBatch', iter1) ← iter0.nextGPT
+    let newGen := { gen with
+      iterator := iter1
+      globalStep := gen.globalStep + 1
+      trainPathIdx := nextIdx
+    }
+    return (maybeBatch', newGen)
 
 /-- Update batch and sequence parameters based on training step for modded-nanogpt. -/
 def DistributedDataGenerator.updateForStepGPT (gen : DistributedDataGenerator)
