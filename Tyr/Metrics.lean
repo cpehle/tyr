@@ -25,7 +25,7 @@ def accuracy {batch num_classes : UInt64}
     (preds : T #[batch, num_classes])
     (targets : T #[batch])
     : Float :=
-  let predicted := nn.argmax preds 1  -- [batch]
+  let predicted := nn.argmax preds (1 : UInt64)  -- [batch]
   let isCorrect := eq predicted targets
   let matchesFloat := toFloat' isCorrect
   let numCorrect := nn.sumAll matchesFloat

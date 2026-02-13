@@ -59,7 +59,7 @@ def applyTemperature {s : Shape} (logits : T s) (temp : Float) : T s :=
 def sampleGreedy {batch vocabSize : UInt64} (logits : T #[batch, vocabSize])
     : IO (Array TokenId) := do
   -- Get argmax along vocab dimension - returns [batch] tensor of indices
-  let indices := nn.argmax logits 1
+  let indices := nn.argmax logits (1 : UInt64)
   -- Convert tensor to array of token IDs (use dynamic version since shape is computed)
   tensorToUInt64Array' (reshape indices #[])
 

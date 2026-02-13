@@ -1610,9 +1610,10 @@ lean_object* lean_torch_tril(lean_obj_arg /*s*/, b_lean_obj_arg input, int64_t d
 }
 
 // Top-k values (for sampling)
-lean_object* lean_torch_topk_values(lean_obj_arg /*s*/, b_lean_obj_arg input, uint64_t k, int64_t dim) {
+lean_object* lean_torch_topk_values(lean_obj_arg /*s*/, b_lean_obj_arg input, uint64_t k, uint64_t dim) {
   auto input_ = borrowTensor(input);
-  auto result_tuple = torch::topk(input_, k, dim);
+  auto dim_ = static_cast<int64_t>(dim);
+  auto result_tuple = torch::topk(input_, k, dim_);
   return fromTorchTensor(std::get<0>(result_tuple));
 }
 
@@ -1653,10 +1654,10 @@ int64_t lean_torch_item_int(lean_obj_arg /*s*/, b_lean_obj_arg input) {
 }
 
 // Argmax
-// Int64 is a single-field structure wrapping UInt64, so it's passed unboxed as uint64_t
 lean_object* lean_torch_argmax(lean_obj_arg /*s*/, b_lean_obj_arg input, uint64_t dim) {
   auto input_ = borrowTensor(input);
-  auto result_ = torch::argmax(input_, static_cast<int64_t>(dim));
+  auto dim_ = static_cast<int64_t>(dim);
+  auto result_ = torch::argmax(input_, dim_);
   return fromTorchTensor(result_);
 }
 
