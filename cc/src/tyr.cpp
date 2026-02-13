@@ -154,6 +154,16 @@ lean_object* lean_torch_get_live_tensors(lean_object* /* w */) {
     return lean_io_result_mk_ok(lean_box_uint64(static_cast<uint64_t>(g_live_lean_tensors.load())));
 }
 
+lean_object* lean_torch_manual_seed(uint64_t seed, lean_object* /*w*/) {
+  try {
+    torch::manual_seed(static_cast<int64_t>(seed));
+    return lean_io_result_mk_ok(lean_box(0));
+  } catch (const c10::Error& e) {
+    return lean_io_result_mk_error(lean_mk_io_user_error(
+      lean_mk_string(("Failed to set manual seed: " + std::string(e.what())).c_str())));
+  }
+}
+
 // ============================================================================
 // Tensor metadata extraction for visualization widgets
 // ============================================================================

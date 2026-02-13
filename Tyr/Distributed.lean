@@ -47,6 +47,10 @@ structure WorkHandle where
 @[extern "lean_torch_dist_init_process_group"]
 opaque initProcessGroup (backend masterAddr : @& String) (masterPort rank worldSize : UInt64) : IO Unit
 
+/-- Set the current CUDA device for this process (typically LOCAL_RANK). -/
+@[extern "lean_torch_dist_set_cuda_device"]
+opaque setCudaDevice (device : UInt64) : IO Unit
+
 /-- Get the rank of this process -/
 @[extern "lean_torch_dist_get_rank"]
 opaque getRank : IO UInt64

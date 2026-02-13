@@ -108,21 +108,30 @@ def NanoChatConfig.getCheckpointDir (cfg : NanoChatConfig) (stage : String) : IO
 
 /-! ## Device & Data Adapters -/
 
-/-- Resolve training device from TYR_DEVICE and distributed rank. -/
-def resolveTrainingDevice (rank : UInt64) (isDistributed : Bool) : IO Device := do
+/-- Get local rank from environment (for torchrun). -/
+def getLocalRankFromEnv : IO UInt64 := do
+  let envVar ← IO.getEnv "LOCAL_RANK"
+  match envVar with
+  | some r => pure r.toNat!.toUInt64
+  | none => pure 0
+
+/-- Resolve training device from TYR_DEVICE.
+    In distributed mode, CUDA ordinal follows LOCAL_RANK (per-node index). -/
+def resolveTrainingDevice (_rank localRank : UInt64) (isDistributed : Bool) : IO Device := do
+  let cudaOrdinal := if isDistributed then localRank else 0
   let requested? := (← IO.getEnv "TYR_DEVICE").map String.toLower
   match requested? with
   | some "cpu" => pure Device.CPU
   | some "mps" => pure Device.MPS
-  | some "cuda" => pure (Device.CUDA (if isDistributed then rank else 0))
+  | some "cuda" => pure (Device.CUDA cudaOrdinal)
   | some "auto" | none =>
     if isDistributed then
-      if ← cuda_is_available then pure (Device.CUDA rank) else pure Device.CPU
+      if ← cuda_is_available then pure (Device.CUDA cudaOrdinal) else pure Device.CPU
     else
       getBestDevice
   | some _ =>
     if isDistributed then
-      if ← cuda_is_available then pure (Device.CUDA rank) else pure Device.CPU
+      if ← cuda_is_available then pure (Device.CUDA cudaOrdinal) else pure Device.CPU
     else
       getBestDevice
 
@@ -347,20 +356,23 @@ def pretrainBaseModel (cfg : NanoChatConfig) : PipelineM Unit := do
 
   -- Check for existing checkpoint to resume
   let ckptPath := s!"{checkpointDir}/latest.ckpt"
-  let _existingCkpt ← loadCheckpoint modelCfg ckptPath
+  let hasCheckpoint ← checkpointExists ckptPath
 
   -- Initialize or resume training state
   let isDistributed ← dist.isInitialized
   let (rank, worldSize) ← if isDistributed then dist.getRankAndWorldSize else pure (0, 1)
-  let trainDevice ← resolveTrainingDevice rank isDistributed
+  let localRank ← getLocalRankFromEnv
+  let trainDevice ← resolveTrainingDevice rank localRank isDistributed
   let isMaster := rank == 0
 
   -- Run distributed training
   if isMaster then
     log s!"Starting training with {worldSize} GPUs"
     log s!"Data path: {dataDir}"
+    if hasCheckpoint then
+      log s!"Resuming base pretraining from {ckptPath}"
 
-  trainDistributed modelCfg hp dataConfig trainDevice
+  let _finalState ← trainDistributed modelCfg hp dataConfig trainDevice checkpointDir none
 
   -- Estimate parameters for logging
   let numParams := modelCfg.vocabSize.toNat * modelCfg.modelDim.toNat +  -- embeddings
@@ -483,64 +495,58 @@ def midtrain (cfg : NanoChatConfig) : PipelineM Unit := do
   let midCheckpointDir ← cfg.getCheckpointDir "mid"
   IO.FS.createDirAll ⟨midCheckpointDir⟩
 
-  -- Load base model checkpoint
-  let ckptPath := s!"{baseCheckpointDir}/latest.ckpt"
-  log s!"Loading base checkpoint from {ckptPath}"
-  let maybeCkpt ← loadCheckpoint modelCfg ckptPath
+  -- Midtraining hyperparameters (lower LR, shorter training)
+  let hp : Hyperparameters := {
+    numIterations := 500
+    cooldownFrac := 0.3
+    valInterval := 25
+    logInterval := 5
+  }
 
-  match maybeCkpt with
-  | none =>
-    throw $ IO.userError s!"Base checkpoint not found at {ckptPath}"
-  | some baseCkpt =>
-    log s!"Loaded base checkpoint at step {baseCkpt.step}"
+  -- Create data config for task data
+  -- TODO: Replace with task mixture data (conversation tokens, tool use)
+  let dataDir ← cfg.getDataDir
+  let dataConfig : DataLoader.Config := {
+    dataPath := dataDir
+    bosToken := 0
+    seqLen := hp.maxSeqLen
+  }
 
-    -- Midtraining hyperparameters (lower LR, shorter training)
-    let hp : Hyperparameters := {
-      numIterations := 500
-      cooldownFrac := 0.3
-      valInterval := 25
-      logInterval := 5
-    }
+  -- Resume policy:
+  -- 1) If mid checkpoint exists, continue from it.
+  -- 2) Otherwise bootstrap midtraining from base/latest checkpoint.
+  let baseCkptPath := s!"{baseCheckpointDir}/latest.ckpt"
+  let midCkptPath := s!"{midCheckpointDir}/latest.ckpt"
+  let hasMid ← checkpointExists midCkptPath
+  let hasBase ← checkpointExists baseCkptPath
 
-    -- Initialize optimizer from checkpoint params
-    let optState := OptimizerState.init modelCfg baseCkpt.params 0.01 0.01  -- Lower LR for midtraining
+  if !hasMid && !hasBase then
+    throw <| IO.userError s!"Base checkpoint not found at {baseCkptPath}"
 
-    -- Create data config for task data
-    -- TODO: Replace with task mixture data (conversation tokens, tool use)
-    -- Currently uses raw pretraining data; trainDistributed creates its own YaRN
-    let dataDir ← cfg.getDataDir
-    let dataConfig : DataLoader.Config := {
-      dataPath := dataDir
-      bosToken := 0
-      seqLen := hp.maxSeqLen
-    }
+  let resumePath : Option String :=
+    if hasMid then none else some baseCkptPath
 
-    -- Run training loop
-    let isDistributed ← dist.isInitialized
-    let (rank, worldSize) ← if isDistributed then dist.getRankAndWorldSize else pure (0, 1)
-    let trainDevice ← resolveTrainingDevice rank isDistributed
-    let isMaster := rank == 0
+  -- Run training loop
+  let isDistributed ← dist.isInitialized
+  let (rank, worldSize) ← if isDistributed then dist.getRankAndWorldSize else pure (0, 1)
+  let localRank ← getLocalRankFromEnv
+  let trainDevice ← resolveTrainingDevice rank localRank isDistributed
+  let isMaster := rank == 0
 
-    if isMaster then
-      log s!"Starting midtraining with {worldSize} GPUs"
+  if isMaster then
+    log s!"Starting midtraining with {worldSize} GPUs"
+    if hasMid then
+      log s!"Resuming midtraining from {midCkptPath}"
+    else
+      log s!"Bootstrapping midtraining from base checkpoint {baseCkptPath}"
 
-    trainDistributed modelCfg hp dataConfig trainDevice
+  let _finalState ← trainDistributed modelCfg hp dataConfig trainDevice midCheckpointDir resumePath
 
-    -- Save midtraining checkpoint
-    if isMaster then
-      let midCkpt : Checkpoint modelCfg := {
-        params := baseCkpt.params  -- Would be updated params after training
-        optState := optState
-        step := hp.numIterations
-        bestValLoss := baseCkpt.bestValLoss
-      }
-      saveCheckpoint midCkpt s!"{midCheckpointDir}/latest.ckpt"
-
-    recordMetrics [
-      ("steps", toString hp.numIterations),
-      ("base_checkpoint", baseCheckpointDir),
-      ("mid_checkpoint", midCheckpointDir)
-    ]
+  recordMetrics [
+    ("steps", toString hp.numIterations),
+    ("base_checkpoint", baseCheckpointDir),
+    ("mid_checkpoint", midCheckpointDir)
+  ]
 
 /-- Evaluate chat model at a checkpoint -/
 def evalChat (cfg : NanoChatConfig) (checkpoint : String) : PipelineM Unit := do

@@ -13,6 +13,10 @@
 #include <torch/csrc/distributed/c10d/TCPStore.hpp>
 
 #if defined(USE_C10D_NCCL)
+#include <c10/cuda/CUDAFunctions.h>
+#endif
+
+#if defined(USE_C10D_NCCL)
 #include <torch/csrc/distributed/c10d/ProcessGroupNCCL.hpp>
 #define TYR_HAS_NCCL 1
 #endif
@@ -65,9 +69,42 @@ c10d::ReduceOp::RedOpType reduceOpFromInt(uint8_t op) {
     }
 }
 
+void maybeSetCurrentCudaDeviceFromTensor(const torch::Tensor& t) {
+#if TYR_HAS_NCCL
+    if (t.is_cuda()) {
+        c10::cuda::set_device(static_cast<c10::DeviceIndex>(t.get_device()));
+    }
+#else
+    (void)t;
+#endif
+}
+
 } // anonymous namespace
 
 extern "C" {
+
+/**
+ * Set the current CUDA device for this process.
+ *
+ * This should be called with LOCAL_RANK before NCCL collectives to avoid
+ * duplicate-device communicator initialization.
+ */
+lean_object* lean_torch_dist_set_cuda_device(uint64_t device, lean_object* /*w*/) {
+    try {
+#if TYR_HAS_NCCL
+        if (!torch::cuda::is_available()) {
+            return lean_io_result_mk_ok(lean_box(0));
+        }
+        c10::cuda::set_device(static_cast<c10::DeviceIndex>(device));
+#else
+        (void)device;
+#endif
+        return lean_io_result_mk_ok(lean_box(0));
+    } catch (const std::exception& e) {
+        return lean_io_result_mk_error(lean_mk_io_user_error(
+            lean_mk_string(("Failed to set CUDA device: " + std::string(e.what())).c_str())));
+    }
+}
 
 /**
  * Initialize the distributed process group.
@@ -255,6 +292,7 @@ lean_object* lean_torch_dist_all_reduce(
 
     try {
         auto t = borrowTensor(tensor);
+        maybeSetCurrentCudaDeviceFromTensor(t);
         std::vector<torch::Tensor> tensors = {t};
 
         c10d::AllreduceOptions opts;
@@ -298,6 +336,7 @@ lean_object* lean_torch_dist_broadcast(
 
     try {
         auto t = borrowTensor(tensor);
+        maybeSetCurrentCudaDeviceFromTensor(t);
         std::vector<torch::Tensor> tensors = {t};
 
         c10d::BroadcastOptions opts;
@@ -342,6 +381,7 @@ lean_object* lean_torch_dist_reduce_scatter_tensor(
     try {
         auto out_tensor = borrowTensor(output);
         auto in_tensor = borrowTensor(input);
+        maybeSetCurrentCudaDeviceFromTensor(out_tensor);
 
         c10d::ReduceScatterOptions opts;
         opts.reduceOp = c10d::ReduceOp(reduceOpFromInt(op));
@@ -401,6 +441,7 @@ lean_object* lean_torch_dist_all_gather_into_tensor(
     try {
         auto out_tensor = borrowTensor(output);
         auto in_tensor = borrowTensor(input);
+        maybeSetCurrentCudaDeviceFromTensor(in_tensor);
 
         // Split output into world_size chunks to receive each rank's data
         auto output_chunks = out_tensor.chunk(g_world_size);

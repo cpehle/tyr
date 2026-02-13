@@ -18,6 +18,7 @@ import Tyr.TensorStruct
 import Tyr.Distributed
 import Examples.NanoChat.ModdedGPT
 import Tyr.DataLoader
+import Tyr.Checkpoint
 import Examples.GPT.GPTDataLoader
 import Tyr.Optim
 import Tyr.Optim.NorMuon
@@ -370,25 +371,93 @@ structure Checkpoint (cfg : moddedGpt.Config) where
   /-- Best validation loss -/
   bestValLoss : Float
 
+/-- Check whether a serialized checkpoint exists at `path`. -/
+def checkpointExists (path : String) : IO Bool := do
+  data.fileExists s!"{path}/step.pt"
+
+private def saveScalarUInt64 (value : UInt64) (path : String) : IO Unit := do
+  let t := data.fromInt64Array #[value.toInt64]
+  data.saveTensor t path
+
+private def loadScalarUInt64 (path : String) : IO UInt64 := do
+  let t ← data.loadTensor #[1] path
+  let vals ← data.tensorToUInt64Array t
+  match vals[0]? with
+  | some v => pure v
+  | none => throw <| IO.userError s!"Missing scalar value in {path}"
+
+private def saveScalarFloat (value : Float) (path : String) : IO Unit := do
+  let t := full #[] value
+  data.saveTensor t path
+
+private def loadScalarFloat (path : String) : IO Float := do
+  let t ← data.loadTensor #[] path
+  pure (nn.item t)
+
 /-- Save a checkpoint to disk -/
 def saveCheckpoint {cfg : moddedGpt.Config} (ckpt : Checkpoint cfg) (path : String)
     : IO Unit := do
-  -- In a full implementation, serialize to disk
-  -- For now, just log parameter statistics using TensorStruct
+  IO.FS.createDirAll ⟨path⟩
+
+  checkpoint.saveParams ckpt.params path "param"
+  checkpoint.saveParams ckpt.optState.adamState path "optim_adam"
+
+  saveScalarUInt64 ckpt.step s!"{path}/step.pt"
+  saveScalarUInt64 ckpt.optState.step s!"{path}/opt_step.pt"
+  saveScalarUInt64 ckpt.optState.adamState.fst.count.toUInt64 s!"{path}/adam_count.pt"
+  saveScalarFloat ckpt.bestValLoss s!"{path}/best_val_loss.pt"
+  saveScalarFloat ckpt.optState.baseLr s!"{path}/base_lr.pt"
+  saveScalarFloat ckpt.optState.weightDecay s!"{path}/weight_decay.pt"
+
   IO.println s!"Saving checkpoint to {path} at step {ckpt.step}"
-  
+
   let numParams := TensorStruct.fold (fun {s} _t acc => acc + s.foldl (· * ·) 1) 0 ckpt.params
   let numTensors := TensorStruct.fold (fun {_s} _t acc => acc + 1) 0 ckpt.params
-  
+
   IO.println s!"  Parameters: {numTensors} tensors, {numParams} elements"
   IO.println s!"  Best validation loss: {ckpt.bestValLoss}"
 
 /-- Load a checkpoint from disk -/
 def loadCheckpoint (cfg : moddedGpt.Config) (path : String)
     : IO (Option (Checkpoint cfg)) := do
-  -- In a full implementation, deserialize from disk
-  IO.println s!"Would load checkpoint from {path}"
-  return none
+  if !(← checkpointExists path) then
+    return none
+
+  try
+    -- Templates supply the static structure and tensor shapes for deserialization.
+    let templateParams ← ModdedGPTParams.init cfg
+    let templateOpt := OptimizerState.init cfg templateParams
+
+    let params ← checkpoint.loadParams templateParams path "param"
+    let loadedAdamState ← checkpoint.loadParams templateOpt.adamState path "optim_adam"
+
+    let step ← loadScalarUInt64 s!"{path}/step.pt"
+    let optStep ← loadScalarUInt64 s!"{path}/opt_step.pt"
+    let adamCount := (← loadScalarUInt64 s!"{path}/adam_count.pt").toNat
+    let bestValLoss ← loadScalarFloat s!"{path}/best_val_loss.pt"
+    let baseLr ← loadScalarFloat s!"{path}/base_lr.pt"
+    let weightDecay ← loadScalarFloat s!"{path}/weight_decay.pt"
+
+    let adamState := {
+      loadedAdamState with
+      fst := { loadedAdamState.fst with count := adamCount }
+    }
+    let optState : OptimizerState cfg := {
+      adamState := adamState
+      step := optStep
+      baseLr := baseLr
+      weightDecay := weightDecay
+    }
+
+    return some {
+      params := params
+      optState := optState
+      step := step
+      bestValLoss := bestValLoss
+    }
+  catch e =>
+    IO.eprintln s!"Failed to load checkpoint from {path}: {e}"
+    return none
 
 /-! ## Training Loop -/
 
@@ -494,11 +563,19 @@ def runValidation (state : TrainState cfg) (_hp : Hyperparameters)
 
 /-- Main training loop -/
 def trainLoop (cfg : moddedGpt.Config) (hp : Hyperparameters)
-    (state : TrainState cfg) : IO (TrainState cfg) := do
+    (state : TrainState cfg) (checkpointDir : String := "checkpoints/modded")
+    : IO (TrainState cfg) := do
   let totalSteps := hp.numIterations + hp.extensionIterations
   let mut state := state
+  let startStep := state.optState.step
 
-  for step in [:totalSteps.toNat] do
+  IO.FS.createDirAll ⟨checkpointDir⟩
+
+  if startStep >= totalSteps then
+    IO.println s!"Training already complete at step {state.step} (target {totalSteps})"
+    return state
+
+  for step in [startStep.toNat:totalSteps.toNat] do
     let stepU := step.toUInt64
 
     -- Update schedules
@@ -550,7 +627,18 @@ def trainLoop (cfg : moddedGpt.Config) (hp : Hyperparameters)
           step := stepU
           bestValLoss := state.bestValLoss
         }
-        saveCheckpoint ckpt s!"checkpoints/step_{stepU}.ckpt"
+        let stepPath := s!"{checkpointDir}/step_{stepU}.ckpt"
+        let latestPath := s!"{checkpointDir}/latest.ckpt"
+        saveCheckpoint ckpt stepPath
+        saveCheckpoint ckpt latestPath
+
+  let finalCkpt : Checkpoint cfg := {
+    params := state.params
+    optState := state.optState
+    step := state.step
+    bestValLoss := state.bestValLoss
+  }
+  saveCheckpoint finalCkpt s!"{checkpointDir}/latest.ckpt"
 
   IO.println s!"Training complete! Total tokens: {state.totalTokens}"
   return state
@@ -748,12 +836,22 @@ def DistributedTrainState.init (cfg : moddedGpt.Config) (dataConfig : DataLoader
 
 /-- Distributed training loop with proper gradient sync -/
 def trainLoopDistributed (cfg : moddedGpt.Config) (hp : Hyperparameters)
-    (state : DistributedTrainState cfg) : IO (DistributedTrainState cfg) := do
+    (state : DistributedTrainState cfg) (checkpointDir : String := "checkpoints/modded")
+    : IO (DistributedTrainState cfg) := do
   let totalSteps := hp.numIterations + hp.extensionIterations
   let mut state := state
   let isMaster := state.rank == 0
+  let startStep := state.optState.step
 
-  for step in [:totalSteps.toNat] do
+  if isMaster then
+    IO.FS.createDirAll ⟨checkpointDir⟩
+
+  if startStep >= totalSteps then
+    if isMaster then
+      IO.println s!"Training already complete at step {state.step} (target {totalSteps})"
+    return state
+
+  for step in [startStep.toNat:totalSteps.toNat] do
     let stepU := step.toUInt64
 
     -- Update schedules
@@ -811,15 +909,28 @@ def trainLoopDistributed (cfg : moddedGpt.Config) (hp : Hyperparameters)
           step := stepU
           bestValLoss := state.bestValLoss
         }
-        saveCheckpoint ckpt s!"checkpoints/step_{stepU}.ckpt"
+        let stepPath := s!"{checkpointDir}/step_{stepU}.ckpt"
+        let latestPath := s!"{checkpointDir}/latest.ckpt"
+        saveCheckpoint ckpt stepPath
+        saveCheckpoint ckpt latestPath
 
   if isMaster then
+    let finalCkpt : Checkpoint cfg := {
+      params := state.params
+      optState := state.optState
+      step := state.step
+      bestValLoss := state.bestValLoss
+    }
+    saveCheckpoint finalCkpt s!"{checkpointDir}/latest.ckpt"
     IO.println s!"Training complete! Total tokens: {state.totalTokens}"
   return state
 
 /-- Distributed training loop wrapper -/
 def trainDistributed (cfg : moddedGpt.Config) (hp : Hyperparameters)
-    (dataConfig : DataLoader.Config) (device : Device) : IO Unit := do
+    (dataConfig : DataLoader.Config) (device : Device)
+    (checkpointDir : String := "checkpoints/modded")
+    (resume : Option String := none)
+    : IO (DistributedTrainState cfg) := do
   -- Check if distributed
   let isDistributed ← dist.isInitialized
   let (rank, worldSize) ← if isDistributed then
@@ -835,21 +946,67 @@ def trainDistributed (cfg : moddedGpt.Config) (hp : Hyperparameters)
     IO.println s!"Hyperparameters: {repr hp}"
 
   -- Initialize distributed training state
-  let state ← DistributedTrainState.init cfg dataConfig device
+  let initState ← DistributedTrainState.init cfg dataConfig device
+
+  -- Resolve resume path (explicit --resume takes precedence over latest in checkpointDir).
+  let latestPath := s!"{checkpointDir}/latest.ckpt"
+  let resumePath? ←
+    match resume with
+    | some path => pure (some path)
+    | none =>
+      if ← checkpointExists latestPath then
+        pure (some latestPath)
+      else
+        pure none
+
+  let state ←
+    match resumePath? with
+    | none => pure initState
+    | some resumePath =>
+      if isMaster then
+        IO.println s!"Resuming from checkpoint: {resumePath}"
+      match ← loadCheckpoint cfg resumePath with
+      | some ckpt =>
+        let resumedParams ← moveToDevice ckpt.params device
+        let resumedOptState : OptimizerState cfg := {
+          ckpt.optState with
+          adamState := TensorStruct.map (fun t => t.to device) ckpt.optState.adamState
+        }
+        pure {
+          initState with
+          params := resumedParams
+          optState := resumedOptState
+          step := ckpt.step
+          bestValLoss := ckpt.bestValLoss
+        }
+      | none =>
+        if resume.isSome then
+          throw <| IO.userError s!"Resume checkpoint not found or invalid: {resumePath}"
+        else
+          if isMaster then
+            IO.println s!"Warning: failed to load auto-resume checkpoint {resumePath}; starting fresh"
+          pure initState
 
   -- Synchronize parameters from rank 0
   let syncedParams ← syncParameters state.params
-  let state := { state with params := syncedParams }
+  let syncedAdamState ← if isDistributed then dist.broadcastParams state.optState.adamState else pure state.optState.adamState
+  let state := {
+    state with
+    params := syncedParams
+    optState := { state.optState with adamState := syncedAdamState }
+  }
 
   -- Barrier to ensure all ranks are ready
   if isDistributed then
     dist.barrier
 
   -- Run distributed training loop
-  let finalState ← trainLoopDistributed cfg hp state
+  let finalState ← trainLoopDistributed cfg hp state checkpointDir
 
   if isMaster then
     IO.println s!"Training finished!"
     IO.println s!"Best validation loss: {finalState.bestValLoss}"
+
+  return finalState
 
 end torch.ModdedTrain

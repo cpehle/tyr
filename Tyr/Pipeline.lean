@@ -700,10 +700,13 @@ def withDistributed (config : PipelineConfig) (action : PipelineM α) : IO α :=
   -- Initialize distributed if env vars are set
   let worldSize := (← IO.getEnv "WORLD_SIZE").bind (·.toNat?) |>.getD 1
   let rank := (← IO.getEnv "RANK").bind (·.toNat?) |>.getD 0
+  let localRank := (← IO.getEnv "LOCAL_RANK").bind (·.toNat?) |>.getD rank
   let masterAddr := (← IO.getEnv "MASTER_ADDR").getD "localhost"
   let masterPort := (← IO.getEnv "MASTER_PORT").bind (·.toNat?) |>.getD 29500
 
   if worldSize > 1 then
+    if ← cuda_is_available then
+      dist.setCudaDevice localRank.toUInt64
     dist.initProcessGroup "nccl" masterAddr masterPort.toUInt64 rank.toUInt64 worldSize.toUInt64
 
   let result ← runPipeline config action
