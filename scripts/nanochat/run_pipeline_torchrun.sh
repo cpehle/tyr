@@ -34,7 +34,11 @@ else
   unset ENABLE_RL || true
 fi
 
-export NANOCHAT_DIR="${NANOCHAT_DIR:-${REPO_ROOT}/data/nanochat_cache}"
+if [[ "${CLEAR_PIPELINE_CHECKPOINT:-1}" == "1" ]]; then
+  rm -f .pipeline_checkpoint.json
+fi
+
+export NANOCHAT_DIR="${NANOCHAT_DIR:-${REPO_ROOT}}"
 export DATA_PATH="${DATA_PATH:-data/nanochat}"
 export MODEL_DEPTH="${MODEL_DEPTH:-20}"
 export VOCAB_SIZE="${VOCAB_SIZE:-65536}"
