@@ -145,14 +145,24 @@ def ensureCOREData (cacheDir : String := "~/.cache/nanochat") : IO String := do
   let evalBundleDir := s!"{expandedCacheDir}/eval_bundle"
   let evalBundleUrl := "https://karpathy-public.s3.us-west-2.amazonaws.com/eval_bundle.zip"
 
+  let resolveBundleRoot (rootDir : String) : IO String := do
+    let directDataDir := s!"{rootDir}/eval_data"
+    if ← fileExists directDataDir then
+      return rootDir
+    let nestedRoot := s!"{rootDir}/eval_bundle"
+    let nestedDataDir := s!"{nestedRoot}/eval_data"
+    if ← fileExists nestedDataDir then
+      return nestedRoot
+    return rootDir
+
   -- Check if already exists
   if ← fileExists evalBundleDir then
-    return evalBundleDir
+    return (← resolveBundleRoot evalBundleDir)
 
   IO.println "Downloading CORE evaluation bundle..."
-  let _ ← downloadAndExtractZip evalBundleUrl evalBundleDir 5
+  let extractedRoot ← downloadAndExtractZip evalBundleUrl evalBundleDir 5
 
-  return evalBundleDir
+  return (← resolveBundleRoot extractedRoot)
 
 /-- Ensure word list is downloaded for spelling tasks.
     Returns path to words_alpha.txt. -/

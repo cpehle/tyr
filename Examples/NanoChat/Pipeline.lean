@@ -108,6 +108,49 @@ def NanoChatConfig.getCheckpointDir (cfg : NanoChatConfig) (stage : String) : IO
   let baseDir := cfg.baseDir.replace "~" (← IO.getEnv "HOME" |>.map (·.getD ""))
   return s!"{baseDir}/checkpoints/{stage}"
 
+private def resolveDataDirWithOverride (cfg : NanoChatConfig) (envVar : String) : IO String := do
+  match ← IO.getEnv envVar with
+  | some overridePath =>
+    if overridePath.startsWith "/" then
+      pure overridePath
+    else
+      let baseDir := cfg.baseDir.replace "~" (← IO.getEnv "HOME" |>.map (·.getD ""))
+      pure s!"{baseDir}/{overridePath}"
+  | none =>
+    cfg.getDataDir
+
+private def envNat (name : String) : IO (Option Nat) := do
+  pure <| (← IO.getEnv name).bind String.toNat?
+
+private def envUInt64 (name : String) : IO (Option UInt64) := do
+  pure <| (← envNat name).map (·.toUInt64)
+
+private def capArray {α : Type} (xs : Array α) (cap? : Option Nat) : Array α :=
+  match cap? with
+  | some n =>
+    let m := min n xs.size
+    xs.extract 0 m
+  | none => xs
+
+private def runOnMaster (action : PipelineM Unit) : PipelineM Unit := do
+  let isDistributed ← dist.isInitialized
+  let (rank, _) ← if isDistributed then dist.getRankAndWorldSize else pure (0, 1)
+  if rank == 0 then
+    action
+    if isDistributed then
+      dist.barrier
+  else
+    if isDistributed then
+      dist.barrier
+
+private def runOnMasterIO (action : IO Unit) : IO Unit := do
+  let isDistributed ← dist.isInitialized
+  let (rank, _) ← if isDistributed then dist.getRankAndWorldSize else pure (0, 1)
+  if rank == 0 then
+    action
+  if isDistributed then
+    dist.barrier
+
 /-! ## Device & Data Adapters -/
 
 /-- Get local rank from environment (for torchrun). -/
@@ -136,6 +179,15 @@ def resolveTrainingDevice (_rank localRank : UInt64) (isDistributed : Bool) : IO
       if ← cuda_is_available then pure (Device.CUDA cudaOrdinal) else pure Device.CPU
     else
       getBestDevice
+
+/-- Move YaRN rotary cache tensors to the target device. -/
+private def moveYarnToDevice {headDim maxSeqLen : UInt64}
+    (yarn : YarnRotary headDim maxSeqLen) (device : Device) : YarnRotary headDim maxSeqLen :=
+  { yarn with
+    cos := yarn.cos.to device
+    sin := yarn.sin.to device
+    angularFreq := yarn.angularFreq.to device
+  }
 
 /-- Load ARC task from HuggingFace parquet rows. -/
 def loadARCFromHuggingFace (subset : String) (split : String)
@@ -266,7 +318,7 @@ def loadParquetTexts (dataDir : String) (maxChars : Nat) : IO (Array String) := 
   return texts
 
 /-- Train tokenizer on parquet data -/
-def trainTokenizer (cfg : NanoChatConfig) : PipelineM Unit := do
+def trainTokenizer (cfg : NanoChatConfig) : PipelineM Unit := runOnMaster do
   log s!"Training tokenizer with vocab_size={cfg.vocabSize} on up to {cfg.tokenizerMaxChars} chars..."
 
   let dataDir ← cfg.getDataDir
@@ -305,7 +357,7 @@ def trainTokenizer (cfg : NanoChatConfig) : PipelineM Unit := do
   ]
 
 /-- Evaluate tokenizer compression ratio -/
-def evalTokenizer (cfg : NanoChatConfig) : PipelineM Unit := do
+def evalTokenizer (cfg : NanoChatConfig) : PipelineM Unit := runOnMaster do
   log "Evaluating tokenizer compression ratio..."
 
   let tokenizerPath ← cfg.getTokenizerPath
@@ -344,8 +396,16 @@ def pretrainBaseModel (cfg : NanoChatConfig) : PipelineM Unit := do
   log s!"Pretraining d{cfg.modelDepth} model..."
 
   let modelCfg := cfg.toModelConfig
-  let hp := Hyperparameters.default
-  let dataDir ← cfg.getDataDir
+  let defaultHp := Hyperparameters.default
+  let hp : Hyperparameters := {
+    defaultHp with
+    numIterations := (← envUInt64 "PRETRAIN_ITERS").getD defaultHp.numIterations
+    extensionIterations := (← envUInt64 "PRETRAIN_EXTENSION_ITERS").getD defaultHp.extensionIterations
+    valInterval := (← envUInt64 "PRETRAIN_VAL_INTERVAL").getD defaultHp.valInterval
+    logInterval := (← envUInt64 "PRETRAIN_LOG_INTERVAL").getD defaultHp.logInterval
+    checkpointInterval := (← envUInt64 "PRETRAIN_CHECKPOINT_INTERVAL").getD defaultHp.checkpointInterval
+  }
+  let dataDir ← resolveDataDirWithOverride cfg "PRETRAIN_DATA_PATH"
   let checkpointDir ← cfg.getCheckpointDir "base"
   IO.FS.createDirAll ⟨checkpointDir⟩
 
@@ -371,6 +431,7 @@ def pretrainBaseModel (cfg : NanoChatConfig) : PipelineM Unit := do
   if isMaster then
     log s!"Starting training with {worldSize} GPUs"
     log s!"Data path: {dataDir}"
+    log s!"Pretrain schedule: iters={hp.numIterations}, ext={hp.extensionIterations}, val_int={hp.valInterval}, ckpt_int={hp.checkpointInterval}"
     if hasCheckpoint then
       log s!"Resuming base pretraining from {ckptPath}"
 
@@ -389,7 +450,7 @@ def pretrainBaseModel (cfg : NanoChatConfig) : PipelineM Unit := do
   ]
 
 /-- Evaluate base model on CORE benchmark -/
-def evalBaseModel (cfg : NanoChatConfig) : PipelineM Unit := do
+def evalBaseModel (cfg : NanoChatConfig) : PipelineM Unit := runOnMaster do
   log "Evaluating base model on CORE tasks..."
 
   let modelCfg := cfg.toModelConfig
@@ -410,6 +471,7 @@ def evalBaseModel (cfg : NanoChatConfig) : PipelineM Unit := do
     recordMetrics [("CORE", "N/A"), ("checkpoint", "not found")]
   | some ckpt =>
     log s!"Loaded checkpoint from {ckptPath} at step {ckpt.step}"
+    let evalDevice := ckpt.params.embed.device
 
     -- Create tokenization function
     let tokenizeFn := fun (text : String) =>
@@ -417,13 +479,14 @@ def evalBaseModel (cfg : NanoChatConfig) : PipelineM Unit := do
 
     -- Initialize YaRN rotary embeddings for evaluation
     let yarn ← YarnRotary.init modelCfg.headDim modelCfg.maxSeqLen modelCfg.ropeBase
+    let yarn := moveYarnToDevice yarn evalDevice
 
     -- Create model forward function for evaluation
     let runModel := fun (input : T #[]) => do
       let shape := input.runtimeShape
       let batch := shape.getD 0 1
       let seq := shape.getD 1 1
-      let inputTyped : T #[batch, seq] := cast rfl input
+      let inputTyped : T #[batch, seq] := cast rfl (input.to evalDevice)
       let logits ← moddedGpt.forward (batch := batch) (seq := seq) ckpt.params yarn inputTyped
       pure (cast rfl logits : T #[])
 
@@ -431,6 +494,8 @@ def evalBaseModel (cfg : NanoChatConfig) : PipelineM Unit := do
     let evalConfig : EvalConfig := {
       bosToken := 0  -- <|bos|>
       maxSeqLen := some modelCfg.maxSeqLen
+      device := evalDevice
+      parallelAcrossRanks := false
     }
 
     let mut taskResults : Array (String × Float) := #[]
@@ -439,13 +504,15 @@ def evalBaseModel (cfg : NanoChatConfig) : PipelineM Unit := do
     let cacheDir := cfg.baseDir.replace "~" (← IO.getEnv "HOME" |>.map (·.getD ""))
     let evalBundleDir ← ensureCOREData cacheDir
     let coreConfigs ← loadCOREConfig evalBundleDir
+    let evalCap := (← envNat "CORE_MAX_EXAMPLES")
 
     for taskMeta in coreTasks do
       log s!"  Evaluating {taskMeta.taskName}..."
       -- Load task-specific data from CORE bundle
-      let examples ← match coreTaskMetaToConfig taskMeta coreConfigs with
+      let examplesRaw ← match coreTaskMetaToConfig taskMeta coreConfigs with
         | some tc => loadCORETaskData evalBundleDir tc
         | none => pure #[]
+      let examples := capArray examplesRaw evalCap
       let score ← evaluateTask examples taskMeta tokenizeFn runModel evalConfig
       taskResults := taskResults.push (taskMeta.taskName, score)
 
@@ -498,16 +565,26 @@ def midtrain (cfg : NanoChatConfig) : PipelineM Unit := do
   IO.FS.createDirAll ⟨midCheckpointDir⟩
 
   -- Midtraining hyperparameters (lower LR, shorter training)
-  let hp : Hyperparameters := {
+  let midDefaultHp : Hyperparameters := {
+    Hyperparameters.default with
     numIterations := 500
+    extensionIterations := 0
     cooldownFrac := 0.3
     valInterval := 25
     logInterval := 5
   }
+  let hp : Hyperparameters := {
+    midDefaultHp with
+    numIterations := (← envUInt64 "MIDTRAIN_ITERS").getD midDefaultHp.numIterations
+    extensionIterations := (← envUInt64 "MIDTRAIN_EXTENSION_ITERS").getD midDefaultHp.extensionIterations
+    valInterval := (← envUInt64 "MIDTRAIN_VAL_INTERVAL").getD midDefaultHp.valInterval
+    logInterval := (← envUInt64 "MIDTRAIN_LOG_INTERVAL").getD midDefaultHp.logInterval
+    checkpointInterval := (← envUInt64 "MIDTRAIN_CHECKPOINT_INTERVAL").getD midDefaultHp.checkpointInterval
+  }
 
   -- Create data config for task data
   -- TODO: Replace with task mixture data (conversation tokens, tool use)
-  let dataDir ← cfg.getDataDir
+  let dataDir ← resolveDataDirWithOverride cfg "MIDTRAIN_DATA_PATH"
   let dataConfig : DataLoader.Config := {
     dataPath := dataDir
     bosToken := 0
@@ -537,12 +614,24 @@ def midtrain (cfg : NanoChatConfig) : PipelineM Unit := do
 
   if isMaster then
     log s!"Starting midtraining with {worldSize} GPUs"
+    log s!"Midtrain schedule: iters={hp.numIterations}, ext={hp.extensionIterations}, val_int={hp.valInterval}, ckpt_int={hp.checkpointInterval}"
     if hasMid then
       log s!"Resuming midtraining from {midCkptPath}"
     else
       log s!"Bootstrapping midtraining from base checkpoint {baseCkptPath}"
 
-  let _finalState ← trainDistributed modelCfg hp dataConfig trainDevice midCheckpointDir resumePath
+  let finalState ← trainDistributed modelCfg hp dataConfig trainDevice midCheckpointDir resumePath
+
+  -- If no new step was run (e.g. resume already at horizon), ensure mid/latest exists.
+  if isMaster && !(← checkpointExists midCkptPath) then
+    let fallbackCkpt : Checkpoint modelCfg := {
+      params := finalState.params
+      optState := finalState.optState
+      step := finalState.step
+      bestValLoss := finalState.bestValLoss
+    }
+    saveCheckpoint fallbackCkpt midCkptPath
+    log s!"Materialized fallback mid checkpoint at {midCkptPath}"
 
   recordMetrics [
     ("steps", toString hp.numIterations),
@@ -551,7 +640,7 @@ def midtrain (cfg : NanoChatConfig) : PipelineM Unit := do
   ]
 
 /-- Evaluate chat model at a checkpoint -/
-def evalChat (cfg : NanoChatConfig) (checkpoint : String) : PipelineM Unit := do
+def evalChat (cfg : NanoChatConfig) (checkpoint : String) : PipelineM Unit := runOnMaster do
   log s!"Evaluating chat model ({checkpoint})..."
 
   let modelCfg := cfg.toModelConfig
@@ -572,6 +661,7 @@ def evalChat (cfg : NanoChatConfig) (checkpoint : String) : PipelineM Unit := do
     recordMetrics [("status", "checkpoint not found")]
   | some ckpt =>
     log s!"Loaded checkpoint at step {ckpt.step}"
+    let evalDevice := ckpt.params.embed.device
 
     -- Create tokenization function
     let tokenizeFn := fun (text : String) =>
@@ -579,13 +669,14 @@ def evalChat (cfg : NanoChatConfig) (checkpoint : String) : PipelineM Unit := do
 
     -- Initialize model inference components
     let yarn ← YarnRotary.init modelCfg.headDim modelCfg.maxSeqLen modelCfg.ropeBase
+    let yarn := moveYarnToDevice yarn evalDevice
 
     -- Create model forward function for evaluation
     let runModel := fun (input : T #[]) => do
       let shape := input.runtimeShape
       let batch := shape.getD 0 1
       let seq := shape.getD 1 1
-      let inputTyped : T #[batch, seq] := cast rfl input
+      let inputTyped : T #[batch, seq] := cast rfl (input.to evalDevice)
       let logits ← moddedGpt.forward (batch := batch) (seq := seq) ckpt.params yarn inputTyped
       pure (cast rfl logits : T #[])
 
@@ -593,6 +684,8 @@ def evalChat (cfg : NanoChatConfig) (checkpoint : String) : PipelineM Unit := do
     let evalConfig : EvalConfig := {
       bosToken := 0
       maxSeqLen := some modelCfg.maxSeqLen
+      device := evalDevice
+      parallelAcrossRanks := false
     }
 
     let mut results : Array (String × Float) := #[]
@@ -610,13 +703,15 @@ def evalChat (cfg : NanoChatConfig) (checkpoint : String) : PipelineM Unit := do
     let cacheDir := cfg.baseDir.replace "~" (← IO.getEnv "HOME" |>.map (·.getD ""))
     let evalBundleDir ← ensureCOREData cacheDir
     let coreConfigs ← loadCOREConfig evalBundleDir
+    let evalCap := (← envNat "CORE_MAX_EXAMPLES")
 
     for taskMeta in chatTasks do
       log s!"  Evaluating {taskMeta.taskName}..."
       -- Load task-specific data from CORE bundle
-      let examples ← match coreTaskMetaToConfig taskMeta coreConfigs with
+      let examplesRaw ← match coreTaskMetaToConfig taskMeta coreConfigs with
         | some tc => loadCORETaskData evalBundleDir tc
         | none => pure #[]
+      let examples := capArray examplesRaw evalCap
       let score ← evaluateTask examples taskMeta tokenizeFn runModel evalConfig
       results := results.push (taskMeta.taskName, score)
 
@@ -647,13 +742,17 @@ def convertConversationBatchToSFT (batch : ConversationBatch) : IO SFTBatch := d
   }
 
 /-- Run supervised fine-tuning using ChatSFT infrastructure -/
-def supervisedFineTune (cfg : NanoChatConfig) : PipelineM Unit := do
+def supervisedFineTune (cfg : NanoChatConfig) : PipelineM Unit := runOnMaster do
   log "Running supervised fine-tuning..."
 
   let modelCfg := cfg.toModelConfig
   let midCheckpointDir ← cfg.getCheckpointDir "mid"
   let sftCheckpointDir ← cfg.getCheckpointDir "sft"
   IO.FS.createDirAll ⟨sftCheckpointDir⟩
+  let isDistributed ← dist.isInitialized
+  let (rank, _) ← if isDistributed then dist.getRankAndWorldSize else pure (0, 1)
+  let localRank ← getLocalRankFromEnv
+  let trainDevice ← resolveTrainingDevice rank localRank isDistributed
 
   -- SFT configuration
   let sftCfg : SFTConfig := {
@@ -665,10 +764,16 @@ def supervisedFineTune (cfg : NanoChatConfig) : PipelineM Unit := do
     maxSeqLen := 2048
     evalEvery := 100
     logInterval := 10
+    device := trainDevice
   }
 
+  let deviceStr := match trainDevice with
+    | Device.CPU => "cpu"
+    | Device.MPS => "mps"
+    | Device.CUDA idx => s!"cuda:{idx}"
   log s!"SFT config: epochs={sftCfg.numEpochs}, batch={sftCfg.deviceBatchSize}"
   log s!"Learning rates: embed={sftCfg.embeddingLr}, matrix={sftCfg.matrixLr}"
+  log s!"SFT device: {deviceStr}"
 
   -- Load mid checkpoint
   let ckptPath := s!"{midCheckpointDir}/latest.ckpt"
@@ -680,9 +785,12 @@ def supervisedFineTune (cfg : NanoChatConfig) : PipelineM Unit := do
     throw $ IO.userError s!"Midtraining checkpoint not found at {ckptPath}"
   | some midCkpt =>
     log s!"Loaded checkpoint at step {midCkpt.step}"
+    let paramsOnDeviceRaw ← TensorStruct.mapM (fun t => pure (t.to trainDevice)) midCkpt.params
+    let paramsOnDevice := TensorStruct.makeLeafParams paramsOnDeviceRaw
 
     -- Initialize YaRN rotary embeddings
     let yarn ← YarnRotary.init modelCfg.headDim modelCfg.maxSeqLen modelCfg.ropeBase
+    let yarn := moveYarnToDevice yarn trainDevice
 
     -- Create forward function for SFT
     -- Note: T s is the same type for all s (TSpec.type), so we can cast between shapes
@@ -692,21 +800,23 @@ def supervisedFineTune (cfg : NanoChatConfig) : PipelineM Unit := do
       let batch := shape.getD 0 1
       let seq := shape.getD 1 1
       -- Call forward with explicit shape parameters using cast
-      let inputTyped : T #[batch, seq] := cast rfl input
+      let inputTyped : T #[batch, seq] := cast rfl (input.to trainDevice)
       let logits ← moddedGpt.forward (batch := batch) (seq := seq) params yarn inputTyped
       pure (cast rfl logits : T #[])
 
     -- Create masked loss function
     let lossFn := fun (logits : T #[]) (targets : T #[]) (mask : T #[]) =>
-      -- Note: Would need proper shape handling in real implementation
-      let logitsReshaped := reshape logits #[1, 1, modelCfg.vocabSize]
-      let targetsReshaped := reshape targets #[1, 1]
-      let maskReshaped := reshape mask #[1, 1]
+      let shape := targets.runtimeShape
+      let batch := shape.getD 0 1
+      let seq := shape.getD 1 1
+      let logitsReshaped : T #[batch, seq, modelCfg.vocabSize] := cast rfl logits
+      let targetsReshaped : T #[batch, seq] := cast rfl targets
+      let maskReshaped : T #[batch, seq] := cast rfl mask
       maskedCrossEntropy logitsReshaped targetsReshaped maskReshaped
 
     -- Initialize AdamW optimizer
     let opt := Optim.adamw (lr := sftCfg.embeddingLr) (b1 := 0.9) (b2 := 0.999)
-    let optState := opt.init midCkpt.params
+    let optState := opt.init paramsOnDevice
 
     -- Load tokenizer
     let tokenizerPath ← cfg.getTokenizerPath
@@ -784,14 +894,12 @@ def supervisedFineTune (cfg : NanoChatConfig) : PipelineM Unit := do
 
     -- Run SFT training loop
     log "Starting SFT training..."
-    let (finalParams, finalOptState, finalState) ← trainLoop sftCfg midCkpt.params optState
+    let (finalParams, finalOptState, finalState) ← trainLoop sftCfg paramsOnDevice optState
       forwardFn lossFn trainDataFn none numTrainExamples
 
     log s!"SFT complete: {finalState.totalTokens} tokens trained"
 
     -- Save SFT checkpoint
-    let isDistributed ← dist.isInitialized
-    let (rank, _) ← if isDistributed then dist.getRankAndWorldSize else pure (0, 1)
     if rank == 0 then
       let sftOptState : OptimizerState modelCfg := {
         midCkpt.optState with
@@ -820,7 +928,7 @@ def supervisedFineTune (cfg : NanoChatConfig) : PipelineM Unit := do
 /-! ## Reinforcement Learning Stage -/
 
 /-- Run GRPO reinforcement learning on GSM8K -/
-def reinforcementLearning (cfg : NanoChatConfig) : PipelineM Unit := do
+def reinforcementLearning (cfg : NanoChatConfig) : PipelineM Unit := runOnMaster do
   log "Running reinforcement learning (GRPO on GSM8K)..."
 
   let modelCfg := cfg.toModelConfig
@@ -829,6 +937,16 @@ def reinforcementLearning (cfg : NanoChatConfig) : PipelineM Unit := do
   let tokenizerPath ← cfg.getTokenizerPath
   let tokenizerFile := s!"{tokenizerPath}/tokenizer.bin"
   IO.FS.createDirAll ⟨rlCheckpointDir⟩
+  let isDistributed ← dist.isInitialized
+  let (rank, _) ← if isDistributed then dist.getRankAndWorldSize else pure (0, 1)
+  let localRank ← getLocalRankFromEnv
+  let trainDevice ← resolveTrainingDevice rank localRank isDistributed
+
+  let grpoExamplesPerStep := max 1 <| (← envNat "GRPO_EXAMPLES_PER_STEP").getD 16
+  let grpoEvalEvery := max 1 <| (← envNat "GRPO_EVAL_EVERY").getD 100
+  let grpoLogEvery := max 1 <| (← envNat "GRPO_LOG_EVERY").getD 10
+  let grpoEpochs := max 1 <| (← envNat "GRPO_EPOCHS").getD 3
+  let grpoMaxPrompts := (← envNat "GRPO_MAX_PROMPTS")
 
   -- GRPO configuration
   let grpoCfg : GRPOConfig := {
@@ -836,11 +954,12 @@ def reinforcementLearning (cfg : NanoChatConfig) : PipelineM Unit := do
     maxNewTokens := cfg.grpoMaxNewTokens
     temperature := 1.0
     topK := 50
-    examplesPerStep := 16
-    evalEvery := 100
+    examplesPerStep := grpoExamplesPerStep
+    evalEvery := grpoEvalEvery
+    logEvery := grpoLogEvery
   }
 
-  log s!"GRPO config: samples={grpoCfg.numSamples}, max_tokens={grpoCfg.maxNewTokens}"
+  log s!"GRPO config: samples={grpoCfg.numSamples}, max_tokens={grpoCfg.maxNewTokens}, examples_per_step={grpoCfg.examplesPerStep}, eval_every={grpoCfg.evalEvery}, log_every={grpoCfg.logEvery}, epochs={grpoEpochs}"
 
   -- Load tokenizer
   let tok ← tokenizer.load tokenizerFile
@@ -855,9 +974,13 @@ def reinforcementLearning (cfg : NanoChatConfig) : PipelineM Unit := do
     throw $ IO.userError s!"SFT checkpoint not found at {ckptPath}"
   | some sftCkpt =>
     log s!"Loaded checkpoint at step {sftCkpt.step}"
+    let paramsOnDeviceRaw ← TensorStruct.mapM (fun t => pure (t.to trainDevice)) sftCkpt.params
+    let paramsOnDevice := TensorStruct.makeLeafParams paramsOnDeviceRaw
+    let adamStateOnDevice ← TensorStruct.mapM (fun t => pure (t.to trainDevice)) sftCkpt.optState.adamState
 
     -- Initialize model components
     let yarn ← YarnRotary.init modelCfg.headDim modelCfg.maxSeqLen modelCfg.ropeBase
+    let yarn := moveYarnToDevice yarn trainDevice
 
     -- Create decode function
     let decodeFn := fun (tokens : Array UInt64) =>
@@ -866,23 +989,30 @@ def reinforcementLearning (cfg : NanoChatConfig) : PipelineM Unit := do
     -- Create generation function (single token sampling)
     let generateOneFn := fun (params : ModdedGPTParams modelCfg) (context : Array UInt64) => do
       let inputTensor := data.fromInt64Array (context.map (·.toInt64))
-      let inputReshaped := reshape inputTensor #[1, context.size.toUInt64]
+      let inputReshaped := (reshape inputTensor #[1, context.size.toUInt64]).to trainDevice
       let logits ← moddedGpt.forward params yarn inputReshaped
       -- Flatten logits and extract last position's vocab slice
       let logitsFlat := reshape logits #[context.size.toUInt64 * modelCfg.vocabSize]
       let startIdx := ((context.size - 1).toUInt64 * modelCfg.vocabSize).toInt64
       let endIdx := (context.size.toUInt64 * modelCfg.vocabSize).toInt64
       let lastLogits := data.slice1d' logitsFlat startIdx endIdx
-      let nextToken := nn.argmax (reshape lastLogits #[modelCfg.vocabSize]) 0
-      return (nn.itemInt nextToken).toUInt64
+      let rowLogits := reshape lastLogits #[1, modelCfg.vocabSize]
+      let scaled := if grpoCfg.temperature == 1.0 then rowLogits
+                    else mul_scalar rowLogits (1.0 / grpoCfg.temperature)
+      let filtered := if grpoCfg.topK == 0 then scaled
+                      else nn.topKFilter scaled grpoCfg.topK.toUInt64
+      let probs := nn.softmax filtered (-1)
+      let sampled ← nn.multinomial probs 1
+      let sampled := nn.squeezeDim sampled (-1)
+      return (nn.itemInt sampled).toUInt64
 
     -- Create forward function for policy gradient
     -- Returns per-token NLL: (input, target) → nll_per_token
     let forwardFn := fun (params : ModdedGPTParams modelCfg) (input : T #[1, 256]) (target : T #[1, 256]) => do
-      let logits ← moddedGpt.forward params yarn input
+      let logits ← moddedGpt.forward params yarn (input.to trainDevice)
       -- Compute per-token cross-entropy (NLL)
       let logitsFlat := reshape logits #[256, modelCfg.vocabSize]
-      let targetFlat := reshape target #[256]
+      let targetFlat := reshape (target.to trainDevice) #[256]
       let nllFlat := nn.cross_entropy_none logitsFlat targetFlat
       return reshape nllFlat #[1, 256]
 
@@ -891,12 +1021,22 @@ def reinforcementLearning (cfg : NanoChatConfig) : PipelineM Unit := do
     let gsm8kTask ← loadGSM8KFromHuggingFace "main" "train" cacheDir
 
     -- Convert GSM8K examples to (tokenized_prompt, question, expected_answer) tuples
-    let gsm8kPrompts : Array (Array UInt64 × String × String) :=
+    let gsm8kPromptsAll : Array (Array UInt64 × String × String) :=
       gsm8kTask.examples.filterMap fun ex => do
         let promptTokens := (tokenizer.encode tok ex.question).map (·.toUInt64)
         -- Extract the numerical answer after "#### " marker
         let expectedAnswer ← extractHashAnswer ex.answer
         some (promptTokens, ex.question, expectedAnswer)
+
+    let gsm8kPrompts :=
+      match grpoMaxPrompts with
+      | some n =>
+        let cap := min n gsm8kPromptsAll.size
+        gsm8kPromptsAll.extract 0 cap
+      | none => gsm8kPromptsAll
+
+    if gsm8kPrompts.isEmpty then
+      throw <| IO.userError "No GSM8K prompts available for GRPO"
 
     log s!"Loaded {gsm8kPrompts.size} GSM8K prompts for GRPO"
 
@@ -906,14 +1046,14 @@ def reinforcementLearning (cfg : NanoChatConfig) : PipelineM Unit := do
 
     -- Run GRPO training
     log "Starting GRPO training..."
-    let numEpochs := 3  -- Multiple passes over GSM8K
+    let numEpochs := grpoEpochs  -- Multiple passes over GSM8K
 
-    let initAdamState := sftCkpt.optState.adamState
+    let initAdamState := adamStateOnDevice
     let (finalParams, finalAdamState, result) ← trainOnPromptsWithUpdates 1 256
       gsm8kPrompts
       generateOneFn
       forwardFn
-      sftCkpt.params
+      paramsOnDevice
       initAdamState
       decodeFn
       rewardFn
@@ -923,8 +1063,6 @@ def reinforcementLearning (cfg : NanoChatConfig) : PipelineM Unit := do
     log s!"GRPO complete: best pass@1 = {result.bestPass1}"
 
     -- Save RL checkpoint
-    let isDistributed ← dist.isInitialized
-    let (rank, _) ← if isDistributed then dist.getRankAndWorldSize else pure (0, 1)
     if rank == 0 then
       let rlOptState : OptimizerState modelCfg := {
         sftCkpt.optState with
@@ -988,11 +1126,13 @@ def runNanoChatPipeline (cfg : NanoChatConfig) : PipelineM Unit := do
   -- Stage 1: Data Download
   -- Download initial data for tokenizer training
   stage "data-download-initial" do
-    downloadDataShards cfg cfg.initialDataShards
+    runOnMaster do
+      downloadDataShards cfg cfg.initialDataShards
 
   -- Spawn background download of remaining shards while tokenizer trains
   let moreDataTask ← background "download-remaining-shards" do
-    downloadDataShards cfg cfg.numDataShards
+    runOnMasterIO do
+      downloadDataShards cfg cfg.numDataShards
 
   -- Stage 2: Tokenizer
   stage "tokenizer-training" do
@@ -1042,22 +1182,20 @@ def runNanoChatPipeline (cfg : NanoChatConfig) : PipelineM Unit := do
 /-- Quick pipeline for testing (reduced settings) -/
 def runQuickPipeline (cfg : NanoChatConfig) : PipelineM Unit := do
   log "Running QUICK pipeline (testing mode)..."
+  let quickCfg := { cfg with modelDepth := 4 }
 
   -- Skip data download, use existing data
   stage "tokenizer-training" do
-    trainTokenizer cfg
+    trainTokenizer quickCfg
 
   stage "pretrain" do
-    -- Use minimal training settings
-    let quickCfg := { cfg with modelDepth := 4 }  -- Smaller model
     pretrainBaseModel quickCfg
 
   stage "midtrain" do
-    let quickCfg := { cfg with modelDepth := 4 }
     midtrain quickCfg
 
   stage "sft" do
-    supervisedFineTune cfg
+    supervisedFineTune quickCfg
 
   log "Quick pipeline complete!"
 
@@ -1067,9 +1205,15 @@ def main : IO Unit := do
   let baseDir := (← IO.getEnv "NANOCHAT_DIR").getD "~/.cache/nanochat"
   let numGpus := (← IO.getEnv "WORLD_SIZE").bind (·.toNat?) |>.getD 1
   let modelDepth := (← IO.getEnv "MODEL_DEPTH").bind (·.toNat?) |>.getD 20
+  let paramDataRatio := (← IO.getEnv "PARAM_DATA_RATIO").bind (·.toNat?) |>.getD 20
   let vocabSize := (← IO.getEnv "VOCAB_SIZE").bind (·.toNat?) |>.getD 65536
   let numShards := (← IO.getEnv "NUM_SHARDS").bind (·.toNat?) |>.getD 240
+  let initialDataShards := (← IO.getEnv "INITIAL_DATA_SHARDS").bind (·.toNat?) |>.getD 8
+  let tokenizerMaxChars := (← IO.getEnv "TOKENIZER_MAX_CHARS").bind (·.toNat?) |>.getD 2000000000
   let dataPath := (← IO.getEnv "DATA_PATH").getD "base_data"
+  let sftEpochs := (← IO.getEnv "SFT_EPOCHS").bind (·.toNat?) |>.getD 1
+  let grpoNumSamples := (← IO.getEnv "GRPO_NUM_SAMPLES").bind (·.toNat?) |>.getD 16
+  let grpoMaxNewTokens := (← IO.getEnv "GRPO_MAX_NEW_TOKENS").bind (·.toNat?) |>.getD 256
   let quickMode := (← IO.getEnv "QUICK_MODE").isSome
   let enableRL := (← IO.getEnv "ENABLE_RL").isSome
 
@@ -1079,9 +1223,15 @@ def main : IO Unit := do
     wandbRun := (← IO.getEnv "WANDB_RUN").getD "nanochat"
     numGpus := numGpus
     modelDepth := modelDepth
+    paramDataRatio := paramDataRatio
     vocabSize := vocabSize
+    tokenizerMaxChars := tokenizerMaxChars
     dataPath := dataPath
     numDataShards := numShards
+    initialDataShards := initialDataShards
+    sftEpochs := sftEpochs
+    grpoNumSamples := grpoNumSamples
+    grpoMaxNewTokens := grpoMaxNewTokens
     resumeFromCheckpoint := true
     checkpointAfterStage := true
     enableRL := enableRL
@@ -1093,9 +1243,14 @@ def main : IO Unit := do
   IO.println s!"Configuration:"
   IO.println s!"  Model depth: {cfg.modelDepth}"
   IO.println s!"  Vocab size: {cfg.vocabSize}"
+  IO.println s!"  Param/data ratio: {cfg.paramDataRatio}"
   IO.println s!"  Data path: {cfg.dataPath}"
   IO.println s!"  Num GPUs: {cfg.numGpus}"
   IO.println s!"  Data shards: {cfg.numDataShards}"
+  IO.println s!"  Initial shards: {cfg.initialDataShards}"
+  IO.println s!"  Tokenizer max chars: {cfg.tokenizerMaxChars}"
+  IO.println s!"  SFT epochs: {cfg.sftEpochs}"
+  IO.println s!"  GRPO samples: {cfg.grpoNumSamples}, max_new_tokens: {cfg.grpoMaxNewTokens}"
   IO.println s!"  Quick mode: {quickMode}"
   IO.println s!"  RL enabled: {cfg.enableRL}"
   IO.println ""

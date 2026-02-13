@@ -18,11 +18,12 @@ if [[ ! -x "${TORCHRUN_BIN}" ]]; then
 fi
 
 NPROC_PER_NODE="${NPROC_PER_NODE:-2}"
+PIPELINE_EXE="${PIPELINE_EXE:-NanoChatPipeline}"
 if [[ "${SKIP_BUILD:-0}" != "1" ]]; then
-  lake --quiet build NanoChatPipeline
+  lake --quiet build "${PIPELINE_EXE}"
 fi
 
-if [[ "${QUICK_MODE_FLAG:-1}" == "1" ]]; then
+if [[ "${QUICK_MODE_FLAG:-0}" == "1" ]]; then
   export QUICK_MODE=1
 else
   unset QUICK_MODE || true
@@ -34,22 +35,31 @@ else
   unset ENABLE_RL || true
 fi
 
-if [[ "${CLEAR_PIPELINE_CHECKPOINT:-1}" == "1" ]]; then
-  rm -f .pipeline_checkpoint.json
-fi
-
-export NANOCHAT_DIR="${NANOCHAT_DIR:-${REPO_ROOT}}"
-export DATA_PATH="${DATA_PATH:-data/nanochat}"
+export NANOCHAT_DIR="${NANOCHAT_DIR:-${HOME}/.cache/nanochat}"
+export DATA_PATH="${DATA_PATH:-base_data}"
 export MODEL_DEPTH="${MODEL_DEPTH:-20}"
 export VOCAB_SIZE="${VOCAB_SIZE:-65536}"
 export NUM_SHARDS="${NUM_SHARDS:-240}"
+if [[ -z "${PRETRAIN_DATA_PATH:-}" && -d "${REPO_ROOT}/data/nanochat" ]]; then
+  export PRETRAIN_DATA_PATH="${REPO_ROOT}/data/nanochat"
+fi
+if [[ -z "${MIDTRAIN_DATA_PATH:-}" && -n "${PRETRAIN_DATA_PATH:-}" ]]; then
+  export MIDTRAIN_DATA_PATH="${PRETRAIN_DATA_PATH}"
+fi
 
-echo "Running NanoChatPipeline with torchrun (${NPROC_PER_NODE} processes)"
+if [[ "${CLEAR_PIPELINE_CHECKPOINT:-1}" == "1" ]]; then
+  rm -f "${REPO_ROOT}/.pipeline_checkpoint.json" "${NANOCHAT_DIR}/.pipeline_checkpoint.json"
+fi
+
+echo "Running ${PIPELINE_EXE} with torchrun (${NPROC_PER_NODE} processes)"
 echo "Torchrun: ${TORCHRUN_BIN}"
-echo "QUICK_MODE=${QUICK_MODE_FLAG:-1} ENABLE_RL=${ENABLE_RL_FLAG:-0}"
+echo "Executable: ${PIPELINE_EXE}"
+echo "QUICK_MODE=${QUICK_MODE_FLAG:-0} ENABLE_RL=${ENABLE_RL_FLAG:-0}"
 echo "NANOCHAT_DIR=${NANOCHAT_DIR}"
 echo "DATA_PATH=${DATA_PATH}"
+echo "PRETRAIN_DATA_PATH=${PRETRAIN_DATA_PATH:-<unset>}"
+echo "MIDTRAIN_DATA_PATH=${MIDTRAIN_DATA_PATH:-<unset>}"
 
 exec env TYR_DEVICE="${TYR_DEVICE:-cuda}" \
   "${TORCHRUN_BIN}" --standalone --nnodes=1 --nproc_per_node="${NPROC_PER_NODE}" --no_python \
-  ./.lake/build/bin/NanoChatPipeline
+  "./.lake/build/bin/${PIPELINE_EXE}"

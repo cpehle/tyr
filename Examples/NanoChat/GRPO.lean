@@ -55,6 +55,8 @@ structure GRPOConfig where
   weightDecay : Float := 0.0
   /-- Evaluation frequency (steps) -/
   evalEvery : Nat := 100
+  /-- Logging frequency (steps) -/
+  logEvery : Nat := 10
   /-- Padding token ID -/
   padToken : Nat := 0
   /-- EOS token ID -/
@@ -172,6 +174,10 @@ def computePGLoss
     (numPasses : UInt64 := 1)
     (examplesPerRank : UInt64 := 1)
     : T #[] :=
+  let device := logProbs.device
+  let advantages := advantages.to device
+  let mask := mask.to device
+
   -- Expand advantages to [B, T] for broadcasting
   let advExpanded := nn.unsqueeze advantages 1  -- [B, 1]
   let advExpanded := nn.expand advExpanded #[b, t]  -- [B, T]
@@ -189,8 +195,8 @@ def computePGLoss
   -- Add small epsilon to avoid division by zero (equivalent to clamp(min=1))
   let numValid := nn.sumAll mask
   let numValidSafe := add_scalar numValid 1e-8
-  let normalizer := numValidSafe * (full #[] (numPasses.toFloat * examplesPerRank.toFloat))
-  let pgObjNorm := nn.div pgObj normalizer
+  let pgObjNorm := nn.div pgObj numValidSafe
+  let pgObjNorm := div_scalar pgObjNorm (numPasses.toFloat * examplesPerRank.toFloat)
 
   -- Return negative (we minimize loss, not maximize objective)
   mul_scalar pgObjNorm (-1.0)
@@ -666,6 +672,7 @@ def trainLoop (b t : UInt64)
 
   let mut state := initialState
   let mut bestPass1 : Float := 0.0
+  let logEvery := max 1 config.logEvery
 
   for step in [:numSteps] do
     -- Generate rollouts for this step
@@ -685,7 +692,7 @@ def trainLoop (b t : UInt64)
     state := newState
 
     -- Log progress
-    if step % 10 == 0 then
+    if step % logEvery == 0 || step + 1 == numSteps then
       logProgress result state
 
     -- Evaluation
@@ -739,10 +746,10 @@ def grpoStepWithModelUpdate (b t : UInt64) [TensorStruct P]
   let advantages := computeAdvantages rewards
   let tNat := t.toNat
   let mut sampleIdx := 0
-  let mut accumLoss := 0.0
+  let mut totalLoss? : Option (T #[]) := none
 
   -- Accumulate gradients across all rollout samples.
-  let workingParams := TensorStruct.zeroGrads params
+  let workingParams := TensorStruct.zeroGrads (TensorStruct.makeLeafParams params)
 
   for batch in rollouts do
     for sample in batch.samples do
@@ -779,10 +786,17 @@ def grpoStepWithModelUpdate (b t : UInt64) [TensorStruct P]
       let nllPerToken ← forwardFn workingParams inputTensor targetTensor
       let logProbs := negateToLogProb nllPerToken
       let pgLoss := computePGLoss logProbs advTensor maskTensor 1 1
-      autograd.backwardLoss pgLoss
-
-      accumLoss := accumLoss + nn.item pgLoss
+      totalLoss? := some <| match totalLoss? with
+        | some lossSoFar => torch.add lossSoFar pgLoss
+        | none => pgLoss
       sampleIdx := sampleIdx + 1
+
+  let totalLoss ← match totalLoss? with
+    | some loss => pure loss
+    | none => throw <| IO.userError "grpoStepWithModelUpdate: no losses accumulated"
+
+  let meanLossTensor := div_scalar totalLoss rewards.size.toFloat
+  autograd.backwardLoss meanLossTensor
 
   let grads := TensorStruct.grads workingParams
   let lr := state.getLr config.matrixLr config.initLrFrac
@@ -791,7 +805,7 @@ def grpoStepWithModelUpdate (b t : UInt64) [TensorStruct P]
 
   let meanReward := rewards.foldl (· + ·) 0.0 / rewards.size.toFloat
   let meanGenLen := totalGenLen.toFloat / rewards.size.toFloat
-  let meanLoss := accumLoss / rewards.size.toFloat
+  let meanLoss := nn.item meanLossTensor
 
   let newState := { state with
     step := state.step + 1
@@ -837,6 +851,7 @@ def trainLoopWithUpdates (b t : UInt64) [TensorStruct P]
   let mut bestPass1 : Float := 0.0
   let mut currentParams := params
   let mut currentOptState := optState
+  let logEvery := max 1 config.logEvery
 
   for step in [:numSteps] do
     let mut rollouts : Array RolloutBatch := #[]
@@ -857,7 +872,7 @@ def trainLoopWithUpdates (b t : UInt64) [TensorStruct P]
     currentOptState := newOptState
     state := newState
 
-    if step % 10 == 0 then
+    if step % logEvery == 0 || step + 1 == numSteps then
       logProgress result state
 
     if step > 0 && step % config.evalEvery == 0 then
