@@ -30,6 +30,17 @@ open torch.moddedGpt
 open torch.DataLoader
 open torch.Optim
 
+private def moveToDevice [TensorStruct α] (x : α) (device : Device) : IO α :=
+  TensorStruct.mapM (fun t => pure (t.to device)) x
+
+private def moveYarnToDevice {headDim maxSeqLen : UInt64}
+    (yarn : YarnRotary headDim maxSeqLen) (device : Device) : YarnRotary headDim maxSeqLen :=
+  { yarn with
+    cos := yarn.cos.to device
+    sin := yarn.sin.to device
+    angularFreq := yarn.angularFreq.to device
+  }
+
 /-! ## Hyperparameters -/
 
 /-- Training hyperparameters matching modded-nanogpt -/
@@ -312,6 +323,7 @@ def validate {cfg : moddedGpt.Config}
     (yarn : YarnRotary cfg.headDim cfg.maxSeqLen)
     (valData : DataShard)
     (batchSize seqLen : UInt64)
+    (device : Device := Device.CPU)
     (numBatches : UInt64 := 10)
     : IO ValidationResult := do
   let startTime ← IO.monoMsNow
@@ -327,8 +339,8 @@ def validate {cfg : moddedGpt.Config}
     match maybeBatch with
     | some (inputDyn, targetDyn) =>
       -- Reshape dynamic tensors to expected shape
-      let input := reshape inputDyn #[batchSize, seqLen]
-      let target := reshape targetDyn #[batchSize, seqLen]
+      let input := (reshape inputDyn #[batchSize, seqLen]).to device
+      let target := (reshape targetDyn #[batchSize, seqLen]).to device
       let lossT ← moddedGpt.loss params yarn input target false
       totalLoss := totalLoss + nn.item lossT
       numValid := numValid + 1
@@ -404,12 +416,15 @@ structure TrainState (cfg : moddedGpt.Config) where
 /-- Initialize training state -/
 def TrainState.init (cfg : moddedGpt.Config) (dataConfig : DataLoader.Config)
     (_distributed : Bool) (_worldSize : UInt64)
+    (device : Device := Device.CPU)
     (lr : Float := 0.023) (weightDecay : Float := 0.01)
     : IO (TrainState cfg) := do
   let params ← ModdedGPTParams.init cfg
   let yarn ← YarnRotary.init cfg.headDim cfg.maxSeqLen cfg.ropeBase
 
-  -- Initialize optimizer state from parameters
+  let params ← moveToDevice params device
+  let yarn := moveYarnToDevice yarn device
+  -- Initialize optimizer state from moved parameters so moment buffers match device
   let optState := OptimizerState.init cfg params lr weightDecay
 
   let initialBatchSize := getBatchSize 0
@@ -463,8 +478,9 @@ def runValidation (state : TrainState cfg) (_hp : Hyperparameters)
     let batchSize := getBatchSize state.step
     let seqLen := getSeqLen state.step
     let _windowSizes := getWindowSizes state.step  -- Kept for API compatibility
+    let device := state.params.embed.device
 
-    let valResult ← validate state.params state.yarn valData batchSize seqLen
+    let valResult ← validate state.params state.yarn valData batchSize seqLen device
 
     IO.println s!"Validation: loss={valResult.loss} time={valResult.timeMs}ms"
 
@@ -502,8 +518,9 @@ def trainLoop (cfg : moddedGpt.Config) (hp : Hyperparameters)
       continue
     | some (inputDyn, targetDyn) =>
       -- Reshape dynamic tensors to expected shape
-      let input := reshape inputDyn #[batchSize, seqLen]
-      let target := reshape targetDyn #[batchSize, seqLen]
+      let device := state.params.embed.device
+      let input := (reshape inputDyn #[batchSize, seqLen]).to device
+      let target := (reshape targetDyn #[batchSize, seqLen]).to device
 
       -- Training step with optimizer update
       let (newParams, newOptState, result) ← trainStep state.params state.yarn
@@ -667,6 +684,7 @@ structure DistributedTrainState (cfg : moddedGpt.Config) extends TrainState cfg 
 
 /-- Initialize distributed training state -/
 def DistributedTrainState.init (cfg : moddedGpt.Config) (dataConfig : DataLoader.Config)
+    (device : Device := Device.CPU)
     (lr : Float := 0.023) (weightDecay : Float := 0.01)
     : IO (DistributedTrainState cfg) := do
   -- Check distributed status
@@ -680,12 +698,24 @@ def DistributedTrainState.init (cfg : moddedGpt.Config) (dataConfig : DataLoader
   let params ← ModdedGPTParams.init cfg
   let yarn ← YarnRotary.init cfg.headDim cfg.maxSeqLen cfg.ropeBase
 
-  -- Initialize optimizer state from parameters
+  let params ← moveToDevice params device
+  let yarn := moveYarnToDevice yarn device
+  -- Initialize optimizer state from moved parameters so moment buffers match device
   let optState := OptimizerState.init cfg params lr weightDecay
 
   let initialBatchSize := getBatchSize 0
   let initialSeqLen := getSeqLen 0 cfg.blockSize
   let dataGen ← DistributedDataGenerator.init dataConfig initialBatchSize initialSeqLen
+  let valData ←
+    match dataConfig.valPath with
+    | none => pure none
+    | some valPath =>
+      try
+        let shard ← loadValidationData valPath cfg.maxSeqLen dataConfig.bosToken
+        pure (some shard)
+      catch e =>
+        IO.eprintln s!"Warning: failed to load validation data from {valPath}: {e}"
+        pure none
 
   -- Create distributed sampler if in distributed mode
   let sampler := if isDistributed then
@@ -706,7 +736,7 @@ def DistributedTrainState.init (cfg : moddedGpt.Config) (dataConfig : DataLoader
     yarn := yarn
     optState := optState
     dataGen := dataGen
-    valData := none
+    valData := valData
     step := 0
     bestValLoss := 1e30
     totalTokens := 0
@@ -744,8 +774,9 @@ def trainLoopDistributed (cfg : moddedGpt.Config) (hp : Hyperparameters)
       continue
     | some (inputDyn, targetDyn) =>
       -- Reshape dynamic tensors to expected shape
-      let input := reshape inputDyn #[batchSize, seqLen]
-      let target := reshape targetDyn #[batchSize, seqLen]
+      let device := state.params.embed.device
+      let input := (reshape inputDyn #[batchSize, seqLen]).to device
+      let target := (reshape targetDyn #[batchSize, seqLen]).to device
 
       -- Distributed training step with gradient sync
       let (newParams, newOptState, result) ← trainStepDistributed state.params state.yarn
@@ -764,8 +795,8 @@ def trainLoopDistributed (cfg : moddedGpt.Config) (hp : Hyperparameters)
       if isMaster then
         logProgress state.toTrainState result hp
 
-      -- Validation (only on master, but all ranks participate in forward pass)
-      if stepU % hp.valInterval == 0 && stepU > 0 then
+      -- Validation (master only)
+      if stepU % hp.valInterval == 0 && stepU > 0 && isMaster then
         let baseState ← runValidation state.toTrainState hp
         state := { state with
           bestValLoss := baseState.bestValLoss
@@ -788,7 +819,7 @@ def trainLoopDistributed (cfg : moddedGpt.Config) (hp : Hyperparameters)
 
 /-- Distributed training loop wrapper -/
 def trainDistributed (cfg : moddedGpt.Config) (hp : Hyperparameters)
-    (dataConfig : DataLoader.Config) : IO Unit := do
+    (dataConfig : DataLoader.Config) (device : Device) : IO Unit := do
   -- Check if distributed
   let isDistributed ← dist.isInitialized
   let (rank, worldSize) ← if isDistributed then
@@ -804,7 +835,7 @@ def trainDistributed (cfg : moddedGpt.Config) (hp : Hyperparameters)
     IO.println s!"Hyperparameters: {repr hp}"
 
   -- Initialize distributed training state
-  let state ← DistributedTrainState.init cfg dataConfig
+  let state ← DistributedTrainState.init cfg dataConfig device
 
   -- Synchronize parameters from rank 0
   let syncedParams ← syncParameters state.params

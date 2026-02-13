@@ -78,17 +78,49 @@ def getWorldSizeFromEnv : IO UInt64 := do
   | some ws => return ws.toNat!.toUInt64
   | none => return 1
 
+/-- Get global rank from environment (for distributed training). -/
+def getRankFromEnv : IO UInt64 := do
+  let envVar ← IO.getEnv "RANK"
+  match envVar with
+  | some rank => return rank.toNat!.toUInt64
+  | none => getLocalRankFromEnv
+
+/-- Render a device for logging. -/
+def deviceToString : Device → String
+  | Device.MPS => "MPS"
+  | Device.CPU => "CPU"
+  | Device.CUDA n => s!"CUDA:{n}"
+
+/-- Resolve training device from TYR_DEVICE and distributed rank. -/
+def resolveTrainingDevice (rank : UInt64) (isDistributed : Bool) : IO Device := do
+  let requested? := (← IO.getEnv "TYR_DEVICE").map String.toLower
+  match requested? with
+  | some "cpu" => pure Device.CPU
+  | some "mps" => pure Device.MPS
+  | some "cuda" => pure (Device.CUDA (if isDistributed then rank else 0))
+  | some "auto" | none =>
+    if isDistributed then
+      if ← cuda_is_available then pure (Device.CUDA rank) else pure Device.CPU
+    else
+      getBestDevice
+  | some _ =>
+    if isDistributed then
+      if ← cuda_is_available then pure (Device.CUDA rank) else pure Device.CPU
+    else
+      getBestDevice
+
 /-- Initialize distributed training if needed -/
 def initDistributedIfNeeded : IO Bool := do
   let worldSize ← getWorldSizeFromEnv
   if worldSize > 1 then
+    let rank ← getRankFromEnv
     let localRank ← getLocalRankFromEnv
     let masterAddrEnv ← IO.getEnv "MASTER_ADDR"
     let masterAddr := masterAddrEnv.getD "localhost"
     let masterPortEnv ← IO.getEnv "MASTER_PORT"
     let masterPort := (masterPortEnv.getD "29500").toNat!.toUInt64
-    IO.println s!"Initializing distributed: rank {localRank}/{worldSize} master={masterAddr}:{masterPort}"
-    dist.initProcessGroup "nccl" masterAddr masterPort localRank worldSize
+    IO.println s!"Initializing distributed: rank {rank} (local {localRank})/{worldSize} master={masterAddr}:{masterPort}"
+    dist.initProcessGroup "nccl" masterAddr masterPort rank worldSize
     return true
   else
     return false
@@ -104,6 +136,7 @@ def runTraining (args : Args) : IO Unit := do
       getRankAndWorldSize
     else
       pure (0, 1)
+  let trainDevice ← resolveTrainingDevice rank isDistributed
 
   let isMaster := rank == 0
 
@@ -113,6 +146,7 @@ def runTraining (args : Args) : IO Unit := do
     IO.println s!"  Validation path: {args.valPath}"
     IO.println s!"  Checkpoint dir: {args.checkpointDir}"
     IO.println s!"  Distributed: {isDistributed} (world size: {worldSize})"
+    IO.println s!"  Device: {deviceToString trainDevice}"
     IO.println s!"  Debug mode: {args.debug}"
     IO.println ""
 
@@ -161,49 +195,48 @@ def runTraining (args : Args) : IO Unit := do
     IO.println s!"  Validation interval: {hp.valInterval}"
     IO.println ""
 
-  -- Initialize training state
-  if isMaster then IO.println "Initializing model..."
-  let state ← TrainState.init cfg dataConfig isDistributed worldSize
-
-  -- Synchronize parameters
   if isDistributed then
-    if isMaster then IO.println "Synchronizing parameters across ranks..."
-    let _ ← syncParameters state.params
-    dist.barrier
+    if args.resume.isSome && isMaster then
+      IO.println "Warning: --resume is currently only supported in single-process mode"
+    trainDistributed cfg hp dataConfig trainDevice
+  else
+    -- Initialize training state
+    if isMaster then IO.println "Initializing model..."
+    let state ← TrainState.init cfg dataConfig isDistributed worldSize trainDevice
 
-  -- Check for resume
-  let state ← match args.resume with
-    | some path =>
-      if isMaster then IO.println s!"Resuming from checkpoint: {path}"
-      let ckpt ← loadCheckpoint cfg path
-      match ckpt with
-      | some ckpt => pure { state with
-          params := ckpt.params
-          optState := ckpt.optState
-          step := ckpt.step
-          bestValLoss := ckpt.bestValLoss
-        }
-      | none =>
-        if isMaster then IO.println "  Warning: checkpoint not found, starting fresh"
-        pure state
-    | none => pure state
+    -- Check for resume
+    let state ← match args.resume with
+      | some path =>
+        if isMaster then IO.println s!"Resuming from checkpoint: {path}"
+        let ckpt ← loadCheckpoint cfg path
+        match ckpt with
+        | some ckpt => pure { state with
+            params := ckpt.params
+            optState := ckpt.optState
+            step := ckpt.step
+            bestValLoss := ckpt.bestValLoss
+          }
+        | none =>
+          if isMaster then IO.println "  Warning: checkpoint not found, starting fresh"
+          pure state
+      | none => pure state
 
-  -- Run training
-  if isMaster then
-    IO.println ""
-    IO.println "Starting training..."
-    IO.println "=============================================================="
+    -- Run training
+    if isMaster then
+      IO.println ""
+      IO.println "Starting training..."
+      IO.println "=============================================================="
 
-  let finalState ← trainLoop cfg hp state
+    let finalState ← trainLoop cfg hp state
 
-  -- Final summary
-  if isMaster then
-    IO.println ""
-    IO.println "=============================================================="
-    IO.println "Training complete!"
-    IO.println s!"  Total steps: {finalState.step}"
-    IO.println s!"  Total tokens: {finalState.totalTokens}"
-    IO.println s!"  Best validation loss: {finalState.bestValLoss}"
+    -- Final summary
+    if isMaster then
+      IO.println ""
+      IO.println "=============================================================="
+      IO.println "Training complete!"
+      IO.println s!"  Total steps: {finalState.step}"
+      IO.println s!"  Total tokens: {finalState.totalTokens}"
+      IO.println s!"  Best validation loss: {finalState.bestValLoss}"
 
   -- Cleanup distributed
   if isDistributed then

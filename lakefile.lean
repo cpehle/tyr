@@ -6,7 +6,7 @@ def packageLinkArgs : Array String :=
   if System.Platform.isOSX then
     #[
       "-Lexternal/libtorch/lib",
-      "-ltorch", "-ltorch_cpu", "-lc10", "-lc10_cuda",
+      "-ltorch", "-ltorch_cpu", "-ltorch_cuda", "-lc10", "-lc10_cuda",
       "-L/opt/homebrew/opt/libomp/lib", "-lomp",
       "-L/opt/homebrew/lib", "-larrow", "-lparquet",
       "-Wl,-rpath,@loader_path/../../external/libtorch/lib",
@@ -16,7 +16,7 @@ def packageLinkArgs : Array String :=
   else
     #[
       "-Lexternal/libtorch/lib",
-      "-ltorch", "-ltorch_cpu", "-lc10", "-lc10_cuda",
+      "-ltorch", "-ltorch_cpu", "-ltorch_cuda", "-lc10", "-lc10_cuda",
       "-L/usr/lib", "-lgomp", "-lstdc++",
       "-larrow", "-lparquet", "-lcudart",
       "-Wl,-rpath,$ORIGIN/../../external/libtorch/lib"

@@ -48,7 +48,8 @@ AR := ar
 CXX := c++
 NVCC ?= nvcc
 EXTRA_CXX_FLAGS := -fPIC -O3 -Wall -Wno-sign-compare \
-		 -Wno-unused-parameter -Wno-missing-field-initializers -Wno-comment
+		 -Wno-unused-parameter -Wno-missing-field-initializers -Wno-comment \
+		 -DUSE_C10D_NCCL
 NVCCFLAGS := -std=c++20 -O3 --use_fast_math --expt-extended-lambda --expt-relaxed-constexpr
 NVCCFLAGS += -lineinfo -Xcompiler -fPIC
 NVCCFLAGS += -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__

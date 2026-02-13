@@ -12,12 +12,22 @@
 #include <torch/csrc/distributed/c10d/ProcessGroup.hpp>
 #include <torch/csrc/distributed/c10d/TCPStore.hpp>
 
-#ifdef USE_NCCL
+#if defined(USE_C10D_NCCL)
 #include <torch/csrc/distributed/c10d/ProcessGroupNCCL.hpp>
+#define TYR_HAS_NCCL 1
 #endif
 
-#ifdef USE_GLOO
+#if defined(USE_C10D_GLOO)
 #include <torch/csrc/distributed/c10d/ProcessGroupGloo.hpp>
+#define TYR_HAS_GLOO 1
+#endif
+
+#ifndef TYR_HAS_NCCL
+#define TYR_HAS_NCCL 0
+#endif
+
+#ifndef TYR_HAS_GLOO
+#define TYR_HAS_GLOO 0
 #endif
 
 #include <memory>
@@ -32,8 +42,8 @@ extern torch::Tensor borrowTensor(b_lean_obj_arg o);
 namespace {
 
 // Global process group state
-std::shared_ptr<c10d::ProcessGroup> g_process_group;
-std::shared_ptr<c10d::Store> g_store;
+c10::intrusive_ptr<c10d::Backend> g_process_group;
+c10::intrusive_ptr<c10d::Store> g_store;
 int g_rank = 0;
 int g_world_size = 1;
 bool g_initialized = false;
@@ -99,24 +109,28 @@ lean_object* lean_torch_dist_init_process_group(
         store_opts.numWorkers = static_cast<int>(world_size);
         store_opts.waitWorkers = true;
 
-        g_store = std::make_shared<c10d::TCPStore>(master_addr, store_opts);
+        g_store = c10::make_intrusive<c10d::TCPStore>(master_addr, store_opts);
 
-#ifdef USE_NCCL
         if (backend == "nccl") {
+#if TYR_HAS_NCCL
             auto options = c10d::ProcessGroupNCCL::Options::create();
             options->is_high_priority_stream = true;
-            g_process_group = c10d::ProcessGroupNCCL::createProcessGroupNCCL(
+            g_process_group = c10::make_intrusive<c10d::ProcessGroupNCCL>(
                 g_store, g_rank, g_world_size, options);
-        } else
+#else
+            return lean_io_result_mk_error(lean_mk_io_user_error(
+                lean_mk_string("NCCL backend requested but ProcessGroupNCCL is unavailable in this build")));
 #endif
-#ifdef USE_GLOO
-        if (backend == "gloo") {
+        } else if (backend == "gloo") {
+#if TYR_HAS_GLOO
             auto options = c10d::ProcessGroupGloo::Options::create();
             g_process_group = c10d::ProcessGroupGloo::createProcessGroupGloo(
                 g_store, g_rank, g_world_size, options);
-        } else
+#else
+            return lean_io_result_mk_error(lean_mk_io_user_error(
+                lean_mk_string("Gloo backend requested but ProcessGroupGloo is unavailable in this build")));
 #endif
-        {
+        } else {
             return lean_io_result_mk_error(lean_mk_io_user_error(
                 lean_mk_string(("Unsupported backend: " + backend).c_str())));
         }

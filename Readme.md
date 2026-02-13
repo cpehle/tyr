@@ -158,6 +158,27 @@ See [Examples/README.md](Examples/README.md) for detailed per-example documentat
 | **BranchingFlows** | Combinatorial branching flow sampler | Part of `Examples` lib |
 | **NanoProof** | Transformer theorem prover (model only) | Part of `Examples` lib |
 
+### Distributed NanoChat (GPU Node)
+
+Use the helper scripts to run `TrainNanoChat` under `torchrun` without pulling in a mismatched CUDA module stack:
+
+```bash
+# default: debug smoke run on 2 GPUs
+./scripts/nanochat/run_train_torchrun.sh
+
+# explicit 4-GPU run
+NPROC_PER_NODE=4 ./scripts/nanochat/run_train_torchrun.sh \
+  --debug --iterations 2 --data data/nanochat --val data/nanochat
+
+# scaling check (1/2/4 GPUs by default)
+./scripts/nanochat/bench_distributed.sh
+```
+
+Notes:
+- `run_train_torchrun.sh` defaults `TORCHRUN_BIN` to `/grid/it/data/elzar/easybuild/software/Anaconda3/2023.07-2/bin/torchrun`.
+- Override launcher path with `TORCHRUN_BIN=/path/to/torchrun`.
+- Override process counts in the benchmark script with `SIZES="2 4"` (or any space-separated list).
+
 ## Key Concepts
 
 ### Shape-Indexed Tensors
