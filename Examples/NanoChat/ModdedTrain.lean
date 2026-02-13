@@ -570,8 +570,8 @@ def runValidation (state : TrainState cfg) (hp : Hyperparameters)
       bestValLoss := if newBest then valResult.loss else state.bestValLoss
     }
 
-/-- Main training loop -/
-def trainStepAccum {cfg : moddedGpt.Config} {batch seq : UInt64}
+/-- Distributed training step with gradient accumulation over micro-batches. -/
+def trainStepDistributedAccum {cfg : moddedGpt.Config} {batch seq : UInt64}
     (params : ModdedGPTParams cfg)
     (yarn : YarnRotary cfg.headDim cfg.maxSeqLen)
     (microBatches : Array (T #[batch, seq] × T #[batch, seq]))
@@ -670,7 +670,7 @@ def trainLoop (cfg : moddedGpt.Config) (hp : Hyperparameters)
     if microBatches.isEmpty then
       state := { state with dataGen := newDataGen }
       continue
-    let (newParams, newOptState, result) ← trainStepAccum state.params state.yarn
+    let (newParams, newOptState, result) ← trainStepDistributedAccum state.params state.yarn
       microBatches state.optState hp
     state := { state with
       params := newParams
@@ -821,67 +821,6 @@ def trainStepDistributed {cfg : moddedGpt.Config} {batch seq : UInt64}
     weightDecay := optState.weightDecay
   }
 
-  return (newParams, newOptState, result)
-
-/-- Distributed training step with gradient accumulation over micro-batches. -/
-def trainStepDistributedAccum {cfg : moddedGpt.Config} {batch seq : UInt64}
-    (params : ModdedGPTParams cfg)
-    (yarn : YarnRotary cfg.headDim cfg.maxSeqLen)
-    (microBatches : Array (T #[batch, seq] × T #[batch, seq]))
-    (optState : OptimizerState cfg)
-    (hp : Hyperparameters)
-    (gradClip : Float := 1.0)
-    : IO (ModdedGPTParams cfg × OptimizerState cfg × StepResult) := do
-  if microBatches.isEmpty then
-    return (params, optState, { loss := 0.0, gradNorm := 0.0, tokensProcessed := 0, timeMs := 0.0 })
-  let startTime ← IO.monoMsNow
-  let isDistributed ← dist.isInitialized
-  let worldSize ← if isDistributed then dist.getWorldSize else pure 1
-  let params := TensorStruct.zeroGrads (TensorStruct.makeLeafParams params)
-  let microCount := microBatches.size.toUInt64
-  let mut totalLoss := 0.0
-  for (input, target) in microBatches do
-    let lossT ← moddedGpt.loss params yarn input target true
-    let scaledLoss := div_scalar lossT microCount.toFloat
-    autograd.backwardLoss scaledLoss
-    totalLoss := totalLoss + nn.item lossT
-  if isDistributed then
-    syncGradients params
-  if gradClip > 0 then
-    let _ ← nn.clip_grad_norm_ params.embed gradClip
-    let _ ← nn.clip_grad_norm_ params.smearGate.weight gradClip
-    for ve in params.valueEmbeds do
-      let _ ← nn.clip_grad_norm_ ve gradClip
-    for block in params.blocks do
-      match block.attn with
-      | some attn =>
-        let _ ← nn.clip_grad_norm_ attn.wQ gradClip
-        let _ ← nn.clip_grad_norm_ attn.wK gradClip
-        let _ ← nn.clip_grad_norm_ attn.wV gradClip
-        let _ ← nn.clip_grad_norm_ attn.wO gradClip
-      | none => pure ()
-      let _ ← nn.clip_grad_norm_ block.mlp.cFc gradClip
-      let _ ← nn.clip_grad_norm_ block.mlp.cProj gradClip
-    let _ ← nn.clip_grad_norm_ params.lmHead.weight gradClip
-    let _ ← nn.clip_grad_norm_ params.scalars.values gradClip
-  let grads := TensorStruct.grads params
-  let lr := getLearningRate optState.step hp optState.baseLr
-  let opt := Optim.adamw (lr := lr) (weight_decay := optState.weightDecay)
-  let (newParams, newAdamState) := Optim.step opt params grads optState.adamState
-  let endTime ← IO.monoMsNow
-  let timeMs := (endTime - startTime).toFloat
-  let result : StepResult := {
-    loss := totalLoss / microCount.toFloat
-    gradNorm := 0.0
-    tokensProcessed := batch * seq * worldSize * microCount
-    timeMs := timeMs
-  }
-  let newOptState : OptimizerState cfg := {
-    adamState := newAdamState
-    step := optState.step + 1
-    baseLr := optState.baseLr
-    weightDecay := optState.weightDecay
-  }
   return (newParams, newOptState, result)
 
 /-- Distributed training state with sampler -/
