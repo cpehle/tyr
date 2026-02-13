@@ -46,8 +46,21 @@ structure RegisteredKernel where
 /-- Persistent kernel registration stored in the env extension. -/
 abbrev RegisteredKernelSpec := RegisteredKernel
 
-/-- Persistent reference to a generated kernel spec declaration. -/
-structure RegisteredKernelRef where
+/-- Kernel declaration mode encoded by `@[gpu_kernel]`. -/
+inductive KernelDeclMode where
+  | single (arch : GpuArch)
+  | poly
+  deriving Repr, Inhabited
+
+/-- Pending kernel declaration registered by the attribute. -/
+structure PendingKernelDecl where
+  moduleName : Name
+  declName : Name
+  mode : KernelDeclMode
+  deriving Repr, Inhabited
+
+/-- Materialized kernel companion that can be evaluated in `GenerateGpuKernels`. -/
+structure KernelCompanionRef where
   moduleName : Name
   name : Name
   kernelConst : Name
@@ -57,9 +70,9 @@ structure RegisteredKernelRef where
 initialize gpuKernelRegistry : IO.Ref (Array RegisteredKernel) ←
   IO.mkRef #[]
 
-/-- Persistent registry keyed by source declaration name. -/
-initialize gpuKernelRefExt : MapDeclarationExtension (Array RegisteredKernelRef) ←
-  mkMapDeclarationExtension `gpuKernelRefExt
+/-- Persistent registry of declarations annotated with `@[gpu_kernel]`. -/
+initialize gpuKernelPendingExt : MapDeclarationExtension PendingKernelDecl ←
+  mkMapDeclarationExtension `gpuKernelPendingExt
 
 /-- Marker tag for declarations annotated with `@[gpu_kernel]`. -/
 initialize gpuKernelDeclTag : TagAttribute ←
@@ -77,10 +90,10 @@ private def dedupeKernelSpecs (specs : Array RegisteredKernelSpec) : Array Regis
       out := out.push spec
   out
 
-/-- Drop duplicate references by `(module,name,kernelConst)` identity. -/
-private def dedupeKernelRefs (refs : Array RegisteredKernelRef) : Array RegisteredKernelRef := Id.run do
+/-- Drop duplicate companion refs by `(module,name,kernelConst)` identity. -/
+private def dedupeKernelCompanions (refs : Array KernelCompanionRef) : Array KernelCompanionRef := Id.run do
   let mut seen : Std.HashSet (Name × Name × Name) := {}
-  let mut out : Array RegisteredKernelRef := #[]
+  let mut out : Array KernelCompanionRef := #[]
   for r in refs do
     let key := (r.moduleName, r.name, r.kernelConst)
     if !seen.contains key then
@@ -88,19 +101,24 @@ private def dedupeKernelRefs (refs : Array RegisteredKernelRef) : Array Register
       out := out.push r
   out
 
-/-- Get all kernel refs registered in the environment extension. -/
-def getRegisteredKernelRefs (env : Environment) : Array RegisteredKernelRef := Id.run do
-  let mut refs : Array RegisteredKernelRef := #[]
-  for (_, rs) in gpuKernelRefExt.getState env |>.toList do
-    refs := refs ++ rs
-  for modIdx in [:env.header.moduleNames.size] do
-    for (_, rs) in gpuKernelRefExt.getModuleEntries env modIdx do
-      refs := refs ++ rs
-  dedupeKernelRefs refs
+/-- Get all pending kernel declarations from the environment extension. -/
+def getPendingKernelDecls (env : Environment) : Array PendingKernelDecl := Id.run do
+  let mut decls : Array PendingKernelDecl := #[]
+  for (declName, _) in env.constants.map₁.toList do
+    if let some d := gpuKernelPendingExt.find? env declName then
+      decls := decls.push d
+  let mut seen : Std.HashSet (Name × Name) := {}
+  let mut out : Array PendingKernelDecl := #[]
+  for d in decls do
+    let key := (d.moduleName, d.declName)
+    if !seen.contains key then
+      seen := seen.insert key
+      out := out.push d
+  out
 
-/-- Register all kernel refs associated with one source declaration. -/
-def registerKernelRefsForDecl (declName : Name) (refs : Array RegisteredKernelRef) : CoreM Unit := do
-  modifyEnv fun env => gpuKernelRefExt.insert env declName refs
+/-- Register one pending kernel declaration associated with a source declaration. -/
+def registerPendingKernelDeclForDecl (declName : Name) (pending : PendingKernelDecl) : CoreM Unit := do
+  modifyEnv fun env => gpuKernelPendingExt.insert env declName pending
 
 /-- Clear runtime-registered kernels (call before importing kernel modules). -/
 def clearRegisteredKernels : IO Unit :=
@@ -596,86 +614,91 @@ def generateArchLaunchDecl (declName : Name) (suffix : String) (params : Array E
 
   elabCommand cmd
 
-/-- Collect all registered kernel refs from an imported environment. -/
-def collectRegisteredKernelRefsFromEnv (env : Environment) : Array RegisteredKernelRef :=
-  getRegisteredKernelRefs env
+/-- Derive materializable companion refs for one pending declaration. -/
+def deriveKernelCompanionRefs (pending : PendingKernelDecl) : Array KernelCompanionRef :=
+  match pending.mode with
+  | .single _ =>
+    #[{
+      moduleName := pending.moduleName
+      name := pending.declName
+      kernelConst := pending.declName ++ `kernel
+    }]
+  | .poly =>
+    #[
+      {
+        moduleName := pending.moduleName
+        name := pending.declName ++ Arch.ArchLevel.Ampere.toNameSuffix
+        kernelConst := pending.declName ++ Name.mkSimple s!"kernel{Arch.ArchLevel.Ampere.toSuffix}"
+      },
+      {
+        moduleName := pending.moduleName
+        name := pending.declName ++ Arch.ArchLevel.Hopper.toNameSuffix
+        kernelConst := pending.declName ++ Name.mkSimple s!"kernel{Arch.ArchLevel.Hopper.toSuffix}"
+      },
+      {
+        moduleName := pending.moduleName
+        name := pending.declName ++ Arch.ArchLevel.Blackwell.toNameSuffix
+        kernelConst := pending.declName ++ Name.mkSimple s!"kernel{Arch.ArchLevel.Blackwell.toSuffix}"
+      }
+    ]
 
-/-- Collect registered kernel refs only from the requested Lean modules. -/
-def collectRegisteredKernelRefsFromEnvModules
-    (env : Environment) (modules : Array Name) : Array RegisteredKernelRef :=
-  let refs := getRegisteredKernelRefs env
+/-- Collect all materializable kernel companions from an imported environment. -/
+def collectKernelCompanionRefsFromEnv (env : Environment) : Array KernelCompanionRef :=
+  let refs :=
+    (getPendingKernelDecls env).foldl (init := #[]) fun acc pending =>
+      acc ++ deriveKernelCompanionRefs pending
+  dedupeKernelCompanions refs
+
+/-- Collect materializable kernel companions only from requested modules. -/
+def collectKernelCompanionRefsFromEnvModules
+    (env : Environment) (modules : Array Name) : Array KernelCompanionRef :=
+  let refs := collectKernelCompanionRefsFromEnv env
   if modules.isEmpty then
     refs
   else
     refs.filter (fun r => modules.contains r.moduleName)
 
-/-- Attribute handler for @[gpu_kernel] and @[gpu_kernel arch] -/
+/-- Attribute handler for @[gpu_kernel] and @[gpu_kernel arch]. -/
 initialize registerBuiltinAttribute {
   name := `gpuKernelAttr
   descr := "Mark a function as a GPU kernel. Use @[gpu_kernel .SM90] for single arch, @[gpu_kernel] for polymorphic."
   applicationTime := .afterTypeChecking
   add := fun declName stx _attrKind => do
-    -- Get the declaration info
     let env ← getEnv
     let some info := env.find? declName
       | throwError s!"Declaration {declName} not found"
-
-    -- Extract parameters from the function type
     let params ← Meta.MetaM.run' (extractParams info.type)
-
-    -- Check if architecture is specified
-    match stx with
-    | `(attr| gpu_kernel $archStx) =>
-      -- Single architecture mode (existing behavior)
-      let moduleName := env.mainModule
-      let arch ← match parseArchSyntax archStx with
-        | .ok a => pure a
-        | .error e => throwError e
-
-      liftCommandElabM (generateKernelCompanion declName arch params)
-      liftCommandElabM (generateLaunchDecl declName params)
-      let kernelConst := declName ++ `kernel
-      registerKernelRefsForDecl declName #[{
-        moduleName := moduleName
-        name := declName
-        kernelConst := kernelConst
-      }]
-      gpuKernelDeclTag.setTag declName
-
-    | `(attr| gpu_kernel) =>
-      -- Polymorphic mode: check if function has ArchLevel parameter
-      let moduleName := env.mainModule
-      let isPoly ← Meta.MetaM.run' (hasArchLevelParam info.type)
-      if !isPoly then
-        throwError "Polymorphic @[gpu_kernel] requires function to have an ArchLevel parameter"
-
-      -- Generate kernel for each architecture
-      let archs := #[
-        (GpuArch.SM80, Arch.ArchLevel.Ampere),
-        (GpuArch.SM90, Arch.ArchLevel.Hopper),
-        (GpuArch.SM100, Arch.ArchLevel.Blackwell)
-      ]
-
-      let mut refs : Array RegisteredKernelRef := #[]
-      for (gpuArch, archLevel) in archs do
-        liftCommandElabM (generatePolyKernelCompanion declName gpuArch archLevel params)
-        liftCommandElabM (generateArchLaunchDecl declName archLevel.toSuffix params)
-
-        let kernelCompanion := declName ++ Name.mkSimple s!"kernel{archLevel.toSuffix}"
-        let regName := declName ++ archLevel.toNameSuffix
-        refs := refs.push {
-          moduleName := moduleName
-          name := regName
-          kernelConst := kernelCompanion
-        }
-
-      registerKernelRefsForDecl declName refs
-
-      -- Generate unified launcher
-      liftCommandElabM (generatePolyLaunchDecl declName params)
-      gpuKernelDeclTag.setTag declName
-
-    | _ => throwError "Invalid gpu_kernel attribute syntax"
+    let moduleName := env.mainModule
+    let mode ← match stx with
+      | `(attr| gpu_kernel $archStx) =>
+        let arch ← match parseArchSyntax archStx with
+          | .ok a => pure a
+          | .error e => throwError e
+        liftCommandElabM <| generateKernelCompanion declName arch params
+        liftCommandElabM <| generateLaunchDecl declName params
+        pure (.single arch)
+      | `(attr| gpu_kernel) =>
+        let isPoly ← Meta.MetaM.run' (hasArchLevelParam info.type)
+        if !isPoly then
+          throwError "Polymorphic @[gpu_kernel] requires function to have an ArchLevel parameter"
+        let archs := #[
+          (GpuArch.SM80, Arch.ArchLevel.Ampere),
+          (GpuArch.SM90, Arch.ArchLevel.Hopper),
+          (GpuArch.SM100, Arch.ArchLevel.Blackwell)
+        ]
+        for (gpuArch, archLevel) in archs do
+          liftCommandElabM <| generatePolyKernelCompanion declName gpuArch archLevel params
+          liftCommandElabM <| generateArchLaunchDecl declName archLevel.toSuffix params
+        liftCommandElabM <| generatePolyLaunchDecl declName params
+        pure .poly
+      | _ =>
+        throwError "Invalid gpu_kernel attribute syntax"
+    registerPendingKernelDeclForDecl declName {
+      moduleName := moduleName
+      declName := declName
+      mode := mode
+    }
+    gpuKernelDeclTag.setTag declName
 }
 
 /-! ## Kernel Building Macro -/
@@ -698,7 +721,7 @@ syntax "#generate_gpu_kernels" : command
 elab_rules : command
   | `(#generate_gpu_kernels) => do
     let env ← getEnv
-    let refs := collectRegisteredKernelRefsFromEnv env
+    let refs := collectKernelCompanionRefsFromEnv env
     for r in refs do
       logInfo m!"=== {r.name} ==="
       logInfo m!"kernel constant: {r.kernelConst}"

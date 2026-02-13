@@ -72,7 +72,7 @@ unsafe def evalKernelConstExpr (constName : Name) : CoreM Kernel := do
       Lean.Meta.evalExpr Kernel (mkConst ``Kernel) value
 
 unsafe def materializeKernelRefs (env : Environment)
-    (refs : Array RegisteredKernelRef) : IO (Array RegisteredKernelSpec) := do
+    (refs : Array KernelCompanionRef) : IO (Array RegisteredKernelSpec) := do
   runCoreWithEnv env do
     refs.mapM fun r => do
       try
@@ -102,7 +102,7 @@ unsafe def main (args : List String) : IO UInt32 := do
         #[({ module := `Tyr.GPU.Codegen.Attribute } : Import)] ++
         cfg.modules.map (fun m => ({ module := m } : Import))
       let env ← Lean.importModules imports {} (loadExts := true)
-      let refs := collectRegisteredKernelRefsFromEnvModules env cfg.modules
+      let refs := collectKernelCompanionRefsFromEnvModules env cfg.modules
       let regs ← materializeKernelRefs env refs
       setRegisteredKernels regs
       let written ← writeKernelCudaUnitsByModuleFrom regs cfg.outDir (clean := cfg.clean)

@@ -32,5 +32,4 @@ def copy64x64 (input : GPtr GpuFloat.Float32) (output : GPtr GpuFloat.Float32) :
 
 abbrev tkCopy := copy64x64
 
-
 end Tyr.GPU.Kernels
