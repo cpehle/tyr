@@ -106,6 +106,50 @@ def NanoChatConfig.getCheckpointDir (cfg : NanoChatConfig) (stage : String) : IO
   let baseDir := cfg.baseDir.replace "~" (← IO.getEnv "HOME" |>.map (·.getD ""))
   return s!"{baseDir}/checkpoints/{stage}"
 
+/-! ## Device & Data Adapters -/
+
+/-- Resolve training device from TYR_DEVICE and distributed rank. -/
+def resolveTrainingDevice (rank : UInt64) (isDistributed : Bool) : IO Device := do
+  let requested? := (← IO.getEnv "TYR_DEVICE").map String.toLower
+  match requested? with
+  | some "cpu" => pure Device.CPU
+  | some "mps" => pure Device.MPS
+  | some "cuda" => pure (Device.CUDA (if isDistributed then rank else 0))
+  | some "auto" | none =>
+    if isDistributed then
+      if ← cuda_is_available then pure (Device.CUDA rank) else pure Device.CPU
+    else
+      getBestDevice
+  | some _ =>
+    if isDistributed then
+      if ← cuda_is_available then pure (Device.CUDA rank) else pure Device.CPU
+    else
+      getBestDevice
+
+/-- Load ARC task from HuggingFace parquet rows. -/
+def loadARCFromHuggingFace (subset : String) (split : String)
+    (cacheDir : String := "~/.cache/huggingface") : IO ARCTask := do
+  let rows ← loadARC subset split cacheDir
+  let examples := rows.filterMap ARCExample.fromJson?
+  pure { subset, split, examples, config := {} }
+
+/-- Load GSM8K task from HuggingFace parquet rows. -/
+def loadGSM8KFromHuggingFace (subset : String := "main") (split : String := "train")
+    (cacheDir : String := "~/.cache/huggingface") : IO GSM8KTask := do
+  let rows ← loadGSM8K subset split cacheDir
+  let examples := rows.filterMap GSM8KExample.fromJson?
+  pure { subset, split, examples, config := {} }
+
+/-- Create spelling-bee task after ensuring the shared word list is available. -/
+def createSpellingBeeTaskWithDownload (cacheDir : String) (size : Nat) (split : String) : IO SpellingBeeTask := do
+  let wordListPath ← ensureWordList cacheDir
+  createSpellingBeeTask ⟨wordListPath⟩ size split
+
+/-- Create simple-spelling task after ensuring the shared word list is available. -/
+def createSimpleSpellingTaskWithDownload (cacheDir : String) (size : Nat) (split : String) : IO SimpleSpellingTask := do
+  let wordListPath ← ensureWordList cacheDir
+  createSimpleSpellingTask ⟨wordListPath⟩ size split
+
 /-! ## Data Download with Retry Logic -/
 
 /-- Download a single file with exponential backoff retry -/
@@ -308,6 +352,7 @@ def pretrainBaseModel (cfg : NanoChatConfig) : PipelineM Unit := do
   -- Initialize or resume training state
   let isDistributed ← dist.isInitialized
   let (rank, worldSize) ← if isDistributed then dist.getRankAndWorldSize else pure (0, 1)
+  let trainDevice ← resolveTrainingDevice rank isDistributed
   let isMaster := rank == 0
 
   -- Run distributed training
@@ -315,7 +360,7 @@ def pretrainBaseModel (cfg : NanoChatConfig) : PipelineM Unit := do
     log s!"Starting training with {worldSize} GPUs"
     log s!"Data path: {dataDir}"
 
-  trainDistributed modelCfg hp dataConfig
+  trainDistributed modelCfg hp dataConfig trainDevice
 
   -- Estimate parameters for logging
   let numParams := modelCfg.vocabSize.toNat * modelCfg.modelDim.toNat +  -- embeddings
@@ -473,12 +518,13 @@ def midtrain (cfg : NanoChatConfig) : PipelineM Unit := do
     -- Run training loop
     let isDistributed ← dist.isInitialized
     let (rank, worldSize) ← if isDistributed then dist.getRankAndWorldSize else pure (0, 1)
+    let trainDevice ← resolveTrainingDevice rank isDistributed
     let isMaster := rank == 0
 
     if isMaster then
       log s!"Starting midtraining with {worldSize} GPUs"
 
-    trainDistributed modelCfg hp dataConfig
+    trainDistributed modelCfg hp dataConfig trainDevice
 
     -- Save midtraining checkpoint
     if isMaster then
