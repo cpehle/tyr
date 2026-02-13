@@ -167,6 +167,12 @@ lean_exe TrainNanoChat where
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
+/-- NanoChat multi-stage pipeline executable. -/
+lean_exe NanoChatPipeline where
+  root := `Examples.NanoChat.Pipeline
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
 /-- Diffusion tests executable -/
 lean_exe TestDiffusion where
   root := `Tests.TestDiffusion

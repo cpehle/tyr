@@ -22,6 +22,7 @@
 -/
 import Tyr.Torch
 import Tyr.TensorStruct
+import Tyr.Optim
 
 namespace torch.RL.GRPO
 
@@ -702,6 +703,179 @@ def trainLoop (b t : UInt64)
     totalSteps := numSteps
   }
 
+/-- Perform one GRPO training step with parameter updates.
+
+    This variant accumulates gradients across all generated samples and applies
+    a single AdamW update to the model parameters. -/
+def grpoStepWithModelUpdate (b t : UInt64) [TensorStruct P]
+    (params : P)
+    (optState : Optim.AdamWState P)
+    (rollouts : Array RolloutBatch)
+    (forwardFn : P → T #[b, t] → T #[b, t] → IO (T #[b, t]))  -- (params, input, target) → nll_per_token
+    (config : GRPOConfig)
+    (state : GRPOState)
+    (padToken : UInt64 := 0)
+    : IO (P × Optim.AdamWState P × StepResult × GRPOState) := do
+  if b != 1 then
+    throw <| IO.userError s!"grpoStepWithModelUpdate currently requires b=1, got b={b}"
+
+  -- Flatten samples and rewards for statistics/advantages.
+  let mut rewards : Array Float := #[]
+  let mut totalGenLen := 0
+  for batch in rollouts do
+    for sample in batch.samples do
+      rewards := rewards.push sample.reward
+      totalGenLen := totalGenLen + sample.responseTokens.size
+
+  if rewards.isEmpty then
+    let result : StepResult := {
+      meanReward := 0.0
+      pgLoss := 0.0
+      numValidSamples := 0
+      meanGenLen := 0.0
+    }
+    return (params, optState, result, state)
+
+  let advantages := computeAdvantages rewards
+  let tNat := t.toNat
+  let mut sampleIdx := 0
+  let mut accumLoss := 0.0
+
+  -- Accumulate gradients across all rollout samples.
+  let workingParams := TensorStruct.zeroGrads params
+
+  for batch in rollouts do
+    for sample in batch.samples do
+      let fullSeqRaw := batch.promptTokens ++ sample.responseTokens
+      let fullSeq :=
+        if fullSeqRaw.size >= tNat + 1 then
+          fullSeqRaw.extract 0 (tNat + 1)
+        else
+          padSequence fullSeqRaw (tNat + 1) padToken
+
+      let validTargets :=
+        if fullSeqRaw.isEmpty then
+          0
+        else
+          min tNat (fullSeqRaw.size - 1)
+
+      let inputSeq := fullSeq.extract 0 tNat
+      let targetSeq := fullSeq.extract 1 (tNat + 1)
+      let maskSeq := createValidMask validTargets tNat
+
+      let inputTensor1d := data.fromInt64Array (inputSeq.map (·.toInt64))
+      let targetTensor1d := data.fromInt64Array (targetSeq.map (·.toInt64))
+      let maskTensor1d := data.fromInt64Array (maskSeq.map (fun f => if f > 0.5 then 1 else 0))
+
+      let inputTensor : T #[b, t] := reshape inputTensor1d #[b, t]
+      let targetTensor : T #[b, t] := reshape targetTensor1d #[b, t]
+      let maskTensor : T #[b, t] := reshape (toFloat' maskTensor1d) #[b, t]
+
+      let adv := advantages[sampleIdx]!
+      let advScaled : Int64 := (adv * 1000.0).toInt64
+      let advTensor1d := data.fromInt64Array #[advScaled]
+      let advTensor : T #[b] := reshape (div_scalar (toFloat' advTensor1d) 1000.0) #[b]
+
+      let nllPerToken ← forwardFn workingParams inputTensor targetTensor
+      let logProbs := negateToLogProb nllPerToken
+      let pgLoss := computePGLoss logProbs advTensor maskTensor 1 1
+      autograd.backwardLoss pgLoss
+
+      accumLoss := accumLoss + nn.item pgLoss
+      sampleIdx := sampleIdx + 1
+
+  let grads := TensorStruct.grads workingParams
+  let lr := state.getLr config.matrixLr config.initLrFrac
+  let opt := Optim.adamw (lr := lr) (b1 := 0.9) (b2 := 0.999) (weight_decay := config.weightDecay)
+  let (newParams, newOptState) := Optim.step opt workingParams grads optState
+
+  let meanReward := rewards.foldl (· + ·) 0.0 / rewards.size.toFloat
+  let meanGenLen := totalGenLen.toFloat / rewards.size.toFloat
+  let meanLoss := accumLoss / rewards.size.toFloat
+
+  let newState := { state with
+    step := state.step + 1
+    examplesProcessed := state.examplesProcessed + rollouts.size
+    runningMeanReward := 0.9 * state.runningMeanReward + 0.1 * meanReward
+  }
+
+  let result : StepResult := {
+    meanReward := meanReward
+    pgLoss := meanLoss
+    numValidSamples := rewards.size
+    meanGenLen := meanGenLen
+  }
+
+  return (newParams, newOptState, result, newState)
+
+/-- GRPO training loop that updates model parameters each step. -/
+def trainLoopWithUpdates (b t : UInt64) [TensorStruct P]
+    (getPromptFn : Nat → IO (Array UInt64 × String × String))  -- step → (tokens, text, answer)
+    (generateOneFn : P → Array UInt64 → IO UInt64)
+    (forwardFn : P → T #[b, t] → T #[b, t] → IO (T #[b, t]))
+    (params : P)
+    (optState : Optim.AdamWState P)
+    (decodeFn : Array UInt64 → String)
+    (rewardFn : String → String → Float)
+    (config : GRPOConfig)
+    (numSteps : Nat)
+    : IO (P × Optim.AdamWState P × TrainResult) := do
+
+  let genConfig : GenerationConfig := {
+    maxNewTokens := config.maxNewTokens
+    temperature := config.temperature
+    topK := config.topK
+    eosToken := config.eosToken.toUInt64
+    padToken := config.padToken.toUInt64
+  }
+
+  let initialState : GRPOState := {
+    totalSteps := numSteps
+  }
+
+  let mut state := initialState
+  let mut bestPass1 : Float := 0.0
+  let mut currentParams := params
+  let mut currentOptState := optState
+
+  for step in [:numSteps] do
+    let mut rollouts : Array RolloutBatch := #[]
+
+    for _ in [:config.examplesPerStep] do
+      let (promptTokens, promptText, expectedAnswer) ← getPromptFn step
+      let rollout ← createRolloutBatch
+        promptTokens promptText expectedAnswer
+        (fun context => generateOneFn currentParams context)
+        decodeFn rewardFn
+        config.numSamples genConfig
+      rollouts := rollouts.push rollout
+
+    let (newParams, newOptState, result, newState) ←
+      grpoStepWithModelUpdate b t currentParams currentOptState rollouts forwardFn config state config.padToken.toUInt64
+
+    currentParams := newParams
+    currentOptState := newOptState
+    state := newState
+
+    if step % 10 == 0 then
+      logProgress result state
+
+    if step > 0 && step % config.evalEvery == 0 then
+      let passK := computePassK rollouts config.numSamples
+      logEval passK step
+      if passK.pass1 > bestPass1 then
+        bestPass1 := passK.pass1
+        IO.println s!"New best pass@1: {bestPass1}"
+
+  let trainResult : TrainResult := {
+    finalState := state
+    finalPass1 := state.runningMeanReward
+    bestPass1 := bestPass1
+    totalSteps := numSteps
+  }
+
+  return (currentParams, currentOptState, trainResult)
+
 /-- Simplified training interface for when you have pre-generated prompts. -/
 def trainOnPrompts (b t : UInt64)
     (prompts : Array (Array UInt64 × String × String))  -- (tokens, text, answer)
@@ -721,5 +895,26 @@ def trainOnPrompts (b t : UInt64)
     return prompts[idx]!
 
   trainLoop b t getPromptFn generateOneFn forwardFn decodeFn rewardFn config numSteps
+
+/-- Prompt-array convenience wrapper for the update-enabled GRPO loop. -/
+def trainOnPromptsWithUpdates (b t : UInt64) [TensorStruct P]
+    (prompts : Array (Array UInt64 × String × String))  -- (tokens, text, answer)
+    (generateOneFn : P → Array UInt64 → IO UInt64)
+    (forwardFn : P → T #[b, t] → T #[b, t] → IO (T #[b, t]))
+    (params : P)
+    (optState : Optim.AdamWState P)
+    (decodeFn : Array UInt64 → String)
+    (rewardFn : String → String → Float)
+    (config : GRPOConfig)
+    (numEpochs : Nat := 1)
+    : IO (P × Optim.AdamWState P × TrainResult) := do
+
+  let numSteps := numEpochs * (prompts.size / config.examplesPerStep)
+
+  let getPromptFn := fun step => do
+    let idx := step % prompts.size
+    return prompts[idx]!
+
+  trainLoopWithUpdates b t getPromptFn generateOneFn forwardFn params optState decodeFn rewardFn config numSteps
 
 end torch.RL.GRPO

@@ -77,6 +77,8 @@ structure NanoChatConfig extends PipelineConfig where
   grpoNumSamples : Nat := 16
   /-- GRPO max new tokens -/
   grpoMaxNewTokens : Nat := 256
+  /-- Enable reinforcement-learning stages in full pipeline runs. -/
+  enableRL : Bool := false
   deriving Repr, Inhabited
 
 /-- Convert to model config -/
@@ -782,7 +784,7 @@ def supervisedFineTune (cfg : NanoChatConfig) : PipelineM Unit := do
 
     -- Run SFT training loop
     log "Starting SFT training..."
-    let (finalParams, _finalOptState, finalState) ← trainLoop sftCfg midCkpt.params optState
+    let (finalParams, finalOptState, finalState) ← trainLoop sftCfg midCkpt.params optState
       forwardFn lossFn trainDataFn none numTrainExamples
 
     log s!"SFT complete: {finalState.totalTokens} tokens trained"
@@ -791,9 +793,14 @@ def supervisedFineTune (cfg : NanoChatConfig) : PipelineM Unit := do
     let isDistributed ← dist.isInitialized
     let (rank, _) ← if isDistributed then dist.getRankAndWorldSize else pure (0, 1)
     if rank == 0 then
+      let sftOptState : OptimizerState modelCfg := {
+        midCkpt.optState with
+        adamState := finalOptState
+        step := finalState.step.toUInt64
+      }
       let sftCkpt : Checkpoint modelCfg := {
         params := finalParams
-        optState := midCkpt.optState  -- Would be updated optState
+        optState := sftOptState
         step := finalState.step.toUInt64
         bestValLoss := finalState.bestValLoss
       }
@@ -857,10 +864,10 @@ def reinforcementLearning (cfg : NanoChatConfig) : PipelineM Unit := do
       tokenizer.decode tok (tokens.map (·.toUInt32))
 
     -- Create generation function (single token sampling)
-    let generateOneFn := fun (context : Array UInt64) => do
+    let generateOneFn := fun (params : ModdedGPTParams modelCfg) (context : Array UInt64) => do
       let inputTensor := data.fromInt64Array (context.map (·.toInt64))
       let inputReshaped := reshape inputTensor #[1, context.size.toUInt64]
-      let logits ← moddedGpt.forward sftCkpt.params yarn inputReshaped
+      let logits ← moddedGpt.forward params yarn inputReshaped
       -- Flatten logits and extract last position's vocab slice
       let logitsFlat := reshape logits #[context.size.toUInt64 * modelCfg.vocabSize]
       let startIdx := ((context.size - 1).toUInt64 * modelCfg.vocabSize).toInt64
@@ -871,8 +878,8 @@ def reinforcementLearning (cfg : NanoChatConfig) : PipelineM Unit := do
 
     -- Create forward function for policy gradient
     -- Returns per-token NLL: (input, target) → nll_per_token
-    let forwardFn := fun (input : T #[1, 256]) (target : T #[1, 256]) => do
-      let logits ← moddedGpt.forward sftCkpt.params yarn input
+    let forwardFn := fun (params : ModdedGPTParams modelCfg) (input : T #[1, 256]) (target : T #[1, 256]) => do
+      let logits ← moddedGpt.forward params yarn input
       -- Compute per-token cross-entropy (NLL)
       let logitsFlat := reshape logits #[256, modelCfg.vocabSize]
       let targetFlat := reshape target #[256]
@@ -901,10 +908,13 @@ def reinforcementLearning (cfg : NanoChatConfig) : PipelineM Unit := do
     log "Starting GRPO training..."
     let numEpochs := 3  -- Multiple passes over GSM8K
 
-    let result ← trainOnPrompts 1 256
+    let initAdamState := sftCkpt.optState.adamState
+    let (finalParams, finalAdamState, result) ← trainOnPromptsWithUpdates 1 256
       gsm8kPrompts
       generateOneFn
       forwardFn
+      sftCkpt.params
+      initAdamState
       decodeFn
       rewardFn
       grpoCfg
@@ -916,9 +926,14 @@ def reinforcementLearning (cfg : NanoChatConfig) : PipelineM Unit := do
     let isDistributed ← dist.isInitialized
     let (rank, _) ← if isDistributed then dist.getRankAndWorldSize else pure (0, 1)
     if rank == 0 then
+      let rlOptState : OptimizerState modelCfg := {
+        sftCkpt.optState with
+        adamState := finalAdamState
+        step := result.totalSteps.toUInt64
+      }
       let rlCkpt : Checkpoint modelCfg := {
-        params := sftCkpt.params  -- Would be updated params
-        optState := sftCkpt.optState
+        params := finalParams
+        optState := rlOptState
         step := result.totalSteps.toUInt64
         bestValLoss := sftCkpt.bestValLoss
       }
@@ -1013,11 +1028,13 @@ def runNanoChatPipeline (cfg : NanoChatConfig) : PipelineM Unit := do
     evalChat cfg "sft"
 
   -- Stage 6: Reinforcement Learning (optional)
-  -- Uncomment to enable
-  -- stage "rl" do
-  --   reinforcementLearning cfg
-  -- stage "rl-eval" do
-  --   evalChat cfg "rl"
+  if cfg.enableRL then
+    stage "rl" do
+      reinforcementLearning cfg
+    stage "rl-eval" do
+      evalChat cfg "rl"
+  else
+    log "RL stage disabled (set ENABLE_RL=1 to enable)"
 
   log ""
   log "Pipeline complete!"
@@ -1035,6 +1052,10 @@ def runQuickPipeline (cfg : NanoChatConfig) : PipelineM Unit := do
     let quickCfg := { cfg with modelDepth := 4 }  -- Smaller model
     pretrainBaseModel quickCfg
 
+  stage "midtrain" do
+    let quickCfg := { cfg with modelDepth := 4 }
+    midtrain quickCfg
+
   stage "sft" do
     supervisedFineTune cfg
 
@@ -1048,7 +1069,9 @@ def main : IO Unit := do
   let modelDepth := (← IO.getEnv "MODEL_DEPTH").bind (·.toNat?) |>.getD 20
   let vocabSize := (← IO.getEnv "VOCAB_SIZE").bind (·.toNat?) |>.getD 65536
   let numShards := (← IO.getEnv "NUM_SHARDS").bind (·.toNat?) |>.getD 240
+  let dataPath := (← IO.getEnv "DATA_PATH").getD "base_data"
   let quickMode := (← IO.getEnv "QUICK_MODE").isSome
+  let enableRL := (← IO.getEnv "ENABLE_RL").isSome
 
   let cfg : NanoChatConfig := {
     baseDir := baseDir
@@ -1057,9 +1080,11 @@ def main : IO Unit := do
     numGpus := numGpus
     modelDepth := modelDepth
     vocabSize := vocabSize
+    dataPath := dataPath
     numDataShards := numShards
     resumeFromCheckpoint := true
     checkpointAfterStage := true
+    enableRL := enableRL
   }
 
   IO.println "╔════════════════════════════════════════╗"
@@ -1068,9 +1093,11 @@ def main : IO Unit := do
   IO.println s!"Configuration:"
   IO.println s!"  Model depth: {cfg.modelDepth}"
   IO.println s!"  Vocab size: {cfg.vocabSize}"
+  IO.println s!"  Data path: {cfg.dataPath}"
   IO.println s!"  Num GPUs: {cfg.numGpus}"
   IO.println s!"  Data shards: {cfg.numDataShards}"
   IO.println s!"  Quick mode: {quickMode}"
+  IO.println s!"  RL enabled: {cfg.enableRL}"
   IO.println ""
 
   withDistributed cfg.toPipelineConfig do
@@ -1080,3 +1107,8 @@ def main : IO Unit := do
       runNanoChatPipeline cfg
 
 end torch.NanoChat.Pipeline
+
+/-- Executable entrypoint wrapper. -/
+unsafe def main (_args : List String) : IO UInt32 := do
+  torch.NanoChat.Pipeline.main
+  pure 0
