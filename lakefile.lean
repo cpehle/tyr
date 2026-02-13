@@ -173,6 +173,12 @@ lean_exe NanoChatPipeline where
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
+/-- NanoChat checkpoint-backed chat/inference executable. -/
+lean_exe NanoChatChat where
+  root := `Examples.NanoChat.RunChat
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
 /-- Diffusion tests executable -/
 lean_exe TestDiffusion where
   root := `Tests.TestDiffusion

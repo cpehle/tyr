@@ -1,0 +1,329 @@
+/-
+  Examples/NanoChat/RunChat.lean
+
+  Checkpoint-backed NanoChat inference runner.
+
+  This executable loads a trained NanoChat checkpoint + tokenizer and runs
+  autoregressive decoding with the same per-token sampling path used in RL.
+-/
+import Tyr.Torch
+import Tyr.Tokenizer
+import Examples.NanoChat.ModdedGPT
+import Examples.NanoChat.ModdedTrain
+
+namespace torch.NanoChat.Chat
+
+open torch
+open torch.moddedGpt
+open torch.ModdedTrain
+open tokenizer
+
+structure Args where
+  baseDir : String
+  checkpoint : Option String := none
+  stage : String := "rl"
+  tokenizer : Option String := none
+  prompt : Option String := none
+  interactive : Bool := false
+  useChatMarkers : Bool := false
+  maxNewTokens : Nat := 128
+  temperature : Float := 1.0
+  topK : Nat := 50
+  eosToken : Option UInt64 := none
+  seed : UInt64 := 42
+  modelDepth : Nat := 20
+  vocabSize : Nat := 65536
+  showTokens : Bool := false
+  help : Bool := false
+  deriving Repr, Inhabited
+
+private def envNat (name : String) : IO (Option Nat) := do
+  pure <| (← IO.getEnv name).bind String.toNat?
+
+private def parseFloatLit? (s : String) : Option Float :=
+  match s.splitOn "." with
+  | [whole] =>
+      whole.toNat?.map (·.toFloat)
+  | [whole, frac] =>
+      match whole.toNat?, frac.toNat? with
+      | some w, some f =>
+          let denom : Float := (Nat.pow 10 frac.length).toFloat
+          some (w.toFloat + f.toFloat / denom)
+      | _, _ => none
+  | _ => none
+
+private def withPrompt (acc : Args) (piece : String) : Args :=
+  match acc.prompt with
+  | none => { acc with prompt := some piece }
+  | some p => { acc with prompt := some (p ++ " " ++ piece) }
+
+private partial def parseArgsLoop : List String → Args → Args
+  | [], acc => acc
+  | "--base-dir" :: v :: rest, acc => parseArgsLoop rest { acc with baseDir := v }
+  | "--checkpoint" :: v :: rest, acc => parseArgsLoop rest { acc with checkpoint := some v }
+  | "--stage" :: v :: rest, acc => parseArgsLoop rest { acc with stage := v }
+  | "--tokenizer" :: v :: rest, acc => parseArgsLoop rest { acc with tokenizer := some v }
+  | "--prompt" :: v :: rest, acc => parseArgsLoop rest { acc with prompt := some v }
+  | "--max-new-tokens" :: v :: rest, acc =>
+      let n := v.toNat?.getD acc.maxNewTokens
+      parseArgsLoop rest { acc with maxNewTokens := n }
+  | "--temperature" :: v :: rest, acc =>
+      let t := (parseFloatLit? v).getD acc.temperature
+      parseArgsLoop rest { acc with temperature := t }
+  | "--top-k" :: v :: rest, acc =>
+      let k := v.toNat?.getD acc.topK
+      parseArgsLoop rest { acc with topK := k }
+  | "--eos-token" :: v :: rest, acc =>
+      let eos? := (v.toNat?).map (·.toUInt64)
+      parseArgsLoop rest { acc with eosToken := eos? }
+  | "--seed" :: v :: rest, acc =>
+      let seed := (v.toNat?).map (·.toUInt64) |>.getD acc.seed
+      parseArgsLoop rest { acc with seed := seed }
+  | "--model-depth" :: v :: rest, acc =>
+      let d := v.toNat?.getD acc.modelDepth
+      parseArgsLoop rest { acc with modelDepth := d }
+  | "--vocab-size" :: v :: rest, acc =>
+      let vSize := v.toNat?.getD acc.vocabSize
+      parseArgsLoop rest { acc with vocabSize := vSize }
+  | "--interactive" :: rest, acc => parseArgsLoop rest { acc with interactive := true }
+  | "--chat-markers" :: rest, acc => parseArgsLoop rest { acc with useChatMarkers := true }
+  | "--show-tokens" :: rest, acc => parseArgsLoop rest { acc with showTokens := true }
+  | "--help" :: rest, acc => parseArgsLoop rest { acc with help := true }
+  | arg :: rest, acc =>
+      if arg.startsWith "--" then
+        parseArgsLoop rest acc
+      else
+        parseArgsLoop rest (withPrompt acc arg)
+
+private def mkDefaultArgs : IO Args := do
+  let baseDir := (← IO.getEnv "NANOCHAT_DIR").getD "~/.cache/nanochat"
+  let modelDepth := (← envNat "MODEL_DEPTH").getD 20
+  let vocabSize := (← envNat "VOCAB_SIZE").getD 65536
+  return {
+    baseDir := baseDir
+    modelDepth := modelDepth
+    vocabSize := vocabSize
+  }
+
+private def parseArgs (raw : List String) (defaults : Args) : Args :=
+  parseArgsLoop raw defaults
+
+private def printUsage : IO Unit := do
+  IO.println "Usage: lake exe NanoChatChat [options] [prompt text]"
+  IO.println ""
+  IO.println "Options:"
+  IO.println "  --base-dir <path>       Base nanochat directory (default: $NANOCHAT_DIR or ~/.cache/nanochat)"
+  IO.println "  --checkpoint <path>     Explicit checkpoint path (overrides --stage)"
+  IO.println "  --stage <name>          Checkpoint stage under base dir (default: rl)"
+  IO.println "  --tokenizer <path>      Tokenizer file or tokenizer directory"
+  IO.println "  --prompt <text>         One-shot prompt"
+  IO.println "  --interactive           Interactive REPL mode"
+  IO.println "  --chat-markers          Wrap prompts with token IDs [1][...][2][3]"
+  IO.println "  --max-new-tokens <n>    Decode length cap (default: 128)"
+  IO.println "  --temperature <f>       Sampling temperature (default: 1.0)"
+  IO.println "  --top-k <n>             Top-k filter (default: 50, 0 disables)"
+  IO.println "  --eos-token <id>        End token ID (default: 2, or 4 with --chat-markers)"
+  IO.println "  --model-depth <n>       Model depth used to load checkpoint (default: $MODEL_DEPTH or 20)"
+  IO.println "  --vocab-size <n>        Vocab size used to load checkpoint (default: $VOCAB_SIZE or 65536)"
+  IO.println "  --show-tokens           Print generated token IDs"
+  IO.println "  --help                  Show this help"
+
+private def expandHome (path : String) : IO String := do
+  if path == "~" then
+    return (← IO.getEnv "HOME").getD path
+  else if path.startsWith "~/" then
+    return s!"{(← IO.getEnv "HOME").getD ""}/{path.drop 2}"
+  else
+    return path
+
+private def resolveCheckpointPath (args : Args) : IO String := do
+  match args.checkpoint with
+  | some p => expandHome p
+  | none =>
+    let baseDir ← expandHome args.baseDir
+    pure s!"{baseDir}/checkpoints/{args.stage}/latest.ckpt"
+
+private def resolveTokenizerPath (args : Args) : IO String := do
+  let defaultPath := s!"{(← expandHome args.baseDir)}/tokenizer/tokenizer.bin"
+  match args.tokenizer with
+  | none => pure defaultPath
+  | some p =>
+    let p ← expandHome p
+    if p.endsWith ".bin" then
+      pure p
+    else
+      pure s!"{p}/tokenizer.bin"
+
+private def deviceToString : Device → String
+  | Device.MPS => "MPS"
+  | Device.CPU => "CPU"
+  | Device.CUDA n => s!"CUDA:{n}"
+
+private def resolveDevice : IO Device := do
+  let requested? := (← IO.getEnv "TYR_DEVICE").map String.toLower
+  match requested? with
+  | some "cpu" => pure Device.CPU
+  | some "mps" => pure Device.MPS
+  | some "cuda" =>
+    if ← cuda_is_available then pure (Device.CUDA 0) else pure Device.CPU
+  | some "auto" | none => getBestDevice
+  | some _ => getBestDevice
+
+private def moveYarnToDevice {headDim maxSeqLen : UInt64}
+    (yarn : YarnRotary headDim maxSeqLen) (device : Device) : YarnRotary headDim maxSeqLen :=
+  { yarn with
+    cos := yarn.cos.to device
+    sin := yarn.sin.to device
+    angularFreq := yarn.angularFreq.to device
+  }
+
+private def buildModelConfig (args : Args) : Config := {
+  vocabSize := args.vocabSize.toUInt64
+  nLayer := args.modelDepth.toUInt64
+  nHead := 16
+  headDim := 64
+  modelDim := 1024
+  maxSeqLen := 2048
+  blockSize := 128
+  ropeBase := 10000.0
+}
+
+private def sampleNextToken {cfg : Config}
+    (params : ModdedGPTParams cfg)
+    (yarn : YarnRotary cfg.headDim cfg.maxSeqLen)
+    (device : Device)
+    (temperature : Float)
+    (topK : Nat)
+    (context : Array UInt64)
+    : IO UInt64 := do
+  if context.isEmpty then
+    throw <| IO.userError "Cannot decode from an empty prompt."
+
+  let inputTensor := data.fromInt64Array (context.map (·.toInt64))
+  let inputReshaped := (reshape inputTensor #[1, context.size.toUInt64]).to device
+  let logits ← moddedGpt.forward params yarn inputReshaped false
+
+  -- Extract logits for the final time step.
+  let logitsFlat := reshape logits #[context.size.toUInt64 * cfg.vocabSize]
+  let startIdx := ((context.size - 1).toUInt64 * cfg.vocabSize).toInt64
+  let endIdx := (context.size.toUInt64 * cfg.vocabSize).toInt64
+  let lastLogits := data.slice1d' logitsFlat startIdx endIdx
+  let rowLogits := reshape lastLogits #[1, cfg.vocabSize]
+
+  let scaled :=
+    if temperature == 1.0 then rowLogits
+    else mul_scalar rowLogits (1.0 / temperature)
+  let filtered :=
+    if topK == 0 then scaled
+    else nn.topKFilter scaled topK.toUInt64
+  let probs := nn.softmax filtered (-1)
+  let sampled ← nn.multinomial probs 1
+  let sampled := nn.squeezeDim sampled (-1)
+  pure (nn.itemInt sampled).toUInt64
+
+private def promptWithMarkers (base : Array UInt64) (prompt : Array UInt64) : Array UInt64 :=
+  -- Matches the SFT pipeline chat token conventions.
+  base ++ #[1] ++ prompt ++ #[2, 3]
+
+private def generateTokens
+    (promptTokens : Array UInt64)
+    (nextTokenFn : Array UInt64 → IO UInt64)
+    (maxNewTokens : Nat)
+    (eosToken : UInt64)
+    : IO (Array UInt64) := do
+  let mut full := promptTokens
+  let mut generated : Array UInt64 := #[]
+  for _ in [:maxNewTokens] do
+    let tok ← nextTokenFn full
+    generated := generated.push tok
+    full := full.push tok
+    if tok == eosToken then
+      break
+  pure generated
+
+unsafe def main (rawArgs : List String) : IO UInt32 := do
+  let defaults ← mkDefaultArgs
+  let args := parseArgs rawArgs defaults
+
+  if args.help then
+    printUsage
+    return 0
+
+  let checkpointPath ← resolveCheckpointPath args
+  let tokenizerPath ← resolveTokenizerPath args
+  let cfg := buildModelConfig args
+  let device ← resolveDevice
+  let eosToken := args.eosToken.getD (if args.useChatMarkers then 4 else 2)
+
+  manualSeed args.seed
+
+  IO.println s!"NanoChat inference:"
+  IO.println s!"  checkpoint: {checkpointPath}"
+  IO.println s!"  tokenizer:  {tokenizerPath}"
+  IO.println s!"  device:     {deviceToString device}"
+  IO.println s!"  model:      depth={cfg.nLayer} vocab={cfg.vocabSize}"
+  IO.println s!"  decoding:   max_new={args.maxNewTokens} temp={args.temperature} top_k={args.topK} eos={eosToken}"
+  IO.println ""
+
+  let tok ← tokenizer.load tokenizerPath
+  let maybeCkpt ← loadCheckpoint cfg checkpointPath
+  let ckpt ← match maybeCkpt with
+    | some ckpt => pure ckpt
+    | none => throw <| IO.userError s!"Checkpoint not found or incompatible with current config: {checkpointPath}"
+
+  let paramsOnDeviceRaw ← TensorStruct.mapM (fun t => pure (t.to device)) ckpt.params
+  let paramsOnDevice := TensorStruct.makeLeafParams paramsOnDeviceRaw
+
+  let yarn0 ← YarnRotary.init cfg.headDim cfg.maxSeqLen cfg.ropeBase
+  let yarn := moveYarnToDevice yarn0 device
+
+  let encodeFn := fun (text : String) => (tokenizer.encode tok text).map (·.toUInt64)
+  let decodeFn := fun (tokens : Array UInt64) => tokenizer.decode tok (tokens.map (·.toUInt32))
+  let nextTokenFn := sampleNextToken paramsOnDevice yarn device args.temperature args.topK
+
+  let runTurn := fun (baseCtx : Array UInt64) (prompt : String) => do
+    let promptBody := encodeFn prompt
+    let promptTokens :=
+      if args.useChatMarkers then
+        promptWithMarkers baseCtx promptBody
+      else
+        promptBody
+    if promptTokens.isEmpty then
+      throw <| IO.userError "Prompt encoded to zero tokens."
+    let generated ← generateTokens promptTokens nextTokenFn args.maxNewTokens eosToken
+    let response := decodeFn generated
+    if args.showTokens then
+      IO.println s!"generated_tokens={generated}"
+    let nextCtx :=
+      if args.useChatMarkers then
+        promptTokens ++ generated
+      else
+        #[]
+    pure (response, nextCtx)
+
+  if args.interactive then
+    IO.println "Interactive mode. Type :quit to exit."
+    let rec loop (ctx : Array UInt64) : IO UInt32 := do
+      IO.print "user> "
+      let line ← (← IO.getStdin).getLine
+      let prompt := line.trimAscii.toString
+      if prompt.isEmpty then
+        loop ctx
+      else if prompt == ":quit" || prompt == ":q" || prompt == ":exit" then
+        pure 0
+      else
+        let (response, ctx') ← runTurn ctx prompt
+        IO.println s!"assistant> {response}"
+        IO.println ""
+        loop ctx'
+    loop #[]
+  else
+    let prompt := args.prompt.getD "What is 2+2?"
+    let (response, _) ← runTurn #[] prompt
+    IO.println s!"prompt: {prompt}"
+    IO.println s!"completion: {response}"
+    pure 0
+
+end torch.NanoChat.Chat
+
+unsafe def main : List String → IO UInt32 := torch.NanoChat.Chat.main
