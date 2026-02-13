@@ -415,6 +415,16 @@ def TrainState.init (cfg : moddedGpt.Config) (dataConfig : DataLoader.Config)
   let initialBatchSize := getBatchSize 0
   let initialSeqLen := getSeqLen 0 cfg.blockSize
   let dataGen ← DistributedDataGenerator.init dataConfig initialBatchSize initialSeqLen
+  let valData ←
+    match dataConfig.valPath with
+    | none => pure none
+    | some valPath =>
+      try
+        let shard ← loadValidationData valPath cfg.maxSeqLen dataConfig.bosToken
+        pure (some shard)
+      catch e =>
+        IO.eprintln s!"Warning: failed to load validation data from {valPath}: {e}"
+        pure none
 
   let startTime ← IO.monoMsNow
 
@@ -423,7 +433,7 @@ def TrainState.init (cfg : moddedGpt.Config) (dataConfig : DataLoader.Config)
     yarn := yarn
     optState := optState
     dataGen := dataGen
-    valData := none
+    valData := valData
     step := 0
     bestValLoss := 1e30  -- Very large number instead of inf
     totalTokens := 0

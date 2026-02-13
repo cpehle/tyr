@@ -146,6 +146,7 @@ def runTraining (args : Args) : IO Unit := do
   -- Data config
   let dataConfig : DataLoader.Config := {
     dataPath := args.dataPath
+    valPath := some args.valPath
     seqLen := cfg.maxSeqLen
     bosToken := 50256  -- GPT-2 BOS
     numWorkers := 4

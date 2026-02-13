@@ -20,6 +20,7 @@ open torch
 
 structure Config where
   dataPath : String := "data"
+  valPath : Option String := none
   seqLen : UInt64 := 2048
   bosToken : UInt64 := 50256
   numWorkers : UInt64 := 4
@@ -100,14 +101,81 @@ structure DataShard (n : UInt64 := defaultShardSize) where
   numShards : UInt64
   deriving Repr
 
+/-- fineweb/modded-nanogpt binary format: 256 int32 header words. -/
+def finewebHeaderI32Words : UInt64 := 256
+
+/-- Header size in uint16 words (= 1024 bytes = 512 uint16 entries). -/
+def finewebHeaderU16Words : UInt64 := finewebHeaderI32Words * 2
+
+/-- Magic/version used by modded-nanogpt fineweb shards. -/
+def finewebMagic : UInt64 := 20240520
+def finewebVersion : UInt64 := 1
+
+/-- Decode one little-endian u32 value from two u16 words. -/
+private def decodeLEU32FromU16Words (lo hi : UInt64) : UInt64 :=
+  (lo &&& (0xFFFF : UInt64)) ||| ((hi &&& (0xFFFF : UInt64)) <<< 16)
+
+structure FinewebHeader where
+  magic : UInt64
+  version : UInt64
+  tokenCount : UInt64
+  deriving Repr
+
+/-- Parse the leading modded-nanogpt header values (magic, version, tokenCount). -/
+def parseFinewebHeader? {n : UInt64} (tokens : T #[n]) : IO (Option FinewebHeader) := do
+  if n < 6 then
+    return none
+
+  let hdr6 : T #[6] := tokens.slice 0 0 6
+  let vals ← data.tensorToUInt64Array' hdr6
+  if vals.size < 6 then
+    return none
+
+  let magic := decodeLEU32FromU16Words vals[0]! vals[1]!
+  let version := decodeLEU32FromU16Words vals[2]! vals[3]!
+  let tokenCount := decodeLEU32FromU16Words vals[4]! vals[5]!
+  return some { magic, version, tokenCount }
+
+/-- Split a tensor loaded from .bin into payload tokens, parsing fineweb header when present. -/
+def splitFinewebPayload {n : UInt64} (tokens : T #[n]) : IO (Σ m, T #[m]) := do
+  if n < finewebHeaderU16Words then
+    return ⟨n, tokens⟩
+
+  let some header ← parseFinewebHeader? tokens
+    | return ⟨n, tokens⟩
+
+  if header.magic != finewebMagic then
+    return ⟨n, tokens⟩
+
+  if header.version != finewebVersion then
+    throw <| IO.userError s!"Unsupported fineweb shard version {header.version} in header (expected {finewebVersion})"
+
+  let payloadWords := n - finewebHeaderU16Words
+  let payloadCount ←
+    if header.tokenCount == payloadWords then
+      pure header.tokenCount
+    else if header.tokenCount > payloadWords then
+      IO.eprintln s!"Warning: Fineweb shard appears truncated. header={header.tokenCount}, payload={payloadWords}. Using payload size."
+      pure payloadWords
+    else
+      IO.eprintln s!"Warning: Fineweb shard has trailing payload. header={header.tokenCount}, payload={payloadWords}. Using header size."
+      pure header.tokenCount
+
+  let payloadStart := finewebHeaderU16Words
+  let payloadEnd := payloadStart + payloadCount
+  let payloadRaw := tokens.slice 0 payloadStart.toInt64 payloadEnd.toInt64
+  let payload : T #[payloadCount] := reshape payloadRaw #[payloadCount]
+  return ⟨payloadCount, payload⟩
+
 def DataShard.loadFromFile (path : String) (shardIdx numShards : UInt64)
     (bosToken : UInt64) : IO (Σ n, DataShard n) := do
-  let totalTokens ← data.binFileTokenCount path
+  let rawTokensCount ← data.binFileTokenCount path
+  let rawTokens ← data.loadU16Bin rawTokensCount path
+  let ⟨totalTokens, allTokens⟩ ← splitFinewebPayload rawTokens
   let tokensPerShard := totalTokens / numShards
   let startToken := tokensPerShard * shardIdx
   let endToken := if shardIdx == numShards - 1 then totalTokens else startToken + tokensPerShard
   let shardSize := endToken - startToken
-  let allTokens ← data.loadU16Bin totalTokens path
   let shardTokens := allTokens.slice 0 startToken.toInt64 endToken.toInt64
   let shardTokens := reshape shardTokens #[shardSize]
   let bosFinder ← BOSFinder.init shardTokens bosToken
@@ -117,14 +185,26 @@ def DataShard.load (path : String) (shardIdx numShards : UInt64)
     (bosToken : UInt64) : IO (DataShard defaultShardSize) := do
   let fileExists ← data.fileExists path
   if fileExists then
-    let ⟨_, shard⟩ ← DataShard.loadFromFile path shardIdx numShards bosToken
-    let paddedTokens := reshape shard.tokens #[defaultShardSize]
-    let bosFinder ← BOSFinder.init paddedTokens bosToken
-    return { tokens := paddedTokens, bosFinder, shardIdx, numShards }
-  else
-    let tokens ← randn #[defaultShardSize] false
+    let ⟨n, shard⟩ ← DataShard.loadFromFile path shardIdx numShards bosToken
+    if n == 0 then
+      throw <| IO.userError s!"Data shard is empty: {path}"
+    let tokens :=
+      if n == defaultShardSize then
+        shard.tokens
+      else if n > defaultShardSize then
+        let sliced := shard.tokens.slice 0 0 defaultShardSize.toInt64
+        reshape sliced #[defaultShardSize]
+      else
+        -- Small fixtures are supported by tiling to the working shard size.
+        let reps := (defaultShardSize + n - 1) / n
+        let tiledDyn := nn.tensor_repeat (reshape shard.tokens #[]) #[reps]
+        let tiled := reshape tiledDyn #[reps * n]
+        let sliced := tiled.slice 0 0 defaultShardSize.toInt64
+        reshape sliced #[defaultShardSize]
     let bosFinder ← BOSFinder.init tokens bosToken
     return { tokens := tokens, bosFinder, shardIdx, numShards }
+  else
+    throw <| IO.userError s!"Data shard not found: {path}"
 
 /-! ## Batch Iterator -/
 

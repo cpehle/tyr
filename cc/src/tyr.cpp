@@ -5,7 +5,7 @@
  * REFERENCE COUNTING CONVENTIONS
  * ============================================================================
  *
- * This file bridges Lean's reference counting with LibTorch's intrusive_ptr.
+ * This file bridges Lean's reference counting with LibTorch tensors.
  * Understanding these conventions is critical for memory safety.
  *
  * ## Parameter Types
@@ -35,15 +35,15 @@
  *   When the returned torch::Tensor goes out of scope, refcount is
  *   automatically decremented. No manual cleanup needed.
  *
- * - `giveTensor(torch::Tensor)`: Transfer ownership to Lean. Lean's finalizer
- *   will decrement the refcount when the Lean object is garbage collected.
+ * - `giveTensor(torch::Tensor)`: Transfer ownership to Lean by storing an
+ *   owning intrusive ref (`TensorImpl*`) in an external object.
  *   Increments g_live_lean_tensors counter.
  *
  * ## Memory Lifecycle
  *
- * 1. Tensor created in C++ → giveTensor() → Lean owns it
- * 2. Lean passes tensor to C++ → borrowTensor() → shared ownership
- * 3. Lean GC finalizes tensor → decrefFinalize() → releases C++ memory
+ * 1. Tensor created in C++ → giveTensor() → Lean owns one intrusive ref
+ * 2. Lean passes tensor to C++ → borrowTensor() incref + reclaim to `Tensor`
+ * 3. Lean GC finalizes tensor → decref finalizer releases Lean's owned ref
  *
  * ## Debugging
  *
@@ -56,6 +56,7 @@
 #include <iostream>
 #include <fstream>
 #include <atomic>
+#include <stdexcept>
 #include <lean/lean.h>
 #include <torch/torch.h>
 #include <ATen/ATen.h>
@@ -65,57 +66,56 @@
 // Global atomic counter for live tensors handed to Lean
 std::atomic<int64_t> g_live_lean_tensors(0);
 
-void trivialFinalize(void *p) { return; }
 void trivialForeach(void *p, b_lean_obj_arg a) { return; }
-static lean_external_class *getTrivialObjectClass() {
-  static lean_external_class *c(
-      lean_register_external_class(&trivialFinalize, &trivialForeach));
-  return c;
-}
-template<typename T>
-void deleteFinalize(void *p) { delete static_cast<T *>(p); }
 
-template<typename T>
-void decrefFinalize(void *p) { 
-  auto ptr = c10::intrusive_ptr<T>::reclaim(static_cast<T *>(p));
+void deleteTorchTensorFinalize(void *p) {
+  auto* impl = static_cast<c10::TensorImpl*>(p);
+  if (impl != nullptr) {
+    c10::raw::intrusive_ptr::decref(impl);
+  }
   g_live_lean_tensors--; // Decrement when a tensor is finalized
 }
 
-
-
-template<typename T>
-lean_external_class *registerDecRefClass() {
-  return lean_register_external_class(&decrefFinalize<T>, &trivialForeach);
-}
-
-template<typename T>
-lean_external_class *registerDeleteClass() {
-  return lean_register_external_class(&deleteFinalize<T>, &trivialForeach);
-}
-
-
-static
-lean_external_class* getTorchTensorImplClass() {
-    // Use static thread to make this thread safe (hopefully).
-    static lean_external_class* c = registerDecRefClass<torch::TensorImpl>();
+static lean_external_class* getTorchTensorClass() {
+    static lean_external_class* c =
+        lean_register_external_class(&deleteTorchTensorFinalize, &trivialForeach);
     return c;
 }
 
 // Borrow a tensor from Lean with proper reference counting.
-// Increments refcount so both Lean and C++ have shared ownership.
-// When the returned tensor goes out of scope, refcount is decremented automatically.
-// No manual unsafeReleaseTensorImpl() needed!
+// Returns an owning tensor handle reconstructed from an owning intrusive ref.
 torch::Tensor borrowTensor(b_lean_obj_arg o) {
-    auto impl = static_cast<torch::TensorImpl*>(lean_get_external_data(o));
-    // unsafe_reclaim_from_nonowning increments the refcount
-    return torch::Tensor(c10::intrusive_ptr<torch::TensorImpl>::unsafe_reclaim_from_nonowning(impl));
+    auto* obj = const_cast<lean_object*>(o);
+    if (!lean_is_external(obj)) {
+      throw std::runtime_error("borrowTensor: expected external object");
+    }
+
+#ifndef NDEBUG
+    if (lean_get_external_class(obj) != getTorchTensorClass()) {
+      throw std::runtime_error("borrowTensor: unexpected external class");
+    }
+#endif
+
+    auto* impl = static_cast<c10::TensorImpl*>(lean_get_external_data(obj));
+    if (impl == nullptr) {
+      return torch::Tensor();
+    }
+
+    // Reconstruct an owning intrusive_ptr without using unsafe non-owning reclaim.
+    c10::raw::intrusive_ptr::incref(impl);
+    auto p = c10::intrusive_ptr<c10::TensorImpl, c10::UndefinedTensorImpl>::reclaim(impl);
+    return torch::Tensor(std::move(p));
 }
 
 // Transfer ownership of a new tensor to Lean.
-// The tensor's refcount is transferred to Lean's finalizer.
+// The tensor object is moved to a heap allocation owned by Lean.
 lean_object *giveTensor(torch::Tensor t) {
+  auto* impl = t.unsafeGetTensorImpl();
+  if (impl != nullptr) {
+    c10::raw::intrusive_ptr::incref(impl);
+  }
   g_live_lean_tensors++; // Increment when a new tensor is given to Lean
-  return lean_alloc_external(getTorchTensorImplClass(), t.unsafeReleaseTensorImpl());
+  return lean_alloc_external(getTorchTensorClass(), impl);
 }
 
 // Alias for backward compatibility
@@ -356,6 +356,14 @@ bool lean_torch_requires_grad(lean_obj_arg /* shape */, b_lean_obj_arg x) {
 
 lean_object* lean_torch_reshape(lean_obj_arg /*s*/, b_lean_obj_arg self, b_lean_obj_arg shape) {
   auto shape_ = getShape(shape);
+  // In Lean code, reshape #[ ] is used as a type-erasure cast to dynamic shape.
+  // Treat empty shape as a no-op instead of attempting scalar reshape.
+  if (shape_.empty()) {
+    // Return the original Lean object directly to avoid creating alias wrappers
+    // from a borrowed tensor handle.
+    lean_inc(self);
+    return const_cast<lean_object*>(self);
+  }
   auto self_ = borrowTensor(self);
   auto res = torch::reshape(self_, shape_);
   return fromTorchTensor(res);
@@ -476,6 +484,12 @@ int lean_torch_allclose(lean_obj_arg /* shape */, b_lean_obj_arg a, b_lean_obj_a
 lean_object* lean_torch_grad_of(lean_obj_arg /* shape */, b_lean_obj_arg x) {
     auto out_ = borrowTensor(x);
     auto grad_out_ = out_.grad();
+    // Parameters that are not used in the current forward pass have undefined grads.
+    // Return an explicit zero tensor so downstream optimizer code can treat this as
+    // a standard "no gradient update" case.
+    if (!grad_out_.defined()) {
+      grad_out_ = torch::zeros_like(out_);
+    }
     return fromTorchTensor(grad_out_);
 }
 
