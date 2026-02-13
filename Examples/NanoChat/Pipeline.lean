@@ -148,8 +148,6 @@ private def runOnMasterIO (action : IO Unit) : IO Unit := do
   let (rank, _) ← if isDistributed then dist.getRankAndWorldSize else pure (0, 1)
   if rank == 0 then
     action
-  if isDistributed then
-    dist.barrier
 
 /-! ## Device & Data Adapters -/
 
@@ -888,9 +886,14 @@ def supervisedFineTune (cfg : NanoChatConfig) : PipelineM Unit := runOnMaster do
       | some batch =>
         convertConversationBatchToSFT batch
 
-    -- Get number of training examples from mixture
-    let numTrainExamples := taskMixture.size
-    log s!"Training on {numTrainExamples} task examples"
+    -- Get number of training examples from mixture (optionally capped for fast validation runs)
+    let totalTrainExamples := taskMixture.size
+    let sftMaxExamples := (← envNat "SFT_MAX_EXAMPLES")
+    let numTrainExamples :=
+      match sftMaxExamples with
+      | some n => max 1 (min n totalTrainExamples)
+      | none => totalTrainExamples
+    log s!"Training on {numTrainExamples}/{totalTrainExamples} task examples"
 
     -- Run SFT training loop
     log "Starting SFT training..."
@@ -1145,6 +1148,9 @@ def runNanoChatPipeline (cfg : NanoChatConfig) : PipelineM Unit := do
   -- Wait for all data shards before pretraining
   stage "data-download-complete" do
     await moreDataTask
+    let isDistributed ← dist.isInitialized
+    if isDistributed then
+      dist.barrier
     log s!"All {cfg.numDataShards} data shards ready"
 
   stage "pretrain" do
