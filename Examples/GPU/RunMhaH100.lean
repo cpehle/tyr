@@ -1,7 +1,7 @@
 /- End-to-end `mha_h100`-style forward/backward validation for the reduced
    2-block (`seq=128`, `d=64`) kernel variant in this repo. -/
 import Tyr.Torch
-import Tyr.GPU.Kernels.ThunderKittensFlashAttn
+import Tyr.GPU.Kernels.MhaH100
 import Examples.GPU.FixtureRunner
 
 namespace Examples.GPU

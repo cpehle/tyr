@@ -1,5 +1,5 @@
 /-
-  Examples/GPU/RunThunderKittensCopy.lean
+  Examples/GPU/RunCopy.lean
 
   End-to-end GPU demo:
   - create CUDA torch tensors in Lean
@@ -7,7 +7,7 @@
   - verify output matches input
 -/
 import Tyr.Torch
-import Tyr.GPU.Kernels.ThunderKittensCopy
+import Tyr.GPU.Kernels.Copy
 
 namespace Examples.GPU
 

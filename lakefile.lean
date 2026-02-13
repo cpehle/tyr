@@ -192,44 +192,44 @@ lean_exe FluxDebug where
   moreLinkArgs := commonLinkArgs
 
 /-- End-to-end demo for a minimal ThunderKittens-style copy kernel. -/
-lean_exe RunThunderKittensCopy where
-  root := `Examples.GPU.RunThunderKittensCopy
+lean_exe RunCopy where
+  root := `Examples.GPU.RunCopy
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
 /-- End-to-end rotary fixture validation using a ThunderKittens-style kernel. -/
-lean_exe RunThunderKittensRotary where
-  root := `Examples.GPU.RunThunderKittensRotary
+lean_exe RunRotary where
+  root := `Examples.GPU.RunRotary
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
 /-- End-to-end ThunderKittens layernorm fixture validation. -/
-lean_exe RunThunderKittensLayerNorm where
-  root := `Examples.GPU.RunThunderKittensLayerNorm
+lean_exe RunLayerNorm where
+  root := `Examples.GPU.RunLayerNorm
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
 /-- End-to-end ThunderKittens flash attention fixture validation. -/
-lean_exe RunThunderKittensFlashAttn where
-  root := `Examples.GPU.RunThunderKittensFlashAttn
+lean_exe RunFlashAttn where
+  root := `Examples.GPU.RunFlashAttn
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
 /-- End-to-end ThunderKittens `mha_h100` forward/backward fixture validation. -/
-lean_exe RunThunderKittensMhaH100 where
-  root := `Examples.GPU.RunThunderKittensMhaH100
+lean_exe RunMhaH100 where
+  root := `Examples.GPU.RunMhaH100
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
 /-- End-to-end `mha_h100` training/benchmark demo (kernel + optional torch baseline). -/
-lean_exe RunThunderKittensMhaH100Train where
-  root := `Examples.GPU.RunThunderKittensMhaH100Train
+lean_exe RunMhaH100Train where
+  root := `Examples.GPU.RunMhaH100Train
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
 /-- End-to-end multi-block `mha_h100` validation (`seq=768`, `d=64`). -/
-lean_exe RunThunderKittensMhaH100Seq768 where
-  root := `Examples.GPU.RunThunderKittensMhaH100Seq768
+lean_exe RunMhaH100Seq768 where
+  root := `Examples.GPU.RunMhaH100Seq768
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 

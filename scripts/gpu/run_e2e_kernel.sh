@@ -3,7 +3,7 @@ set -euo pipefail
 
 if [[ $# -lt 3 ]]; then
   echo "Usage: $0 <KernelModule> <RunnerExe> <Label> [ExtraLeanBuildTarget ...]" >&2
-  echo "Example: $0 Tyr.GPU.Kernels.Rotary RunThunderKittensRotary rotary" >&2
+  echo "Example: $0 Tyr.GPU.Kernels.Rotary RunRotary rotary" >&2
   exit 2
 fi
 

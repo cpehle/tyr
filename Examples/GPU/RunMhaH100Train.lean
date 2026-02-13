@@ -2,7 +2,7 @@
    It optimizes q/k/v to match a fixed target attention output and can benchmark
    kernel-based training steps against a PyTorch SDPA autograd baseline. -/
 import Tyr.Torch
-import Tyr.GPU.Kernels.ThunderKittensFlashAttn
+import Tyr.GPU.Kernels.MhaH100
 
 namespace Examples.GPU
 

@@ -2,6 +2,6 @@
 set -euo pipefail
 
 ./scripts/gpu/run_e2e_kernel.sh \
-  Tyr.GPU.Kernels.ThunderKittensFlashAttn \
-  RunThunderKittensFlashAttn \
+  Tyr.GPU.Kernels.MhaH100 \
+  RunFlashAttn \
   flashattn

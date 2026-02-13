@@ -1,6 +1,6 @@
 /- End-to-end ThunderKittens-style layernorm validation. -/
 import Tyr.Torch
-import Tyr.GPU.Kernels.ThunderKittensLayerNorm
+import Tyr.GPU.Kernels.LayerNormResidual
 import Examples.GPU.FixtureRunner
 
 namespace Examples.GPU

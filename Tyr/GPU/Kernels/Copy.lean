@@ -1,5 +1,5 @@
 /-
-  Tyr/GPU/Kernels/ThunderKittensCopy.lean
+  Tyr/GPU/Kernels/Copy.lean
 
   Minimal ThunderKittens-style copy kernel:
   copy one 64x64 tile from input to output using global -> shared -> register flow.

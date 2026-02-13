@@ -1,6 +1,6 @@
 /- End-to-end FlashAttention validation for 2-block forward + forward-with-LSE. -/
 import Tyr.Torch
-import Tyr.GPU.Kernels.ThunderKittensFlashAttn
+import Tyr.GPU.Kernels.MhaH100
 import Examples.GPU.FixtureRunner
 
 namespace Examples.GPU

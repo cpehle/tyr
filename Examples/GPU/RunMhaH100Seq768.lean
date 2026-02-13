@@ -1,7 +1,7 @@
 /- End-to-end `mha_h100`-style validation for a real multi-block setup
    (`seq=768`, `head_dim=64`, 12 KV tiles). -/
 import Tyr.Torch
-import Tyr.GPU.Kernels.ThunderKittensFlashAttn
+import Tyr.GPU.Kernels.MhaH100
 import Examples.GPU.FixtureRunner
 
 namespace Examples.GPU

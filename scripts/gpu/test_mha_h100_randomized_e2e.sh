@@ -5,6 +5,6 @@ trials="${1:-10}"
 export E2E_TRIALS="$trials"
 
 exec ./scripts/gpu/run_e2e_kernel.sh \
-  Tyr.GPU.Kernels.ThunderKittensFlashAttn \
-  RunThunderKittensMhaH100 \
+  Tyr.GPU.Kernels.MhaH100 \
+  RunMhaH100 \
   mha_h100

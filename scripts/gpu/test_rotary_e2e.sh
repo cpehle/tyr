@@ -3,5 +3,5 @@ set -euo pipefail
 
 ./scripts/gpu/run_e2e_kernel.sh \
   Tyr.GPU.Kernels.Rotary \
-  RunThunderKittensRotary \
+  RunRotary \
   rotary

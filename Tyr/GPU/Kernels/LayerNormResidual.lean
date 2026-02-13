@@ -1,5 +1,5 @@
 /-
-  Tyr/GPU/Kernels/ThunderKittensLayerNorm.lean
+  Tyr/GPU/Kernels/LayerNormResidual.lean
 
   LayerNorm + residual kernel aligned with ThunderKittens layernorm semantics:
   - out_resid = x + residual
