@@ -23,3 +23,9 @@ output.ppm
 # Bazel
 bazel-*
 MODULE.bazel.lock
+
+# NanoChat/Tyr runtime artifacts
+.nanochat_*/
+logs/
+data/
+cc/src/generated/

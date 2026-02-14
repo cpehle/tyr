@@ -21,19 +21,15 @@ def gpt4SplitPattern : String :=
   "'(?i:[sdmt]|ll|ve|re)|[^\\r\\n\\p{L}\\p{N}]?+\\p{L}+|\\p{N}{1,2}| ?[^\\s\\p{L}\\p{N}]++[\\r\\n]*|\\s*[\\r\\n]|\\s+(?!\\S)|\\s+"
 
 /-- Default special tokens for chat models.
-    Based on nanochat's special token set. -/
+    Mirrors nanochat's SPECIAL_TOKENS ordering exactly. -/
 def defaultChatSpecialTokens : Array String := #[
   "<|bos|>",              -- Beginning of sequence
-  "<|eos|>",              -- End of sequence
-  "<|pad|>",              -- Padding token
   "<|user_start|>",       -- User message start
   "<|user_end|>",         -- User message end
   "<|assistant_start|>",  -- Assistant message start
   "<|assistant_end|>",    -- Assistant message end
-  "<|system_start|>",     -- System message start
-  "<|system_end|>",       -- System message end
-  "<|tool_start|>",       -- Tool invocation start
-  "<|tool_end|>",         -- Tool invocation end
+  "<|python_start|>",     -- Tool (python) call start
+  "<|python_end|>",       -- Tool (python) call end
   "<|output_start|>",     -- Tool output start
   "<|output_end|>"        -- Tool output end
 ]

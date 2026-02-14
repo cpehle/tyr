@@ -46,56 +46,78 @@ def defaultCOREConfigs : Array CORETaskConfig := #[
   -- ARC (AI2 Reasoning Challenge)
   { label := "arc_easy"
     taskType := .multipleChoice
-    datasetPath := "arc_easy.jsonl"
+    datasetPath := "eval_data/world_knowledge/arc_easy.jsonl"
     numFewshot := 0
     continuationDelimiter := "\nAnswer: " },
   { label := "arc_challenge"
     taskType := .multipleChoice
-    datasetPath := "arc_challenge.jsonl"
+    datasetPath := "eval_data/world_knowledge/arc_challenge.jsonl"
     numFewshot := 0
     continuationDelimiter := "\nAnswer: " },
   -- HellaSwag
   { label := "hellaswag"
     taskType := .multipleChoice
-    datasetPath := "hellaswag.jsonl"
+    datasetPath := "eval_data/language_understanding/hellaswag.jsonl"
     numFewshot := 0
     continuationDelimiter := " " },
   -- Winogrande
   { label := "winogrande"
     taskType := .schema
-    datasetPath := "winogrande.jsonl"
+    datasetPath := "eval_data/language_understanding/winogrande.jsonl"
     numFewshot := 0
     continuationDelimiter := "" },
   -- PIQA
   { label := "piqa"
     taskType := .multipleChoice
-    datasetPath := "piqa.jsonl"
+    datasetPath := "eval_data/commonsense_reasoning/piqa.jsonl"
     numFewshot := 0
     continuationDelimiter := " " },
-  -- SciQ
-  { label := "sciq"
+  -- MMLU
+  { label := "mmlu"
     taskType := .multipleChoice
-    datasetPath := "sciq.jsonl"
+    datasetPath := "eval_data/world_knowledge/mmlu.jsonl"
     numFewshot := 0
     continuationDelimiter := " " },
   -- BoolQ
   { label := "boolq"
     taskType := .multipleChoice
-    datasetPath := "boolq.jsonl"
+    datasetPath := "eval_data/reading_comprehension/boolq.jsonl"
     numFewshot := 0
     continuationDelimiter := " " },
   -- LAMBADA
   { label := "lambada"
     taskType := .languageModeling
-    datasetPath := "lambada.jsonl"
+    datasetPath := "eval_data/language_understanding/lambada_openai.jsonl"
+    numFewshot := 0
+    continuationDelimiter := " " },
+  -- GSM8K
+  { label := "gsm8k"
+    taskType := .languageModeling
+    datasetPath := "eval_data/symbolic_problem_solving/gsm8k.jsonl"
+    numFewshot := 0
+    continuationDelimiter := " " },
+  -- HumanEval
+  { label := "humaneval"
+    taskType := .languageModeling
+    datasetPath := "eval_data/programming/human_eval.jsonl"
     numFewshot := 0
     continuationDelimiter := " " }
 ]
 
 /-! ## JSON Parsing Utilities -/
 
+/-- Parse multiple-choice item from standard CORE fields.
+    Format: {"query": str, "choices": [str], "gold": int} -/
+def parseMCQueryChoicesGold (json : Lean.Json) : Option MCItem := do
+  let query ← getJsonString json "query"
+  let choices ← getJsonStringArray json "choices"
+  let gold ← getJsonNat json "gold"
+  return { query, choices, gold }
+
 /-- Parse ARC example from JSON -/
 def parseARCItem (json : Lean.Json) : Option MCItem := do
+  if let some item := parseMCQueryChoicesGold json then
+    return item
   let question ← getJsonString json "question"
   let choicesObj ← (json.getObjVal? "choices").toOption
   let choices ← getJsonStringArray choicesObj "text"
@@ -108,6 +130,8 @@ def parseARCItem (json : Lean.Json) : Option MCItem := do
 /-- Parse HellaSwag example from JSON.
     Format: {"ctx": str, "endings": [str], "label": str} -/
 def parseHellaSwagItem (json : Lean.Json) : Option MCItem := do
+  if let some item := parseMCQueryChoicesGold json then
+    return item
   let ctx ← getJsonString json "ctx"
   let endings ← getJsonStringArray json "endings"
   let labelStr ← getJsonString json "label"
@@ -117,6 +141,10 @@ def parseHellaSwagItem (json : Lean.Json) : Option MCItem := do
 /-- Parse Winogrande example from JSON.
     Format: {"sentence": str, "option1": str, "option2": str, "answer": str} -/
 def parseWinograndeItem (json : Lean.Json) : Option SchemaItem := do
+  if let some contextOptions := getJsonStringArray json "context_options" then
+    let continuation ← getJsonString json "continuation"
+    let gold ← getJsonNat json "gold"
+    return { contextOptions, continuation, gold }
   let sentence ← getJsonString json "sentence"
   let option1 ← getJsonString json "option1"
   let option2 ← getJsonString json "option2"
@@ -132,6 +160,8 @@ def parseWinograndeItem (json : Lean.Json) : Option SchemaItem := do
 /-- Parse PIQA example from JSON.
     Format: {"goal": str, "sol1": str, "sol2": str, "label": int} -/
 def parsePIQAItem (json : Lean.Json) : Option MCItem := do
+  if let some item := parseMCQueryChoicesGold json then
+    return item
   let goal ← getJsonString json "goal"
   let sol1 ← getJsonString json "sol1"
   let sol2 ← getJsonString json "sol2"
@@ -142,6 +172,8 @@ def parsePIQAItem (json : Lean.Json) : Option MCItem := do
     Format: {"question": str, "distractor1": str, "distractor2": str, "distractor3": str,
              "correct_answer": str, "support": str} -/
 def parseSciQItem (json : Lean.Json) : Option MCItem := do
+  if let some item := parseMCQueryChoicesGold json then
+    return item
   let question ← getJsonString json "question"
   let correct ← getJsonString json "correct_answer"
   let d1 ← getJsonString json "distractor1"
@@ -153,6 +185,8 @@ def parseSciQItem (json : Lean.Json) : Option MCItem := do
 /-- Parse BoolQ example from JSON.
     Format: {"question": str, "passage": str, "answer": bool} -/
 def parseBoolQItem (json : Lean.Json) : Option MCItem := do
+  if let some item := parseMCQueryChoicesGold json then
+    return item
   let question ← getJsonString json "question"
   let passage ← getJsonString json "passage"
   let answer ← getJsonBool json "answer"
@@ -163,6 +197,14 @@ def parseBoolQItem (json : Lean.Json) : Option MCItem := do
 /-- Parse LAMBADA example from JSON.
     Format: {"text": str} - last word is the target -/
 def parseLAMBADAItem (json : Lean.Json) : Option LMItem := do
+  if let some context := getJsonString json "context" then
+    if let some continuation := getJsonString json "continuation" then
+      return { context, continuation }
+    if let some answer := getJsonString json "answer" then
+      return { context, continuation := answer }
+  if let some prompt := getJsonString json "prompt" then
+    if let some solution := getJsonString json "canonical_solution" then
+      return { context := prompt, continuation := solution }
   let text ← getJsonString json "text"
   -- Split off last word as continuation
   let words := text.splitOn " "
@@ -183,7 +225,7 @@ def loadCOREConfig (bundleDir : String) : IO (Array CORETaskConfig) := do
     let content ← IO.FS.readFile ⟨configPath⟩
     match Lean.Json.parse content with
     | .error _ => return defaultCOREConfigs
-    | .ok json =>
+    | .ok _json =>
       -- Parse array of configs (simplified - in practice would parse full structure)
       return defaultCOREConfigs
   else
@@ -209,12 +251,12 @@ def loadCORETaskData (bundleDir : String) (taskConfig : CORETaskConfig)
     match taskConfig.taskType with
     | .multipleChoice =>
       let parsed := match taskConfig.label with
-        | "arc_easy" | "arc_challenge" => parseARCItem json
+        | "arc_easy" | "arc_challenge" | "mmlu" => parseARCItem json
         | "hellaswag" => parseHellaSwagItem json
         | "piqa" => parsePIQAItem json
         | "sciq" => parseSciQItem json
         | "boolq" => parseBoolQItem json
-        | _ => none
+        | _ => parseMCQueryChoicesGold json
       if let some item := parsed then
         items := items.push (.mc item)
     | .schema =>
@@ -228,10 +270,13 @@ def loadCORETaskData (bundleDir : String) (taskConfig : CORETaskConfig)
   return items
 
 /-- Find CORE config for a given TaskMeta -/
+private def normalizeTaskLabel (s : String) : String :=
+  ((s.toLower.replace "_" "").replace "-" "").replace " " ""
+
 def coreTaskMetaToConfig (taskMeta : TaskMeta) (configs : Array CORETaskConfig)
     : Option CORETaskConfig :=
   configs.find? fun cfg =>
-    cfg.label == taskMeta.taskName || cfg.label.replace "_" "" == taskMeta.taskName.replace "_" ""
+    normalizeTaskLabel cfg.label == normalizeTaskLabel taskMeta.taskName
 
 /-! ## Loading All CORE Tasks -/
 
@@ -307,9 +352,26 @@ def getFewshotExamples (items : Array EvalItem) (numFewshot : Nat) (seed : UInt6
     : Array EvalItem := Id.run do
   if numFewshot == 0 || items.isEmpty then return #[]
 
-  -- Simple deterministic selection: first N items
-  let n := min numFewshot items.size
-  return items.extract 0 n
+  -- Deterministically shuffle indices using an LCG seeded by `seed`.
+  let mut idxs : Array Nat := #[]
+  for i in [:items.size] do
+    idxs := idxs.push i
+
+  let mut state := seed
+  if idxs.size > 1 then
+    for i in [:(idxs.size - 1)] do
+      state := state * 6364136223846793005 + 1442695040888963407
+      let remaining := idxs.size - i
+      let j := i + (state % remaining.toUInt64).toNat
+      let tmp := idxs[i]!
+      idxs := idxs.set! i idxs[j]!
+      idxs := idxs.set! j tmp
+
+  let n := min numFewshot idxs.size
+  let mut selected : Array EvalItem := #[]
+  for i in [:n] do
+    selected := selected.push items[idxs[i]!]!
+  selected
 
 /-- Render few-shot prefix for multiple choice tasks -/
 def renderFewshotPrefixMC (examples : Array EvalItem) (delimiter : String) : String := Id.run do

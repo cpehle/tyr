@@ -7,6 +7,8 @@
   - ARC (AI2 Reasoning Challenge) - multiple choice
   - MMLU (Massive Multitask Language Understanding) - multiple choice
   - GSM8K (Grade School Math) - generative with tool use
+  - SmolTalk (general chat conversations)
+  - CustomJSON (local JSONL conversations)
   - SpellingBee - generative with character counting
   - SimpleSpelling - generative spelling practice
   - HumanEval - code generation with execution-based evaluation
@@ -43,6 +45,50 @@ def findSubstr (haystack : String) (needle : String) : Option Nat := Id.run do
         break
     if found then return some i
   return none
+
+private def getObjArr? (json : Lean.Json) (field : String) : Option (Array Lean.Json) := do
+  let value ← (json.getObjVal? field).toOption
+  match value with
+  | .arr xs => some xs
+  | _ => none
+
+private def parseRole? (role : String) : Option Role :=
+  match role.trimAscii.toString.toLower with
+  | "system" => some .system
+  | "user" => some .user
+  | "assistant" => some .assistant
+  | "tool" => some .tool
+  | _ => none
+
+private def parseMessageJson? (json : Lean.Json) : Option Message := do
+  let roleStr ← (json.getObjValAs? String "role").toOption
+  let content ← (json.getObjValAs? String "content").toOption
+  let role ← parseRole? roleStr
+  return { role, content, parts := #[] }
+
+private def validateAlternatingUserAssistant (msgs : Array Message) : Bool :=
+  if msgs.isEmpty then
+    false
+  else
+    let offset :=
+      match msgs[0]? with
+      | some first =>
+        if first.role == .system then 1 else 0
+      | none => 0
+    let rest := msgs.extract offset msgs.size
+    if rest.size < 2 then
+      false
+    else
+      Id.run do
+        let mut ok := true
+        for i in [:rest.size] do
+          let expected := if i % 2 == 0 then Role.user else Role.assistant
+          match rest[i]? with
+          | some msg =>
+            if msg.role != expected then
+              ok := false
+          | none => ok := false
+        ok
 
 /-! ## Answer Extraction -/
 
@@ -168,10 +214,19 @@ structure MMLUExample where
   deriving Repr
 
 def MMLUExample.fromJson? (json : Lean.Json) : Option MMLUExample := do
-  let question ← (json.getObjValAs? String "question").toOption
-  let choices ← (json.getObjValAs? (Array String) "choices").toOption
-  let answer ← (json.getObjValAs? Nat "answer").toOption
-  let subject ← (json.getObjValAs? String "subject").toOption
+  -- HF `auxiliary_train` rows can be wrapped as `{ "train": {...} }`.
+  let root := ((json.getObjVal? "train").toOption).getD json
+  let question ← (root.getObjValAs? String "question").toOption
+  let choices ← (root.getObjValAs? (Array String) "choices").toOption
+  let answer :=
+    match (root.getObjValAs? Nat "answer").toOption with
+    | some a => some a
+    | none =>
+      match (root.getObjValAs? Int "answer").toOption with
+      | some a => Int.toNat? a
+      | none => none
+  let answer ← answer
+  let subject := (root.getObjValAs? String "subject").toOption |>.getD ""
   return { question, choices, answer, subject }
 
 /-- MMLU task implementation -/
@@ -209,6 +264,79 @@ def MMLUTask.evaluate (_task : MMLUTask) (conv : Conversation) (response : Strin
   let expected := conv.messages.back?.map (·.content) |>.getD ""
   let predicted := extractLetterAnswer response MMLUTask.letters |>.getD response.trimAscii.toString
   let correct := predicted == expected
+  { correct, score := if correct then 1.0 else 0.0, expected, predicted }
+
+/-! ## SmolTalk Task -/
+
+structure SmolTalkExample where
+  messages : Array Message
+  source : Option String := none
+  deriving Repr
+
+def SmolTalkExample.fromJson? (json : Lean.Json) : Option SmolTalkExample := do
+  let rawMsgs ← getObjArr? json "messages"
+  let msgs := rawMsgs.filterMap parseMessageJson?
+  if msgs.size != rawMsgs.size then
+    none
+  else if !validateAlternatingUserAssistant msgs then
+    none
+  else
+    let source := (json.getObjValAs? String "source").toOption
+    some { messages := msgs, source := source }
+
+structure SmolTalkTask where
+  split : String
+  examples : Array SmolTalkExample
+  config : TaskConfig
+  deriving Repr
+
+def SmolTalkTask.evalType : EvalType := .generative
+
+def SmolTalkTask.size (task : SmolTalkTask) : Nat :=
+  let stop := task.config.stop.getD task.examples.size
+  let span := stop - task.config.start
+  (span + task.config.step - 1) / task.config.step
+
+def SmolTalkTask.getExample (task : SmolTalkTask) (index : Nat) : Option Conversation := do
+  let physicalIdx := task.config.start + index * task.config.step
+  let ex ← task.examples[physicalIdx]?
+  let mut metadata : List (String × String) := []
+  match ex.source with
+  | some src => metadata := ("source", src) :: metadata
+  | none => pure ()
+  return { messages := ex.messages, metadata := metadata }
+
+def SmolTalkTask.evaluate (_task : SmolTalkTask) (conv : Conversation) (response : String)
+    : EvalResult :=
+  let expected := conv.messages.back?.map (·.content) |>.getD ""
+  let predicted := response.trimAscii.toString
+  let correct := !predicted.isEmpty && !expected.isEmpty
+  { correct, score := if correct then 1.0 else 0.0, expected, predicted }
+
+/-! ## CustomJSON Task -/
+
+structure CustomJSONTask where
+  filepath : String
+  examples : Array Conversation
+  config : TaskConfig
+  deriving Repr
+
+def CustomJSONTask.evalType : EvalType := .generative
+
+def CustomJSONTask.size (task : CustomJSONTask) : Nat :=
+  let stop := task.config.stop.getD task.examples.size
+  let span := stop - task.config.start
+  (span + task.config.step - 1) / task.config.step
+
+def CustomJSONTask.getExample (task : CustomJSONTask) (index : Nat) : Option Conversation := do
+  let physicalIdx := task.config.start + index * task.config.step
+  task.examples[physicalIdx]?
+
+def CustomJSONTask.evaluate (_task : CustomJSONTask) (conv : Conversation) (response : String)
+    : EvalResult :=
+  let expected := conv.messages.back?.map (·.content) |>.getD ""
+  let predicted := response.trimAscii.toString
+  let correct := !predicted.isEmpty && !expected.isEmpty
   { correct, score := if correct then 1.0 else 0.0, expected, predicted }
 
 /-! ## GSM8K Task (Grade School Math) -/
@@ -467,6 +595,34 @@ def loadGSM8KFromJsonl (path : System.FilePath) : IO (Array GSM8KExample) := do
     | .error _ => pure ()
   return examples
 
+/-- Load SmolTalk examples from JSONL file. -/
+def loadSmolTalkFromJsonl (path : System.FilePath) : IO (Array SmolTalkExample) := do
+  let content ← IO.FS.readFile path
+  let lines := content.splitOn "\n" |>.filter (!·.isEmpty)
+  let mut examples : Array SmolTalkExample := #[]
+  for line in lines do
+    match Lean.Json.parse line with
+    | .ok json =>
+      if let some ex := SmolTalkExample.fromJson? json then
+        examples := examples.push ex
+    | .error _ => pure ()
+  return examples
+
+/-- Load conversations from CustomJSON JSONL format (one JSON array of messages per line). -/
+def loadCustomJSONConversations (path : System.FilePath) : IO (Array Conversation) := do
+  let content ← IO.FS.readFile path
+  let lines := content.splitOn "\n" |>.filter (!·.isEmpty)
+  let mut convs : Array Conversation := #[]
+  for line in lines do
+    match Lean.Json.parse line with
+    | .ok (.arr rawMsgs) =>
+      let msgs := rawMsgs.filterMap parseMessageJson?
+      if msgs.size == rawMsgs.size && validateAlternatingUserAssistant msgs then
+        convs := convs.push { messages := msgs }
+    | .ok _ => pure ()
+    | .error _ => pure ()
+  return convs
+
 /-- Load word list from text file (one word per line) -/
 def loadWordList (path : System.FilePath) : IO (Array String) := do
   let content ← IO.FS.readFile path
@@ -494,6 +650,18 @@ def createGSM8KTask (path : System.FilePath) (subset : String) (split : String)
     (config : TaskConfig := {}) : IO GSM8KTask := do
   let examples ← loadGSM8KFromJsonl path
   return { subset, split, examples, config }
+
+/-- Create SmolTalk task from JSONL file. -/
+def createSmolTalkTask (path : System.FilePath) (split : String)
+    (config : TaskConfig := {}) : IO SmolTalkTask := do
+  let examples ← loadSmolTalkFromJsonl path
+  return { split, examples, config }
+
+/-- Create CustomJSON task from a local JSONL file. -/
+def createCustomJSONTask (path : System.FilePath)
+    (config : TaskConfig := {}) : IO CustomJSONTask := do
+  let examples ← loadCustomJSONConversations path
+  return { filepath := path.toString, examples, config }
 
 /-- Create SpellingBee task from word list -/
 def createSpellingBeeTask (wordListPath : System.FilePath) (size : Nat) (split : String)
@@ -638,6 +806,22 @@ instance : EvalTask GSM8KTask where
   evaluate := GSM8KTask.evaluate
   reward := GSM8KTask.reward
 
+/-- SmolTalk task implements Task typeclass. -/
+instance : EvalTask SmolTalkTask where
+  name := "smoltalk"
+  evalType _ := .generative
+  size := SmolTalkTask.size
+  getExample := SmolTalkTask.getExample
+  evaluate := SmolTalkTask.evaluate
+
+/-- CustomJSON task implements Task typeclass. -/
+instance : EvalTask CustomJSONTask where
+  name := "customjson"
+  evalType _ := .generative
+  size := CustomJSONTask.size
+  getExample := CustomJSONTask.getExample
+  evaluate := CustomJSONTask.evaluate
+
 /-- SpellingBee task implements Task typeclass -/
 instance : EvalTask SpellingBeeTask where
   name := "spelling_bee"
@@ -673,6 +857,8 @@ inductive AnyTask where
   | arc : ARCTask → AnyTask
   | mmlu : MMLUTask → AnyTask
   | gsm8k : GSM8KTask → AnyTask
+  | smolTalk : SmolTalkTask → AnyTask
+  | customJSON : CustomJSONTask → AnyTask
   | spellingBee : SpellingBeeTask → AnyTask
   | simpleSpelling : SimpleSpellingTask → AnyTask
   | humanEval : HumanEvalTask → AnyTask
@@ -682,6 +868,8 @@ def AnyTask.evalType : AnyTask → EvalType
   | .arc _ => ARCTask.evalType
   | .mmlu _ => MMLUTask.evalType
   | .gsm8k _ => GSM8KTask.evalType
+  | .smolTalk _ => SmolTalkTask.evalType
+  | .customJSON _ => CustomJSONTask.evalType
   | .spellingBee _ => SpellingBeeTask.evalType
   | .simpleSpelling _ => SimpleSpellingTask.evalType
   | .humanEval _ => HumanEvalTask.evalType
@@ -690,6 +878,8 @@ def AnyTask.size : AnyTask → Nat
   | .arc t => t.size
   | .mmlu t => t.size
   | .gsm8k t => t.size
+  | .smolTalk t => t.size
+  | .customJSON t => t.size
   | .spellingBee t => t.size
   | .simpleSpelling t => t.size
   | .humanEval t => t.size
@@ -699,6 +889,8 @@ def AnyTask.getExample (task : AnyTask) (index : Nat) : Option Conversation :=
   | .arc t => t.getExample index
   | .mmlu t => t.getExample index
   | .gsm8k t => t.getExample index
+  | .smolTalk t => t.getExample index
+  | .customJSON t => t.getExample index
   | .spellingBee t => t.getExample index
   | .simpleSpelling t => t.getExample index
   | .humanEval t => t.getExample index
@@ -708,6 +900,8 @@ def AnyTask.evaluate (task : AnyTask) (conv : Conversation) (response : String) 
   | .arc t => t.evaluate conv response
   | .mmlu t => t.evaluate conv response
   | .gsm8k t => t.evaluate conv response
+  | .smolTalk t => t.evaluate conv response
+  | .customJSON t => t.evaluate conv response
   | .spellingBee t => t.evaluate conv response
   | .simpleSpelling _ =>
     -- SimpleSpelling doesn't have formal evaluation

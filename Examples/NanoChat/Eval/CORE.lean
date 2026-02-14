@@ -330,7 +330,7 @@ def evaluateLM {seq vocab : UInt64}
 
   -- Get argmax predictions at each position: [1, seq]
   -- predictions[i] is the predicted token for position i+1
-  let predictions := nn.argmax logits 2
+  let (_, predictions) := torch.max_dim_3d logits 2
 
   -- Flatten to 1D for easier slicing
   let predsFlat := reshape predictions #[seq]
@@ -370,6 +370,8 @@ structure EvalConfig where
   bosToken : UInt64 := 0
   /-- Device to run on -/
   device : Device := Device.CPU
+  /-- When true, shard evaluation examples across distributed ranks. -/
+  parallelAcrossRanks : Bool := true
   deriving Repr, Inhabited
 
 /-- Stack and pad token sequences to create input tensor -/
@@ -388,8 +390,9 @@ def evaluateSingleExample
     (taskMeta : TaskMeta)
     (tokenize : String → Array UInt64)
     (runModel : T #[] → IO (T #[]))
-    (bosToken : UInt64)
+    (config : EvalConfig)
     : IO (Option Bool) := do
+  let bosToken := config.bosToken
   -- Render prompts and get batch info based on task type
   let maybeBatchAndGold := match taskMeta.taskType, item with
   | .multipleChoice, .mc mcItem =>
@@ -410,18 +413,19 @@ def evaluateSingleExample
     let paddedTokens := stackAndPad batchInfo.tokens bosToken
     let batchSize := batchInfo.tokens.size.toUInt64
     let seqLen := if batchInfo.tokens.isEmpty then (1 : UInt64)
-                  else batchInfo.tokens[0]!.size.toUInt64
+                  else
+                    (batchInfo.tokens.foldl (fun acc (seq : Array UInt64) => max acc seq.size) 0).toUInt64
 
     -- Convert to tensor
     let inputTensor := data.fromInt64Array (paddedTokens.map (·.toInt64))
     let inputReshaped := reshape inputTensor #[batchSize, seqLen]
 
     -- Run model forward
-    let logits ← runModel (reshape inputReshaped #[])
+    let logits ← runModel ((reshape inputReshaped #[]).to config.device)
 
     -- Create target IDs tensor (same as input for loss computation)
     let targetTensor := data.fromInt64Array (paddedTokens.map (·.toInt64))
-    let targetReshaped := reshape targetTensor #[batchSize, seqLen]
+    let targetReshaped := (reshape targetTensor #[batchSize, seqLen]).to logits.device
 
     -- Evaluate based on task type
     let result ← match taskMeta.taskType with
@@ -456,7 +460,8 @@ def evaluateTask
 
   -- Get distributed info
   let isDistributed ← dist.isInitialized
-  let (rank, worldSize) ← if isDistributed
+  let useDistributed := config.parallelAcrossRanks && isDistributed
+  let (rank, worldSize) ← if useDistributed
     then dist.getRankAndWorldSize
     else pure (0, 1)
 
@@ -468,7 +473,7 @@ def evaluateTask
     -- Skip if not assigned to this rank
     if idx % worldSize.toNat == rank.toNat then
       let item := examples[idx]!
-      let maybeCorrect ← evaluateSingleExample item taskMeta tokenize runModel config.bosToken
+      let maybeCorrect ← evaluateSingleExample item taskMeta tokenize runModel config
       match maybeCorrect with
       | none => pure ()  -- Skip invalid examples
       | some isCorrect =>
@@ -477,7 +482,7 @@ def evaluateTask
         numTotal := numTotal + 1
 
   -- Aggregate across ranks if distributed
-  if isDistributed && worldSize > 1 then
+  if useDistributed && worldSize > 1 then
     dist.barrier
     -- All-reduce numCorrect and numTotal (allReduce modifies in-place)
     let correctTensor := data.fromInt64Array #[numCorrect.toInt64]
@@ -501,8 +506,8 @@ def coreTasks : Array TaskMeta := #[
   { taskType := .schema, numFewshot := 0, taskName := "winogrande" },
   -- PIQA
   { taskType := .multipleChoice, numFewshot := 0, taskName := "piqa" },
-  -- SciQ
-  { taskType := .multipleChoice, numFewshot := 0, taskName := "sciq" },
+  -- MMLU
+  { taskType := .multipleChoice, numFewshot := 0, taskName := "mmlu" },
   -- BoolQ
   { taskType := .multipleChoice, numFewshot := 0, taskName := "boolq" },
   -- LAMBADA

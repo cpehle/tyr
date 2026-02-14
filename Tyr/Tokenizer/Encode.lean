@@ -9,6 +9,63 @@ import Tyr.Tokenizer.Pretokenize
 
 namespace tokenizer
 
+/-- Insert a special token into an array sorted by decreasing token length. -/
+private def insertSpecialByLength (sorted : Array String) (s : String) : Array String := Id.run do
+  let mut out : Array String := #[]
+  let mut inserted := false
+  for existing in sorted do
+    if !inserted && s.length > existing.length then
+      out := out.push s
+      inserted := true
+    out := out.push existing
+  if !inserted then
+    out := out.push s
+  out
+
+/-- Sort special tokens by decreasing length so longest match wins. -/
+private def sortSpecialsByLength (specials : Array String) : Array String :=
+  specials.foldl insertSpecialByLength #[]
+
+/-- Match a special token at position `i` in `chars`, preferring earlier entries.
+    Call with specials sorted by decreasing length for longest-match behavior. -/
+private def matchSpecialAt (chars : Array Char) (i : Nat) (specials : Array String)
+    : Option (String × Nat) := Id.run do
+  for s in specials do
+    let pat := s.toList
+    let len := pat.length
+    if i + len <= chars.size then
+      let mut ok := true
+      for j in [:len] do
+        if chars[i + j]! != pat[j]! then
+          ok := false
+      if ok then
+        return some (s, len)
+  none
+
+/-- Split text into `(isSpecial, segment)` while preserving special tokens. -/
+private def splitWithSpecials (text : String) (specials : Array String)
+    : Array (Bool × String) := Id.run do
+  let chars := text.toList.toArray
+  let mut out : Array (Bool × String) := #[]
+  let mut buffer : Array Char := #[]
+  let mut i : Nat := 0
+
+  while i < chars.size do
+    match matchSpecialAt chars i specials with
+    | some (tok, len) =>
+      if !buffer.isEmpty then
+        out := out.push (false, String.ofList buffer.toList)
+        buffer := #[]
+      out := out.push (true, tok)
+      i := i + len
+    | none =>
+      buffer := buffer.push chars[i]!
+      i := i + 1
+
+  if !buffer.isEmpty then
+    out := out.push (false, String.ofList buffer.toList)
+  out
+
 /-- Convert bytes to base token IDs (one token per byte) -/
 def bytesToBaseTokens (tok : BPETokenizer) (bytes : ByteArray) : Array TokenId := Id.run do
   let mut result := Array.mkEmpty bytes.size
@@ -106,13 +163,26 @@ def encode (tok : BPETokenizer) (text : String) : Array TokenId := Id.run do
 /-- Encode with special token handling.
     Special tokens in the input are detected and replaced with their IDs. -/
 def encodeWithSpecials (tok : BPETokenizer) (text : String) : Array TokenId := Id.run do
-  -- Simple approach: split on special tokens, encode each part
-  -- For now, just use regular encode
-  -- TODO: implement proper special token detection
-  encode tok text
+  if tok.specialTokens.isEmpty then
+    return encode tok text
+
+  let specialList := sortSpecialsByLength <| tok.specialTokens.toList.map Prod.fst |>.toArray
+  let segments := splitWithSpecials text specialList
+
+  let mut out : Array TokenId := #[]
+  for (isSpecial, segment) in segments do
+    if isSpecial then
+      match tok.specialTokens.get? segment with
+      | some id => out := out.push id
+      | none =>
+        -- Should not happen because we matched from `specialList`, but keep safe fallback.
+        out := out ++ encode tok segment
+    else
+      out := out ++ encode tok segment
+  out
 
 /-- Get the number of tokens for a text (without returning them) -/
 def countTokens (tok : BPETokenizer) (text : String) : Nat :=
-  (encode tok text).size
+  (encodeWithSpecials tok text).size
 
 end tokenizer

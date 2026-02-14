@@ -23,10 +23,12 @@
 import Tyr.Torch
 import Tyr.TensorStruct
 import Tyr.Optim
+import Tyr.Distributed
 
 namespace torch.RL.GRPO
 
 open torch
+open torch.dist
 
 /-! ## Configuration -/
 
@@ -253,11 +255,15 @@ def padSequence (seq : Array UInt64) (targetLen : Nat) (padValue : UInt64) : Arr
 /-- Create input and target sequences from a full sequence (shift by 1) -/
 def createInputTarget (fullSeq : Array UInt64) (padToken : UInt64 := 0)
     : Array UInt64 × Array UInt64 :=
-  -- Input: all tokens except last (seq[:-1])
-  let input := fullSeq.extract 0 (fullSeq.size - 1)
-  -- Target: all tokens except first (seq[1:])
-  let target := fullSeq.extract 1 fullSeq.size
-  (input, target)
+  -- Keep a valid one-step pair for degenerate sequences.
+  if fullSeq.size <= 1 then
+    (#[padToken], #[padToken])
+  else
+    -- Input: all tokens except last (seq[:-1])
+    let input := fullSeq.extract 0 (fullSeq.size - 1)
+    -- Target: all tokens except first (seq[1:])
+    let target := fullSeq.extract 1 fullSeq.size
+    (input, target)
 
 /-- Create mask for valid tokens (1.0 for valid, 0.0 for padding) -/
 def createValidMask (seqLen : Nat) (paddedLen : Nat) : Array Float :=
@@ -315,8 +321,8 @@ def prepareBatchedRollouts (rollouts : Array RolloutBatch) (padToken : UInt64 :=
 
 /-- Perform one GRPO training step (simple version without model).
 
-    This version collects statistics but returns a placeholder loss.
-    Use grpoStepWithModel for actual training. -/
+    This variant computes rollout statistics and a proxy PG score.
+    Use grpoStepWithModel/grpoStepWithModelUpdate for gradient updates. -/
 def grpoStep
     (rollouts : Array RolloutBatch)
     (_config : GRPOConfig)
@@ -332,7 +338,7 @@ def grpoStep
       totalGenLen := totalGenLen + sample.responseTokens.size
 
   -- Compute advantages (nanochat: A = r - mean(r))
-  let _advantages := computeAdvantages allRewards
+  let advantages := computeAdvantages allRewards
 
   -- Compute mean reward
   let meanReward := if allRewards.isEmpty then 0.0
@@ -342,8 +348,11 @@ def grpoStep
   let meanGenLen := if allRewards.isEmpty then 0.0
     else totalGenLen.toFloat / allRewards.size.toFloat
 
-  -- Placeholder loss value (use grpoStepWithModel for actual training)
-  let pgLoss := 0.0
+  -- Proxy PG objective for logging in non-gradient mode.
+  let mut pgObj : Float := 0.0
+  for i in [:allRewards.size] do
+    pgObj := pgObj + allRewards[i]! * advantages[i]!
+  let pgLoss := if allRewards.isEmpty then 0.0 else -(pgObj / allRewards.size.toFloat)
 
   -- Update state
   let newState := { state with
@@ -425,8 +434,6 @@ def grpoStepWithModel (b t : UInt64)
   -- Create tensors
   let inputTensor1d := data.fromInt64Array inputFlat
   let targetTensor1d := data.fromInt64Array targetFlat
-  let seqLenMinusOne := batched.seqLen - 1
-
   -- Reshape to [B, T-1]
   let inputTensor : T #[b, t] := reshape inputTensor1d #[b, t]
   let targetTensor : T #[b, t] := reshape targetTensor1d #[b, t]
@@ -565,8 +572,8 @@ def generateSample
     newTokens := newTokens.push nextToken
     tokens := tokens.push nextToken
 
-    -- Stop at EOS
-    if nextToken == config.eosToken then
+    -- Stop on either terminal token.
+    if nextToken == config.eosToken || nextToken == config.padToken then
       break
 
   return newTokens
@@ -797,6 +804,13 @@ def grpoStepWithModelUpdate (b t : UInt64) [TensorStruct P]
 
   let meanLossTensor := div_scalar totalLoss rewards.size.toFloat
   autograd.backwardLoss meanLossTensor
+
+  -- Synchronize gradients in distributed runs.
+  let isDistributed ← dist.isInitialized
+  if isDistributed then
+    let gradsToSync := TensorStruct.grads workingParams
+    let _ ← dist.allReduceGrads gradsToSync .avg
+    pure ()
 
   let grads := TensorStruct.grads workingParams
   let lr := state.getLr config.matrixLr config.initLrFrac

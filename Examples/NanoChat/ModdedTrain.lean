@@ -1256,18 +1256,26 @@ def trainDistributed (cfg : moddedGpt.Config) (hp : Hyperparameters)
             IO.println s!"Warning: failed to load auto-resume checkpoint {resumePath}; starting fresh"
           pure initState
 
+  -- Normalize all train state tensors onto the selected training device
+  -- before any NCCL collectives.
+  let paramsOnDevice ← moveToDevice state.params device
+  let adamOnDevice := TensorStruct.map (fun t => t.to device) state.optState.adamState
+  let dualOnDevice := TensorStruct.map (fun t => t.to device) state.optState.dualState
+  let state := {
+    state with
+    params := paramsOnDevice
+    optState := {
+      state.optState with
+      adamState := adamOnDevice
+      dualState := dualOnDevice
+    }
+  }
+
   -- Synchronize parameters from rank 0
   let syncedParams ← syncParameters state.params
-  let syncedAdamState ← if isDistributed then dist.broadcastParams state.optState.adamState else pure state.optState.adamState
-  let syncedDualState ← if isDistributed then dist.broadcastParams state.optState.dualState else pure state.optState.dualState
   let state := {
     state with
     params := syncedParams
-    optState := {
-      state.optState with
-      adamState := syncedAdamState
-      dualState := syncedDualState
-    }
   }
 
   -- Barrier to ensure all ranks are ready
@@ -1531,25 +1539,25 @@ def trainDistributedWithBatchProvider (cfg : moddedGpt.Config) (hp : Hyperparame
             IO.println s!"Warning: failed to load auto-resume checkpoint {resumePath}; starting fresh"
           pure initState
 
+  -- Normalize all train state tensors onto the selected training device
+  -- before any NCCL collectives.
+  let paramsOnDevice ← moveToDevice state.params device
+  let adamOnDevice := TensorStruct.map (fun t => t.to device) state.optState.adamState
+  let dualOnDevice := TensorStruct.map (fun t => t.to device) state.optState.dualState
+  let state := {
+    state with
+    params := paramsOnDevice
+    optState := {
+      state.optState with
+      adamState := adamOnDevice
+      dualState := dualOnDevice
+    }
+  }
+
   let syncedParams ← syncParameters state.params
-  let syncedAdamState ←
-    if isDistributed then
-      dist.broadcastParams state.optState.adamState
-    else
-      pure state.optState.adamState
-  let syncedDualState ←
-    if isDistributed then
-      dist.broadcastParams state.optState.dualState
-    else
-      pure state.optState.dualState
   let state := {
     state with
     params := syncedParams
-    optState := {
-      state.optState with
-      adamState := syncedAdamState
-      dualState := syncedDualState
-    }
   }
 
   if isDistributed then

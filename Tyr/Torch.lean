@@ -601,7 +601,7 @@ def meanDim {s : Shape} (t : T s) (dim : Nat) (keepdim : Bool := false) : T (red
   reshape result (reduceShape s dim keepdim)
 
 -- Sampling operations
-@[extern "lean_torch_topk_values"] opaque topk_values {s : Shape} (t : @& T s) (k : UInt64) (dim : Nat) : T (replaceAtDim s dim k)
+@[extern "lean_torch_topk_values"] opaque topk_values {s : Shape} (t : @& T s) (k : UInt64) (dim : UInt64) : T (replaceAtDim s dim.toNat k)
 @[extern "lean_torch_multinomial"] opaque multinomial {s : Shape} (probs : @& T s) (num_samples : UInt64) (replacement : Bool := false) : IO (T (replaceAtDim s (s.size - 1) num_samples))
 
 /-- Top-k filtering: set all logits outside the top k to -infinity.
@@ -619,7 +619,7 @@ opaque topPFilter {s : Shape} (logits : @& T s) (p : Float) : T s
 opaque squeezeDim {s : Shape} (input : @& T s) (dim : Int64) : T #[]
 
 -- Argmax (returns indices along dimension, removing that dimension)
-@[extern "lean_torch_argmax"] opaque argmax {s : Shape} (t : @& T s) (dim : Nat) : T (reduceShape s dim false)
+@[extern "lean_torch_argmax"] opaque argmax {s : Shape} (t : @& T s) (dim : UInt64) : T (reduceShape s dim.toNat false)
 
 -- Scalar extraction
 @[extern "lean_torch_item"] opaque item {s : Shape} (t : @& T s) : Float

@@ -8,6 +8,12 @@ import Tyr.Tokenizer.ByteLevel
 
 namespace tokenizer
 
+/-- Decode UTF-8 bytes, falling back to byte-level rendering for invalid streams. -/
+private def decodeUtf8Lossy (bytes : ByteArray) : String :=
+  match String.fromUTF8? bytes with
+  | some s => s
+  | none => bytesToByteLevel bytes
+
 /-- Decode a single token ID to bytes -/
 def decodeToken (tok : BPETokenizer) (id : TokenId) : ByteArray :=
   -- Check if it's a special token first
@@ -24,8 +30,7 @@ def decode (tok : BPETokenizer) (ids : Array TokenId) : String := Id.run do
   let mut bytes := ByteArray.empty
   for id in ids do
     bytes := bytes ++ decodeToken tok id
-  -- Convert bytes to UTF-8 string, replacing invalid sequences
-  String.fromUTF8! bytes
+  return decodeUtf8Lossy bytes
 
 /-- Decode tokens, returning bytes instead of string -/
 def decodeToBytes (tok : BPETokenizer) (ids : Array TokenId) : ByteArray := Id.run do
@@ -36,6 +41,6 @@ def decodeToBytes (tok : BPETokenizer) (ids : Array TokenId) : ByteArray := Id.r
 
 /-- Decode a single token to string (for debugging) -/
 def decodeOne (tok : BPETokenizer) (id : TokenId) : String :=
-  String.fromUTF8! (decodeToken tok id)
+  decodeUtf8Lossy (decodeToken tok id)
 
 end tokenizer

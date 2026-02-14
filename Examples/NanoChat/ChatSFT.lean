@@ -13,12 +13,14 @@ import Tyr.Torch
 import Tyr.TensorStruct
 import Tyr.Module
 import Tyr.Optim
+import Tyr.Distributed
 import Tyr.Data.Task
 
 namespace torch.Train.ChatSFT
 
 open torch
 open torch.Data.Task
+open torch.dist
 
 /-! ## Configuration -/
 
@@ -114,6 +116,14 @@ def SFTBatch.empty : SFTBatch :=
   , batchSize := 0
   , seqLen := 0
   , numValidTokens := 0 }
+
+/-- Move all tensor fields of an SFT batch to a target device. -/
+private def moveBatchToDevice (batch : SFTBatch) (device : Device) : SFTBatch :=
+  { batch with
+    inputs := batch.inputs.to device
+    targets := batch.targets.to device
+    mask := batch.mask.to device
+  }
 
 /-! ## Masked Loss Computation -/
 
@@ -240,12 +250,14 @@ def evalValidationLoss
     (dataFn : IO SFTBatch)
     (forwardFn : T #[] → IO (T #[]))  -- Generic forward: inputs → logits
     (numSteps : Nat)
+    (device : Device := Device.CPU)
     : IO Float := autograd.no_grad do
   let mut totalLoss : Float := 0.0
   let mut totalValid : Nat := 0
 
   for _ in [:numSteps] do
     let batch ← dataFn
+    let batch := moveBatchToDevice batch device
     if batch.numValidTokens > 0 then
       let logits ← forwardFn batch.inputs
       -- Reshape for loss computation (dimensions come from batch)
@@ -306,6 +318,10 @@ def trainLoop [TensorStruct P]
     (numTrainExamples : Nat := 10000)
     (logger : LogCallback := defaultLogger)
     : IO (P × Optim.AdamWState P × SFTState) := do
+  let isDistributed ← dist.isInitialized
+  let worldSizeU64 ← if isDistributed then dist.getWorldSize else pure 1
+  let worldSize := worldSizeU64.toNat
+
   -- Compute number of iterations
   let numIterations : Nat :=
     if cfg.numIterations >= 0 then
@@ -313,15 +329,16 @@ def trainLoop [TensorStruct P]
     else
       (numTrainExamples / cfg.targetExamplesPerStep) * cfg.numEpochs
 
-  let gradAccumSteps := cfg.gradAccumSteps 1  -- Assuming single GPU for now
+  let gradAccumSteps := max 1 (cfg.gradAccumSteps worldSize)
 
   IO.println s!"Starting SFT training for {numIterations} iterations"
+  IO.println s!"  World size: {worldSize}"
   IO.println s!"  Batch size: {cfg.deviceBatchSize}, Grad accum: {gradAccumSteps}"
   IO.println s!"  LRs: embed={cfg.embeddingLr}, unembed={cfg.unembeddingLr}, matrix={cfg.matrixLr}"
   IO.println s!"  Eval every: {cfg.evalEvery}, Log every: {cfg.logInterval}"
   (← IO.getStdout).flush
 
-  let mut currentParams := params
+  let mut currentParams := TensorStruct.makeLeafParams params
   let mut currentOptState := optState
   let mut state : SFTState := {}
 
@@ -332,7 +349,7 @@ def trainLoop [TensorStruct P]
     -- Validation evaluation
     if let some valFn := valDataFn then
       if isLastStep || (step > 0 && step % cfg.evalEvery == 0) then
-        let valLoss ← evalValidationLoss valFn (forwardFn currentParams) cfg.evalSteps
+        let valLoss ← evalValidationLoss valFn (forwardFn currentParams) cfg.evalSteps cfg.device
         IO.println s!"Step {step}: val_loss={valLoss}"
         if valLoss < state.bestValLoss then
           state := { state with bestValLoss := valLoss }
@@ -343,7 +360,7 @@ def trainLoop [TensorStruct P]
       break
 
     -- Zero gradients at start of accumulation
-    let workingParams := TensorStruct.zeroGrads currentParams
+    let workingParams := TensorStruct.zeroGrads (TensorStruct.makeLeafParams currentParams)
 
     -- Gradient accumulation loop
     let mut accumLoss : Float := 0.0
@@ -351,6 +368,7 @@ def trainLoop [TensorStruct P]
 
     for _ in [:gradAccumSteps] do
       let batch ← trainDataFn
+      let batch := moveBatchToDevice batch cfg.device
 
       if batch.numValidTokens > 0 then
         -- Forward pass
@@ -369,12 +387,13 @@ def trainLoop [TensorStruct P]
     let lrm := linearLRMultiplier step numIterations
     let lr := cfg.embeddingLr * cfg.initLrFrac * lrm
 
-    -- Gradient clipping (placeholder - would need per-tensor clipping)
-    -- Note: TensorStruct doesn't have clipGradNorm, would need to implement
-    -- For now, skip gradient clipping
-    pure ()
+    -- Synchronize gradients across ranks in distributed training.
+    if isDistributed then
+      let gradsToSync := TensorStruct.grads workingParams
+      let _ ← dist.allReduceGrads gradsToSync .avg
+      pure ()
 
-    -- Extract gradients and update parameters
+    -- Extract gradients and update parameters.
     let grads := TensorStruct.grads workingParams
     let opt := Optim.adamw (lr := lr) (b1 := 0.9) (b2 := 0.999)
     let (newParams, newOptState) := Optim.step opt workingParams grads currentOptState
@@ -407,10 +426,19 @@ def trainLoop [TensorStruct P]
     Yields SFTBatch on each call, handling epoch boundaries automatically. -/
 def makeTaskDataGenerator
     (iter : TaskIterator)
-    (maxLen : Nat)
-    (padTokenId : UInt64)
+    (_maxLen : Nat)
+    (_padTokenId : UInt64)
     : IO (IO SFTBatch) := do
   let iterRef ← IO.mkRef iter
+  let toSFTBatch := fun (convBatch : ConversationBatch) =>
+    let numValidInt := nn.itemInt (nn.sumAll convBatch.mask)
+    let numValidTokens := if numValidInt <= 0 then 0 else numValidInt.toUInt64.toNat
+    { SFTBatch.empty with
+      inputs := convBatch.tokens
+      targets := convBatch.tokens
+      mask := convBatch.mask
+      numValidTokens := numValidTokens
+    }
   return do
     let mut currentIter ← iterRef.get
 
@@ -426,22 +454,9 @@ def makeTaskDataGenerator
         currentIter := newerIter
         match maybeBatch' with
         | none => pure SFTBatch.empty
-        | some convBatch =>
-          -- Need to re-process the ConversationBatch into SFTBatch
-          -- This is a simplified conversion - real impl would re-tokenize
-          pure { SFTBatch.empty with
-            inputs := convBatch.tokens
-            targets := convBatch.tokens
-            mask := convBatch.mask
-            numValidTokens := convBatch.lengths.foldl (· + ·) 0
-          }
+        | some convBatch => pure (toSFTBatch convBatch)
       | some convBatch =>
-        pure { SFTBatch.empty with
-          inputs := convBatch.tokens
-          targets := convBatch.tokens
-          mask := convBatch.mask
-          numValidTokens := convBatch.lengths.foldl (· + ·) 0
-        }
+        pure (toSFTBatch convBatch)
 
     iterRef.set currentIter
     return batch

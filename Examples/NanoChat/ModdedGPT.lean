@@ -247,11 +247,25 @@ def CausalSelfAttention.forward {batch seq dim headDim numHeads rotaryLen : UInt
     (x : T #[batch, seq, dim])
     (yarn : YarnRotary headDim rotaryLen)
     (windowSize : Option UInt64 := none)
+    (valueEmbed : Option (T #[batch, seq, numHeads * headDim]) := none)
+    (valueMix : T #[] := zeros #[])
     : T #[batch, seq, dim] :=
   -- Project to Q, K, V: [batch, seq, numHeads * headDim]
   let q := linear3d x attn.wQ
   let k := linear3d x attn.wK
-  let v := linear3d x attn.wV
+  let vBase := linear3d x attn.wV
+
+  -- Value-embedding blend (modded-nanogpt style): v := (1-λ)*v + λ*ve.
+  let v := match valueEmbed with
+    | some ve =>
+      let mix := nn.sigmoid valueMix
+      let one : T #[] := (ones #[]).to mix.device
+      let oneMinus := one - mix
+      let mixExpanded := nn.expand mix #[batch, seq, numHeads * headDim]
+      let oneMinusExpanded := nn.expand oneMinus #[batch, seq, numHeads * headDim]
+      (vBase * oneMinusExpanded) + (ve * mixExpanded)
+    | none =>
+      vBase
 
   -- Reshape to [batch, seq, numHeads, headDim] for rotary/attention
   let q := reshape q #[batch, seq, numHeads, headDim]
@@ -386,6 +400,44 @@ def Scalars.init (nLayer : UInt64) : Scalars nLayer := {
   values := autograd.set_requires_grad (mul_scalar (ones #[nLayer * 4 + 8]) 1.1) true
 }
 
+/-! ## Scalar/Value Helper Utilities -/
+
+/-- Extract scalar tensor at `idx` from a 1D tensor. -/
+private def scalarAt {n : UInt64} (values : T #[n]) (idx : UInt64) : T #[] :=
+  let oneElem : T #[1] := data.slice1d (n := n) (m := 1) values idx.toInt64 (idx.toInt64 + 1)
+  reshape oneElem #[]
+
+/-- Extract scalar at `idx` and squash to (0, 1). -/
+private def scalarSigmoidAt {n : UInt64} (values : T #[n]) (idx : UInt64) : T #[] :=
+  nn.sigmoid (scalarAt values idx)
+
+/-- Scale a tensor by a scalar tensor, keeping gradient flow through the scalar. -/
+private def scaleByScalar {s : Shape} (x : T s) (scalar : T #[]) : T s :=
+  let expanded := nn.expand scalar s
+  x * expanded
+
+/-- Blend two tensors with scalar weights. -/
+private def blendByScalars {s : Shape} (x y : T s) (sx sy : T #[]) : T s :=
+  scaleByScalar x sx + scaleByScalar y sy
+
+/-- Value-embedding routing pattern used by modded-nanogpt:
+    assign value embeddings to early and late layers, skip middle layers. -/
+private def layerValueEmbed {cfg : Config} {batch seq : UInt64}
+    (valueEmbeds : Array (T #[batch, seq, cfg.modelDim]))
+    (layerIdx : Nat)
+    : Option (T #[batch, seq, cfg.modelDim]) := Id.run do
+  let nLayers := cfg.nLayer.toNat
+  let nValue := valueEmbeds.size
+  if nLayers == 0 || nValue == 0 then
+    return none
+  let span := min nValue nLayers
+  if layerIdx < span then
+    return valueEmbeds[layerIdx]?
+  let backStart := nLayers - span
+  if layerIdx >= backStart then
+    return valueEmbeds[(layerIdx - backStart) % span]?
+  return none
+
 /-- Full modded GPT model parameters -/
 structure ModdedGPTParams (cfg : Config) where
   /-- Token embeddings [vocabSize, modelDim] -/
@@ -458,23 +510,36 @@ def forward {cfg : Config} {batch seq : UInt64}
     (inputSeq : T #[batch, seq])
     (_training : Bool := true)
     : IO (T #[batch, seq, cfg.vocabSize]) := do
-  -- 1. Token embedding
+  -- 1) Token embedding + lightweight smear-style modulation.
   let tokEmb := nn.embedding inputSeq params.embed
+  let smearIn : T #[batch, seq, 12] := data.slice tokEmb 2 0 12
+  let smearGate := nn.sigmoid (params.smearGate.forward smearIn)
+  let smearGateExpanded := nn.expand smearGate #[batch, seq, cfg.modelDim]
+  let x0 := nanoproof.rmsNorm (tokEmb + (tokEmb * smearGateExpanded))
 
-  -- 2. Smear gate: forward-shift token embeddings
-  -- Simplified: skip smear gate for now
-  let x := tokEmb
+  -- Precompute token value embeddings and global scalar controls.
+  let valueEmbeds := params.valueEmbeds.map (nn.embedding inputSeq ·)
+  let scalarBaseGlobal := cfg.nLayer * 4
+  let valueMix := scalarSigmoidAt params.scalars.values scalarBaseGlobal
+  let skipMix := scalarSigmoidAt params.scalars.values (scalarBaseGlobal + 1)
+  let finalScale := scalarSigmoidAt params.scalars.values (scalarBaseGlobal + 2)
 
-  -- 3. Apply transformer blocks
-  let mut x := x
+  -- 2) Apply transformer blocks with value embeddings and scalar-gated residuals.
+  let mut x := x0
   let mut skipConnection : Option (T #[batch, seq, cfg.modelDim]) := none
 
   for i in [:cfg.nLayer.toNat] do
     let block : Block cfg.modelDim cfg.headDim cfg.nHead := params.blocks[i]!
+    let scalarBase := (i.toUInt64) * 4
+    let lamX := scalarSigmoidAt params.scalars.values scalarBase
+    let lamX0 := scalarSigmoidAt params.scalars.values (scalarBase + 1)
+    let lamAttn := scalarSigmoidAt params.scalars.values (scalarBase + 2)
+    let lamMlp := scalarSigmoidAt params.scalars.values (scalarBase + 3)
+    let xIn := blendByScalars x x0 lamX lamX0
 
     -- Skip connection: save layer 3 output for layer 6
     if i == 2 then  -- Layer 3 (0-indexed: 2)
-      skipConnection := some x
+      skipConnection := some xIn
 
     -- Determine window size from config's windowPattern
     -- Pattern is tiled across layers, final layer always gets full context
@@ -484,35 +549,38 @@ def forward {cfg : Config} {batch seq : UInt64}
     match block.attn with
     | some attn =>
       -- Pre-norm (RMSNorm before attention)
-      let xNormed := nanoproof.rmsNorm x
-      -- Apply attention with rotary embeddings and window
-      let attnOut := attn.forward xNormed yarn windowSize
+      let xNormed := nanoproof.rmsNorm xIn
+      let layerVE := layerValueEmbed (cfg := cfg) valueEmbeds i
+      -- Apply attention with rotary embeddings/window and optional value embedding.
+      let attnOut := attn.forward xNormed yarn windowSize layerVE valueMix
       -- Residual connection
-      let x' := x + attnOut
+      let x' := xIn + scaleByScalar attnOut lamAttn
       -- Pre-norm before MLP
       let xMlpNormed := nanoproof.rmsNorm x'
       -- Apply MLP
       let h ← block.mlp.forward xMlpNormed
       -- Residual connection
-      x := x' + h
+      x := x' + scaleByScalar h lamMlp
     | none =>
       -- Attention skipped (layer 6)
       -- Apply skip connection from layer 3
       match skipConnection with
-      | some skip => x := x + skip
-      | none => pure ()
+      | some skip =>
+        x := xIn + scaleByScalar skip skipMix
+      | none =>
+        x := xIn
       -- Pre-norm before MLP
       let xNormed := nanoproof.rmsNorm x
       let h ← block.mlp.forward xNormed
-      x := x + h
+      x := x + scaleByScalar h lamMlp
 
-  -- 4. Final layer norm before projection
-  let xNormed := nanoproof.rmsNorm x
+  -- 3) Final layer norm / projection / softcap.
+  let xNormed := nanoproof.rmsNorm (scaleByScalar x finalScale)
 
-  -- 5. Final projection to vocab
+  -- Final projection to vocab
   let logits := params.lmHead.forward xNormed
 
-  -- 6. Softcap logits
+  -- Softcap logits
   let logitsCapped := nanoproof.softcap logits cfg.softcapValue
 
   return logitsCapped

@@ -118,11 +118,11 @@ private def printUsage : IO Unit := do
   IO.println "  --tokenizer <path>      Tokenizer file or tokenizer directory"
   IO.println "  --prompt <text>         One-shot prompt"
   IO.println "  --interactive           Interactive REPL mode"
-  IO.println "  --chat-markers          Wrap prompts with token IDs [1][...][2][3]"
+  IO.println "  --chat-markers          Wrap prompts using tokenizer chat markers"
   IO.println "  --max-new-tokens <n>    Decode length cap (default: 128)"
   IO.println "  --temperature <f>       Sampling temperature (default: 1.0)"
   IO.println "  --top-k <n>             Top-k filter (default: 50, 0 disables)"
-  IO.println "  --eos-token <id>        End token ID (default: 2, or 4 with --chat-markers)"
+  IO.println "  --eos-token <id>        End token ID (default: bos, or assistant_end with --chat-markers)"
   IO.println "  --model-depth <n>       Model depth used to load checkpoint (default: $MODEL_DEPTH or 20)"
   IO.println "  --vocab-size <n>        Vocab size used to load checkpoint (default: $VOCAB_SIZE or 65536)"
   IO.println "  --show-tokens           Print generated token IDs"
@@ -177,6 +177,33 @@ private def moveYarnToDevice {headDim maxSeqLen : UInt64}
     angularFreq := yarn.angularFreq.to device
   }
 
+private def findSpecialId? (tok : BPETokenizer) (names : Array String) : Option UInt64 := Id.run do
+  for name in names do
+    match tok.specialTokens.get? name with
+    | some id => return some id.toUInt64
+    | none => pure ()
+  none
+
+private def requireSpecialId (tok : BPETokenizer) (label : String) (names : Array String) : IO UInt64 := do
+  match findSpecialId? tok names with
+  | some id => pure id
+  | none => throw <| IO.userError s!"Tokenizer missing {label} token. Tried: {repr names}"
+
+private structure ChatMarkerIds where
+  bos : UInt64
+  userStart : UInt64
+  userEnd : UInt64
+  assistantStart : UInt64
+  assistantEnd : UInt64
+
+private def resolveChatMarkers (tok : BPETokenizer) : IO ChatMarkerIds := do
+  let bos ← requireSpecialId tok "bos" #["<|bos|>", "<|endoftext|>"]
+  let userStart ← requireSpecialId tok "user_start" #["<|user_start|>", "<|user|>"]
+  let userEnd ← requireSpecialId tok "user_end" #["<|user_end|>", "<|eot|>"]
+  let assistantStart ← requireSpecialId tok "assistant_start" #["<|assistant_start|>", "<|assistant|>"]
+  let assistantEnd ← requireSpecialId tok "assistant_end" #["<|assistant_end|>", "<|eot|>"]
+  pure { bos, userStart, userEnd, assistantStart, assistantEnd }
+
 private def buildModelConfig (args : Args) : Config := {
   vocabSize := args.vocabSize.toUInt64
   nLayer := args.modelDepth.toUInt64
@@ -221,9 +248,10 @@ private def sampleNextToken {cfg : Config}
   let sampled := nn.squeezeDim sampled (-1)
   pure (nn.itemInt sampled).toUInt64
 
-private def promptWithMarkers (base : Array UInt64) (prompt : Array UInt64) : Array UInt64 :=
-  -- Matches the SFT pipeline chat token conventions.
-  base ++ #[1] ++ prompt ++ #[2, 3]
+private def promptWithMarkers (markers : ChatMarkerIds) (base : Array UInt64) (prompt : Array UInt64)
+    : Array UInt64 :=
+  (if base.isEmpty then #[markers.bos] else base) ++
+    #[markers.userStart] ++ prompt ++ #[markers.userEnd, markers.assistantStart]
 
 private def generateTokens
     (promptTokens : Array UInt64)
@@ -253,7 +281,9 @@ unsafe def main (rawArgs : List String) : IO UInt32 := do
   let tokenizerPath ← resolveTokenizerPath args
   let cfg := buildModelConfig args
   let device ← resolveDevice
-  let eosToken := args.eosToken.getD (if args.useChatMarkers then 4 else 2)
+  let tok ← tokenizer.load tokenizerPath
+  let markers ← resolveChatMarkers tok
+  let eosToken := args.eosToken.getD (if args.useChatMarkers then markers.assistantEnd else markers.bos)
 
   manualSeed args.seed
 
@@ -265,7 +295,6 @@ unsafe def main (rawArgs : List String) : IO UInt32 := do
   IO.println s!"  decoding:   max_new={args.maxNewTokens} temp={args.temperature} top_k={args.topK} eos={eosToken}"
   IO.println ""
 
-  let tok ← tokenizer.load tokenizerPath
   let maybeCkpt ← loadCheckpoint cfg checkpointPath
   let ckpt ← match maybeCkpt with
     | some ckpt => pure ckpt
@@ -277,7 +306,7 @@ unsafe def main (rawArgs : List String) : IO UInt32 := do
   let yarn0 ← YarnRotary.init cfg.headDim cfg.maxSeqLen cfg.ropeBase
   let yarn := moveYarnToDevice yarn0 device
 
-  let encodeFn := fun (text : String) => (tokenizer.encode tok text).map (·.toUInt64)
+  let encodeFn := fun (text : String) => (tokenizer.encodeWithSpecials tok text).map (·.toUInt64)
   let decodeFn := fun (tokens : Array UInt64) => tokenizer.decode tok (tokens.map (·.toUInt32))
   let nextTokenFn := sampleNextToken paramsOnDevice yarn device args.temperature args.topK
 
@@ -285,7 +314,7 @@ unsafe def main (rawArgs : List String) : IO UInt32 := do
     let promptBody := encodeFn prompt
     let promptTokens :=
       if args.useChatMarkers then
-        promptWithMarkers baseCtx promptBody
+        promptWithMarkers markers baseCtx promptBody
       else
         promptBody
     if promptTokens.isEmpty then
@@ -294,9 +323,14 @@ unsafe def main (rawArgs : List String) : IO UInt32 := do
     let response := decodeFn generated
     if args.showTokens then
       IO.println s!"generated_tokens={generated}"
+    let generatedForCtx :=
+      if args.useChatMarkers && (generated.isEmpty || generated.back! != markers.assistantEnd) then
+        generated.push markers.assistantEnd
+      else
+        generated
     let nextCtx :=
       if args.useChatMarkers then
-        promptTokens ++ generated
+        promptTokens ++ generatedForCtx
       else
         #[]
     pure (response, nextCtx)

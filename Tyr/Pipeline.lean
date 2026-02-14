@@ -388,8 +388,8 @@ def logStageFailed (name : String) (error : String) : PipelineM Unit := do
   if state.isMaster then
     IO.eprintln s!"[FAILED] Stage '{name}': {error}"
 
-/-- Define and execute a pipeline stage with error handling -/
-def stage (name : String) (action : PipelineM α) : PipelineM α := do
+/-- Define and execute a pipeline stage with error handling. -/
+def stage (name : String) (action : PipelineM Unit) : PipelineM Unit := do
   let mut state ← get
   let config := state.config
 
@@ -399,7 +399,7 @@ def stage (name : String) (action : PipelineM α) : PipelineM α := do
   | some info =>
     if info.status == .completed then
       log s!"[SKIP] Already completed: {name}"
-      return ← action
+      return ()
     else if let .failed err := info.status then
       log s!"[RESUME] Retrying previously failed stage: {name} (was: {err})"
   | none => pure ()
@@ -418,7 +418,7 @@ def stage (name : String) (action : PipelineM α) : PipelineM α := do
 
   -- Execute stage action with exception handling
   try
-    let result ← action
+    action
 
     -- Record stage completion
     let endTime ← IO.monoMsNow
@@ -438,7 +438,7 @@ def stage (name : String) (action : PipelineM α) : PipelineM α := do
       Pipeline.saveCheckpoint baseDir state.stages config.runId
 
     logStageEnd name durationMs
-    return result
+    return ()
 
   catch e =>
     -- Record failure
@@ -465,12 +465,13 @@ def stage (name : String) (action : PipelineM α) : PipelineM α := do
     else
       throw e  -- For now, always propagate
 
-/-- Execute a stage with retry logic -/
-def stageWithRetry (name : String) (policy : RetryPolicy) (action : PipelineM α) : PipelineM α := do
+/-- Execute a stage with retry logic. -/
+def stageWithRetry (name : String) (policy : RetryPolicy) (action : PipelineM Unit) : PipelineM Unit := do
   let mut lastError := ""
   for attempt in [:policy.maxAttempts] do
     try
-      return ← stage name action
+      stage name action
+      return ()
     catch e =>
       lastError := toString e
       let state ← get

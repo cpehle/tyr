@@ -72,6 +72,100 @@ def loadMMLU (subset : String) (split : String)
   let localPath ← ensureHFParquet "cais/mmlu" subset split cacheDir
   readParquetToJson localPath
 
+private def sortPaths (paths : Array String) : Array String :=
+  paths.qsort (· < ·)
+
+private def readSnapshotRef? (repoDir : System.FilePath) : IO (Option String) := do
+  let refPath := repoDir / "refs" / "main"
+  if ← refPath.pathExists then
+    let ref := (← IO.FS.readFile refPath).trimAscii.toString
+    if ref.isEmpty then pure none else pure (some ref)
+  else
+    pure none
+
+private def findSmolTalkLocalParquets (split : String) (cacheDir : String)
+    : IO (Array String) := do
+  let expanded ← expandHome cacheDir
+  let repoDir : System.FilePath := ⟨s!"{expanded}/hub/datasets--HuggingFaceTB--smol-smoltalk"⟩
+  if !(← repoDir.pathExists) then
+    return #[]
+  let snapshotsDir := repoDir / "snapshots"
+  if !(← snapshotsDir.pathExists) then
+    return #[]
+
+  let preferredRev? ← readSnapshotRef? repoDir
+  let mut revDirs : Array System.FilePath := #[]
+  match preferredRev? with
+  | some rev =>
+    let p := snapshotsDir / rev
+    if ← p.pathExists then
+      revDirs := revDirs.push p
+  | none => pure ()
+
+  let entries ← snapshotsDir.readDir
+  for entry in entries do
+    if (← entry.path.isDir) && !revDirs.contains entry.path then
+      revDirs := revDirs.push entry.path
+
+  let mut files : Array String := #[]
+  for revDir in revDirs do
+    let dataDir := revDir / "data"
+    if ← dataDir.pathExists then
+      let dataEntries ← dataDir.readDir
+      for entry in dataEntries do
+        if entry.path.extension == some "parquet" && entry.fileName.startsWith s!"{split}-" then
+          files := files.push entry.path.toString
+      if !files.isEmpty then
+        return sortPaths files
+  return #[]
+
+private def ensureSmolTalkParquet (split : String) (cacheDir : String)
+    : IO (Array String) := do
+  let localFiles ← findSmolTalkLocalParquets split cacheDir
+  if !localFiles.isEmpty then
+    return localFiles
+
+  -- Fallback: fetch known parquet shard names from HF.
+  let expanded ← expandHome cacheDir
+  let outDir := s!"{expanded}/datasets/HuggingFaceTB_smol-smoltalk/default"
+  ensureDir outDir
+
+  let urls : Array String :=
+    if split == "test" then
+      #[
+        "https://huggingface.co/datasets/HuggingFaceTB/smol-smoltalk/resolve/main/data/test-00000-of-00001.parquet"
+      ]
+    else
+      #[
+        "https://huggingface.co/datasets/HuggingFaceTB/smol-smoltalk/resolve/main/data/train-00000-of-00004.parquet",
+        "https://huggingface.co/datasets/HuggingFaceTB/smol-smoltalk/resolve/main/data/train-00001-of-00004.parquet",
+        "https://huggingface.co/datasets/HuggingFaceTB/smol-smoltalk/resolve/main/data/train-00002-of-00004.parquet",
+        "https://huggingface.co/datasets/HuggingFaceTB/smol-smoltalk/resolve/main/data/train-00003-of-00004.parquet"
+      ]
+
+  let mut files : Array String := #[]
+  for url in urls do
+    let filename := System.FilePath.fileName ⟨url⟩ |>.getD ""
+    let localPath := s!"{outDir}/{filename}"
+    let ok ← downloadWithRetry url localPath 3
+    if ok then
+      files := files.push localPath
+
+  if files.isEmpty then
+    throw <| IO.userError s!"Failed to resolve SmolTalk parquet files for split={split}"
+  return sortPaths files
+
+/-- Load SmolTalk dataset from HuggingFace.
+    Uses local HF cache snapshots when available; otherwise downloads known parquet shards. -/
+def loadSmolTalk (split : String)
+    (cacheDir : String := "~/.cache/huggingface") : IO (Array Lean.Json) := do
+  let files ← ensureSmolTalkParquet split cacheDir
+  let mut rows : Array Lean.Json := #[]
+  for file in files do
+    let part ← readParquetToJson file
+    rows := rows ++ part
+  return rows
+
 /-- Load JSONL file from URL -/
 def loadJsonlFromUrl (url : String) (cacheDir : String) (filename : String)
     : IO (Array Lean.Json) := do
