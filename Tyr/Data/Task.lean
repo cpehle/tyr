@@ -185,6 +185,8 @@ structure ChatTokens where
   userEnd : UInt64
   assistantStart : UInt64
   assistantEnd : UInt64
+  pythonStart : UInt64
+  pythonEnd : UInt64
   systemStart : UInt64
   systemEnd : UInt64
   toolStart : UInt64
@@ -193,6 +195,20 @@ structure ChatTokens where
   outputEnd : UInt64
   deriving Repr, Inhabited
 
+/-- Merge a leading system message into the first user message (nanochat behavior). -/
+private def mergeLeadingSystemMessage (msgs : Array Message) : Array Message :=
+  if msgs.size >= 2 then
+    match msgs[0]?, msgs[1]? with
+    | some first, some second =>
+      if first.role == .system && second.role == .user then
+        let mergedUser : Message := { second with content := first.content ++ "\n\n" ++ second.content }
+        #[mergedUser] ++ msgs.extract 2 msgs.size
+      else
+        msgs
+    | _, _ => msgs
+  else
+    msgs
+
 /-- Render a conversation to tokens with training mask.
     Only assistant responses are marked for training (mask = 1). -/
 def renderConversation
@@ -200,19 +216,20 @@ def renderConversation
     (tokens : ChatTokens)
     (encode : String → Array UInt64)
     : TokenizedConversation := Id.run do
+  let messages := mergeLeadingSystemMessage conv.messages
   let mut allTokens : Array UInt64 := #[tokens.bos]
   let mut mask : Array UInt8 := #[0]  -- Don't train on BOS
 
-  for msg in conv.messages do
+  for msg in messages do
     match msg.role with
     | .system =>
-      -- System messages: don't train
-      allTokens := allTokens.push tokens.systemStart
+      -- Keep system content unsupervised; treat it as extra user context.
+      allTokens := allTokens.push tokens.userStart
       mask := mask.push 0
       let contentTokens := encode msg.content
       allTokens := allTokens ++ contentTokens
       mask := mask ++ Array.mk (List.replicate contentTokens.size 0)
-      allTokens := allTokens.push tokens.systemEnd
+      allTokens := allTokens.push tokens.userEnd
       mask := mask.push 0
 
     | .user =>
@@ -229,9 +246,46 @@ def renderConversation
       -- Assistant messages: TRAIN on content and end token
       allTokens := allTokens.push tokens.assistantStart
       mask := mask.push 0  -- Don't train on start token
-      let contentTokens := encode msg.content
-      allTokens := allTokens ++ contentTokens
-      mask := mask ++ Array.mk (List.replicate contentTokens.size 1)  -- Train!
+      if msg.parts.isEmpty then
+        let contentTokens := encode msg.content
+        allTokens := allTokens ++ contentTokens
+        mask := mask ++ Array.mk (List.replicate contentTokens.size 1)
+      else
+        for part in msg.parts do
+          match part.type with
+          | .text =>
+            let valueTokens := encode part.content
+            allTokens := allTokens ++ valueTokens
+            mask := mask ++ Array.mk (List.replicate valueTokens.size 1)
+          | .code lang =>
+            if lang == "python" then
+              allTokens := allTokens.push tokens.pythonStart
+              mask := mask.push 1
+              let valueTokens := encode part.content
+              allTokens := allTokens ++ valueTokens
+              mask := mask ++ Array.mk (List.replicate valueTokens.size 1)
+              allTokens := allTokens.push tokens.pythonEnd
+              mask := mask.push 1
+            else
+              let valueTokens := encode part.content
+              allTokens := allTokens ++ valueTokens
+              mask := mask ++ Array.mk (List.replicate valueTokens.size 1)
+          | .toolCall _ =>
+            allTokens := allTokens.push tokens.pythonStart
+            mask := mask.push 1
+            let valueTokens := encode part.content
+            allTokens := allTokens ++ valueTokens
+            mask := mask ++ Array.mk (List.replicate valueTokens.size 1)
+            allTokens := allTokens.push tokens.pythonEnd
+            mask := mask.push 1
+          | .toolResult =>
+            allTokens := allTokens.push tokens.outputStart
+            mask := mask.push 0
+            let valueTokens := encode part.content
+            allTokens := allTokens ++ valueTokens
+            mask := mask ++ Array.mk (List.replicate valueTokens.size 0)
+            allTokens := allTokens.push tokens.outputEnd
+            mask := mask.push 0
       allTokens := allTokens.push tokens.assistantEnd
       mask := mask.push 1  -- Train on end token too
 
@@ -353,7 +407,7 @@ def TaskIterator.nextBatch (iter : TaskIterator)
     tokenizedConvs := tokenizedConvs.push tokenized
 
   -- Collate into batch
-  let batch ← collate tokenizedConvs iter.maxSeqLen
+  let batch ← collate tokenizedConvs iter.maxSeqLen iter.chatTokens.assistantEnd
   let newIter := { iter with currentIdx := endIdx }
 
   return (some batch, newIter)
@@ -366,5 +420,130 @@ def TaskIterator.reset (iter : TaskIterator) : TaskIterator :=
 def TaskIterator.progress (iter : TaskIterator) : Float :=
   if iter.mixture.size == 0 then 1.0
   else iter.currentIdx.toFloat / iter.mixture.size.toFloat
+
+/-- Streaming token buffer for autoregressive GPT-style training over task mixtures.
+
+    This mirrors nanochat midtraining data flow:
+    - iterate task rows in rank-strided order
+    - append rendered conversation tokens into a token buffer
+    - emit contiguous windows of length `batchSize * seqLen + 1`
+    - form `(inputs, targets)` by one-token shift
+-/
+structure TaskTokenStream where
+  mixture : TaskMixture
+  chatTokens : ChatTokens
+  encode : String → Array UInt64
+  batchSize : Nat
+  seqLen : Nat
+  rank : Nat := 0
+  worldSize : Nat := 1
+  cursor : Nat := 0
+  buffer : Array UInt64 := #[]
+  consumed : Nat := 0
+  steps : Nat := 0
+  lastWrapped : Bool := false
+  lastProgress : Float := 0.0
+
+/-- Construct a task token stream. -/
+def TaskTokenStream.new
+    (mixture : TaskMixture)
+    (batchSize seqLen : Nat)
+    (chatTokens : ChatTokens)
+    (encode : String → Array UInt64)
+    (rank worldSize : Nat := 0)
+    : TaskTokenStream :=
+  let size := mixture.size
+  let startCursor :=
+    if size == 0 then 0 else rank % size
+  {
+    mixture := mixture
+    chatTokens := chatTokens
+    encode := encode
+    batchSize := batchSize
+    seqLen := seqLen
+    rank := rank
+    worldSize := max 1 worldSize
+    cursor := startCursor
+  }
+
+private def TaskTokenStream.available (s : TaskTokenStream) : Nat :=
+  s.buffer.size - s.consumed
+
+private def TaskTokenStream.compact (s : TaskTokenStream) : TaskTokenStream :=
+  if s.consumed == 0 then
+    s
+  else if s.consumed * 2 < s.buffer.size then
+    s
+  else
+    { s with
+      buffer := s.buffer.extract s.consumed s.buffer.size
+      consumed := 0
+    }
+
+private def TaskTokenStream.pushTokens (s : TaskTokenStream) (tokens : Array UInt64) : TaskTokenStream :=
+  { s with buffer := s.buffer ++ tokens }
+
+private def TaskTokenStream.popWindow? (s : TaskTokenStream) (n : Nat)
+    : Option (Array UInt64 × TaskTokenStream) := do
+  if s.available < n then
+    none
+  else
+    let start := s.consumed
+    let stop := start + n
+    let window := s.buffer.extract start stop
+    let s' := { s with consumed := stop }
+    some (window, s'.compact)
+
+/-- Consume one GPT batch from the stream.
+    Returns dynamic tensors shaped `[batchSize, seqLen]` for input and target. -/
+def TaskTokenStream.nextGPTBatch (stream : TaskTokenStream)
+    : IO (Option (T #[] × T #[]) × TaskTokenStream) := do
+  if stream.batchSize == 0 || stream.seqLen == 0 || stream.mixture.size == 0 then
+    return (none, stream)
+
+  let needed := stream.batchSize * stream.seqLen + 1
+  let mut s := { stream with lastWrapped := false }
+
+  while s.available < needed do
+    let conv ← s.mixture.get s.cursor
+    let rendered := renderConversation conv s.chatTokens s.encode
+    s := s.pushTokens rendered.tokens
+
+    let nextCursor := s.cursor + s.worldSize
+    if nextCursor >= s.mixture.size then
+      s := { s with
+        cursor := nextCursor % s.mixture.size
+        lastWrapped := true
+      }
+    else
+      s := { s with cursor := nextCursor }
+
+  match s.popWindow? needed with
+  | none =>
+    return (none, s)
+  | some (window, sWindow) =>
+    let inputIds := window.extract 0 (needed - 1)
+    let targetIds := window.extract 1 needed
+
+    let inputTensor := data.fromInt64Array (inputIds.map (·.toInt64))
+    let inputTensor := reshape inputTensor #[s.batchSize.toUInt64, s.seqLen.toUInt64]
+    let targetTensor := data.fromInt64Array (targetIds.map (·.toInt64))
+    let targetTensor := reshape targetTensor #[s.batchSize.toUInt64, s.seqLen.toUInt64]
+
+    let progress :=
+      if sWindow.mixture.size == 0 then
+        1.0
+      else
+        sWindow.cursor.toFloat / sWindow.mixture.size.toFloat
+
+    let sOut := { sWindow with
+      steps := sWindow.steps + 1
+      lastProgress := progress
+    }
+    return (some (reshape inputTensor #[], reshape targetTensor #[]), sOut)
+
+/-- Stream progress over current mixed dataset epoch. -/
+def TaskTokenStream.progress (s : TaskTokenStream) : Float :=
+  s.lastProgress
 
 end torch.Data.Task

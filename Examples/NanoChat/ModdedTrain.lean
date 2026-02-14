@@ -55,6 +55,18 @@ structure Hyperparameters where
   deviceBatchSize : UInt64 := 32
   /-- Target global batch size in tokens across all ranks/accumulation. -/
   totalBatchSizeTokens : UInt64 := 524288
+  /-- Embedding learning rate (Adam). -/
+  embeddingLr : Float := 0.3
+  /-- Unembedding / lm-head learning rate (Adam). -/
+  unembeddingLr : Float := 0.004
+  /-- Matrix learning rate (Muon). -/
+  matrixLr : Float := 0.02
+  /-- Adam beta1 (nanochat default: 0.8). -/
+  adamBeta1 : Float := 0.8
+  /-- Adam beta2 (nanochat default: 0.95). -/
+  adamBeta2 : Float := 0.95
+  /-- Adam weight decay (nanochat default: 0.0). -/
+  adamWeightDecay : Float := 0.0
   /-- Warmup fraction of total steps. -/
   warmupFrac : Float := 0.0
   /-- Final warmdown fraction of total steps. -/
@@ -139,6 +151,17 @@ def getLearningRate (step : UInt64) (hp : Hyperparameters)
     let progress := (totalSteps - step).toFloat / warmdownSteps.toFloat
     baseLr * (progress + (1.0 - progress) * hp.finalLrFrac)
 
+/-- Batch-size LR scaling used by nanochat: sqrt(batch/reference_batch). -/
+def batchLrScale (hp : Hyperparameters) (referenceBatch : Float := 524288.0) : Float :=
+  if hp.totalBatchSizeTokens == 0 then
+    1.0
+  else
+    Float.sqrt (hp.totalBatchSizeTokens.toFloat / referenceBatch)
+
+/-- Scale Adam learning rates by model dimension: (d_model / 768)^(-0.5). -/
+def dModelLrScale (cfg : moddedGpt.Config) : Float :=
+  Float.pow (cfg.modelDim.toFloat / 768.0) (-0.5)
+
 /-- Compute grad-accum steps from global token budget and world size. -/
 def effectiveGradAccumSteps (hp : Hyperparameters) (worldSize : UInt64) : UInt64 :=
   let world := max 1 worldSize
@@ -169,11 +192,65 @@ def getMuonMomentum (step : UInt64) (hp : Hyperparameters)
 
 /-! ## Optimizer State -/
 
+/-- Muon state for an attention module. -/
+structure MuonAttnState (cfg : moddedGpt.Config) where
+  wQ : NorMuon.ParamState #[cfg.nHead * cfg.headDim, cfg.modelDim]
+  wK : NorMuon.ParamState #[cfg.nHead * cfg.headDim, cfg.modelDim]
+  wV : NorMuon.ParamState #[cfg.nHead * cfg.headDim, cfg.modelDim]
+  wO : NorMuon.ParamState #[cfg.modelDim, cfg.nHead * cfg.headDim]
+  deriving Repr, TensorStruct
+
+/-- Muon state for a transformer block. -/
+structure MuonBlockState (cfg : moddedGpt.Config) where
+  attn : Option (MuonAttnState cfg)
+  cFc : NorMuon.ParamState #[4 * cfg.modelDim, cfg.modelDim]
+  cProj : NorMuon.ParamState #[4 * cfg.modelDim, cfg.modelDim]
+  deriving Repr, TensorStruct
+
+/-- Full dual-optimizer parameter state (DistAdam + Muon). -/
+structure DualParamState (cfg : moddedGpt.Config) where
+  embed : DistAdam.ParamState #[cfg.vocabSize, cfg.modelDim]
+  valueEmbeds : Array (DistAdam.ParamState #[cfg.vocabSize, cfg.modelDim])
+  lmHead : DistAdam.ParamState #[cfg.vocabSize, cfg.modelDim]
+  scalars : DistAdam.ParamState #[cfg.nLayer * 4 + 8]
+  smearGate : NorMuon.ParamState #[1, 12]
+  blocks : Array (MuonBlockState cfg)
+  deriving Repr, TensorStruct
+
+private def initDualParamState (cfg : moddedGpt.Config) (params : ModdedGPTParams cfg) : DualParamState cfg :=
+  let attnState? (attn : Option (CausalSelfAttention cfg.modelDim cfg.headDim cfg.nHead)) :
+      Option (MuonAttnState cfg) :=
+    match attn with
+    | none => none
+    | some a =>
+      some {
+        wQ := NorMuon.initParamState a.wQ
+        wK := NorMuon.initParamState a.wK
+        wV := NorMuon.initParamState a.wV
+        wO := NorMuon.initParamState a.wO
+      }
+  let blockStates : Array (MuonBlockState cfg) := params.blocks.map fun b =>
+    {
+      attn := attnState? b.attn
+      cFc := NorMuon.initParamState b.mlp.cFc
+      cProj := NorMuon.initParamState b.mlp.cProj
+    }
+  {
+    embed := DistAdam.initParamState params.embed
+    valueEmbeds := params.valueEmbeds.map DistAdam.initParamState
+    lmHead := DistAdam.initParamState params.lmHead.weight
+    scalars := DistAdam.initParamState params.scalars.values
+    smearGate := NorMuon.initParamState params.smearGate.weight
+    blocks := blockStates
+  }
+
 /-- Combined optimizer state for training.
-    Uses AdamW for all parameters (can be extended to dual optimizer later). -/
+    Keeps legacy Adam state for compatibility, and dual parameter states for updates. -/
 structure OptimizerState (cfg : moddedGpt.Config) where
-  /-- AdamW optimizer state -/
+  /-- Legacy AdamW optimizer state (kept for checkpoint compatibility). -/
   adamState : Optim.AdamWState (ModdedGPTParams cfg)
+  /-- DistAdam + Muon parameter states used by the training step. -/
+  dualState : DualParamState cfg
   /-- Current step -/
   step : UInt64
   /-- Base learning rate -/
@@ -183,10 +260,11 @@ structure OptimizerState (cfg : moddedGpt.Config) where
 
 /-- Initialize optimizer state from model parameters -/
 def OptimizerState.init (cfg : moddedGpt.Config) (params : ModdedGPTParams cfg)
-    (lr : Float := 0.023) (weightDecay : Float := 0.01) : OptimizerState cfg :=
+    (lr : Float := 0.023) (weightDecay : Float := 0.0) : OptimizerState cfg :=
   let opt := Optim.adamw (lr := lr) (weight_decay := weightDecay)
   {
     adamState := opt.init params
+    dualState := initDualParamState cfg params
     step := 0
     baseLr := lr
     weightDecay := weightDecay
@@ -288,6 +366,7 @@ def trainStep {cfg : moddedGpt.Config} {batch seq : UInt64}
 
   let newOptState : OptimizerState cfg := {
     adamState := newAdamState
+    dualState := optState.dualState
     step := optState.step + 1
     baseLr := optState.baseLr
     weightDecay := optState.weightDecay
@@ -410,6 +489,7 @@ def saveCheckpoint {cfg : moddedGpt.Config} (ckpt : Checkpoint cfg) (path : Stri
 
   checkpoint.saveParams ckpt.params path "param"
   checkpoint.saveParams ckpt.optState.adamState path "optim_adam"
+  checkpoint.saveParams ckpt.optState.dualState path "optim_dual"
 
   saveScalarUInt64 ckpt.step s!"{path}/step.pt"
   saveScalarUInt64 ckpt.optState.step s!"{path}/opt_step.pt"
@@ -439,6 +519,12 @@ def loadCheckpoint (cfg : moddedGpt.Config) (path : String)
 
     let params ← checkpoint.loadParams templateParams path "param"
     let loadedAdamState ← checkpoint.loadParams templateOpt.adamState path "optim_adam"
+    let loadedDualState ←
+      try
+        checkpoint.loadParams templateOpt.dualState path "optim_dual"
+      catch _ =>
+        -- Backward compatibility with checkpoints saved before dual-state serialization.
+        pure (initDualParamState cfg params)
 
     let step ← loadScalarUInt64 s!"{path}/step.pt"
     let optStep ← loadScalarUInt64 s!"{path}/opt_step.pt"
@@ -453,6 +539,7 @@ def loadCheckpoint (cfg : moddedGpt.Config) (path : String)
     }
     let optState : OptimizerState cfg := {
       adamState := adamState
+      dualState := loadedDualState
       step := optStep
       baseLr := baseLr
       weightDecay := weightDecay
@@ -496,7 +583,7 @@ def TrainState.init (cfg : moddedGpt.Config) (dataConfig : DataLoader.Config)
     (hp : Hyperparameters)
     (_distributed : Bool) (_worldSize : UInt64)
     (device : Device := Device.CPU)
-    (lr : Float := 0.023) (weightDecay : Float := 0.01)
+    (lr : Float := 0.023) (weightDecay : Float := 0.0)
     : IO (TrainState cfg) := do
   let params ← ModdedGPTParams.init cfg
   let yarn ← YarnRotary.init cfg.headDim cfg.maxSeqLen cfg.ropeBase
@@ -613,9 +700,135 @@ def trainStepDistributedAccum {cfg : moddedGpt.Config} {batch seq : UInt64}
   if isDistributed then
     let _ ← dist.allReduceGrads grads .avg
     pure ()
-  let lr := getLearningRate optState.step hp optState.baseLr
-  let opt := Optim.adamw (lr := lr) (weight_decay := optState.weightDecay)
-  let (newParams, newAdamState) := Optim.step opt params grads optState.adamState
+  let batchScale := batchLrScale hp
+  let dScale := dModelLrScale cfg
+  let lrEmbed := getLearningRate optState.step hp (hp.embeddingLr * batchScale * dScale)
+  let lrUnembed := getLearningRate optState.step hp (hp.unembeddingLr * batchScale * dScale)
+  let lrMatrix := getLearningRate optState.step hp (hp.matrixLr * batchScale)
+  let muMomentum := getMuonMomentum optState.step hp
+
+  let adamCfgBase : DistAdam.Config := {
+    lr := 1.0
+    beta1 := hp.adamBeta1
+    beta2 := hp.adamBeta2
+    eps := 1e-10
+    weightDecay := hp.adamWeightDecay
+    distributed := false
+  }
+  let muonCfg : NorMuon.Config := {
+    lr := lrMatrix
+    weightDecay := 0.0
+    momentum := muMomentum
+    beta2 := 0.95
+    numIters := 5
+    distributed := false
+    worldSize := 1
+  }
+
+  let (embed', embedState') ← DistAdam.stepSingle
+    params.embed grads.embed optState.dualState.embed { adamCfgBase with lr := lrEmbed }
+
+  let mut newValueEmbeds : Array (T #[cfg.vocabSize, cfg.modelDim]) := #[]
+  let mut newValueEmbedStates : Array (DistAdam.ParamState #[cfg.vocabSize, cfg.modelDim]) := #[]
+  for i in [:params.valueEmbeds.size] do
+    let ve := params.valueEmbeds[i]!
+    let veGrad := grads.valueEmbeds[i]!
+    let veState := optState.dualState.valueEmbeds[i]?.getD (DistAdam.initParamState ve)
+    let (ve', veState') ← DistAdam.stepSingle ve veGrad veState { adamCfgBase with lr := lrEmbed }
+    newValueEmbeds := newValueEmbeds.push ve'
+    newValueEmbedStates := newValueEmbedStates.push veState'
+
+  let (lmHeadW', lmHeadState') ← DistAdam.stepSingle
+    params.lmHead.weight grads.lmHead.weight optState.dualState.lmHead { adamCfgBase with lr := lrUnembed }
+  let (scalars', scalarState') ← DistAdam.stepSingle
+    params.scalars.values grads.scalars.values optState.dualState.scalars { adamCfgBase with lr := lrUnembed }
+
+  let (smearGateW', smearGateState') ← NorMuon.stepSingle
+    params.smearGate.weight grads.smearGate.weight optState.dualState.smearGate muonCfg 1.0 1.0
+
+  let mut newBlocks : Array (Block cfg.modelDim cfg.headDim cfg.nHead) := #[]
+  let mut newBlockStates : Array (MuonBlockState cfg) := #[]
+  for i in [:params.blocks.size] do
+    let block := params.blocks[i]!
+    let blockGrad := grads.blocks[i]!
+    let defaultBlockState : MuonBlockState cfg := {
+      attn := block.attn.map fun attn =>
+        {
+          wQ := NorMuon.initParamState attn.wQ
+          wK := NorMuon.initParamState attn.wK
+          wV := NorMuon.initParamState attn.wV
+          wO := NorMuon.initParamState attn.wO
+        }
+      cFc := NorMuon.initParamState block.mlp.cFc
+      cProj := NorMuon.initParamState block.mlp.cProj
+    }
+    let blockState := optState.dualState.blocks[i]?.getD defaultBlockState
+
+    let (attn', attnState') ←
+      match block.attn, blockGrad.attn with
+      | some attn, some attnGrad =>
+        let attnState := blockState.attn.getD {
+          wQ := NorMuon.initParamState attn.wQ
+          wK := NorMuon.initParamState attn.wK
+          wV := NorMuon.initParamState attn.wV
+          wO := NorMuon.initParamState attn.wO
+        }
+        let (wQ', wQState') ← NorMuon.stepSingle attn.wQ attnGrad.wQ attnState.wQ muonCfg 1.0 1.0
+        let (wK', wKState') ← NorMuon.stepSingle attn.wK attnGrad.wK attnState.wK muonCfg 1.0 1.0
+        let (wV', wVState') ← NorMuon.stepSingle attn.wV attnGrad.wV attnState.wV muonCfg 1.0 1.0
+        let (wO', wOState') ← NorMuon.stepSingle attn.wO attnGrad.wO attnState.wO muonCfg 1.0 1.0
+        let newAttn : CausalSelfAttention cfg.modelDim cfg.headDim cfg.nHead := {
+          wQ := wQ'
+          wK := wK'
+          wV := wV'
+          wO := wO'
+        }
+        let newAttnState : MuonAttnState cfg := {
+          wQ := wQState'
+          wK := wKState'
+          wV := wVState'
+          wO := wOState'
+        }
+        pure (some newAttn, some newAttnState)
+      | none, _ => pure (none, none)
+      | _, none => pure (block.attn, blockState.attn)
+
+    let (cFc', cFcState') ← NorMuon.stepSingle block.mlp.cFc blockGrad.mlp.cFc blockState.cFc muonCfg 1.0 1.0
+    let (cProj', cProjState') ← NorMuon.stepSingle block.mlp.cProj blockGrad.mlp.cProj blockState.cProj muonCfg 1.0 1.0
+    let newBlock : Block cfg.modelDim cfg.headDim cfg.nHead := {
+      attn := attn'
+      mlp := { cFc := cFc', cProj := cProj' }
+    }
+    let newBlockState : MuonBlockState cfg := {
+      attn := attnState'
+      cFc := cFcState'
+      cProj := cProjState'
+    }
+    newBlocks := newBlocks.push newBlock
+    newBlockStates := newBlockStates.push newBlockState
+
+  let newParams : ModdedGPTParams cfg := {
+    params with
+    embed := embed'
+    valueEmbeds := newValueEmbeds
+    lmHead := { params.lmHead with weight := lmHeadW' }
+    scalars := { params.scalars with values := scalars' }
+    smearGate := { params.smearGate with weight := smearGateW' }
+    blocks := newBlocks
+  }
+  let legacyAdamState := {
+    optState.adamState with
+    fst := { optState.adamState.fst with count := optState.adamState.fst.count + 1 }
+  }
+  let newDualState : DualParamState cfg := {
+    embed := embedState'
+    valueEmbeds := newValueEmbedStates
+    lmHead := lmHeadState'
+    scalars := scalarState'
+    smearGate := smearGateState'
+    blocks := newBlockStates
+  }
+  let newParams := TensorStruct.makeLeafParams newParams
   let endTime ← IO.monoMsNow
   let timeMs := (endTime - startTime).toFloat
   let result : StepResult := {
@@ -625,7 +838,8 @@ def trainStepDistributedAccum {cfg : moddedGpt.Config} {batch seq : UInt64}
     timeMs := timeMs
   }
   let newOptState : OptimizerState cfg := {
-    adamState := newAdamState
+    adamState := legacyAdamState
+    dualState := newDualState
     step := optState.step + 1
     baseLr := optState.baseLr
     weightDecay := optState.weightDecay
@@ -816,6 +1030,7 @@ def trainStepDistributed {cfg : moddedGpt.Config} {batch seq : UInt64}
 
   let newOptState : OptimizerState cfg := {
     adamState := newAdamState
+    dualState := optState.dualState
     step := optState.step + 1
     baseLr := optState.baseLr
     weightDecay := optState.weightDecay
@@ -836,7 +1051,7 @@ structure DistributedTrainState (cfg : moddedGpt.Config) extends TrainState cfg 
 def DistributedTrainState.init (cfg : moddedGpt.Config) (dataConfig : DataLoader.Config)
     (hp : Hyperparameters)
     (device : Device := Device.CPU)
-    (lr : Float := 0.023) (weightDecay : Float := 0.01)
+    (lr : Float := 0.023) (weightDecay : Float := 0.0)
     : IO (DistributedTrainState cfg) := do
   -- Check distributed status
   let isDistributed ← dist.isInitialized
@@ -1024,6 +1239,7 @@ def trainDistributed (cfg : moddedGpt.Config) (hp : Hyperparameters)
         let resumedOptState : OptimizerState cfg := {
           ckpt.optState with
           adamState := TensorStruct.map (fun t => t.to device) ckpt.optState.adamState
+          dualState := TensorStruct.map (fun t => t.to device) ckpt.optState.dualState
         }
         pure {
           initState with
@@ -1043,10 +1259,15 @@ def trainDistributed (cfg : moddedGpt.Config) (hp : Hyperparameters)
   -- Synchronize parameters from rank 0
   let syncedParams ← syncParameters state.params
   let syncedAdamState ← if isDistributed then dist.broadcastParams state.optState.adamState else pure state.optState.adamState
+  let syncedDualState ← if isDistributed then dist.broadcastParams state.optState.dualState else pure state.optState.dualState
   let state := {
     state with
     params := syncedParams
-    optState := { state.optState with adamState := syncedAdamState }
+    optState := {
+      state.optState with
+      adamState := syncedAdamState
+      dualState := syncedDualState
+    }
   }
 
   -- Barrier to ensure all ranks are ready
@@ -1058,6 +1279,286 @@ def trainDistributed (cfg : moddedGpt.Config) (hp : Hyperparameters)
 
   if isMaster then
     IO.println s!"Training finished!"
+    IO.println s!"Best validation loss: {finalState.bestValLoss}"
+
+  return finalState
+
+/-- Dynamically-shaped GPT micro-batch `(inputs, targets)`. -/
+abbrev DynamicGPTBatch := T #[] × T #[]
+
+/-- Provider callback for GPT micro-batches. -/
+abbrev DynamicGPTBatchProvider := IO (Option DynamicGPTBatch)
+
+/-- Distributed streaming training state (no shard-backed data generator). -/
+structure StreamTrainState (cfg : moddedGpt.Config) where
+  params : ModdedGPTParams cfg
+  yarn : YarnRotary cfg.headDim cfg.maxSeqLen
+  optState : OptimizerState cfg
+  step : UInt64 := 0
+  bestValLoss : Float := 1e30
+  totalTokens : UInt64 := 0
+  startTime : UInt64 := 0
+  rank : UInt64 := 0
+  worldSize : UInt64 := 1
+
+private def logStreamProgress (state : StreamTrainState cfg) (result : StepResult)
+    (hp : Hyperparameters) : IO Unit := do
+  if state.step % hp.logInterval == 0 then
+    let nowMs ← IO.monoMsNow
+    let elapsed := nowMs - state.startTime.toNat
+    let elapsedSec := elapsed.toFloat / 1000.0
+    let tokensPerSec :=
+      if elapsedSec <= 0.0 then 0.0 else state.totalTokens.toFloat / elapsedSec
+    let lr := getLearningRate state.step hp
+    IO.println s!"Step {state.step}: loss={result.loss} lr={lr} batch={hp.deviceBatchSize} seq={hp.maxSeqLen} tok/s={tokensPerSec} time={result.timeMs}ms"
+
+private def initStreamTrainState (cfg : moddedGpt.Config) (device : Device)
+    (lr : Float := 0.023) (weightDecay : Float := 0.0)
+    : IO (StreamTrainState cfg) := do
+  let isDistributed ← dist.isInitialized
+  let (rank, worldSize) ← if isDistributed then
+      dist.getRankAndWorldSize
+    else
+      pure (0, 1)
+
+  let params ← ModdedGPTParams.init cfg
+  let yarn ← YarnRotary.init cfg.headDim cfg.maxSeqLen cfg.ropeBase
+  let params ← moveToDevice params device
+  let yarn := moveYarnToDevice yarn device
+  let optState := OptimizerState.init cfg params lr weightDecay
+  let startTime ← IO.monoMsNow
+
+  return {
+    params := params
+    yarn := yarn
+    optState := optState
+    startTime := startTime.toUInt64
+    rank := rank
+    worldSize := worldSize
+  }
+
+private def collectMicroBatches {batch seq : UInt64}
+    (provider : DynamicGPTBatchProvider)
+    (gradAccum : Nat)
+    (device : Device)
+    : IO (Array (T #[batch, seq] × T #[batch, seq])) := do
+  let mut microBatches : Array (T #[batch, seq] × T #[batch, seq]) := #[]
+  for _ in [:gradAccum] do
+    match ← provider with
+    | none => pure ()
+    | some (inputDyn, targetDyn) =>
+      let input := (reshape inputDyn #[batch, seq]).to device
+      let target := (reshape targetDyn #[batch, seq]).to device
+      microBatches := microBatches.push (input, target)
+  return microBatches
+
+private def validateWithProvider {cfg : moddedGpt.Config} {batch seq : UInt64}
+    (params : ModdedGPTParams cfg)
+    (yarn : YarnRotary cfg.headDim cfg.maxSeqLen)
+    (provider : DynamicGPTBatchProvider)
+    (numBatches : Nat)
+    (device : Device)
+    : IO (Option Float) := do
+  if numBatches == 0 then
+    return none
+
+  let mut totalLoss := 0.0
+  let mut seen := 0
+
+  for _ in [:numBatches] do
+    match ← provider with
+    | none => pure ()
+    | some (inputDyn, targetDyn) =>
+      let input := (reshape inputDyn #[batch, seq]).to device
+      let target := (reshape targetDyn #[batch, seq]).to device
+      let lossT ← moddedGpt.loss params yarn input target false
+      totalLoss := totalLoss + nn.item lossT
+      seen := seen + 1
+
+  if seen == 0 then
+    return none
+  else
+    return some (totalLoss / seen.toFloat)
+
+private def trainLoopDistributedStream (cfg : moddedGpt.Config) (hp : Hyperparameters)
+    (state : StreamTrainState cfg)
+    (trainProvider : DynamicGPTBatchProvider)
+    (valProvider? : Option DynamicGPTBatchProvider)
+    (valBatches : Nat)
+    (checkpointDir : String)
+    : IO (StreamTrainState cfg) := do
+  let totalSteps := hp.numIterations + hp.extensionIterations
+  let mut state := state
+  let isMaster := state.rank == 0
+  let startStep := state.optState.step
+  if isMaster then
+    IO.FS.createDirAll ⟨checkpointDir⟩
+
+  if startStep >= totalSteps then
+    if isMaster then
+      IO.println s!"Training already complete at step {state.step} (target {totalSteps})"
+    return state
+
+  for step in [startStep.toNat:totalSteps.toNat] do
+    let stepU := step.toUInt64
+    let batchSize := hp.deviceBatchSize
+    let seqLen := hp.maxSeqLen
+    let gradAccum := effectiveGradAccumSteps hp state.worldSize
+    let device := state.params.embed.device
+
+    let microBatches ← collectMicroBatches
+      (batch := batchSize) (seq := seqLen)
+      trainProvider gradAccum.toNat device
+
+    if microBatches.isEmpty then
+      if isMaster then
+        IO.println "No micro-batches available; ending stream training early."
+      break
+
+    let (newParams, newOptState, result) ← trainStepDistributedAccum state.params state.yarn
+      microBatches state.optState hp
+
+    state := { state with
+      params := newParams
+      optState := newOptState
+      step := stepU
+      totalTokens := state.totalTokens + result.tokensProcessed
+    }
+
+    if isMaster then
+      logStreamProgress state result hp
+
+    if stepU % hp.valInterval == 0 && stepU > 0 && isMaster then
+      match valProvider? with
+      | none => pure ()
+      | some valProvider =>
+        match ← validateWithProvider
+            (cfg := cfg) (batch := batchSize) (seq := seqLen)
+            state.params state.yarn valProvider valBatches device with
+        | none => pure ()
+        | some valLoss =>
+          IO.println s!"Validation: loss={valLoss}"
+          if valLoss < state.bestValLoss then
+            IO.println "  New best validation loss!"
+            state := { state with bestValLoss := valLoss }
+
+    if stepU % hp.checkpointInterval == 0 && stepU > 0 && isMaster then
+      let ckpt : Checkpoint cfg := {
+        params := state.params
+        optState := state.optState
+        step := stepU
+        bestValLoss := state.bestValLoss
+      }
+      let stepPath := s!"{checkpointDir}/step_{stepU}.ckpt"
+      let latestPath := s!"{checkpointDir}/latest.ckpt"
+      saveCheckpoint ckpt stepPath
+      saveCheckpoint ckpt latestPath
+
+  if isMaster then
+    let finalCkpt : Checkpoint cfg := {
+      params := state.params
+      optState := state.optState
+      step := state.step
+      bestValLoss := state.bestValLoss
+    }
+    saveCheckpoint finalCkpt s!"{checkpointDir}/latest.ckpt"
+    IO.println s!"Training complete! Total tokens: {state.totalTokens}"
+
+  return state
+
+/-- Train from streaming GPT batch providers instead of parquet shards.
+    This keeps the distributed optimizer/checkpoint path unchanged while
+    allowing task-mixture token-buffer data feeding. -/
+def trainDistributedWithBatchProvider (cfg : moddedGpt.Config) (hp : Hyperparameters)
+    (device : Device)
+    (trainProvider : DynamicGPTBatchProvider)
+    (valProvider? : Option DynamicGPTBatchProvider := none)
+    (valBatches : Nat := 0)
+    (checkpointDir : String := "checkpoints/modded")
+    (resume : Option String := none)
+    : IO (StreamTrainState cfg) := do
+  let isDistributed ← dist.isInitialized
+  let (rank, worldSize) ← if isDistributed then
+      dist.getRankAndWorldSize
+    else
+      pure (0, 1)
+
+  let isMaster := rank == 0
+
+  if isMaster then
+    IO.println s!"Starting streaming training with {worldSize} GPUs"
+    IO.println s!"Config: {repr cfg}"
+    IO.println s!"Hyperparameters: {repr hp}"
+
+  let initState ← initStreamTrainState cfg device
+
+  let latestPath := s!"{checkpointDir}/latest.ckpt"
+  let resumePath? ←
+    match resume with
+    | some path => pure (some path)
+    | none =>
+      if ← checkpointExists latestPath then
+        pure (some latestPath)
+      else
+        pure none
+
+  let state ←
+    match resumePath? with
+    | none => pure initState
+    | some resumePath =>
+      if isMaster then
+        IO.println s!"Resuming from checkpoint: {resumePath}"
+      match ← loadCheckpoint cfg resumePath with
+      | some ckpt =>
+        let resumedParams ← moveToDevice ckpt.params device
+        let resumedOptState : OptimizerState cfg := {
+          ckpt.optState with
+          adamState := TensorStruct.map (fun t => t.to device) ckpt.optState.adamState
+          dualState := TensorStruct.map (fun t => t.to device) ckpt.optState.dualState
+        }
+        pure {
+          initState with
+          params := resumedParams
+          optState := resumedOptState
+          step := ckpt.step
+          bestValLoss := ckpt.bestValLoss
+        }
+      | none =>
+        if resume.isSome then
+          throw <| IO.userError s!"Resume checkpoint not found or invalid: {resumePath}"
+        else
+          if isMaster then
+            IO.println s!"Warning: failed to load auto-resume checkpoint {resumePath}; starting fresh"
+          pure initState
+
+  let syncedParams ← syncParameters state.params
+  let syncedAdamState ←
+    if isDistributed then
+      dist.broadcastParams state.optState.adamState
+    else
+      pure state.optState.adamState
+  let syncedDualState ←
+    if isDistributed then
+      dist.broadcastParams state.optState.dualState
+    else
+      pure state.optState.dualState
+  let state := {
+    state with
+    params := syncedParams
+    optState := {
+      state.optState with
+      adamState := syncedAdamState
+      dualState := syncedDualState
+    }
+  }
+
+  if isDistributed then
+    dist.barrier
+
+  let finalState ← trainLoopDistributedStream cfg hp state trainProvider valProvider? valBatches checkpointDir
+
+  if isMaster then
+    IO.println "Streaming training finished!"
     IO.println s!"Best validation loss: {finalState.bestValLoss}"
 
   return finalState
