@@ -183,6 +183,8 @@ def runTraining (args : Args) : IO Unit := do
         nHead := 4
         headDim := 64
         modelDim := 256
+        maxSeqLen := 512
+        blockSize := 64
       }
     else
       Config.default
@@ -197,9 +199,23 @@ def runTraining (args : Args) : IO Unit := do
     IO.println ""
 
   -- Hyperparameters
+  let hpBase : Hyperparameters := if args.debug then
+    -- Keep debug runs lightweight enough for congested multi-GPU nodes.
+    { Hyperparameters.default with
+      deviceBatchSize := 1
+      totalBatchSizeTokens := 2048
+      maxSeqLen := cfg.maxSeqLen
+      valInterval := 1
+      logInterval := 1
+      checkpointInterval := 10
+    }
+  else
+    { Hyperparameters.default with
+      maxSeqLen := cfg.maxSeqLen
+    }
   let hp : Hyperparameters := {
-    Hyperparameters.default with
-    numIterations := args.numIterations.getD Hyperparameters.default.numIterations
+    hpBase with
+    numIterations := args.numIterations.getD hpBase.numIterations
   }
 
   -- Data config
