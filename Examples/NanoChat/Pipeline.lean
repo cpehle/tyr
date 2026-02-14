@@ -293,6 +293,42 @@ def loadGSM8KFromHuggingFace (subset : String := "main") (split : String := "tra
   let examples := rows.filterMap GSM8KExample.fromJson?
   pure { subset, split, examples, config := {} }
 
+/-- Load MMLU task from HuggingFace parquet rows. -/
+def loadMMLUFromHuggingFace (subset : String) (split : String)
+    (cacheDir : String := "~/.cache/huggingface") : IO MMLUTask := do
+  let rows ← loadMMLU subset split cacheDir
+  let examples := rows.filterMap MMLUExample.fromJson?
+  pure { subset, split, examples, config := {} }
+
+/-- Load SmolTalk task from HuggingFace parquet rows. -/
+def loadSmolTalkFromHuggingFace (split : String)
+    (cacheDir : String := "~/.cache/huggingface") : IO SmolTalkTask := do
+  let rows ← loadSmolTalk split cacheDir
+  let examples := rows.filterMap SmolTalkExample.fromJson?
+  pure { split, examples, config := {} }
+
+private def resolveIdentityConversationsPath (cacheDir : String) : IO String := do
+  match ← IO.getEnv "IDENTITY_CONVERSATIONS_PATH" with
+  | some p =>
+    let expanded ← expandHome p
+    if ← System.FilePath.pathExists ⟨expanded⟩ then
+      pure expanded
+    else
+      throw <| IO.userError s!"IDENTITY_CONVERSATIONS_PATH does not exist: {expanded}"
+  | none =>
+    let fallback := s!"{cacheDir}/identity_conversations.jsonl"
+    if ← System.FilePath.pathExists ⟨fallback⟩ then
+      pure fallback
+    else
+      let _ ← downloadWithRetry
+        "https://karpathy-public.s3.us-west-2.amazonaws.com/identity_conversations.jsonl"
+        fallback
+        3
+      if ← System.FilePath.pathExists ⟨fallback⟩ then
+        pure fallback
+      else
+        throw <| IO.userError s!"Missing identity conversations at {fallback}"
+
 /-- Create spelling-bee task after ensuring the shared word list is available. -/
 def createSpellingBeeTaskWithDownload (cacheDir : String) (size : Nat) (split : String) : IO SpellingBeeTask := do
   let wordListPath ← ensureWordList cacheDir
@@ -545,6 +581,12 @@ def pretrainBaseModel (cfg : NanoChatConfig) : PipelineM Unit := do
     extensionIterations := extensionIterations
     deviceBatchSize := deviceBatchSize
     totalBatchSizeTokens := totalBatchSizeTokens
+    embeddingLr := 0.3
+    unembeddingLr := 0.004
+    matrixLr := 0.02
+    adamBeta1 := 0.8
+    adamBeta2 := 0.95
+    adamWeightDecay := 0.0
     warmupFrac := 0.0
     cooldownFrac := 0.4
     finalLrFrac := 0.0
@@ -681,29 +723,116 @@ def evalBaseModel (cfg : NanoChatConfig) : PipelineM Unit := runOnMaster do
 def createMidtrainTaskMixture (cfg : NanoChatConfig) : IO AnyTaskMixture := do
   -- Get cache directory
   let cacheDir := cfg.baseDir.replace "~" (← IO.getEnv "HOME" |>.map (·.getD ""))
+  let identityPath ← resolveIdentityConversationsPath cacheDir
 
   IO.println "Creating midtraining task mixture..."
 
-  -- Load ARC tasks from HuggingFace
+  -- Match nanochat/scripts/mid_train.py defaults.
+  let smolTalk ← loadSmolTalkFromHuggingFace "train" cacheDir
+  let mmluAux ← loadMMLUFromHuggingFace "auxiliary_train" "train" cacheDir
+  let gsm8k ← loadGSM8KFromHuggingFace "main" "train" cacheDir
+  let identityTask ← createCustomJSONTask ⟨identityPath⟩
+
+  let simpleSpelling ← createSimpleSpellingTaskWithDownload cacheDir 200000 "train"
+  let spellingBee ← createSpellingBeeTaskWithDownload cacheDir 80000 "train"
+
+  let entries : Array AnyMixtureEntry := #[
+    { task := .smolTalk smolTalk, weight := 1 },
+    { task := .mmlu mmluAux, weight := 1 },
+    { task := .gsm8k gsm8k, weight := 1 },
+    { task := .customJSON identityTask, weight := 2 },
+    { task := .simpleSpelling simpleSpelling, weight := 1 },
+    { task := .spellingBee spellingBee, weight := 1 }
+  ]
+
+  IO.println s!"Created mixture with {entries.size} tasks"
+  return AnyTaskMixture.create entries
+
+/-- Create validation task mixture for midtraining (matches nanochat/scripts/mid_train.py). -/
+def createMidtrainValTaskMixture (cfg : NanoChatConfig) : IO AnyTaskMixture := do
+  let cacheDir := cfg.baseDir.replace "~" (← IO.getEnv "HOME" |>.map (·.getD ""))
+
+  IO.println "Creating midtraining validation task mixture..."
+
+  let smolTalkTest ← loadSmolTalkFromHuggingFace "test" cacheDir
+  let mmluAllTest ← loadMMLUFromHuggingFace "all" "test" cacheDir
+  let gsm8kTest ← loadGSM8KFromHuggingFace "main" "test" cacheDir
+
+  let mmluVal : MMLUTask := {
+    mmluAllTest with
+    config := { stop := some 5200 }
+  }
+  let gsm8kVal : GSM8KTask := {
+    gsm8kTest with
+    config := { stop := some 420 }
+  }
+
+  let entries : Array AnyMixtureEntry := #[
+    { task := .smolTalk smolTalkTest, weight := 1 },
+    { task := .mmlu mmluVal, weight := 1 },
+    { task := .gsm8k gsm8kVal, weight := 1 }
+  ]
+
+  IO.println s!"Created midtraining validation mixture with {entries.size} tasks"
+  return AnyTaskMixture.create entries
+
+private def anyTaskName (task : AnyTask) : String :=
+  match task with
+  | .arc t => s!"arc_{t.subset}"
+  | .mmlu t => s!"mmlu_{t.subset}"
+  | .gsm8k _ => "gsm8k"
+  | .smolTalk _ => "smoltalk"
+  | .customJSON _ => "customjson"
+  | .spellingBee _ => "spelling_bee"
+  | .simpleSpelling _ => "simple_spelling"
+  | .humanEval _ => "humaneval"
+
+private def materializeAnyTask (task : AnyTask) : LoadedTask := Id.run do
+  let mut convs : Array Conversation := #[]
+  for i in [:task.size] do
+    if let some conv := task.getExample i then
+      convs := convs.push conv
+  return {
+    name := anyTaskName task
+    conversations := convs
+    config := {}
+  }
+
+private def materializeAnyTaskMixture (mix : AnyTaskMixture) : TaskMixture :=
+  let entries : Array MixtureEntry := mix.entries.map fun entry =>
+    { task := materializeAnyTask entry.task, weight := entry.weight }
+  TaskMixture.create entries mix.seed
+
+/-- Create task mixture for chat SFT (matches nanochat/scripts/chat_sft.py). -/
+def createSFTTaskMixture (cfg : NanoChatConfig) : IO AnyTaskMixture := do
+  let cacheDir := cfg.baseDir.replace "~" (← IO.getEnv "HOME" |>.map (·.getD ""))
+  let identityPath ← resolveIdentityConversationsPath cacheDir
+
+  IO.println "Creating SFT task mixture..."
+
   let arcEasy ← loadARCFromHuggingFace "ARC-Easy" "train" cacheDir
   let arcChallenge ← loadARCFromHuggingFace "ARC-Challenge" "train" cacheDir
-
-  -- Load GSM8K from HuggingFace
   let gsm8k ← loadGSM8KFromHuggingFace "main" "train" cacheDir
-
-  -- Create spelling tasks with downloaded word list
-  let spellingBee ← createSpellingBeeTaskWithDownload cacheDir 300 "train"
+  let smolTalkAll ← loadSmolTalkFromHuggingFace "train" cacheDir
+  let smolTalk : SmolTalkTask := {
+    smolTalkAll with
+    config := { stop := some 10000 }
+  }
+  let identityTask ← createCustomJSONTask ⟨identityPath⟩
   let simpleSpelling ← createSimpleSpellingTaskWithDownload cacheDir 300 "train"
+  let spellingBee ← createSpellingBeeTaskWithDownload cacheDir 300 "train"
 
   let entries : Array AnyMixtureEntry := #[
     { task := .arc arcEasy, weight := 1 },
     { task := .arc arcChallenge, weight := 1 },
-    { task := .gsm8k gsm8k, weight := 2 },
-    { task := .spellingBee spellingBee, weight := 1 },
-    { task := .simpleSpelling simpleSpelling, weight := 1 }
+    { task := .gsm8k gsm8k, weight := 1 },
+    { task := .smolTalk smolTalk, weight := 1 },
+    { task := .customJSON identityTask, weight := 1 },
+    { task := .simpleSpelling simpleSpelling, weight := 1 },
+    { task := .spellingBee spellingBee, weight := 1 }
   ]
 
-  IO.println s!"Created mixture with {entries.size} tasks"
+  IO.println s!"Created SFT mixture with {entries.size} tasks"
   return AnyTaskMixture.create entries
 
 /-- Run midtraining with conversation data and task mixture -/
@@ -738,22 +867,18 @@ def midtrain (cfg : NanoChatConfig) : PipelineM Unit := do
     extensionIterations := midExtIters
     deviceBatchSize := midDeviceBatchSize
     totalBatchSizeTokens := midTotalBatchSize
+    embeddingLr := 0.2
+    unembeddingLr := 0.004
+    matrixLr := 0.02
+    adamBeta1 := 0.8
+    adamBeta2 := 0.95
+    adamWeightDecay := 0.0
     warmupFrac := 0.0
     finalLrFrac := 0.0
     maxSeqLen := modelCfg.maxSeqLen
     valInterval := midValInterval
     logInterval := midLogInterval
     checkpointInterval := midCheckpointInterval
-  }
-
-  -- Midtraining consumes pre-tokenized shards. Point MIDTRAIN_DATA_PATH at a
-  -- dedicated midtraining corpus that already includes conversation/tool-use tokens.
-  let dataDir ← resolveDataDirWithOverride cfg "MIDTRAIN_DATA_PATH"
-  let bosTokenId ← resolveBosTokenId cfg
-  let dataConfig : DataLoader.Config := {
-    dataPath := dataDir
-    bosToken := bosTokenId
-    seqLen := hp.maxSeqLen
   }
 
   -- Resume policy:
@@ -777,16 +902,57 @@ def midtrain (cfg : NanoChatConfig) : PipelineM Unit := do
   let trainDevice ← resolveTrainingDevice rank localRank isDistributed
   let isMaster := rank == 0
 
+  -- Build task mixtures and streaming token providers.
+  let tokenizerPath ← cfg.getTokenizerPath
+  let tokenizerFile := s!"{tokenizerPath}/tokenizer.bin"
+  let tok ← tokenizer.load tokenizerFile
+  let chatTokens ← buildChatTokensFromTokenizer tok
+  let encode := fun (text : String) =>
+    (tokenizer.encodeWithSpecials tok text).map (·.toUInt64)
+
+  let trainAnyMixture ← createMidtrainTaskMixture cfg
+  let valAnyMixture ← createMidtrainValTaskMixture cfg
+  let trainTaskMixture := materializeAnyTaskMixture trainAnyMixture
+  let valTaskMixture := materializeAnyTaskMixture valAnyMixture
+
+  let trainStream0 := TaskTokenStream.new
+    trainTaskMixture hp.deviceBatchSize.toNat hp.maxSeqLen.toNat
+    chatTokens encode rank.toNat worldSize.toNat
+  let valStream0 := TaskTokenStream.new
+    valTaskMixture hp.deviceBatchSize.toNat hp.maxSeqLen.toNat
+    chatTokens encode rank.toNat worldSize.toNat
+  let trainStreamRef ← IO.mkRef trainStream0
+  let valStreamRef ← IO.mkRef valStream0
+
+  let trainProvider : DynamicGPTBatchProvider := do
+    let stream ← trainStreamRef.get
+    let (batch?, stream') ← stream.nextGPTBatch
+    trainStreamRef.set stream'
+    pure batch?
+
+  let valProvider : DynamicGPTBatchProvider := do
+    let stream ← valStreamRef.get
+    let (batch?, stream') ← stream.nextGPTBatch
+    valStreamRef.set stream'
+    pure batch?
+
+  let evalTokens := (← envUInt64 "MIDTRAIN_EVAL_TOKENS").getD (20 * 524288)
+  let tokensPerValBatch := max 1 (hp.deviceBatchSize * hp.maxSeqLen * worldSize)
+  let valBatches : Nat := max 1 ((evalTokens / tokensPerValBatch).toNat)
+
   if isMaster then
     let gradAccum := effectiveGradAccumSteps hp worldSize
     log s!"Starting midtraining with {worldSize} GPUs"
     log s!"Midtrain schedule: iters={hp.numIterations}, ext={hp.extensionIterations}, batch={hp.deviceBatchSize}, seq={hp.maxSeqLen}, accum={gradAccum}, val_int={hp.valInterval}, ckpt_int={hp.checkpointInterval}"
+    log s!"Midtrain token-stream batches: train_rows={trainTaskMixture.size}, val_rows={valTaskMixture.size}, val_batches={valBatches}"
     if hasMid then
       log s!"Resuming midtraining from {midCkptPath}"
     else
       log s!"Bootstrapping midtraining from base checkpoint {baseCkptPath}"
 
-  let finalState ← trainDistributed modelCfg hp dataConfig trainDevice midCheckpointDir resumePath
+  let finalState ← trainDistributedWithBatchProvider
+    modelCfg hp trainDevice trainProvider (some valProvider) valBatches
+    midCheckpointDir resumePath
 
   -- If no new step was run (e.g. resume already at horizon), ensure mid/latest exists.
   if isMaster && !(← checkpointExists midCkptPath) then
@@ -921,8 +1087,10 @@ def supervisedFineTune (cfg : NanoChatConfig) : PipelineM Unit := do
   let (rank, worldSize) ← if isDistributed then dist.getRankAndWorldSize else pure (0, 1)
   let localRank ← getLocalRankFromEnv
   let trainDevice ← resolveTrainingDevice rank localRank isDistributed
-  let sftDeviceBatchSize := max 1 <| (← envNat "SFT_DEVICE_BATCH_SIZE").getD 8
-  let sftTargetExamplesPerStep := max 1 <| (← envNat "SFT_TARGET_EXAMPLES_PER_STEP").getD 1024
+  -- Match nanochat chat_sft.py defaults:
+  -- device_batch_size=4, target_examples_per_step=32.
+  let sftDeviceBatchSize := max 1 <| (← envNat "SFT_DEVICE_BATCH_SIZE").getD 4
+  let sftTargetExamplesPerStep := max 1 <| (← envNat "SFT_TARGET_EXAMPLES_PER_STEP").getD 32
 
   -- SFT configuration
   let sftCfg : SFTConfig := {
@@ -994,7 +1162,7 @@ def supervisedFineTune (cfg : NanoChatConfig) : PipelineM Unit := do
     let tok ← tokenizer.load tokenizerFile
 
     -- Create task mixture from HuggingFace data
-    let sftMixture ← createMidtrainTaskMixture cfg
+    let sftMixture ← createSFTTaskMixture cfg
 
     -- Convert AnyTaskMixture to LoadedTask-based TaskMixture
     let loadedEntries : Array MixtureEntry ← sftMixture.entries.mapM fun entry => do
@@ -1015,6 +1183,8 @@ def supervisedFineTune (cfg : NanoChatConfig) : PipelineM Unit := do
           | .arc t => s!"arc_{t.subset}"
           | .mmlu t => s!"mmlu_{t.subset}"
           | .gsm8k _ => "gsm8k"
+          | .smolTalk _ => "smoltalk"
+          | .customJSON _ => "customjson"
           | .spellingBee _ => "spelling_bee"
           | .simpleSpelling _ => "simple_spelling"
           | .humanEval _ => "humaneval"
