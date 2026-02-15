@@ -162,7 +162,8 @@ def batchLrScale (hp : Hyperparameters) (referenceBatch : Float := 524288.0) : F
 def dModelLrScale (cfg : moddedGpt.Config) : Float :=
   Float.pow (cfg.modelDim.toFloat / 768.0) (-0.5)
 
-/-- Compute grad-accum steps from global token budget and world size. -/
+/-- Compute grad-accum steps from global token budget and world size.
+    Expects divisibility to be validated up-front (nanochat parity). -/
 def effectiveGradAccumSteps (hp : Hyperparameters) (worldSize : UInt64) : UInt64 :=
   let world := max 1 worldSize
   let perMicro := hp.deviceBatchSize * hp.maxSeqLen * world
@@ -170,25 +171,34 @@ def effectiveGradAccumSteps (hp : Hyperparameters) (worldSize : UInt64) : UInt64
     1
   else
     let target := max perMicro hp.totalBatchSizeTokens
-    let q := target / perMicro
-    let r := target % perMicro
-    if r == 0 then max 1 q else max 1 (q + 1)
+    max 1 (target / perMicro)
+
+/-- Enforce nanochat batch semantics:
+    total_batch_size must be divisible by per-rank micro-batch tokens. -/
+def validateGradAccumConfig (hp : Hyperparameters) (worldSize : UInt64) : IO Unit := do
+  let world := max 1 worldSize
+  let perMicro := hp.deviceBatchSize * hp.maxSeqLen * world
+  if perMicro == 0 then
+    throw <| IO.userError "Invalid grad-accum config: perMicro tokens is zero"
+  if hp.totalBatchSizeTokens % perMicro != 0 then
+    throw <| IO.userError s!"Invalid grad-accum config: total_batch_size={hp.totalBatchSizeTokens} must be divisible by device_batch_size*max_seq_len*world_size={perMicro}"
 
 /-! ## Momentum Schedule -/
 
-/-- Get Muon momentum for a given iteration.
+/-- Get Muon momentum for a given iteration (nanochat parity).
 
     Momentum schedule:
-    - Warmup: 0.85 -> 0.95 over 300 steps
-    - Plateau: 0.95
-    - Cooldown: 0.95 -> 0.85 over last 50 steps
+    - Warmup: 0.85 -> baseMomentum over 300 steps
+    - Then constant at baseMomentum
 -/
 def getMuonMomentum (step : UInt64) (hp : Hyperparameters)
     (baseMomentum : Float := 0.95) (warmupSteps : UInt64 := 300)
     (cooldownSteps : UInt64 := 50) : Float :=
+  let _ := hp
+  let _ := cooldownSteps
   NorMuon.getMomentum step.toNat
-    (hp.numIterations + hp.extensionIterations).toNat
-    baseMomentum warmupSteps.toNat cooldownSteps.toNat
+    0
+    baseMomentum warmupSteps.toNat 0
 
 /-! ## Optimizer State -/
 
@@ -305,7 +315,7 @@ def trainStep {cfg : moddedGpt.Config} {batch seq : UInt64}
     (target : T #[batch, seq])
     (optState : OptimizerState cfg)
     (hp : Hyperparameters)
-    (gradClip : Float := 1.0)
+    (gradClip : Float := 0.0)
     : IO (ModdedGPTParams cfg × OptimizerState cfg × StepResult) := do
   let startTime ← IO.monoMsNow
 
@@ -664,7 +674,7 @@ def trainStepDistributedAccum {cfg : moddedGpt.Config} {batch seq : UInt64}
     (microBatches : Array (T #[batch, seq] × T #[batch, seq]))
     (optState : OptimizerState cfg)
     (hp : Hyperparameters)
-    (gradClip : Float := 1.0)
+    (gradClip : Float := 0.0)
     : IO (ModdedGPTParams cfg × OptimizerState cfg × StepResult) := do
   if microBatches.isEmpty then
     return (params, optState, { loss := 0.0, gradNorm := 0.0, tokensProcessed := 0, timeMs := 0.0 })
@@ -697,9 +707,6 @@ def trainStepDistributedAccum {cfg : moddedGpt.Config} {batch seq : UInt64}
     let _ ← nn.clip_grad_norm_ params.lmHead.weight gradClip
     let _ ← nn.clip_grad_norm_ params.scalars.values gradClip
   let grads := TensorStruct.grads params
-  if isDistributed then
-    let _ ← dist.allReduceGrads grads .avg
-    pure ()
   let batchScale := batchLrScale hp
   let dScale := dModelLrScale cfg
   let lrEmbed := getLearningRate optState.step hp (hp.embeddingLr * batchScale * dScale)
@@ -713,7 +720,7 @@ def trainStepDistributedAccum {cfg : moddedGpt.Config} {batch seq : UInt64}
     beta2 := hp.adamBeta2
     eps := 1e-10
     weightDecay := hp.adamWeightDecay
-    distributed := false
+    distributed := isDistributed
   }
   let muonCfg : NorMuon.Config := {
     lr := lrMatrix
@@ -721,12 +728,17 @@ def trainStepDistributedAccum {cfg : moddedGpt.Config} {batch seq : UInt64}
     momentum := muMomentum
     beta2 := 0.95
     numIters := 5
-    distributed := false
-    worldSize := 1
+    distributed := isDistributed
+    worldSize := worldSize
   }
 
-  let (embed', embedState') ← DistAdam.stepSingle
-    params.embed grads.embed optState.dualState.embed { adamCfgBase with lr := lrEmbed }
+  let runAdamStep : {s : Shape} → (p : T s) → (g : T s) → DistAdam.ParamState s → Float →
+      IO (T s × DistAdam.ParamState s) :=
+    fun {_} p g st lr => do
+      DistAdam.stepDistributed p g st { adamCfgBase with lr := lr } 1.0 1.0
+
+  let (embed', embedState') ← runAdamStep
+    params.embed grads.embed optState.dualState.embed lrEmbed
 
   let mut newValueEmbeds : Array (T #[cfg.vocabSize, cfg.modelDim]) := #[]
   let mut newValueEmbedStates : Array (DistAdam.ParamState #[cfg.vocabSize, cfg.modelDim]) := #[]
@@ -734,20 +746,44 @@ def trainStepDistributedAccum {cfg : moddedGpt.Config} {batch seq : UInt64}
     let ve := params.valueEmbeds[i]!
     let veGrad := grads.valueEmbeds[i]!
     let veState := optState.dualState.valueEmbeds[i]?.getD (DistAdam.initParamState ve)
-    let (ve', veState') ← DistAdam.stepSingle ve veGrad veState { adamCfgBase with lr := lrEmbed }
+    let (ve', veState') ← runAdamStep ve veGrad veState lrEmbed
     newValueEmbeds := newValueEmbeds.push ve'
     newValueEmbedStates := newValueEmbedStates.push veState'
 
-  let (lmHeadW', lmHeadState') ← DistAdam.stepSingle
-    params.lmHead.weight grads.lmHead.weight optState.dualState.lmHead { adamCfgBase with lr := lrUnembed }
-  let (scalars', scalarState') ← DistAdam.stepSingle
-    params.scalars.values grads.scalars.values optState.dualState.scalars { adamCfgBase with lr := lrUnembed }
+  let (lmHeadW', lmHeadState') ← runAdamStep
+    params.lmHead.weight grads.lmHead.weight optState.dualState.lmHead lrUnembed
+  let (scalars', scalarState') ← runAdamStep
+    params.scalars.values grads.scalars.values optState.dualState.scalars lrUnembed
 
-  let (smearGateW', smearGateState') ← NorMuon.stepSingle
-    params.smearGate.weight grads.smearGate.weight optState.dualState.smearGate muonCfg 1.0 1.0
+  let (smearGateWs, smearGateStates) ← NorMuon.stepDistributedGroup
+    #[params.smearGate.weight]
+    #[grads.smearGate.weight]
+    #[optState.dualState.smearGate]
+    muonCfg
+  let smearGateW' := smearGateWs[0]?.getD params.smearGate.weight
+  let smearGateState' := smearGateStates[0]?.getD optState.dualState.smearGate
 
-  let mut newBlocks : Array (Block cfg.modelDim cfg.headDim cfg.nHead) := #[]
-  let mut newBlockStates : Array (MuonBlockState cfg) := #[]
+  let mut blockStatesIn : Array (MuonBlockState cfg) := #[]
+  let mut cFcParams : Array (T #[4 * cfg.modelDim, cfg.modelDim]) := #[]
+  let mut cFcGrads : Array (T #[4 * cfg.modelDim, cfg.modelDim]) := #[]
+  let mut cFcStates : Array (NorMuon.ParamState #[4 * cfg.modelDim, cfg.modelDim]) := #[]
+  let mut cProjParams : Array (T #[4 * cfg.modelDim, cfg.modelDim]) := #[]
+  let mut cProjGrads : Array (T #[4 * cfg.modelDim, cfg.modelDim]) := #[]
+  let mut cProjStates : Array (NorMuon.ParamState #[4 * cfg.modelDim, cfg.modelDim]) := #[]
+
+  let mut qParams : Array (T #[cfg.nHead * cfg.headDim, cfg.modelDim]) := #[]
+  let mut qGrads : Array (T #[cfg.nHead * cfg.headDim, cfg.modelDim]) := #[]
+  let mut qStates : Array (NorMuon.ParamState #[cfg.nHead * cfg.headDim, cfg.modelDim]) := #[]
+  let mut kParams : Array (T #[cfg.nHead * cfg.headDim, cfg.modelDim]) := #[]
+  let mut kGrads : Array (T #[cfg.nHead * cfg.headDim, cfg.modelDim]) := #[]
+  let mut kStates : Array (NorMuon.ParamState #[cfg.nHead * cfg.headDim, cfg.modelDim]) := #[]
+  let mut vParams : Array (T #[cfg.nHead * cfg.headDim, cfg.modelDim]) := #[]
+  let mut vGrads : Array (T #[cfg.nHead * cfg.headDim, cfg.modelDim]) := #[]
+  let mut vStates : Array (NorMuon.ParamState #[cfg.nHead * cfg.headDim, cfg.modelDim]) := #[]
+  let mut oParams : Array (T #[cfg.modelDim, cfg.nHead * cfg.headDim]) := #[]
+  let mut oGrads : Array (T #[cfg.modelDim, cfg.nHead * cfg.headDim]) := #[]
+  let mut oStates : Array (NorMuon.ParamState #[cfg.modelDim, cfg.nHead * cfg.headDim]) := #[]
+
   for i in [:params.blocks.size] do
     let block := params.blocks[i]!
     let blockGrad := grads.blocks[i]!
@@ -763,38 +799,96 @@ def trainStepDistributedAccum {cfg : moddedGpt.Config} {batch seq : UInt64}
       cProj := NorMuon.initParamState block.mlp.cProj
     }
     let blockState := optState.dualState.blocks[i]?.getD defaultBlockState
+    blockStatesIn := blockStatesIn.push blockState
 
-    let (attn', attnState') ←
-      match block.attn, blockGrad.attn with
-      | some attn, some attnGrad =>
-        let attnState := blockState.attn.getD {
+    cFcParams := cFcParams.push block.mlp.cFc
+    cFcGrads := cFcGrads.push blockGrad.mlp.cFc
+    cFcStates := cFcStates.push blockState.cFc
+    cProjParams := cProjParams.push block.mlp.cProj
+    cProjGrads := cProjGrads.push blockGrad.mlp.cProj
+    cProjStates := cProjStates.push blockState.cProj
+
+    match block.attn, blockGrad.attn with
+    | some attn, some attnGrad =>
+      let attnState := blockState.attn.getD {
+        wQ := NorMuon.initParamState attn.wQ
+        wK := NorMuon.initParamState attn.wK
+        wV := NorMuon.initParamState attn.wV
+        wO := NorMuon.initParamState attn.wO
+      }
+      qParams := qParams.push attn.wQ
+      qGrads := qGrads.push attnGrad.wQ
+      qStates := qStates.push attnState.wQ
+      kParams := kParams.push attn.wK
+      kGrads := kGrads.push attnGrad.wK
+      kStates := kStates.push attnState.wK
+      vParams := vParams.push attn.wV
+      vGrads := vGrads.push attnGrad.wV
+      vStates := vStates.push attnState.wV
+      oParams := oParams.push attn.wO
+      oGrads := oGrads.push attnGrad.wO
+      oStates := oStates.push attnState.wO
+    | _, _ => pure ()
+
+  let (qParams', qStates') ← NorMuon.stepDistributedGroup qParams qGrads qStates muonCfg
+  let (kParams', kStates') ← NorMuon.stepDistributedGroup kParams kGrads kStates muonCfg
+  let (vParams', vStates') ← NorMuon.stepDistributedGroup vParams vGrads vStates muonCfg
+  let (oParams', oStates') ← NorMuon.stepDistributedGroup oParams oGrads oStates muonCfg
+  let (cFcParams', cFcStates') ← NorMuon.stepDistributedGroup cFcParams cFcGrads cFcStates muonCfg
+  let (cProjParams', cProjStates') ← NorMuon.stepDistributedGroup cProjParams cProjGrads cProjStates muonCfg
+
+  let mut newBlocks : Array (Block cfg.modelDim cfg.headDim cfg.nHead) := #[]
+  let mut newBlockStates : Array (MuonBlockState cfg) := #[]
+  let mut attnCursor : Nat := 0
+  for i in [:params.blocks.size] do
+    let block := params.blocks[i]!
+    let blockGrad := grads.blocks[i]!
+    let defaultBlockState : MuonBlockState cfg := {
+      attn := block.attn.map fun attn =>
+        {
           wQ := NorMuon.initParamState attn.wQ
           wK := NorMuon.initParamState attn.wK
           wV := NorMuon.initParamState attn.wV
           wO := NorMuon.initParamState attn.wO
         }
-        let (wQ', wQState') ← NorMuon.stepSingle attn.wQ attnGrad.wQ attnState.wQ muonCfg 1.0 1.0
-        let (wK', wKState') ← NorMuon.stepSingle attn.wK attnGrad.wK attnState.wK muonCfg 1.0 1.0
-        let (wV', wVState') ← NorMuon.stepSingle attn.wV attnGrad.wV attnState.wV muonCfg 1.0 1.0
-        let (wO', wOState') ← NorMuon.stepSingle attn.wO attnGrad.wO attnState.wO muonCfg 1.0 1.0
-        let newAttn : CausalSelfAttention cfg.modelDim cfg.headDim cfg.nHead := {
-          wQ := wQ'
-          wK := wK'
-          wV := wV'
-          wO := wO'
-        }
-        let newAttnState : MuonAttnState cfg := {
-          wQ := wQState'
-          wK := wKState'
-          wV := wVState'
-          wO := wOState'
-        }
-        pure (some newAttn, some newAttnState)
-      | none, _ => pure (none, none)
-      | _, none => pure (block.attn, blockState.attn)
-
-    let (cFc', cFcState') ← NorMuon.stepSingle block.mlp.cFc blockGrad.mlp.cFc blockState.cFc muonCfg 1.0 1.0
-    let (cProj', cProjState') ← NorMuon.stepSingle block.mlp.cProj blockGrad.mlp.cProj blockState.cProj muonCfg 1.0 1.0
+      cFc := NorMuon.initParamState block.mlp.cFc
+      cProj := NorMuon.initParamState block.mlp.cProj
+    }
+    let blockState := blockStatesIn[i]?.getD defaultBlockState
+    let cFc' := cFcParams'[i]?.getD block.mlp.cFc
+    let cProj' := cProjParams'[i]?.getD block.mlp.cProj
+    let cFcState' := cFcStates'[i]?.getD (NorMuon.initParamState cFc')
+    let cProjState' := cProjStates'[i]?.getD (NorMuon.initParamState cProj')
+    let (attn', attnState', nextAttnCursor) :=
+      match block.attn, blockGrad.attn with
+      | some attn, some _ =>
+        if attnCursor < qParams'.size then
+          let wQ' := qParams'[attnCursor]?.getD attn.wQ
+          let wK' := kParams'[attnCursor]?.getD attn.wK
+          let wV' := vParams'[attnCursor]?.getD attn.wV
+          let wO' := oParams'[attnCursor]?.getD attn.wO
+          let wQState' := qStates'[attnCursor]?.getD (NorMuon.initParamState wQ')
+          let wKState' := kStates'[attnCursor]?.getD (NorMuon.initParamState wK')
+          let wVState' := vStates'[attnCursor]?.getD (NorMuon.initParamState wV')
+          let wOState' := oStates'[attnCursor]?.getD (NorMuon.initParamState wO')
+          let newAttn : CausalSelfAttention cfg.modelDim cfg.headDim cfg.nHead := {
+            wQ := wQ'
+            wK := wK'
+            wV := wV'
+            wO := wO'
+          }
+          let newAttnState : MuonAttnState cfg := {
+            wQ := wQState'
+            wK := wKState'
+            wV := wVState'
+            wO := wOState'
+          }
+          (some newAttn, some newAttnState, attnCursor + 1)
+        else
+          (block.attn, blockState.attn, attnCursor)
+      | none, _ => (none, none, attnCursor)
+      | _, none => (block.attn, blockState.attn, attnCursor)
+    attnCursor := nextAttnCursor
     let newBlock : Block cfg.modelDim cfg.headDim cfg.nHead := {
       attn := attn'
       mlp := { cFc := cFc', cProj := cProj' }
@@ -959,7 +1053,7 @@ def trainStepDistributed {cfg : moddedGpt.Config} {batch seq : UInt64}
     (target : T #[batch, seq])
     (optState : OptimizerState cfg)
     (hp : Hyperparameters)
-    (gradClip : Float := 1.0)
+    (gradClip : Float := 0.0)
     : IO (ModdedGPTParams cfg × OptimizerState cfg × StepResult) := do
   let startTime ← IO.monoMsNow
 
@@ -1278,6 +1372,9 @@ def trainDistributed (cfg : moddedGpt.Config) (hp : Hyperparameters)
     params := syncedParams
   }
 
+  -- Match nanochat's strict grad-accum divisibility contract.
+  validateGradAccumConfig hp worldSize
+
   -- Barrier to ensure all ranks are ready
   if isDistributed then
     dist.barrier
@@ -1559,6 +1656,9 @@ def trainDistributedWithBatchProvider (cfg : moddedGpt.Config) (hp : Hyperparame
     state with
     params := syncedParams
   }
+
+  -- Match nanochat's strict grad-accum divisibility contract.
+  validateGradAccumConfig hp worldSize
 
   if isDistributed then
     dist.barrier

@@ -553,6 +553,163 @@ def evalTokenizer (cfg : NanoChatConfig) : PipelineM Unit := runOnMaster do
 
 /-! ## Pretraining Stage -/
 
+/-- Data split used by parquet pretraining streams. -/
+private inductive PretrainParquetSplit where
+  | train
+  | val
+  deriving Repr, BEq
+
+/-- Streaming parquet token state for base pretraining.
+    Mirrors nanochat's rank-strided row-group traversal and BOS-prepended tokenization. -/
+private structure ParquetTokenStream where
+  files : Array String
+  tok : BPETokenizer
+  bosToken : UInt64
+  textColumn : String := "text"
+  tokenizerBatchSize : Nat := 128
+  rank : Nat := 0
+  worldSize : Nat := 1
+  fileIdx : Nat := 0
+  rowGroupIdx : Nat := 0
+  buffer : Array UInt64 := #[]
+  consumed : Nat := 0
+  epoch : Nat := 0
+
+private def selectParquetFilesForSplit (files : Array String) (split : PretrainParquetSplit) : Array String :=
+  match split with
+  | .train =>
+      if files.size <= 1 then #[] else files.extract 0 (files.size - 1)
+  | .val =>
+      if files.isEmpty then #[] else #[files[files.size - 1]!]
+
+private def ParquetTokenStream.init
+    (dataDir : String) (split : PretrainParquetSplit)
+    (tok : BPETokenizer) (bosToken : UInt64)
+    (rank worldSize : UInt64)
+    (textColumn : String := "text")
+    (tokenizerBatchSize : Nat := 128)
+    : IO ParquetTokenStream := do
+  let allFiles ← listParquetFiles dataDir
+  let files := selectParquetFilesForSplit allFiles split
+  pure {
+    files := files
+    tok := tok
+    bosToken := bosToken
+    textColumn := textColumn
+    tokenizerBatchSize := tokenizerBatchSize
+    rank := rank.toNat
+    worldSize := max 1 worldSize.toNat
+    fileIdx := 0
+    rowGroupIdx := rank.toNat
+  }
+
+private def ParquetTokenStream.available (s : ParquetTokenStream) : Nat :=
+  s.buffer.size - s.consumed
+
+private def ParquetTokenStream.compact (s : ParquetTokenStream) : ParquetTokenStream :=
+  if s.consumed == 0 then
+    s
+  else if s.consumed * 2 < s.buffer.size then
+    s
+  else
+    { s with
+      buffer := s.buffer.extract s.consumed s.buffer.size
+      consumed := 0
+    }
+
+private def ParquetTokenStream.pushDocuments
+    (stream : ParquetTokenStream) (documents : Array String) : ParquetTokenStream := Id.run do
+  let mut st := stream
+  let chunkSize := max 1 stream.tokenizerBatchSize
+  let mut start := 0
+  while start < documents.size do
+    let stop := min (start + chunkSize) documents.size
+    let chunk := documents.extract start stop
+    let mut chunkTokens : Array UInt64 := #[]
+    for doc in chunk do
+      chunkTokens := chunkTokens.push stream.bosToken
+      let ids := tokenizer.encodeWithSpecials stream.tok doc
+      for id in ids do
+        chunkTokens := chunkTokens.push id.toUInt64
+    st := { st with buffer := st.buffer ++ chunkTokens }
+    start := stop
+  st
+
+private def ParquetTokenStream.readNextRowGroup
+    (stream : ParquetTokenStream) : IO (Option RowGroupData × ParquetTokenStream) := do
+  if stream.files.isEmpty then
+    return (none, stream)
+
+  let mut st := stream
+  let mut scanned := 0
+  while scanned < st.files.size do
+    if st.fileIdx >= st.files.size then
+      st := { st with
+        fileIdx := 0
+        rowGroupIdx := st.rank
+        epoch := st.epoch + 1
+      }
+
+    let filePath := st.files[st.fileIdx]!
+    let metadata ← getParquetMetadata filePath
+    if st.rowGroupIdx < metadata.numRowGroups then
+      let rg ← readRowGroup filePath st.rowGroupIdx.toUInt64 st.textColumn
+      let st' := { st with rowGroupIdx := st.rowGroupIdx + st.worldSize }
+      return (some rg, st')
+
+    st := { st with
+      fileIdx := st.fileIdx + 1
+      rowGroupIdx := st.rank
+    }
+    scanned := scanned + 1
+
+  return (none, st)
+
+private def ParquetTokenStream.fillUntil
+    (stream : ParquetTokenStream) (needed : Nat) : IO ParquetTokenStream := do
+  let mut st := stream
+  while st.available < needed do
+    let (rg?, st') ← st.readNextRowGroup
+    st := st'
+    match rg? with
+    | none => return st
+    | some rg =>
+      st := st.pushDocuments rg.documents
+  return st
+
+private def ParquetTokenStream.popWindow?
+    (stream : ParquetTokenStream) (n : Nat)
+    : Option (Array UInt64 × ParquetTokenStream) := do
+  if stream.available < n then
+    none
+  else
+    let start := stream.consumed
+    let stop := start + n
+    let window := stream.buffer.extract start stop
+    let st := { stream with consumed := stop }
+    some (window, st.compact)
+
+/-- Emit one `(input,target)` batch for GPT next-token training from parquet text. -/
+private def ParquetTokenStream.nextBatch
+    (stream : ParquetTokenStream) (batchSize seqLen : UInt64)
+    : IO (Option DynamicGPTBatch × ParquetTokenStream) := do
+  if batchSize == 0 || seqLen == 0 then
+    return (none, stream)
+
+  let needed := (batchSize * seqLen + 1).toNat
+  let st ← stream.fillUntil needed
+  match st.popWindow? needed with
+  | none =>
+    return (none, st)
+  | some (window, st') =>
+    let inputIds := window.extract 0 (needed - 1)
+    let targetIds := window.extract 1 needed
+    let inputTensor := data.fromInt64Array (inputIds.map (·.toInt64))
+    let inputTensor := reshape inputTensor #[batchSize, seqLen]
+    let targetTensor := data.fromInt64Array (targetIds.map (·.toInt64))
+    let targetTensor := reshape targetTensor #[batchSize, seqLen]
+    pure (some (reshape inputTensor #[], reshape targetTensor #[]), st')
+
 /-- Pretrain base model using ModdedTrain infrastructure -/
 def pretrainBaseModel (cfg : NanoChatConfig) : PipelineM Unit := do
   log s!"Pretraining d{cfg.modelDepth} model..."
@@ -598,14 +755,12 @@ def pretrainBaseModel (cfg : NanoChatConfig) : PipelineM Unit := do
   let dataDir ← resolveDataDirWithOverride cfg "PRETRAIN_DATA_PATH"
   let checkpointDir ← cfg.getCheckpointDir "base"
   IO.FS.createDirAll ⟨checkpointDir⟩
-  let bosTokenId ← resolveBosTokenId cfg
-
-  -- Create data config
-  let dataConfig : DataLoader.Config := {
-    dataPath := dataDir
-    bosToken := bosTokenId
-    seqLen := hp.maxSeqLen
-  }
+  let tokenizerPath ← cfg.getTokenizerPath
+  let tokenizerFile := s!"{tokenizerPath}/tokenizer.bin"
+  let tok ← tokenizer.load tokenizerFile
+  let bosTokenId ← requireSpecialId tok "BOS" #["<|bos|>", "<|endoftext|>"]
+  let pretrainTextColumn := (← IO.getEnv "PRETRAIN_TEXT_COLUMN").getD "text"
+  let pretrainTokenizerBatchSize := (← envNat "PRETRAIN_TOKENIZER_BATCH_SIZE").getD 128
 
   -- Check for existing checkpoint to resume
   let ckptPath := s!"{checkpointDir}/latest.ckpt"
@@ -618,16 +773,55 @@ def pretrainBaseModel (cfg : NanoChatConfig) : PipelineM Unit := do
   let trainDevice ← resolveTrainingDevice rank localRank isDistributed
   let isMaster := rank == 0
 
+  -- Build parquet token streams (matches nanochat split convention:
+  -- all-but-last shard for train, last shard for val).
+  let trainStream0 ← ParquetTokenStream.init
+    dataDir .train tok bosTokenId rank worldSize pretrainTextColumn pretrainTokenizerBatchSize
+  if trainStream0.files.isEmpty then
+    throw <| IO.userError s!"No parquet train shards found in {dataDir} (need at least 2 files: train + val)"
+  let valStream0 ← ParquetTokenStream.init
+    dataDir .val tok bosTokenId rank worldSize pretrainTextColumn pretrainTokenizerBatchSize
+
+  let trainStreamRef ← IO.mkRef trainStream0
+  let valStreamRef ← IO.mkRef valStream0
+
+  let trainProvider : DynamicGPTBatchProvider := do
+    let stream ← trainStreamRef.get
+    let (batch?, stream') ← stream.nextBatch hp.deviceBatchSize hp.maxSeqLen
+    trainStreamRef.set stream'
+    pure batch?
+
+  let valProvider? : Option DynamicGPTBatchProvider :=
+    if valStream0.files.isEmpty then
+      none
+    else
+      some <| do
+        let stream ← valStreamRef.get
+        let (batch?, stream') ← stream.nextBatch hp.deviceBatchSize hp.maxSeqLen
+        valStreamRef.set stream'
+        pure batch?
+
+  let defaultEvalTokens : UInt64 := 20 * 524288
+  let evalTokens := (← envUInt64 "PRETRAIN_EVAL_TOKENS").getD defaultEvalTokens
+  let tokensPerValBatch := max 1 (hp.deviceBatchSize * hp.maxSeqLen * worldSize)
+  let valBatches : Nat :=
+    if valProvider?.isSome then
+      max 1 ((evalTokens / tokensPerValBatch).toNat)
+    else
+      0
+
   -- Run distributed training
   if isMaster then
     let gradAccum := effectiveGradAccumSteps hp worldSize
     log s!"Starting training with {worldSize} GPUs"
     log s!"Data path: {dataDir}"
     log s!"Pretrain schedule: iters={hp.numIterations}, ext={hp.extensionIterations}, batch={hp.deviceBatchSize}, seq={hp.maxSeqLen}, accum={gradAccum}, val_int={hp.valInterval}, ckpt_int={hp.checkpointInterval}"
+    log s!"Pretrain parquet stream: train_files={trainStream0.files.size}, val_files={valStream0.files.size}, text_col={pretrainTextColumn}, tokenizer_batch={pretrainTokenizerBatchSize}, val_batches={valBatches}"
     if hasCheckpoint then
       log s!"Resuming base pretraining from {ckptPath}"
 
-  let _finalState ← trainDistributed modelCfg hp dataConfig trainDevice checkpointDir none
+  let _finalState ← trainDistributedWithBatchProvider
+    modelCfg hp trainDevice trainProvider valProvider? valBatches checkpointDir none
 
   -- Estimate parameters for logging
   let numParams := modelCfg.vocabSize.toNat * modelCfg.modelDim.toNat +  -- embeddings

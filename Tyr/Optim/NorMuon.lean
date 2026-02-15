@@ -76,6 +76,13 @@ structure ParamState (s : Shape) where
   step : Nat := 0
   deriving Repr
 
+/-- Initialize state for a parameter. -/
+def initParamState {s : Shape} (_param : T s) : ParamState s := {
+  momentumBuffer := none
+  secondMoment := none
+  step := 0
+}
+
 instance {s : Shape} : TensorStruct (ParamState s) where
   map f ps := { ps with
     momentumBuffer := ps.momentumBuffer.map f,
@@ -174,7 +181,8 @@ def applyCautiousWeightDecay {s : Shape} (param grad : T s) (wd : Float) : IO (T
 
 /-- Update momentum buffer with orthogonalized gradient.
 
-    momentum_t = beta * momentum_{t-1} + (1 - beta) * g_orth
+    Matches nanochat Muon:
+    buf_t = momentum * buf_{t-1} + (1 - momentum) * g
 -/
 def updateMomentum {s : Shape} (orthGrad : T s) (momentumBuffer : Option (T s))
     (momentum : Float) : T s :=
@@ -183,7 +191,7 @@ def updateMomentum {s : Shape} (orthGrad : T s) (momentumBuffer : Option (T s))
     let decayed := mul_scalar buf momentum
     let scaled := mul_scalar orthGrad (1.0 - momentum)
     decayed + scaled
-  | none => orthGrad
+  | none => mul_scalar orthGrad (1.0 - momentum)
 
 /-- Compute aspect ratio scaling for a tensor shape.
     For 2D matrices: sqrt(max(1, height/width))
@@ -202,46 +210,197 @@ def aspectRatioScale (shape : Shape) : Float :=
   else
     1.0
 
-/-- Single NorMuon update step for one parameter.
+/-- Single Muon-style update step for one parameter.
 
-    1. Orthogonalize gradient via Polar Express
-    2. Apply variance reduction
-    3. Apply cautious weight decay
-    4. Update momentum buffer
-    5. Apply update to parameter (with aspect ratio scaling)
-
-    Returns: (new_param, new_state)
+    Matches nanochat's Muon semantics:
+    1. Orthogonalize gradient via Newton-Schulz
+    2. Update momentum buffer
+    3. Apply Nesterov-style blended update
+    4. Apply aspect-ratio learning-rate scaling
 -/
 def stepSingle {s : Shape} (param : T s) (grad : T s) (state : ParamState s)
     (cfg : Config) (lrMul wdMul : Float) : IO (T s × ParamState s) := do
-  -- 1. Orthogonalize gradient
-  let orthGrad ← PolarExpress.muonOrthogonalize grad cfg.numIters
-
-  -- 2. Apply variance reduction
-  let (normalizedGrad, newSecondMoment) ←
-    applyVarianceReduction orthGrad state.secondMoment cfg.beta2 state.step
-
-  -- 3. Apply cautious weight decay
-  let effectiveWd := cfg.weightDecay * wdMul
-  let gradWithWd ← applyCautiousWeightDecay param normalizedGrad effectiveWd
-
-  -- 4. Update momentum
-  let newMomentum := updateMomentum gradWithWd state.momentumBuffer cfg.momentum
-
-  -- 5. Apply update with aspect ratio scaling
+  -- Keep signature compatibility; Muon does not use per-parameter wd multipliers.
+  let _ := wdMul
+  -- Match nanochat ordering:
+  -- 1) momentum buffer update on raw gradients
+  -- 2) Nesterov blend
+  -- 3) orthogonalize blended update
+  let gRaw := autograd.detach grad
+  let newMomentum := updateMomentum gRaw state.momentumBuffer cfg.momentum
+  let nesterovGrad := mul_scalar gRaw (1.0 - cfg.momentum) + mul_scalar newMomentum cfg.momentum
+  -- Zero gradients should stay zero; this avoids entering Newton-Schulz on
+  -- exact zeros while preserving reference Muon semantics.
+  let nesterovAbsMax := nn.item (nn.maxAll (nn.abs nesterovGrad))
+  let orthGrad ←
+    if nesterovAbsMax == 0.0 then
+      pure nesterovGrad
+    else
+      PolarExpress.muonOrthogonalize nesterovGrad cfg.numIters
+  let g := autograd.detach orthGrad
   let aspectScale := aspectRatioScale s
   let effectiveLr := cfg.lr * lrMul * aspectScale
-  let update := mul_scalar newMomentum effectiveLr
+  let update := mul_scalar g effectiveLr
   let newParam := param - update
   let newParam := autograd.set_requires_grad (autograd.detach newParam) true
 
   let newState : ParamState s := {
     momentumBuffer := some newMomentum
-    secondMoment := some newSecondMoment
+    secondMoment := none
     step := state.step + 1
   }
 
   return (newParam, newState)
+
+/-- Distributed Muon step with owner-based updates.
+
+    This mirrors nanochat DistMuon semantics:
+    1. Average gradients across ranks.
+    2. Only `ownerRank` computes the Muon update and advances state.
+    3. Broadcast updated parameter (and momentum buffer) from owner.
+-/
+def stepDistributedOwner {s : Shape} (param : T s) (grad : T s) (state : ParamState s)
+    (cfg : Config) (lrMul wdMul : Float) (ownerRank : UInt64) : IO (T s × ParamState s) := do
+  let isDist ← dist.isInitialized
+  if !cfg.distributed || !isDist then
+    return (← stepSingle param grad state cfg lrMul wdMul)
+
+  let worldSize ← dist.getWorldSize
+  if worldSize <= 1 then
+    return (← stepSingle param grad state cfg lrMul wdMul)
+
+  let rank ← dist.getRank
+  let gradAvg := autograd.detach grad
+  dist.allReduce gradAvg .avg
+
+  let (ownerParam, ownerState) ←
+    if rank == ownerRank then
+      stepSingle param gradAvg state cfg lrMul wdMul
+    else
+      pure (param, state)
+
+  let paramSynced := if rank == ownerRank then ownerParam else autograd.detach param
+  dist.broadcast paramSynced ownerRank
+
+  let momentumSynced :=
+    if rank == ownerRank then
+      ownerState.momentumBuffer.getD (zeros_like paramSynced)
+    else
+      zeros_like paramSynced
+  dist.broadcast momentumSynced ownerRank
+
+  let newParam := autograd.set_requires_grad (autograd.detach paramSynced) true
+  let newState : ParamState s := {
+    momentumBuffer := some momentumSynced
+    secondMoment := ownerState.secondMoment
+    step := state.step + 1
+  }
+  return (newParam, newState)
+
+/-- Local (non-distributed) Muon step for a homogeneous parameter group. -/
+private def stepGroupLocal {s : Shape}
+    (params : Array (T s))
+    (grads : Array (T s))
+    (states : Array (ParamState s))
+    (cfg : Config) (lrMul wdMul : Float)
+    : IO (Array (T s) × Array (ParamState s)) := do
+  let mut outParams : Array (T s) := #[]
+  let mut outStates : Array (ParamState s) := #[]
+  for i in [:params.size] do
+    let p := params[i]!
+    let g := grads[i]?.getD (zeros_like p)
+    let st := states[i]?.getD (initParamState p)
+    let (p', st') ← stepSingle p g st cfg lrMul wdMul
+    outParams := outParams.push p'
+    outStates := outStates.push st'
+  return (outParams, outStates)
+
+/-- Distributed Muon step for a homogeneous parameter group.
+
+    This matches nanochat DistMuon group semantics:
+    - Parameters are processed in blocks of `worldSize`.
+    - For each block, rank `r` owns parameter `base + r` (if it exists).
+    - Gradients are averaged with `reduce_scatter` over explicit per-rank lists.
+    - Updated owner parameters are replicated with `all_gather`.
+-/
+def stepDistributedGroup {s : Shape}
+    (params : Array (T s))
+    (grads : Array (T s))
+    (states : Array (ParamState s))
+    (cfg : Config) (lrMul wdMul : Float := 1.0)
+    : IO (Array (T s) × Array (ParamState s)) := do
+  if params.isEmpty then
+    return (params, states)
+
+  let isDist ← dist.isInitialized
+  if !cfg.distributed || !isDist then
+    return (← stepGroupLocal params grads states cfg lrMul wdMul)
+
+  let worldSize ← dist.getWorldSize
+  if worldSize <= 1 then
+    return (← stepGroupLocal params grads states cfg lrMul wdMul)
+
+  let rank ← dist.getRank
+  let ws := worldSize.toNat
+  let rankNat := rank.toNat
+  let zeroBuf := zeros_like params[0]!
+  let mut outParams := params
+  let mut outStates := states
+  let mut base : Nat := 0
+
+  while base < params.size do
+    -- Build per-rank inputs for reduce-scatter (pad with zeros for short tails).
+    let mut rsInputs : Array (T s) := #[]
+    for j in [:ws] do
+      let idx := base + j
+      let g := grads[idx]?.getD zeroBuf
+      rsInputs := rsInputs.push g
+
+    let ownerIdx := base + rankNat
+    let gradOwner := if ownerIdx < params.size then zeros_like params[ownerIdx]! else zeros_like zeroBuf
+    dist.reduceScatterList gradOwner rsInputs .avg
+
+    let mut ownerParam := if ownerIdx < params.size then params[ownerIdx]! else zeroBuf
+    let mut ownerState := states[ownerIdx]?.getD (initParamState ownerParam)
+    if ownerIdx < params.size then
+      let (p', st') ← stepSingle ownerParam gradOwner ownerState cfg lrMul wdMul
+      ownerParam := p'
+      ownerState := st'
+
+    -- Gather updated owner parameters back to all ranks for this block.
+    let mut gatherParams : Array (T s) := #[]
+    for j in [:ws] do
+      let idx := base + j
+      let t := if idx < params.size then params[idx]! else zeroBuf
+      gatherParams := gatherParams.push (autograd.detach t)
+    let agInput := if ownerIdx < params.size then ownerParam else zeroBuf
+    dist.allGatherList gatherParams agInput
+
+    -- Gather owner momentum buffers to keep replicated checkpoint-compatible state.
+    let mut gatherMomentum : Array (T s) := #[]
+    for j in [:ws] do
+      let idx := base + j
+      let t := if idx < params.size then params[idx]! else zeroBuf
+      gatherMomentum := gatherMomentum.push (zeros_like t)
+    let agMomentum := ownerState.momentumBuffer.getD (zeros_like agInput)
+    dist.allGatherList gatherMomentum agMomentum
+
+    for j in [:ws] do
+      let idx := base + j
+      if idx < params.size then
+        let pSynced := autograd.set_requires_grad (autograd.detach gatherParams[j]!) true
+        outParams := outParams.set! idx pSynced
+        let prevState := outStates[idx]?.getD (initParamState pSynced)
+        let stSynced : ParamState s := {
+          momentumBuffer := some (autograd.detach gatherMomentum[j]!)
+          secondMoment := prevState.secondMoment
+          step := prevState.step + 1
+        }
+        outStates := outStates.set! idx stSynced
+
+    base := base + ws
+
+  return (outParams, outStates)
 
 /-- Step function for parameters using AdamW-like updates (non-orthogonalized).
 
@@ -316,30 +475,20 @@ def defaultWdMul (label : ParamLabel) : Float :=
   | .scalars => 0.0
   | _ => 1.0
 
-/-- Initialize state for a parameter -/
-def initParamState {s : Shape} (_param : T s) : ParamState s := {
-  momentumBuffer := none
-  secondMoment := none
-  step := 0
-}
+/-- Momentum schedule used by nanochat base/mid training.
 
-/-- Warmup/cooldown schedule for momentum.
-
-    modded-nanogpt uses:
-    - Warmup: 300 steps (0.85 -> 0.95)
-    - Cooldown: 50 steps before end (0.95 -> 0.85)
+    Warmup only:
+    - Warmup: 300 steps (0.85 -> baseMomentum)
+    - Then constant at baseMomentum
 -/
 def getMomentum (step totalSteps : Nat) (baseMomentum : Float := 0.95)
     (warmupSteps : Nat := 300) (cooldownSteps : Nat := 50) : Float :=
+  let _ := totalSteps
+  let _ := cooldownSteps
   let minMomentum := 0.85
   if step < warmupSteps then
     -- Linear warmup
     let progress := step.toFloat / warmupSteps.toFloat
-    minMomentum + progress * (baseMomentum - minMomentum)
-  else if step > totalSteps - cooldownSteps then
-    -- Linear cooldown
-    let stepsFromEnd := totalSteps - step
-    let progress := stepsFromEnd.toFloat / cooldownSteps.toFloat
     minMomentum + progress * (baseMomentum - minMomentum)
   else
     baseMomentum

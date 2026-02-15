@@ -257,9 +257,12 @@ lean_object* lean_torch_polar_express(
 /**
  * Muon-style orthogonalized gradient update.
  *
- * For a gradient G of shape [out, in]:
- * 1. If out > in: orthogonalize along rows (G @ G.T)
- * 2. If out <= in: orthogonalize along cols (G.T @ G)
+ * This follows nanochat's zeropower_via_newtonschulz5 implementation:
+ * - Cast to bfloat16 for the NS iteration.
+ * - If tall matrix, transpose first so the short dimension is orthogonalized.
+ * - Normalize by Frobenius norm with epsilon (1e-7) for numerical stability.
+ * - Iterate: X = a*X + (b*A + c*A*A) @ X, where A = X @ X^T.
+ * - Transpose back for tall inputs.
  *
  * @param G - Gradient tensor [out, in] or [batch, out, in]
  * @param num_iters - Number of Newton-Schulz iterations
@@ -274,84 +277,44 @@ lean_object* lean_torch_muon_orthogonalize(
 ) {
     try {
         auto G = borrowTensor(G_obj);
-        auto sizes = G.sizes();
+        if (G.dim() < 2) {
+            return lean_io_result_mk_error(lean_mk_io_user_error(
+                lean_mk_string("muon_orthogonalize requires tensor rank >= 2")));
+        }
 
+        auto sizes = G.sizes();
         int64_t out_dim = sizes[sizes.size() - 2];
         int64_t in_dim = sizes[sizes.size() - 1];
 
-        torch::Tensor result;
-
+        // Match nanochat: run Newton-Schulz in bf16.
+        auto X = G.to(torch::kBFloat16);
+        bool transposed = false;
         if (out_dim > in_dim) {
-            // Orthogonalize: result = polar_express(G.T).T
-            auto GT = G.transpose(-1, -2);
-
-            // Normalize
-            auto norm = GT.norm();
-            auto X = GT / norm;
-
-            // Same coefficients as polar_express
-            static const std::vector<std::tuple<double, double, double>> coeffs = {
-                {8.156554524902461, -22.48329292557795, 15.878769915207462},
-                {4.042929935166739, -2.808917465908714, 0.5000178451051316},
-                {3.241553795498743, -1.758787407092089, 0.35970315917498755},
-                {2.866073605966538, -1.394706279118519, 0.3190251879692427},
-                {2.6379268658498756, -1.1816678706889182, 0.2925389239509298}
-            };
-
-            size_t iters = std::min(static_cast<size_t>(num_iters), coeffs.size());
-            for (size_t i = 0; i < iters; i++) {
-                auto [a, b, c] = coeffs[i];
-
-                torch::Tensor XXT;
-                if (X.dim() == 3) {
-                    XXT = torch::bmm(X, X.transpose(-1, -2));
-                    auto XXT_X = torch::bmm(XXT, X);
-                    auto XXT_XXT_X = torch::bmm(XXT, XXT_X);
-                    X = a * X + b * XXT_X + c * XXT_XXT_X;
-                } else {
-                    XXT = torch::mm(X, X.t());
-                    auto XXT_X = torch::mm(XXT, X);
-                    auto XXT_XXT_X = torch::mm(XXT, XXT_X);
-                    X = a * X + b * XXT_X + c * XXT_XXT_X;
-                }
-            }
-
-            result = X.transpose(-1, -2);
-        } else {
-            // Orthogonalize directly
-            auto norm = G.norm();
-            auto X = G / norm;
-
-            static const std::vector<std::tuple<double, double, double>> coeffs = {
-                {8.156554524902461, -22.48329292557795, 15.878769915207462},
-                {4.042929935166739, -2.808917465908714, 0.5000178451051316},
-                {3.241553795498743, -1.758787407092089, 0.35970315917498755},
-                {2.866073605966538, -1.394706279118519, 0.3190251879692427},
-                {2.6379268658498756, -1.1816678706889182, 0.2925389239509298}
-            };
-
-            size_t iters = std::min(static_cast<size_t>(num_iters), coeffs.size());
-            for (size_t i = 0; i < iters; i++) {
-                auto [a, b, c] = coeffs[i];
-
-                torch::Tensor XXT;
-                if (X.dim() == 3) {
-                    XXT = torch::bmm(X, X.transpose(-1, -2));
-                    auto XXT_X = torch::bmm(XXT, X);
-                    auto XXT_XXT_X = torch::bmm(XXT, XXT_X);
-                    X = a * X + b * XXT_X + c * XXT_XXT_X;
-                } else {
-                    XXT = torch::mm(X, X.t());
-                    auto XXT_X = torch::mm(XXT, X);
-                    auto XXT_XXT_X = torch::mm(XXT, XXT_X);
-                    X = a * X + b * XXT_X + c * XXT_XXT_X;
-                }
-            }
-
-            result = X;
+            X = X.transpose(-1, -2);
+            transposed = true;
         }
 
-        return lean_io_result_mk_ok(fromTorchTensor(result));
+        // Stable normalization: divide by Frobenius norm + epsilon.
+        auto norm = X.norm(2, {-2, -1}, /*keepdim=*/true);
+        X = X / (norm + 1e-7);
+
+        // Same coefficients as nanochat's zeropower_via_newtonschulz5.
+        constexpr double a = 3.4445;
+        constexpr double b = -4.7750;
+        constexpr double c = 2.0315;
+        size_t iters = static_cast<size_t>(num_iters);
+        for (size_t i = 0; i < iters; i++) {
+            auto A = torch::matmul(X, X.transpose(-1, -2));
+            auto B = b * A + c * torch::matmul(A, A);
+            X = a * X + torch::matmul(B, X);
+        }
+
+        if (transposed) {
+            X = X.transpose(-1, -2);
+        }
+
+        // Keep reference behavior: output dtype stays bf16.
+        return lean_io_result_mk_ok(fromTorchTensor(X));
     } catch (const std::exception& e) {
         return lean_io_result_mk_error(lean_mk_io_user_error(
             lean_mk_string(("muon_orthogonalize failed: " + std::string(e.what())).c_str())));

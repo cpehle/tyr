@@ -5,6 +5,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${REPO_ROOT}"
 
+have_glob() {
+  local pattern="$1"
+  compgen -G "${pattern}" > /dev/null
+}
+
 # Disable module paging for non-interactive and detached launches.
 export LMOD_PAGER="${LMOD_PAGER:-none}"
 export MODULES_PAGER="${MODULES_PAGER:-cat}"
@@ -23,9 +28,18 @@ if [[ ! -x "${TORCHRUN_BIN}" ]]; then
 fi
 
 NPROC_PER_NODE="${NPROC_PER_NODE:-4}"
+if ! [[ "${NPROC_PER_NODE}" =~ ^[0-9]+$ ]] || [[ "${NPROC_PER_NODE}" -lt 1 ]]; then
+  echo "error: NPROC_PER_NODE must be a positive integer (got '${NPROC_PER_NODE}')" >&2
+  exit 2
+fi
+
 PIPELINE_EXE="${PIPELINE_EXE:-NanoChatPipeline}"
+PIPELINE_BIN="${REPO_ROOT}/.lake/build/bin/${PIPELINE_EXE}"
 if [[ "${SKIP_BUILD:-0}" != "1" ]]; then
   lake --quiet build "${PIPELINE_EXE}"
+elif [[ ! -x "${PIPELINE_BIN}" ]]; then
+  echo "error: ${PIPELINE_BIN} is missing and SKIP_BUILD=1. Run without SKIP_BUILD or build it first." >&2
+  exit 2
 fi
 
 if [[ "${QUICK_MODE_FLAG:-0}" == "1" ]]; then
@@ -47,6 +61,14 @@ else
   export NANOCHAT_DIR="${NANOCHAT_DIR:-${HOME}/.cache/nanochat}"
 fi
 mkdir -p "${NANOCHAT_DIR}"
+
+if [[ "${TYR_DEVICE:-cuda}" == "cuda" ]] && command -v nvidia-smi >/dev/null 2>&1; then
+  GPU_COUNT="$(nvidia-smi --query-gpu=count --format=csv,noheader 2>/dev/null | head -n 1 || echo 0)"
+  if [[ "${GPU_COUNT}" =~ ^[0-9]+$ ]] && [[ "${GPU_COUNT}" -gt 0 ]] && [[ "${NPROC_PER_NODE}" -gt "${GPU_COUNT}" ]]; then
+    echo "error: requested NPROC_PER_NODE=${NPROC_PER_NODE}, but only ${GPU_COUNT} CUDA devices are visible" >&2
+    exit 2
+  fi
+fi
 
 export DATA_PATH="${DATA_PATH:-base_data}"
 export MODEL_DEPTH="${MODEL_DEPTH:-20}"
@@ -76,6 +98,8 @@ export PRETRAIN_TOTAL_BATCH_SIZE="${PRETRAIN_TOTAL_BATCH_SIZE:-524288}"
 export PRETRAIN_VAL_INTERVAL="${PRETRAIN_VAL_INTERVAL:-250}"
 export PRETRAIN_LOG_INTERVAL="${PRETRAIN_LOG_INTERVAL:-10}"
 export PRETRAIN_CHECKPOINT_INTERVAL="${PRETRAIN_CHECKPOINT_INTERVAL:-21400}"
+export PRETRAIN_TEXT_COLUMN="${PRETRAIN_TEXT_COLUMN:-text}"
+export PRETRAIN_TOKENIZER_BATCH_SIZE="${PRETRAIN_TOKENIZER_BATCH_SIZE:-128}"
 
 # Midtrain defaults aligned to current Lean pipeline implementation.
 export MIDTRAIN_ITERS="${MIDTRAIN_ITERS:-811}"
@@ -95,21 +119,37 @@ export SFT_TARGET_EXAMPLES_PER_STEP="${SFT_TARGET_EXAMPLES_PER_STEP:-32}"
 export GRPO_NUM_SAMPLES="${GRPO_NUM_SAMPLES:-16}"
 export GRPO_MAX_NEW_TOKENS="${GRPO_MAX_NEW_TOKENS:-256}"
 export GRPO_EXAMPLES_PER_STEP="${GRPO_EXAMPLES_PER_STEP:-16}"
+export REQUIRE_BIN_DATA_PATHS="${REQUIRE_BIN_DATA_PATHS:-0}"
+
+if [[ "${AUTO_REUSE_CACHE:-1}" == "1" ]]; then
+  if [[ ! -e "${NANOCHAT_DIR}/base_data" && -d "${HOME}/.cache/nanochat/base_data" ]]; then
+    ln -s "${HOME}/.cache/nanochat/base_data" "${NANOCHAT_DIR}/base_data"
+  fi
+  if [[ ! -e "${NANOCHAT_DIR}/tokenizer" && -d "${HOME}/.cache/nanochat/tokenizer" ]]; then
+    ln -s "${HOME}/.cache/nanochat/tokenizer" "${NANOCHAT_DIR}/tokenizer"
+  fi
+fi
 
 if [[ -z "${PRETRAIN_DATA_PATH:-}" ]]; then
-  if [[ -d "${NANOCHAT_DIR}/base_data_bin" ]]; then
-    export PRETRAIN_DATA_PATH="${NANOCHAT_DIR}/base_data_bin"
-  elif [[ -d "${NANOCHAT_DIR}/base_data" ]] && compgen -G "${NANOCHAT_DIR}/base_data/*.bin" > /dev/null; then
+  if [[ -d "${NANOCHAT_DIR}/base_data" ]] && have_glob "${NANOCHAT_DIR}/base_data/*.parquet"; then
     export PRETRAIN_DATA_PATH="${NANOCHAT_DIR}/base_data"
-  elif [[ -d "${REPO_ROOT}/data/nanochat" ]]; then
+  elif [[ -d "${REPO_ROOT}/data/nanochat" ]] && have_glob "${REPO_ROOT}/data/nanochat/*.parquet"; then
     export PRETRAIN_DATA_PATH="${REPO_ROOT}/data/nanochat"
+  elif [[ "${REQUIRE_BIN_DATA_PATHS}" == "1" ]] && [[ -d "${NANOCHAT_DIR}/base_data_bin" ]] && have_glob "${NANOCHAT_DIR}/base_data_bin/*.bin"; then
+    export PRETRAIN_DATA_PATH="${NANOCHAT_DIR}/base_data_bin"
+  elif [[ "${REQUIRE_BIN_DATA_PATHS}" == "1" ]] && [[ -d "${NANOCHAT_DIR}/base_data" ]] && have_glob "${NANOCHAT_DIR}/base_data/*.bin"; then
+    export PRETRAIN_DATA_PATH="${NANOCHAT_DIR}/base_data"
+  elif [[ "${REQUIRE_BIN_DATA_PATHS}" == "1" ]] && [[ -d "${REPO_ROOT}/data/nanochat" ]] && have_glob "${REPO_ROOT}/data/nanochat/*.bin"; then
+    export PRETRAIN_DATA_PATH="${REPO_ROOT}/data/nanochat"
+  else
+    export PRETRAIN_DATA_PATH="${NANOCHAT_DIR}/base_data"
+    mkdir -p "${PRETRAIN_DATA_PATH}"
   fi
 fi
 if [[ -z "${MIDTRAIN_DATA_PATH:-}" && -n "${PRETRAIN_DATA_PATH:-}" ]]; then
   export MIDTRAIN_DATA_PATH="${PRETRAIN_DATA_PATH}"
 fi
 
-export REQUIRE_BIN_DATA_PATHS="${REQUIRE_BIN_DATA_PATHS:-1}"
 if [[ "${REQUIRE_BIN_DATA_PATHS}" == "1" ]]; then
   if [[ -z "${PRETRAIN_DATA_PATH:-}" ]]; then
     echo "error: PRETRAIN_DATA_PATH is unset. Set PRETRAIN_DATA_PATH to a directory containing .bin token shards." >&2
@@ -119,18 +159,35 @@ if [[ "${REQUIRE_BIN_DATA_PATHS}" == "1" ]]; then
     echo "error: MIDTRAIN_DATA_PATH is unset. Set MIDTRAIN_DATA_PATH to a directory containing .bin token shards." >&2
     exit 2
   fi
-  if ! compgen -G "${PRETRAIN_DATA_PATH}/*.bin" > /dev/null; then
+  if ! have_glob "${PRETRAIN_DATA_PATH}/*.bin"; then
     echo "error: PRETRAIN_DATA_PATH has no .bin files: ${PRETRAIN_DATA_PATH}" >&2
     exit 2
   fi
-  if ! compgen -G "${MIDTRAIN_DATA_PATH}/*.bin" > /dev/null; then
+  if ! have_glob "${MIDTRAIN_DATA_PATH}/*.bin"; then
     echo "error: MIDTRAIN_DATA_PATH has no .bin files: ${MIDTRAIN_DATA_PATH}" >&2
     exit 2
+  fi
+else
+  if [[ -z "${PRETRAIN_DATA_PATH:-}" ]]; then
+    echo "error: PRETRAIN_DATA_PATH is unset. Set PRETRAIN_DATA_PATH to a directory containing parquet shards." >&2
+    exit 2
+  fi
+  if ! have_glob "${PRETRAIN_DATA_PATH}/*.parquet"; then
+    echo "warning: PRETRAIN_DATA_PATH has no local .parquet files yet: ${PRETRAIN_DATA_PATH}" >&2
+    echo "         proceeding; pipeline download stages are expected to populate this directory." >&2
   fi
 fi
 
 if [[ "${CLEAR_PIPELINE_CHECKPOINT:-1}" == "1" ]]; then
   rm -f "${REPO_ROOT}/.pipeline_checkpoint.json" "${NANOCHAT_DIR}/.pipeline_checkpoint.json"
+fi
+
+if [[ "${PRETRAIN_ITERS}" =~ ^[0-9]+$ ]] && [[ "${PRETRAIN_ITERS}" -eq 0 ]]; then
+  if [[ ! -f "${NANOCHAT_DIR}/checkpoints/base/latest.ckpt/meta.txt" ]]; then
+    echo "error: PRETRAIN_ITERS=0 but no base checkpoint is present at ${NANOCHAT_DIR}/checkpoints/base/latest.ckpt" >&2
+    echo "       set PRETRAIN_ITERS>=1 for a fresh run, or place/resume an existing base checkpoint first." >&2
+    exit 2
+  fi
 fi
 
 echo "Running ${PIPELINE_EXE} with torchrun (${NPROC_PER_NODE} processes)"
@@ -149,8 +206,10 @@ echo "SFT_EPOCHS=${SFT_EPOCHS} SFT_DEVICE_BATCH_SIZE=${SFT_DEVICE_BATCH_SIZE} SF
 echo "DATA_PATH=${DATA_PATH}"
 echo "PRETRAIN_DATA_PATH=${PRETRAIN_DATA_PATH:-<unset>}"
 echo "MIDTRAIN_DATA_PATH=${MIDTRAIN_DATA_PATH:-<unset>}"
+echo "PRETRAIN_TEXT_COLUMN=${PRETRAIN_TEXT_COLUMN} PRETRAIN_TOKENIZER_BATCH_SIZE=${PRETRAIN_TOKENIZER_BATCH_SIZE}"
+echo "AUTO_REUSE_CACHE=${AUTO_REUSE_CACHE:-1}"
 echo "REQUIRE_BIN_DATA_PATHS=${REQUIRE_BIN_DATA_PATHS}"
 
 exec env TYR_DEVICE="${TYR_DEVICE:-cuda}" \
   "${TORCHRUN_BIN}" --standalone --nnodes=1 --nproc_per_node="${NPROC_PER_NODE}" --no_python \
-  "./.lake/build/bin/${PIPELINE_EXE}"
+  "${PIPELINE_BIN}"

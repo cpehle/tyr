@@ -416,6 +416,66 @@ lean_object* lean_torch_dist_reduce_scatter_tensor(
 }
 
 /**
+ * Reduce-scatter from an explicit list of input tensors.
+ *
+ * This matches PyTorch DistMuon semantics where each rank provides a list
+ * of per-owner gradients (one tensor per rank in the process group).
+ *
+ * @param output - Output tensor for this rank
+ * @param inputs - Array of input tensors (must have length world_size)
+ * @param op - Reduce operation
+ * @param w - Lean world token
+ */
+lean_object* lean_torch_dist_reduce_scatter_list(
+    lean_obj_arg /*s*/,
+    b_lean_obj_arg output,
+    b_lean_obj_arg inputs,
+    uint8_t op,
+    lean_object* w
+) {
+    std::lock_guard<std::mutex> lock(g_dist_mutex);
+
+    if (!g_initialized) {
+        return lean_io_result_mk_error(lean_mk_io_user_error(
+            lean_mk_string("Process group not initialized")));
+    }
+
+    try {
+        auto out_tensor = borrowTensor(output);
+        maybeSetCurrentCudaDeviceFromTensor(out_tensor);
+
+        size_t n = lean_array_size(inputs);
+        if (n != static_cast<size_t>(g_world_size)) {
+            return lean_io_result_mk_error(lean_mk_io_user_error(
+                lean_mk_string("reduce_scatter_list requires inputs length == world size")));
+        }
+
+        std::vector<torch::Tensor> input_tensors;
+        input_tensors.reserve(n);
+        for (size_t i = 0; i < n; i++) {
+            auto tensor_obj = lean_array_get_core(inputs, i);
+            input_tensors.push_back(borrowTensor(tensor_obj));
+        }
+
+        c10d::ReduceScatterOptions opts;
+        opts.reduceOp = c10d::ReduceOp(reduceOpFromInt(op));
+
+        std::vector<torch::Tensor> output_tensors = {out_tensor};
+        std::vector<std::vector<torch::Tensor>> input_tensor_lists = {input_tensors};
+        auto work = g_process_group->reduce_scatter(
+            output_tensors,
+            input_tensor_lists,
+            opts);
+        work->wait();
+
+        return lean_io_result_mk_ok(lean_box(0));
+    } catch (const std::exception& e) {
+        return lean_io_result_mk_error(lean_mk_io_user_error(
+            lean_mk_string(("Reduce-scatter(list) failed: " + std::string(e.what())).c_str())));
+    }
+}
+
+/**
  * All-gather: gather tensors from all processes to all processes.
  *
  * @param output - Output tensor (concatenated from all ranks)
@@ -467,6 +527,60 @@ lean_object* lean_torch_dist_all_gather_into_tensor(
     } catch (const std::exception& e) {
         return lean_io_result_mk_error(lean_mk_io_user_error(
             lean_mk_string(("All-gather failed: " + std::string(e.what())).c_str())));
+    }
+}
+
+/**
+ * All-gather into an explicit list of output tensors.
+ *
+ * This matches PyTorch DistMuon semantics where each rank gathers one updated
+ * owner tensor into a list of per-owner destination tensors.
+ *
+ * @param outputs - Array of output tensors (must have length world_size)
+ * @param input - Input tensor from this rank
+ * @param w - Lean world token
+ */
+lean_object* lean_torch_dist_all_gather_list(
+    lean_obj_arg /*s*/,
+    b_lean_obj_arg outputs,
+    b_lean_obj_arg input,
+    lean_object* w
+) {
+    std::lock_guard<std::mutex> lock(g_dist_mutex);
+
+    if (!g_initialized) {
+        return lean_io_result_mk_error(lean_mk_io_user_error(
+            lean_mk_string("Process group not initialized")));
+    }
+
+    try {
+        auto in_tensor = borrowTensor(input);
+        maybeSetCurrentCudaDeviceFromTensor(in_tensor);
+
+        size_t n = lean_array_size(outputs);
+        if (n != static_cast<size_t>(g_world_size)) {
+            return lean_io_result_mk_error(lean_mk_io_user_error(
+                lean_mk_string("all_gather_list requires outputs length == world size")));
+        }
+
+        std::vector<torch::Tensor> output_list;
+        output_list.reserve(n);
+        for (size_t i = 0; i < n; i++) {
+            auto tensor_obj = lean_array_get_core(outputs, i);
+            output_list.push_back(borrowTensor(tensor_obj));
+        }
+
+        std::vector<std::vector<torch::Tensor>> output_tensor_lists = {output_list};
+        std::vector<torch::Tensor> input_tensors = {in_tensor};
+        auto work = g_process_group->allgather(
+            output_tensor_lists,
+            input_tensors);
+        work->wait();
+
+        return lean_io_result_mk_ok(lean_box(0));
+    } catch (const std::exception& e) {
+        return lean_io_result_mk_error(lean_mk_io_user_error(
+            lean_mk_string(("All-gather(list) failed: " + std::string(e.what())).c_str())));
     }
 }
 

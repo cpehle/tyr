@@ -133,6 +133,15 @@ def reduceScatterAsync {sOut sIn : Shape} (output : T sOut) (input : T sIn)
   let id ← reduceScatterImpl output input op.toUInt8 1
   return ⟨id⟩
 
+/-- Reduce-scatter from an explicit list of per-rank inputs.
+
+    This mirrors `torch.distributed.reduce_scatter` where each rank contributes
+    a list of tensors (one per rank). The list length must equal world size.
+-/
+@[extern "lean_torch_dist_reduce_scatter_list"]
+opaque reduceScatterList {s : Shape} (output : @& T s) (inputs : @& Array (T s))
+    (op : ReduceOp := .sum) : IO Unit
+
 /-- All-gather: gather tensors from all processes to all processes.
 
     Args:
@@ -155,6 +164,14 @@ def allGather {sOut sIn : Shape} (output : T sOut) (input : T sIn) : IO Unit := 
 def allGatherAsync {sOut sIn : Shape} (output : T sOut) (input : T sIn) : IO WorkHandle := do
   let id ← allGatherImpl output input 1
   return ⟨id⟩
+
+/-- All-gather into an explicit list of output tensors.
+
+    This mirrors `torch.distributed.all_gather` where each rank provides one
+    input tensor and receives the gathered outputs in a list.
+-/
+@[extern "lean_torch_dist_all_gather_list"]
+opaque allGatherList {s : Shape} (outputs : @& Array (T s)) (input : @& T s) : IO Unit
 
 /-! ## Async Operation Handling -/
 

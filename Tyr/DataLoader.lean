@@ -212,15 +212,14 @@ def splitFinewebPayload {n : UInt64} (tokens : T #[n]) : IO (Σ m, T #[m]) := do
     throw <| IO.userError s!"Unsupported fineweb shard version {header.version} in header (expected {finewebVersion})"
 
   let payloadWords := n - finewebHeaderU16Words
-  let payloadCount ←
-    if header.tokenCount == payloadWords then
-      pure header.tokenCount
-    else if header.tokenCount > payloadWords then
-      IO.eprintln s!"Warning: Fineweb shard appears truncated. header={header.tokenCount}, payload={payloadWords}. Using payload size."
-      pure payloadWords
+  -- In practice some shard sets keep a nominal/global tokenCount in the header
+  -- while each file stores only a local payload. Treat tokenCount as advisory
+  -- and clamp to available payload to avoid noisy false-positive warnings.
+  let payloadCount :=
+    if header.tokenCount == 0 then
+      payloadWords
     else
-      IO.eprintln s!"Warning: Fineweb shard has trailing payload. header={header.tokenCount}, payload={payloadWords}. Using header size."
-      pure header.tokenCount
+      min header.tokenCount payloadWords
 
   let payloadStart := finewebHeaderU16Words
   let payloadEnd := payloadStart + payloadCount

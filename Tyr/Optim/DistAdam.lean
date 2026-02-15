@@ -73,9 +73,9 @@ def State.init (cfg : Config) : State α := {
 }
 
 /-- Initialize parameter state with zeros -/
-def initParamState {s : Shape} (_param : T s) : ParamState s := {
-  expAvg := zeros s
-  expAvgSq := zeros s
+def initParamState {s : Shape} (param : T s) : ParamState s := {
+  expAvg := zeros_like param
+  expAvgSq := zeros_like param
   step := 0
 }
 
@@ -163,24 +163,99 @@ def stepSingle {s : Shape} (param : T s) (grad : T s) (state : ParamState s)
     This is more efficient than all-reduce as each rank only
     updates a portion of the parameters.
 -/
+private def canShardFirstDim (s : Shape) (worldSize : UInt64) : Bool :=
+  worldSize > 0 && s.size > 0 && s[0]! % worldSize == 0
+
+private def firstDimShardShape (s : Shape) (worldSize : UInt64) : Shape :=
+  if s.size == 0 then
+    s
+  else
+    #[s[0]! / worldSize] ++ s[1:].toArray
+
 def stepDistributed {s : Shape} (param : T s) (grad : T s) (state : ParamState s)
     (cfg : Config) (lrMul : Float := 1.0) (wdMul : Float := 1.0) : IO (T s × ParamState s) := do
   if !cfg.distributed then
-    -- Fall back to non-distributed
-    stepSingle param grad state cfg lrMul wdMul
-  else
-    -- Get distributed info
-    let worldSize ← dist.getWorldSize
-    let _rank ← dist.getRank
+    return (← stepSingle param grad state cfg lrMul wdMul)
 
-    -- For simplicity, we use all-reduce instead of true reduce-scatter
-    -- A full implementation would shard the parameters
+  let isDist ← dist.isInitialized
+  if !isDist then
+    return (← stepSingle param grad state cfg lrMul wdMul)
+
+  let worldSize ← dist.getWorldSize
+  let rank ← dist.getRank
+  if worldSize <= 1 then
+    return (← stepSingle param grad state cfg lrMul wdMul)
+
+  -- Match nanochat DistAdamW behavior where the first dimension must shard evenly.
+  -- If not shardable, fall back to all-reduce + local step for compatibility.
+  if !canShardFirstDim s worldSize then
     let gradReduced := autograd.detach grad
     dist.allReduce gradReduced .avg
-    let gradScaled := div_scalar gradReduced worldSize.toFloat
+    return (← stepSingle param gradReduced state cfg lrMul wdMul)
 
-    -- Standard Adam step on reduced gradient
-    stepSingle param gradScaled state cfg lrMul wdMul
+  let step := state.step + 1
+  let beta1 := cfg.beta1
+  let beta2 := cfg.beta2
+  let eps := cfg.eps
+  let lr := cfg.lr * lrMul
+  let wd := cfg.weightDecay * wdMul
+
+  let firstDim := s[0]!
+  let localRows := firstDim / worldSize
+  let start := rank * localRows
+  let stop := start + localRows
+  let localShape := firstDimShardShape s worldSize
+
+  -- 1) materialize local parameter/state slices on the parameter device
+  let paramSliceRaw := param.slice 0 start.toInt64 stop.toInt64
+  let paramLocal : T localShape := autograd.detach (reshape paramSliceRaw localShape)
+  let expAvgBase := if state.expAvg.device == param.device then state.expAvg else state.expAvg.to param.device
+  let expAvgSqBase := if state.expAvgSq.device == param.device then state.expAvgSq else state.expAvgSq.to param.device
+  let expAvgSliceRaw := expAvgBase.slice 0 start.toInt64 stop.toInt64
+  let expAvgLocal : T localShape := autograd.detach (reshape expAvgSliceRaw localShape)
+  let expAvgSqSliceRaw := expAvgSqBase.slice 0 start.toInt64 stop.toInt64
+  let expAvgSqLocal : T localShape := autograd.detach (reshape expAvgSqSliceRaw localShape)
+
+  -- 2) reduce-scatter averaged gradient shard
+  let gradLocal : T localShape := zeros_like paramLocal
+  dist.reduceScatter gradLocal grad .avg
+  let g := autograd.detach gradLocal
+
+  -- 3) local Adam update on shard
+  let newExpAvg := mul_scalar expAvgLocal beta1 + mul_scalar g (1.0 - beta1)
+  let gSquared := g * g
+  let newExpAvgSq := mul_scalar expAvgSqLocal beta2 + mul_scalar gSquared (1.0 - beta2)
+  let biasCorrection1 := 1.0 - Float.pow beta1 step.toFloat
+  let biasCorrection2 := 1.0 - Float.pow beta2 step.toFloat
+  let mHat := div_scalar newExpAvg biasCorrection1
+  let vHat := div_scalar newExpAvgSq biasCorrection2
+  let denominator := nn.sqrt vHat + eps
+  let update := nn.div mHat denominator
+  let scaledUpdate := mul_scalar update lr
+
+  let paramDecayed :=
+    if wd > 0.0 then
+      let decay := mul_scalar paramLocal (lr * wd)
+      paramLocal - decay
+    else
+      paramLocal
+  let newLocalParam := paramDecayed - scaledUpdate
+
+  -- 4) all-gather updated local shard and optimizer shards back to replicated form
+  let gatheredParam : T s := zeros_like param
+  dist.allGather gatheredParam newLocalParam
+  let gatheredExpAvg : T s := zeros_like expAvgBase
+  dist.allGather gatheredExpAvg newExpAvg
+  let gatheredExpAvgSq : T s := zeros_like expAvgSqBase
+  dist.allGather gatheredExpAvgSq newExpAvgSq
+
+  let newParam := autograd.set_requires_grad (autograd.detach gatheredParam) true
+  let newState : ParamState s := {
+    expAvg := gatheredExpAvg
+    expAvgSq := gatheredExpAvgSq
+    step := step
+  }
+  return (newParam, newState)
 
 /-- Get learning rate multiplier for embedding parameters.
 

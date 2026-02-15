@@ -44,7 +44,7 @@ structure Config where
   /-- Number of value embedding layers -/
   numValueEmbeds : Nat := 3
   /-- Softcap value for logits -/
-  softcapValue : Float := 30.0
+  softcapValue : Float := 15.0
   /-- Sliding window attention pattern string.
       Characters: L=long (full context), S=short (half context)
       Pattern is tiled across layers. Final layer always gets L.
