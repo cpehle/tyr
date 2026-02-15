@@ -4,12 +4,24 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 lake_exes="$(
-  rg '^\s*lean_exe\s+([A-Za-z0-9_]+)\s+where' -or '$1' lakefile.lean | sort -u
+  if command -v rg >/dev/null 2>&1; then
+    rg '^\s*lean_exe\s+([A-Za-z0-9_]+)\s+where' -or '$1' lakefile.lean
+  else
+    awk '
+      match($0, /^[[:space:]]*lean_exe[[:space:]]+([A-Za-z0-9_]+)[[:space:]]+where/, m) { print m[1] }
+    ' lakefile.lean
+  fi | sort -u
 )"
 
 bazel_bins="$(
   sed -n '/lean_binary(/,/)/p' BUILD.bazel |
-    rg 'name = "([^"]+)"' -or '$1' |
+    if command -v rg >/dev/null 2>&1; then
+      rg 'name = "([^"]+)"' -or '$1'
+    else
+      awk '
+        match($0, /name = "([^"]+)"/, m) { print m[1] }
+      '
+    fi |
     sort -u
 )"
 
