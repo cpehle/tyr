@@ -145,3 +145,73 @@ lean_binary(
     deps = [":Tests"],
     cc_deps = ["//cc:TyrC"],
 )
+
+lean_binary(
+    name = "GenerateGpuKernels",
+    srcs = ["Tyr/GPU/Codegen/GenerateMain.lean"],
+    deps = [":Tyr"],
+    cc_deps = ["//cc:TyrC"],
+)
+
+lean_binary(
+    name = "NanoChatPipeline",
+    srcs = ["Examples/NanoChat/Pipeline.lean"],
+    deps = [":Examples"],
+    cc_deps = ["//cc:TyrC"],
+)
+
+lean_binary(
+    name = "NanoChatChat",
+    srcs = ["Examples/NanoChat/RunChat.lean"],
+    deps = [":Examples"],
+    cc_deps = ["//cc:TyrC"],
+)
+
+lean_binary(
+    name = "RunCopy",
+    srcs = ["Examples/GPU/RunCopy.lean"],
+    deps = [":Examples"],
+    cc_deps = ["//cc:TyrC"],
+)
+
+lean_binary(
+    name = "RunRotary",
+    srcs = ["Examples/GPU/RunRotary.lean"],
+    deps = [":Examples"],
+    cc_deps = ["//cc:TyrC"],
+)
+
+lean_binary(
+    name = "RunLayerNorm",
+    srcs = ["Examples/GPU/RunLayerNorm.lean"],
+    deps = [":Examples"],
+    cc_deps = ["//cc:TyrC"],
+)
+
+lean_binary(
+    name = "RunFlashAttn",
+    srcs = ["Examples/GPU/RunFlashAttn.lean"],
+    deps = [":Examples"],
+    cc_deps = ["//cc:TyrC"],
+)
+
+lean_binary(
+    name = "RunMhaH100",
+    srcs = ["Examples/GPU/RunMhaH100.lean"],
+    deps = [":Examples"],
+    cc_deps = ["//cc:TyrC"],
+)
+
+lean_binary(
+    name = "RunMhaH100Train",
+    srcs = ["Examples/GPU/RunMhaH100Train.lean"],
+    deps = [":Examples"],
+    cc_deps = ["//cc:TyrC"],
+)
+
+lean_binary(
+    name = "RunMhaH100Seq768",
+    srcs = ["Examples/GPU/RunMhaH100Seq768.lean"],
+    deps = [":Examples"],
+    cc_deps = ["//cc:TyrC"],
+)

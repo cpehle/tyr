@@ -168,7 +168,7 @@ def testCodeGenDeclarations : IO Unit := do
 
   let code := generateKernel kernel
   assertTrue (code.containsSubstr "rt<bf16, 64, 64, row_l>") "Should have RT declaration"
-  assertTrue (code.containsSubstr "st<float, 32, 64, col_l>") "Should have ST declaration"
+  assertTrue (code.containsSubstr "__shared__ st<float, 32, 64>") "Should have ST declaration"
   assertTrue (code.containsSubstr "rv<float, 64") "Should have RV declaration"
 
 /-- Test C++ code generation for operations -/
@@ -358,9 +358,9 @@ def testKernelParams : IO Unit := do
   ] (pure ())
 
   let code := generateKernel kernel
-  assertTrue (code.containsSubstr "bf16* x_ptr") "Should have bf16 pointer param"
-  assertTrue (code.containsSubstr "float* y_ptr") "Should have float pointer param"
-  assertTrue (code.containsSubstr "float size") "Should have scalar param"
+  assertTrue (code.containsSubstr "gl<bf16, 1, 1, -1, -1> v0") "Should have bf16 global descriptor param"
+  assertTrue (code.containsSubstr "gl<float, 1, 1, -1, -1> v1") "Should have float global descriptor param"
+  assertTrue (code.containsSubstr "uint64_t v2") "Should have scalar param"
 
 /-! ## Integration Tests -/
 
@@ -403,7 +403,7 @@ def testFlashAttnStructure : IO Unit := do
 
   -- Check all expected components
   assertTrue (code.containsSubstr "flash_attn_test") "Should have kernel name"
-  assertTrue (code.containsSubstr "bf16* Q") "Should have Q param"
+  assertTrue (code.containsSubstr "gl<bf16, 1, 1, -1, -1> v0") "Should have first global descriptor param"
   assertTrue (code.containsSubstr "mma_ABt(") "Should have mmaT"
   assertTrue (code.containsSubstr "make_causal(") "Should have causal mask"
   assertTrue (code.containsSubstr "row_max(") "Should have row_max"

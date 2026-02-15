@@ -6,7 +6,7 @@ def packageLinkArgs : Array String :=
   if System.Platform.isOSX then
     #[
       "-Lexternal/libtorch/lib",
-      "-ltorch", "-ltorch_cpu", "-ltorch_cuda", "-lc10", "-lc10_cuda",
+      "-ltorch", "-ltorch_cpu", "-lc10",
       "-L/opt/homebrew/opt/libomp/lib", "-lomp",
       "-L/opt/homebrew/lib", "-larrow", "-lparquet",
       "-Wl,-rpath,@loader_path/../../external/libtorch/lib",
@@ -16,9 +16,9 @@ def packageLinkArgs : Array String :=
   else
     #[
       "-Lexternal/libtorch/lib",
-      "-ltorch", "-ltorch_cpu", "-ltorch_cuda", "-lc10", "-lc10_cuda",
+      "-ltorch", "-ltorch_cpu", "-lc10",
       "-L/usr/lib", "-lgomp", "-lstdc++",
-      "-larrow", "-lparquet", "-lcudart",
+      "-larrow", "-lparquet",
       "-Wl,-rpath,$ORIGIN/../../external/libtorch/lib"
     ]
 
@@ -27,7 +27,7 @@ def commonLinkArgs : Array String :=
     #[
       "-Lcc/build", "-lTyrC",
       "-Lexternal/libtorch/lib",
-      "-ltorch", "-ltorch_cpu", "-lc10", "-lc10_cuda",
+      "-ltorch", "-ltorch_cpu", "-lc10",
       "-L/opt/homebrew/opt/libomp/lib", "-lomp",
       "-L/opt/homebrew/lib", "-larrow", "-lparquet",
       "-Wl,-rpath,@executable_path/../../external/libtorch/lib",
@@ -38,9 +38,9 @@ def commonLinkArgs : Array String :=
     #[
       "-Lcc/build", "-lTyrC",
       "-Lexternal/libtorch/lib",
-      "-ltorch", "-ltorch_cpu", "-lc10", "-lc10_cuda",
+      "-ltorch", "-ltorch_cpu", "-lc10",
       "-L/usr/lib", "-lgomp", "-lstdc++",
-      "-larrow", "-lparquet", "-lcudart",
+      "-larrow", "-lparquet",
       "-Wl,-rpath,$ORIGIN/../../external/libtorch/lib"
     ]
 

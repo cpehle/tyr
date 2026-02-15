@@ -60,8 +60,18 @@
 #include <lean/lean.h>
 #include <torch/torch.h>
 #include <ATen/ATen.h>
+
+#if defined(__has_include)
+#if __has_include(<c10/cuda/CUDAStream.h>) && __has_include(<c10/cuda/CUDAFunctions.h>) && __has_include(<cuda_runtime_api.h>)
+#define TYR_HAS_CUDA_API 1
 #include <c10/cuda/CUDAStream.h>
-#include <cuda_runtime.h>
+#include <c10/cuda/CUDAFunctions.h>
+#else
+#define TYR_HAS_CUDA_API 0
+#endif
+#else
+#define TYR_HAS_CUDA_API 0
+#endif
 
 // Global atomic counter for live tensors handed to Lean
 std::atomic<int64_t> g_live_lean_tensors(0);
@@ -2978,9 +2988,13 @@ lean_object* lean_torch_cuda_current_stream(lean_object* /*w*/) {
   if (!torch::cuda::is_available()) {
     return lean_io_result_mk_ok(lean_box_uint64(0));
   }
+#if TYR_HAS_CUDA_API
   auto stream = c10::cuda::getCurrentCUDAStream();
   auto raw = reinterpret_cast<uint64_t>(stream.stream());
   return lean_io_result_mk_ok(lean_box_uint64(raw));
+#else
+  return lean_io_result_mk_ok(lean_box_uint64(0));
+#endif
 }
 
 // Synchronize CUDA device for deterministic validation around external launches.
@@ -2988,10 +3002,9 @@ lean_object* lean_torch_cuda_synchronize(lean_object* /*w*/) {
   if (!torch::cuda::is_available()) {
     return lean_io_result_mk_ok(lean_box(0));
   }
-  auto err = cudaDeviceSynchronize();
-  if (err != cudaSuccess) {
-    return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string(cudaGetErrorString(err))));
-  }
+#if TYR_HAS_CUDA_API
+  c10::cuda::device_synchronize();
+#endif
   return lean_io_result_mk_ok(lean_box(0));
 }
 

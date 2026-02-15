@@ -82,7 +82,12 @@ def testSchedules : IO Unit := do
   LeanTest.assertTrue (ws1500_s == 3 && ws1500_l == 11) "Window sizes at step 1500 should be (3, 11)"
 
   -- Learning rate schedule
-  let hp := Hyperparameters.default
+  let hp : Hyperparameters := {
+    Hyperparameters.default with
+    warmupFrac := 0.2
+    cooldownFrac := 0.4
+    finalLrFrac := 0.0
+  }
   let lr0 := getLearningRate 0 hp
   let lr300 := getLearningRate 300 hp  -- After warmup
   let lr2000 := getLearningRate 2000 hp  -- During cooldown
@@ -278,5 +283,4 @@ def testDataLoader : IO Unit := do
   -- Test tokens per step
   let tps := tokensPerStep 8 2048 1
   LeanTest.assertEqual tps (8 * 2048)
-
 

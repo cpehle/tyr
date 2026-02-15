@@ -14,7 +14,7 @@ LEAN_INCLUDE := $(LEAN_HOME)/include
 # TORCH FLAGS
 TORCHDIR=../external/libtorch
 TORCH_INC_FLAGS=-I$(TORCHDIR)/include -I$(TORCHDIR)/include/torch/csrc/api/include  -I$(TORCHDIR)/include/TH  -I$(TORCHDIR)/include/THC
-TORCH_LIBPATH=$(TORCHDIR)/lib/
+TORCH_LIBPATH=$(TORCHDIR)/lib
 TKDIR=../thirdparty/ThunderKittens
 TK_INC_FLAGS=-I$(TKDIR)/include -I$(TKDIR)/prototype
 
@@ -48,8 +48,7 @@ AR := ar
 CXX := c++
 NVCC ?= nvcc
 EXTRA_CXX_FLAGS := -fPIC -O3 -Wall -Wno-sign-compare \
-		 -Wno-unused-parameter -Wno-missing-field-initializers -Wno-comment \
-		 -DUSE_C10D_NCCL
+		 -Wno-unused-parameter -Wno-missing-field-initializers -Wno-comment
 NVCCFLAGS := -std=c++20 -O3 --use_fast_math --expt-extended-lambda --expt-relaxed-constexpr
 NVCCFLAGS += -lineinfo -Xcompiler -fPIC
 NVCCFLAGS += -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__
@@ -65,6 +64,16 @@ else ifeq ($(GPU),A100)
 NVCCFLAGS += -DKITTENS_AMPERE -gencode arch=compute_80a,code=sm_80a
 else
 NVCCFLAGS += -DKITTENS_HOPPER -gencode arch=compute_90a,code=sm_90a
+endif
+
+# Optional distributed backend toggles based on available LibTorch artifacts.
+ifneq ($(wildcard $(TORCHDIR)/include/torch/csrc/distributed/c10d/ProcessGroupNCCL.hpp),)
+ifneq ($(wildcard $(TORCH_LIBPATH)/libtorch_cuda.*),)
+ifneq ($(wildcard $(TORCH_LIBPATH)/libc10_cuda.*),)
+EXTRA_CXX_FLAGS += -DUSE_C10D_NCCL
+TORCH_CUDA_LINK_FLAGS := -ltorch_cuda -lc10_cuda
+endif
+endif
 endif
 
 # Clang-only warning flag (unsupported by GCC).
@@ -104,9 +113,8 @@ LEAN_LIB := $(LEAN_HOME)/lib/lean
 
 # Shared library link flags
 DYLIB_LINK_FLAGS := -L$(LEAN_LIB) -lleanshared \
-	-L$(TORCH_LIBPATH) -ltorch -ltorch_cpu -lc10 -lc10_cuda \
+	-L$(TORCH_LIBPATH) -ltorch -ltorch_cpu -lc10 $(TORCH_CUDA_LINK_FLAGS) \
 	-L$(ARROW_LIBPATH) -larrow -lparquet \
-	-lcudart \
 	-Wl,-rpath,$(LEAN_LIB) \
 	-Wl,-rpath,$(abspath $(TORCH_LIBPATH)) \
 	-Wl,-rpath,$(ARROW_LIBPATH)

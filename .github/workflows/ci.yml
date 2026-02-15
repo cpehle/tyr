@@ -29,7 +29,7 @@ jobs:
 
       - name: Install system dependencies (macOS)
         if: runner.os == 'macOS'
-        run: brew install libomp
+        run: brew install libomp apache-arrow
 
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
@@ -67,7 +67,7 @@ jobs:
           else
             export LD_LIBRARY_PATH="$PWD/external/libtorch/lib:/usr/lib:$LEAN_LIB"
           fi
-          ./.lake/build/bin/test_runner --fail-fast
+          lake env ./.lake/build/bin/test_runner --fail-fast
 
   lint:
     runs-on: ubuntu-latest
