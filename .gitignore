@@ -29,3 +29,9 @@ MODULE.bazel.lock
 logs/
 data/
 cc/src/generated/
+
+# Doc build workspace: keep only declarative inputs under version control.
+docbuild/*
+!docbuild/lean-toolchain
+!docbuild/lakefile.toml
+!docbuild/lake-manifest.json
