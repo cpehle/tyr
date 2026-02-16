@@ -2,6 +2,14 @@ import Lake
 open Lake DSL
 open System (FilePath)
 
+def repoRootDir : FilePath := __dir__
+
+def libtorchLibDir : String :=
+  (repoRootDir / "external" / "libtorch" / "lib").toString
+
+def ccBuildDir : String :=
+  (repoRootDir / "cc" / "build").toString
+
 def linuxSystemLinkDirs : Array String :=
   #[
     "-L/usr/lib/x86_64-linux-gnu",
@@ -18,45 +26,45 @@ def linuxSystemLinkDirs : Array String :=
 def packageLinkArgs : Array String :=
   if System.Platform.isOSX then
     #[
-      "-Lexternal/libtorch/lib",
+      s!"-L{libtorchLibDir}",
       "-ltorch", "-ltorch_cpu", "-lc10",
       "-L/opt/homebrew/opt/libomp/lib", "-lomp",
       "-L/opt/homebrew/lib", "-larrow", "-lparquet",
-      "-Wl,-rpath,@loader_path/../../external/libtorch/lib",
+      s!"-Wl,-rpath,{libtorchLibDir}",
       "-Wl,-rpath,/opt/homebrew/opt/libomp/lib",
       "-Wl,-rpath,/opt/homebrew/lib"
     ]
   else
     #[
-      "-Lexternal/libtorch/lib",
+      s!"-L{libtorchLibDir}",
       "-ltorch", "-ltorch_cpu", "-lc10"
     ] ++ linuxSystemLinkDirs ++ #[
       "-l:libgomp.so.1", "-l:libstdc++.so.6",
       "-larrow", "-lparquet",
-      "-Wl,-rpath,$ORIGIN/../../external/libtorch/lib"
+      s!"-Wl,-rpath,{libtorchLibDir}"
     ]
 
 def commonLinkArgs : Array String :=
   if System.Platform.isOSX then
     #[
-      "-Lcc/build", "-lTyrC",
-      "-Lexternal/libtorch/lib",
+      s!"-L{ccBuildDir}", "-lTyrC",
+      s!"-L{libtorchLibDir}",
       "-ltorch", "-ltorch_cpu", "-lc10",
       "-L/opt/homebrew/opt/libomp/lib", "-lomp",
       "-L/opt/homebrew/lib", "-larrow", "-lparquet",
-      "-Wl,-rpath,@executable_path/../../external/libtorch/lib",
+      s!"-Wl,-rpath,{libtorchLibDir}",
       "-Wl,-rpath,/opt/homebrew/opt/libomp/lib",
       "-Wl,-rpath,/opt/homebrew/lib"
     ]
   else
     #[
-      "-Lcc/build", "-lTyrC",
-      "-Lexternal/libtorch/lib",
+      s!"-L{ccBuildDir}", "-lTyrC",
+      s!"-L{libtorchLibDir}",
       "-ltorch", "-ltorch_cpu", "-lc10"
     ] ++ linuxSystemLinkDirs ++ #[
       "-l:libgomp.so.1", "-l:libstdc++.so.6",
       "-larrow", "-lparquet",
-      "-Wl,-rpath,$ORIGIN/../../external/libtorch/lib"
+      s!"-Wl,-rpath,{libtorchLibDir}"
     ]
 
 package tyr where
