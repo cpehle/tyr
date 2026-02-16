@@ -38,11 +38,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y ca-certificates lsb-release wget
-          distro="$(lsb_release --id --short | tr 'A-Z' 'a-z')"
           codename="$(lsb_release --codename --short)"
-          arrow_repo_pkg="apache-arrow-apt-source-latest-${distro}${codename}.deb"
-          wget "https://packages.apache.org/artifactory/arrow/${distro}/${arrow_repo_pkg}"
-          sudo apt-get install -y "./${arrow_repo_pkg}"
+          arrow_repo_pkg="apache-arrow-apt-source-latest-${codename}.deb"
+          wget "https://packages.apache.org/artifactory/arrow/ubuntu/${arrow_repo_pkg}"
+          sudo apt-get install -y -V "./${arrow_repo_pkg}"
           rm -f "${arrow_repo_pkg}"
           sudo apt-get update
           sudo apt-get install -y libomp-dev libarrow-dev libparquet-dev unzip
