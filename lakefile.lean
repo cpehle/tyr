@@ -2,6 +2,19 @@ import Lake
 open Lake DSL
 open System (FilePath)
 
+def linuxSystemLinkDirs : Array String :=
+  #[
+    "-L/usr/lib/x86_64-linux-gnu",
+    "-L/lib/x86_64-linux-gnu",
+    "-L/usr/lib/gcc/x86_64-linux-gnu/13",
+    "-L/usr/lib/gcc/x86_64-linux-gnu/14",
+    "-L/usr/lib/aarch64-linux-gnu",
+    "-L/lib/aarch64-linux-gnu",
+    "-L/usr/lib/gcc/aarch64-linux-gnu/13",
+    "-L/usr/lib/gcc/aarch64-linux-gnu/14",
+    "-L/usr/lib"
+  ]
+
 def packageLinkArgs : Array String :=
   if System.Platform.isOSX then
     #[
@@ -16,8 +29,9 @@ def packageLinkArgs : Array String :=
   else
     #[
       "-Lexternal/libtorch/lib",
-      "-ltorch", "-ltorch_cpu", "-lc10",
-      "-L/usr/lib", "-lgomp", "-lstdc++",
+      "-ltorch", "-ltorch_cpu", "-lc10"
+    ] ++ linuxSystemLinkDirs ++ #[
+      "-lgomp", "-lstdc++",
       "-larrow", "-lparquet",
       "-Wl,-rpath,$ORIGIN/../../external/libtorch/lib"
     ]
@@ -38,8 +52,9 @@ def commonLinkArgs : Array String :=
     #[
       "-Lcc/build", "-lTyrC",
       "-Lexternal/libtorch/lib",
-      "-ltorch", "-ltorch_cpu", "-lc10",
-      "-L/usr/lib", "-lgomp", "-lstdc++",
+      "-ltorch", "-ltorch_cpu", "-lc10"
+    ] ++ linuxSystemLinkDirs ++ #[
+      "-lgomp", "-lstdc++",
       "-larrow", "-lparquet",
       "-Wl,-rpath,$ORIGIN/../../external/libtorch/lib"
     ]
