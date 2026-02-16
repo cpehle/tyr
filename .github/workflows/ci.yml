@@ -69,15 +69,26 @@ jobs:
           rm libtorch.zip
 
       - name: Build test runner
-        run: lake build test_runner
+        run: |
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            lean_prefix="$(lean --print-prefix)"
+            multiarch_dir="/usr/lib/$(gcc -print-multiarch)"
+            gomp_dir="$(dirname "$(gcc -print-file-name=libgomp.so)")"
+            export LIBRARY_PATH="${multiarch_dir}:${gomp_dir}:/usr/lib:${LIBRARY_PATH:-}"
+            export LD_LIBRARY_PATH="${lean_prefix}/lib:${lean_prefix}/lib/glibc:${multiarch_dir}:${gomp_dir}:/usr/lib:${LD_LIBRARY_PATH:-}"
+          fi
+          lake build test_runner
 
       - name: Run tests
         run: |
-          LEAN_LIB="$(lean --print-prefix)/lib/lean"
+          lean_prefix="$(lean --print-prefix)"
+          LEAN_LIB="${lean_prefix}/lib/lean"
           if [ "${{ runner.os }}" = "macOS" ]; then
             export DYLD_LIBRARY_PATH="$PWD/external/libtorch/lib:/opt/homebrew/opt/libomp/lib:$LEAN_LIB"
           else
-            export LD_LIBRARY_PATH="$PWD/external/libtorch/lib:/usr/lib:$LEAN_LIB"
+            multiarch_dir="/usr/lib/$(gcc -print-multiarch)"
+            gomp_dir="$(dirname "$(gcc -print-file-name=libgomp.so)")"
+            export LD_LIBRARY_PATH="$PWD/external/libtorch/lib:${lean_prefix}/lib:${lean_prefix}/lib/glibc:${multiarch_dir}:${gomp_dir}:/usr/lib:$LEAN_LIB"
           fi
           lake env ./.lake/build/bin/test_runner --fail-fast
 
