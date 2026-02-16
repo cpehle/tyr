@@ -68,7 +68,7 @@ jobs:
           unzip -q libtorch.zip -d external/
           rm libtorch.zip
 
-      - name: Build test runner
+      - name: Build test modules
         run: |
           if [ "${{ runner.os }}" = "Linux" ]; then
             lean_prefix="$(lean --print-prefix)"
@@ -77,7 +77,7 @@ jobs:
             export LIBRARY_PATH="${multiarch_dir}:${gomp_dir}:/usr/lib:${LIBRARY_PATH:-}"
             export LD_LIBRARY_PATH="${lean_prefix}/lib:${lean_prefix}/lib/glibc:${multiarch_dir}:${gomp_dir}:/usr/lib:${LD_LIBRARY_PATH:-}"
           fi
-          lake build test_runner
+          lake build Tests.RunTests
 
       - name: Run tests
         run: |
@@ -90,7 +90,7 @@ jobs:
             gomp_dir="$(dirname "$(gcc -print-file-name=libgomp.so)")"
             export LD_LIBRARY_PATH="$PWD/external/libtorch/lib:${lean_prefix}/lib:${lean_prefix}/lib/glibc:${multiarch_dir}:${gomp_dir}:/usr/lib:$LEAN_LIB"
           fi
-          lake env ./.lake/build/bin/test_runner --fail-fast
+          lake env lean --run Tests/RunTests.lean --fail-fast
 
   lint:
     runs-on: ubuntu-latest
