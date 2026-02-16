@@ -31,7 +31,7 @@ def packageLinkArgs : Array String :=
       "-Lexternal/libtorch/lib",
       "-ltorch", "-ltorch_cpu", "-lc10"
     ] ++ linuxSystemLinkDirs ++ #[
-      "-lgomp", "-lstdc++",
+      "-l:libgomp.so.1", "-l:libstdc++.so.6",
       "-larrow", "-lparquet",
       "-Wl,-rpath,$ORIGIN/../../external/libtorch/lib"
     ]
@@ -54,7 +54,7 @@ def commonLinkArgs : Array String :=
       "-Lexternal/libtorch/lib",
       "-ltorch", "-ltorch_cpu", "-lc10"
     ] ++ linuxSystemLinkDirs ++ #[
-      "-lgomp", "-lstdc++",
+      "-l:libgomp.so.1", "-l:libstdc++.so.6",
       "-larrow", "-lparquet",
       "-Wl,-rpath,$ORIGIN/../../external/libtorch/lib"
     ]
