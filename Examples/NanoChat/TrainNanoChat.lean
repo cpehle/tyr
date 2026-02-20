@@ -32,6 +32,33 @@ open torch.DataLoader
 open torch.ModdedTrain
 open torch.dist
 
+/-- Runtime environment state for standalone training. -/
+structure TrainEnvState where
+  localRank? : Option UInt64 := none
+  worldSize? : Option UInt64 := none
+  rank? : Option UInt64 := none
+  masterAddr? : Option String := none
+  masterPort? : Option UInt64 := none
+  requestedDevice? : Option String := none
+  deriving Repr, Inhabited
+
+/-- Resolve distributed/device env vars once into a typed structure. -/
+def loadTrainEnvState : IO TrainEnvState := do
+  let localRank? := ((← IO.getEnv "LOCAL_RANK").bind (·.toNat?)).map (·.toUInt64)
+  let worldSize? := ((← IO.getEnv "WORLD_SIZE").bind (·.toNat?)).map (·.toUInt64)
+  let rank? := ((← IO.getEnv "RANK").bind (·.toNat?)).map (·.toUInt64)
+  let masterAddr? := (← IO.getEnv "MASTER_ADDR")
+  let masterPort? := ((← IO.getEnv "MASTER_PORT").bind (·.toNat?)).map (·.toUInt64)
+  let requestedDevice? := (← IO.getEnv "TYR_DEVICE").map String.toLower
+  pure {
+    localRank? := localRank?
+    worldSize? := worldSize?
+    rank? := rank?
+    masterAddr? := masterAddr?
+    masterPort? := masterPort?
+    requestedDevice? := requestedDevice?
+  }
+
 /-- Parse command line arguments -/
 structure Args where
   /-- Path to training data -/
@@ -79,26 +106,17 @@ def parseArgs (args : List String) : Args :=
           go rest acc
   go args default
 
-/-- Get local rank from environment (for torchrun) -/
-def getLocalRankFromEnv : IO UInt64 := do
-  let envVar ← IO.getEnv "LOCAL_RANK"
-  match envVar with
-  | some rank => return rank.toNat!.toUInt64
-  | none => return 0
+/-- Get local rank from typed env state (for torchrun). -/
+def getLocalRankFromEnv (env : TrainEnvState) : UInt64 :=
+  env.localRank?.getD 0
 
-/-- Get world size from environment -/
-def getWorldSizeFromEnv : IO UInt64 := do
-  let envVar ← IO.getEnv "WORLD_SIZE"
-  match envVar with
-  | some ws => return ws.toNat!.toUInt64
-  | none => return 1
+/-- Get world size from typed env state. -/
+def getWorldSizeFromEnv (env : TrainEnvState) : UInt64 :=
+  env.worldSize?.getD 1
 
-/-- Get global rank from environment (for distributed training). -/
-def getRankFromEnv : IO UInt64 := do
-  let envVar ← IO.getEnv "RANK"
-  match envVar with
-  | some rank => return rank.toNat!.toUInt64
-  | none => getLocalRankFromEnv
+/-- Get global rank from typed env state (for distributed training). -/
+def getRankFromEnv (env : TrainEnvState) : UInt64 :=
+  env.rank?.getD (getLocalRankFromEnv env)
 
 /-- Render a device for logging. -/
 def deviceToString : Device → String
@@ -108,9 +126,9 @@ def deviceToString : Device → String
 
 /-- Resolve training device from TYR_DEVICE.
     In distributed mode, CUDA ordinal follows LOCAL_RANK (per-node index). -/
-def resolveTrainingDevice (_rank localRank : UInt64) (isDistributed : Bool) : IO Device := do
+def resolveTrainingDevice (_rank localRank : UInt64) (isDistributed : Bool) (env : TrainEnvState) : IO Device := do
   let cudaOrdinal := if isDistributed then localRank else 0
-  let requested? := (← IO.getEnv "TYR_DEVICE").map String.toLower
+  let requested? := env.requestedDevice?
   match requested? with
   | some "cpu" => pure Device.CPU
   | some "mps" => pure Device.MPS
@@ -127,15 +145,13 @@ def resolveTrainingDevice (_rank localRank : UInt64) (isDistributed : Bool) : IO
       getBestDevice
 
 /-- Initialize distributed training if needed -/
-def initDistributedIfNeeded : IO Bool := do
-  let worldSize ← getWorldSizeFromEnv
+def initDistributedIfNeeded (env : TrainEnvState) : IO Bool := do
+  let worldSize := getWorldSizeFromEnv env
   if worldSize > 1 then
-    let rank ← getRankFromEnv
-    let localRank ← getLocalRankFromEnv
-    let masterAddrEnv ← IO.getEnv "MASTER_ADDR"
-    let masterAddr := masterAddrEnv.getD "localhost"
-    let masterPortEnv ← IO.getEnv "MASTER_PORT"
-    let masterPort := (masterPortEnv.getD "29500").toNat!.toUInt64
+    let rank := getRankFromEnv env
+    let localRank := getLocalRankFromEnv env
+    let masterAddr := env.masterAddr?.getD "localhost"
+    let masterPort := env.masterPort?.getD 29500
     IO.println s!"Initializing distributed: rank {rank} (local {localRank})/{worldSize} master={masterAddr}:{masterPort}"
     if ← cuda_is_available then
       dist.setCudaDevice localRank
@@ -145,18 +161,18 @@ def initDistributedIfNeeded : IO Bool := do
     return false
 
 /-- Main training function -/
-def runTraining (args : Args) : IO Unit := do
+def runTraining (args : Args) (env : TrainEnvState) : IO Unit := do
   IO.println "=== Modded NanoGPT Training (Tyr Port) ==="
   IO.println ""
 
   -- Initialize distributed if needed
-  let isDistributed ← initDistributedIfNeeded
+  let isDistributed ← initDistributedIfNeeded env
   let (rank, worldSize) ← if isDistributed then
       getRankAndWorldSize
     else
       pure (0, 1)
-  let localRank := ((← IO.getEnv "LOCAL_RANK").bind (·.toNat?)).map (·.toUInt64) |>.getD args.localRank
-  let trainDevice ← resolveTrainingDevice rank localRank isDistributed
+  let localRank := env.localRank?.getD args.localRank
+  let trainDevice ← resolveTrainingDevice rank localRank isDistributed env
   let seed := 42 + rank
   manualSeed seed
   IO.println s!"Rank {rank}/{worldSize} local={localRank} device={deviceToString trainDevice}"
@@ -236,66 +252,21 @@ def runTraining (args : Args) : IO Unit := do
     IO.println s!"  Validation interval: {hp.valInterval}"
     IO.println ""
 
-  if isDistributed then
-    let _finalState ← trainDistributed cfg hp dataConfig trainDevice args.checkpointDir args.resume
-    pure ()
-  else
-    -- Initialize training state
-    if isMaster then IO.println "Initializing model..."
-    let state ← TrainState.init cfg dataConfig hp isDistributed worldSize trainDevice
+  if isMaster then
+    IO.println "Initializing model..."
+    IO.println ""
+    IO.println "Starting training..."
+    IO.println "=============================================================="
 
-    -- Check for resume
-    let latestResumePath := s!"{args.checkpointDir}/latest.ckpt"
-    let resumePath? ←
-      match args.resume with
-      | some path => pure (some path)
-      | none =>
-        if ← checkpointExists latestResumePath then
-          pure (some latestResumePath)
-        else
-          pure none
+  let finalState ← trainDistributed cfg hp dataConfig trainDevice args.checkpointDir args.resume
 
-    let state ← match resumePath? with
-      | some path =>
-        if isMaster then IO.println s!"Resuming from checkpoint: {path}"
-        let ckpt ← loadCheckpoint cfg path
-        match ckpt with
-        | some ckpt =>
-          let params ← TensorStruct.mapM (fun t => pure (t.to trainDevice)) ckpt.params
-          let optState : OptimizerState cfg := {
-            ckpt.optState with
-            adamState := TensorStruct.map (fun t => t.to trainDevice) ckpt.optState.adamState
-          }
-          pure { state with
-            params := params
-            optState := optState
-            step := ckpt.step
-            bestValLoss := ckpt.bestValLoss
-          }
-        | none =>
-          if args.resume.isSome then
-            throw <| IO.userError s!"Resume checkpoint not found or invalid: {path}"
-          else
-            if isMaster then IO.println s!"  Warning: auto-resume checkpoint invalid ({path}); starting fresh"
-            pure state
-      | none => pure state
-
-    -- Run training
-    if isMaster then
-      IO.println ""
-      IO.println "Starting training..."
-      IO.println "=============================================================="
-
-    let finalState ← trainLoop cfg hp state args.checkpointDir
-
-    -- Final summary
-    if isMaster then
-      IO.println ""
-      IO.println "=============================================================="
-      IO.println "Training complete!"
-      IO.println s!"  Total steps: {finalState.step}"
-      IO.println s!"  Total tokens: {finalState.totalTokens}"
-      IO.println s!"  Best validation loss: {finalState.bestValLoss}"
+  if isMaster then
+    IO.println ""
+    IO.println "=============================================================="
+    IO.println "Training complete!"
+    IO.println s!"  Total steps: {finalState.step}"
+    IO.println s!"  Total tokens: {finalState.totalTokens}"
+    IO.println s!"  Best validation loss: {finalState.bestValLoss}"
 
   -- Cleanup distributed
   if isDistributed then
@@ -310,10 +281,11 @@ def runTraining (args : Args) : IO Unit := do
 def main (args : List String) : IO Unit := do
   -- Parse arguments
   let parsedArgs := parseArgs args
+  let envState ← loadTrainEnvState
 
   -- Run training with error handling
   try
-    runTraining parsedArgs
+    runTraining parsedArgs envState
   catch e =>
     IO.eprintln s!"Error: {e}"
     -- Cleanup if distributed

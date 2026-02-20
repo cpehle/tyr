@@ -18,6 +18,26 @@ open torch.moddedGpt
 open torch.ModdedTrain
 open tokenizer
 
+/-- Runtime environment state for chat inference defaults. -/
+private structure ChatEnvState where
+  baseDir : String := "~/.cache/nanochat"
+  modelDepth : UInt64 := 20
+  vocabSize : UInt64 := 65536
+  requestedDevice? : Option String := none
+  deriving Repr, Inhabited
+
+private def loadChatEnvState : IO ChatEnvState := do
+  let baseDir := (← IO.getEnv "NANOCHAT_DIR").getD "~/.cache/nanochat"
+  let modelDepth := ((← IO.getEnv "MODEL_DEPTH").bind String.toNat?).map (·.toUInt64) |>.getD 20
+  let vocabSize := ((← IO.getEnv "VOCAB_SIZE").bind String.toNat?).map (·.toUInt64) |>.getD 65536
+  let requestedDevice? := (← IO.getEnv "TYR_DEVICE").map String.toLower
+  pure {
+    baseDir := baseDir
+    modelDepth := modelDepth
+    vocabSize := vocabSize
+    requestedDevice? := requestedDevice?
+  }
+
 structure Args where
   baseDir : String
   checkpoint : Option String := none
@@ -31,14 +51,11 @@ structure Args where
   topK : Nat := 50
   eosToken : Option UInt64 := none
   seed : UInt64 := 42
-  modelDepth : Nat := 20
-  vocabSize : Nat := 65536
+  modelDepth : UInt64 := 20
+  vocabSize : UInt64 := 65536
   showTokens : Bool := false
   help : Bool := false
   deriving Repr, Inhabited
-
-private def envNat (name : String) : IO (Option Nat) := do
-  pure <| (← IO.getEnv name).bind String.toNat?
 
 private def parseFloatLit? (s : String) : Option Float :=
   match s.splitOn "." with
@@ -80,10 +97,10 @@ private partial def parseArgsLoop : List String → Args → Args
       let seed := (v.toNat?).map (·.toUInt64) |>.getD acc.seed
       parseArgsLoop rest { acc with seed := seed }
   | "--model-depth" :: v :: rest, acc =>
-      let d := v.toNat?.getD acc.modelDepth
+      let d := (v.toNat?).map (·.toUInt64) |>.getD acc.modelDepth
       parseArgsLoop rest { acc with modelDepth := d }
   | "--vocab-size" :: v :: rest, acc =>
-      let vSize := v.toNat?.getD acc.vocabSize
+      let vSize := (v.toNat?).map (·.toUInt64) |>.getD acc.vocabSize
       parseArgsLoop rest { acc with vocabSize := vSize }
   | "--interactive" :: rest, acc => parseArgsLoop rest { acc with interactive := true }
   | "--chat-markers" :: rest, acc => parseArgsLoop rest { acc with useChatMarkers := true }
@@ -95,15 +112,11 @@ private partial def parseArgsLoop : List String → Args → Args
       else
         parseArgsLoop rest (withPrompt acc arg)
 
-private def mkDefaultArgs : IO Args := do
-  let baseDir := (← IO.getEnv "NANOCHAT_DIR").getD "~/.cache/nanochat"
-  let modelDepth := (← envNat "MODEL_DEPTH").getD 20
-  let vocabSize := (← envNat "VOCAB_SIZE").getD 65536
-  return {
-    baseDir := baseDir
-    modelDepth := modelDepth
-    vocabSize := vocabSize
-  }
+private def mkDefaultArgs (env : ChatEnvState) : Args := {
+  baseDir := env.baseDir
+  modelDepth := env.modelDepth
+  vocabSize := env.vocabSize
+}
 
 private def parseArgs (raw : List String) (defaults : Args) : Args :=
   parseArgsLoop raw defaults
@@ -159,8 +172,8 @@ private def deviceToString : Device → String
   | Device.CPU => "CPU"
   | Device.CUDA n => s!"CUDA:{n}"
 
-private def resolveDevice : IO Device := do
-  let requested? := (← IO.getEnv "TYR_DEVICE").map String.toLower
+private def resolveDevice (env : ChatEnvState) : IO Device := do
+  let requested? := env.requestedDevice?
   match requested? with
   | some "cpu" => pure Device.CPU
   | some "mps" => pure Device.MPS
@@ -205,8 +218,8 @@ private def resolveChatMarkers (tok : BPETokenizer) : IO ChatMarkerIds := do
   pure { bos, userStart, userEnd, assistantStart, assistantEnd }
 
 private def buildModelConfig (args : Args) : Config := {
-  vocabSize := args.vocabSize.toUInt64
-  nLayer := args.modelDepth.toUInt64
+  vocabSize := args.vocabSize
+  nLayer := args.modelDepth
   nHead := 16
   headDim := 64
   modelDim := 1024
@@ -270,7 +283,8 @@ private def generateTokens
   pure generated
 
 unsafe def main (rawArgs : List String) : IO UInt32 := do
-  let defaults ← mkDefaultArgs
+  let envState ← loadChatEnvState
+  let defaults := mkDefaultArgs envState
   let args := parseArgs rawArgs defaults
 
   if args.help then
@@ -280,7 +294,7 @@ unsafe def main (rawArgs : List String) : IO UInt32 := do
   let checkpointPath ← resolveCheckpointPath args
   let tokenizerPath ← resolveTokenizerPath args
   let cfg := buildModelConfig args
-  let device ← resolveDevice
+  let device ← resolveDevice envState
   let tok ← tokenizer.load tokenizerPath
   let markers ← resolveChatMarkers tok
   let eosToken := args.eosToken.getD (if args.useChatMarkers then markers.assistantEnd else markers.bos)
