@@ -70,4 +70,43 @@ if [[ "$need_uv" -eq 1 ]]; then
   fi
 fi
 
-exec "$gcc_bin" "${mapped[@]}" "${extra[@]}"
+cuda_link_args=()
+if [[ "$is_compile" -eq 0 ]]; then
+  has_ltorch=0
+  has_ltorch_cuda=0
+  torch_lib_dir=""
+
+  for arg in "${mapped[@]}"; do
+    case "$arg" in
+      -ltorch)
+        has_ltorch=1
+        ;;
+      -ltorch_cuda)
+        has_ltorch_cuda=1
+        ;;
+      -L*)
+        cand_dir="${arg#-L}"
+        if [[ -f "${cand_dir}/libtorch_cuda.so" ]]; then
+          torch_lib_dir="${cand_dir}"
+        fi
+        ;;
+    esac
+  done
+
+  if [[ "$has_ltorch" -eq 1 && "$has_ltorch_cuda" -eq 0 ]]; then
+    if [[ -z "$torch_lib_dir" && -f "external/libtorch/lib/libtorch_cuda.so" ]]; then
+      torch_lib_dir="external/libtorch/lib"
+    fi
+    if [[ -n "$torch_lib_dir" ]]; then
+      cuda_link_args+=("-ltorch_cuda")
+      if [[ -f "${torch_lib_dir}/libtorch_cuda_linalg.so" ]]; then
+        cuda_link_args+=("-ltorch_cuda_linalg")
+      fi
+      if [[ -f "${torch_lib_dir}/libc10_cuda.so" ]]; then
+        cuda_link_args+=("-lc10_cuda")
+      fi
+    fi
+  fi
+fi
+
+exec "$gcc_bin" "${mapped[@]}" "${cuda_link_args[@]}" "${extra[@]}"

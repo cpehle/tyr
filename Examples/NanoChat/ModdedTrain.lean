@@ -83,7 +83,7 @@ structure Hyperparameters where
   logInterval : UInt64 := 10
   /-- Checkpoint interval -/
   checkpointInterval : UInt64 := 100
-  deriving Repr, Inhabited
+  deriving Repr, Inhabited, Lean.ToJson, Lean.FromJson
 
 /-- Default hyperparameters -/
 def Hyperparameters.default : Hyperparameters := {}
@@ -469,6 +469,39 @@ structure Checkpoint (cfg : moddedGpt.Config) where
   /-- Best validation loss -/
   bestValLoss : Float
 
+/-- Serializable data-loader cursor for faithful resume. -/
+structure DataCursor where
+  /-- Index into resolved training shard paths. -/
+  trainPathIdx : Nat
+  /-- Number of batches consumed by the distributed generator. -/
+  globalStep : UInt64
+  /-- Iterator epoch counter. -/
+  epoch : UInt64
+  /-- Iterator batch counter within epoch. -/
+  batchCount : UInt64
+  /-- Current BOS-finder token offset inside the current shard. -/
+  bosCurrentPos : UInt64
+  deriving Repr, Inhabited, Lean.ToJson, Lean.FromJson
+
+/-- Training metadata stored alongside tensor checkpoints. -/
+structure CheckpointMetadata where
+  /-- Metadata schema version. -/
+  version : UInt64 := 1
+  /-- `repr cfg` captured at save time for compatibility checks. -/
+  modelConfigRepr : String
+  /-- Structured model config captured at save time for robust resume. -/
+  modelConfig? : Option moddedGpt.Config := none
+  /-- Saved training hyperparameters for resume parity. -/
+  hyperparameters : Hyperparameters
+  /-- Total tokens processed when this checkpoint was written. -/
+  totalTokens : UInt64 := 0
+  /-- Optional parquet-loader cursor state. -/
+  dataCursor? : Option DataCursor := none
+  deriving Repr, Inhabited, Lean.ToJson, Lean.FromJson
+
+private def checkpointMetadataFile (path : String) : System.FilePath :=
+  ⟨s!"{path}/training_meta.json"⟩
+
 /-- Check whether a serialized checkpoint exists at `path`. -/
 def checkpointExists (path : String) : IO Bool := do
   data.fileExists s!"{path}/step.pt"
@@ -492,8 +525,90 @@ private def loadScalarFloat (path : String) : IO Float := do
   let t ← data.loadTensor #[] path
   pure (nn.item t)
 
+private def saveCheckpointMetadata (path : String) (metadata : CheckpointMetadata) : IO Unit := do
+  IO.FS.writeFile (checkpointMetadataFile path) (Lean.toJson metadata).pretty
+
+/-- Load checkpoint metadata if present. -/
+def loadCheckpointMetadata (path : String) (quiet : Bool := false)
+    : IO (Option CheckpointMetadata) := do
+  let metaPath := checkpointMetadataFile path
+  if !(← metaPath.pathExists) then
+    return none
+  try
+    let content ← IO.FS.readFile metaPath
+    match Lean.Json.parse content with
+    | .error err =>
+      if !quiet then
+        IO.eprintln s!"Warning: failed to parse checkpoint metadata {metaPath}: {err}"
+      return none
+    | .ok json =>
+      match (Lean.fromJson? json : Except String CheckpointMetadata) with
+      | .error err =>
+        if !quiet then
+          IO.eprintln s!"Warning: invalid checkpoint metadata in {metaPath}: {err}"
+        return none
+      | .ok metadata => return some metadata
+  catch e =>
+    if !quiet then
+      IO.eprintln s!"Warning: failed to read checkpoint metadata {metaPath}: {e}"
+    return none
+
+private def captureDataCursor (gen : DistributedDataGenerator) : DataCursor := {
+  trainPathIdx := gen.trainPathIdx
+  globalStep := gen.globalStep
+  epoch := gen.iterator.epoch
+  batchCount := gen.iterator.batchCount
+  bosCurrentPos := gen.iterator.shard.bosFinder.currentPos
+}
+
+private def restoreDataCursor (gen : DistributedDataGenerator) (cursor : DataCursor)
+    : IO DistributedDataGenerator := do
+  if gen.trainPaths.isEmpty then
+    return gen
+  let pathIdx := cursor.trainPathIdx % gen.trainPaths.size
+  let path := gen.trainPaths[pathIdx]!
+  let shard ← DataShard.load path gen.rank gen.worldSize gen.config.bosToken
+  let baseFinder :=
+    if cursor.epoch == 0 then
+      shard.bosFinder
+    else
+      shard.bosFinder.shuffle (cursor.epoch - 1)
+  let cursorPos := min cursor.bosCurrentPos baseFinder.dataLen
+  let finder := { baseFinder with currentPos := cursorPos }
+  let iter : BatchIterator := {
+    shard := { shard with bosFinder := finder }
+    batchSize := gen.iterator.batchSize
+    seqLen := gen.iterator.seqLen
+    batchCount := cursor.batchCount
+    epoch := cursor.epoch
+  }
+  return {
+    gen with
+    iterator := iter
+    globalStep := cursor.globalStep
+    trainPathIdx := pathIdx
+  }
+
+private def mergedResumeHyperparameters (requested saved : Hyperparameters) : Hyperparameters :=
+  { saved with
+    -- Allow extending/changing horizon while keeping schedule semantics identical.
+    numIterations := requested.numIterations
+    extensionIterations := requested.extensionIterations
+  }
+
+private def mkCheckpointMetadata (cfg : moddedGpt.Config) (hp : Hyperparameters)
+    (totalTokens : UInt64) (dataCursor? : Option DataCursor) : CheckpointMetadata := {
+  version := 1
+  modelConfigRepr := s!"{repr cfg}"
+  modelConfig? := some cfg
+  hyperparameters := hp
+  totalTokens := totalTokens
+  dataCursor? := dataCursor?
+}
+
 /-- Save a checkpoint to disk -/
 def saveCheckpoint {cfg : moddedGpt.Config} (ckpt : Checkpoint cfg) (path : String)
+    (metadata? : Option CheckpointMetadata := none)
     : IO Unit := do
   IO.FS.createDirAll ⟨path⟩
 
@@ -507,6 +622,8 @@ def saveCheckpoint {cfg : moddedGpt.Config} (ckpt : Checkpoint cfg) (path : Stri
   saveScalarFloat ckpt.bestValLoss s!"{path}/best_val_loss.pt"
   saveScalarFloat ckpt.optState.baseLr s!"{path}/base_lr.pt"
   saveScalarFloat ckpt.optState.weightDecay s!"{path}/weight_decay.pt"
+  if let some metadata := metadata? then
+    saveCheckpointMetadata path metadata
 
   IO.println s!"Saving checkpoint to {path} at step {ckpt.step}"
 
@@ -516,8 +633,8 @@ def saveCheckpoint {cfg : moddedGpt.Config} (ckpt : Checkpoint cfg) (path : Stri
   IO.println s!"  Parameters: {numTensors} tensors, {numParams} elements"
   IO.println s!"  Best validation loss: {ckpt.bestValLoss}"
 
-/-- Load a checkpoint from disk -/
-def loadCheckpoint (cfg : moddedGpt.Config) (path : String)
+/-- Load a checkpoint from disk. -/
+def loadCheckpoint (cfg : moddedGpt.Config) (path : String) (quiet : Bool := false)
     : IO (Option (Checkpoint cfg)) := do
   if !(← checkpointExists path) then
     return none
@@ -562,8 +679,38 @@ def loadCheckpoint (cfg : moddedGpt.Config) (path : String)
       bestValLoss := bestValLoss
     }
   catch e =>
-    IO.eprintln s!"Failed to load checkpoint from {path}: {e}"
+    if !quiet then
+      IO.eprintln s!"Failed to load checkpoint from {path}: {e}"
     return none
+
+/-- Load checkpoint tensors plus optional training metadata for resume. -/
+def loadCheckpointForResume (cfg : moddedGpt.Config) (path : String) (quiet : Bool := false)
+    : IO (Option (Checkpoint cfg × Option CheckpointMetadata)) := do
+  let rawMetadata? ← loadCheckpointMetadata path quiet
+  let metadata? ←
+    match rawMetadata? with
+    | some metadata =>
+      if metadata.version != 1 then
+        if !quiet then
+          IO.eprintln s!"Warning: unsupported checkpoint metadata version {metadata.version} in {path}; ignoring metadata."
+        pure none
+      else
+        pure (some metadata)
+    | none => pure none
+  match metadata? with
+  | some metadata =>
+    let savedModelCfgRepr :=
+      match metadata.modelConfig? with
+      | some savedCfg => s!"{repr savedCfg}"
+      | none => metadata.modelConfigRepr
+    if savedModelCfgRepr != s!"{repr cfg}" then
+      if !quiet then
+        IO.eprintln s!"Checkpoint config mismatch for {path}; refusing resume because saved model config differs from current config."
+      return none
+  | none => pure ()
+  match ← loadCheckpoint cfg path quiet with
+  | none => return none
+  | some ckpt => return some (ckpt, metadata?)
 
 /-! ## Training Loop -/
 
@@ -997,10 +1144,11 @@ def trainLoop (cfg : moddedGpt.Config) (hp : Hyperparameters)
         step := stepU
         bestValLoss := state.bestValLoss
       }
+      let metadata := mkCheckpointMetadata cfg hp state.totalTokens (some (captureDataCursor state.dataGen))
       let stepPath := s!"{checkpointDir}/step_{stepU}.ckpt"
       let latestPath := s!"{checkpointDir}/latest.ckpt"
-      saveCheckpoint ckpt stepPath
-      saveCheckpoint ckpt latestPath
+      saveCheckpoint ckpt stepPath (some metadata)
+      saveCheckpoint ckpt latestPath (some metadata)
 
   let finalCkpt : Checkpoint cfg := {
     params := state.params
@@ -1008,7 +1156,8 @@ def trainLoop (cfg : moddedGpt.Config) (hp : Hyperparameters)
     step := state.step
     bestValLoss := state.bestValLoss
   }
-  saveCheckpoint finalCkpt s!"{checkpointDir}/latest.ckpt"
+  let finalMetadata := mkCheckpointMetadata cfg hp state.totalTokens (some (captureDataCursor state.dataGen))
+  saveCheckpoint finalCkpt s!"{checkpointDir}/latest.ckpt" (some finalMetadata)
 
   IO.println s!"Training complete! Total tokens: {state.totalTokens}"
   return state
@@ -1271,10 +1420,11 @@ def trainLoopDistributed (cfg : moddedGpt.Config) (hp : Hyperparameters)
         step := stepU
         bestValLoss := state.bestValLoss
       }
+      let metadata := mkCheckpointMetadata cfg hp state.totalTokens (some (captureDataCursor state.dataGen))
       let stepPath := s!"{checkpointDir}/step_{stepU}.ckpt"
       let latestPath := s!"{checkpointDir}/latest.ckpt"
-      saveCheckpoint ckpt stepPath
-      saveCheckpoint ckpt latestPath
+      saveCheckpoint ckpt stepPath (some metadata)
+      saveCheckpoint ckpt latestPath (some metadata)
 
   if isMaster then
     let finalCkpt : Checkpoint cfg := {
@@ -1283,7 +1433,8 @@ def trainLoopDistributed (cfg : moddedGpt.Config) (hp : Hyperparameters)
       step := state.step
       bestValLoss := state.bestValLoss
     }
-    saveCheckpoint finalCkpt s!"{checkpointDir}/latest.ckpt"
+    let finalMetadata := mkCheckpointMetadata cfg hp state.totalTokens (some (captureDataCursor state.dataGen))
+    saveCheckpoint finalCkpt s!"{checkpointDir}/latest.ckpt" (some finalMetadata)
     IO.println s!"Training complete! Total tokens: {state.totalTokens}"
   return state
 
@@ -1321,34 +1472,59 @@ def trainDistributed (cfg : moddedGpt.Config) (hp : Hyperparameters)
       else
         pure none
 
-  let state ←
+  let (state, effectiveHp) ←
     match resumePath? with
-    | none => pure initState
+    | none => pure (initState, hp)
     | some resumePath =>
       if isMaster then
         IO.println s!"Resuming from checkpoint: {resumePath}"
-      match ← loadCheckpoint cfg resumePath with
-      | some ckpt =>
+      match ← loadCheckpointForResume cfg resumePath (!isMaster) with
+      | some (ckpt, metadata?) =>
         let resumedParams ← moveToDevice ckpt.params device
         let resumedOptState : OptimizerState cfg := {
           ckpt.optState with
           adamState := TensorStruct.map (fun t => t.to device) ckpt.optState.adamState
           dualState := TensorStruct.map (fun t => t.to device) ckpt.optState.dualState
         }
-        pure {
+        let baseState : DistributedTrainState cfg := {
           initState with
           params := resumedParams
           optState := resumedOptState
           step := ckpt.step
           bestValLoss := ckpt.bestValLoss
         }
+        let (resumedState, restoredHp) ←
+          match metadata? with
+          | none =>
+            if isMaster then
+              IO.println "Warning: legacy checkpoint without training metadata; only model/optimizer state restored."
+            pure (baseState, hp)
+          | some metadata =>
+            let hp' := mergedResumeHyperparameters hp metadata.hyperparameters
+            let withTokens : DistributedTrainState cfg := {
+              baseState with
+              totalTokens := metadata.totalTokens
+            }
+            let withCursor ←
+              match metadata.dataCursor? with
+              | none =>
+                if isMaster then
+                  IO.println "Warning: checkpoint metadata missing dataloader cursor; continuing with fresh loader position."
+                pure withTokens
+              | some cursor =>
+                let restoredGen ← restoreDataCursor withTokens.dataGen cursor
+                if isMaster then
+                  IO.println s!"Restored dataloader cursor: shard={cursor.trainPathIdx} epoch={cursor.epoch} batch={cursor.batchCount} pos={cursor.bosCurrentPos}"
+                pure { withTokens with dataGen := restoredGen }
+            if isMaster then
+              IO.println s!"Restored checkpoint hyperparameters (using current iteration horizon: numIterations={hp'.numIterations}, extensionIterations={hp'.extensionIterations})."
+            pure (withCursor, hp')
+        pure (resumedState, restoredHp)
       | none =>
         if resume.isSome then
           throw <| IO.userError s!"Resume checkpoint not found or invalid: {resumePath}"
         else
-          if isMaster then
-            IO.println s!"Warning: failed to load auto-resume checkpoint {resumePath}; starting fresh"
-          pure initState
+          throw <| IO.userError s!"Failed to load auto-resume checkpoint {resumePath}; refusing to start fresh automatically. Remove the checkpoint or fix compatibility to proceed."
 
   -- Normalize all train state tensors onto the selected training device
   -- before any NCCL collectives.
@@ -1373,14 +1549,14 @@ def trainDistributed (cfg : moddedGpt.Config) (hp : Hyperparameters)
   }
 
   -- Match nanochat's strict grad-accum divisibility contract.
-  validateGradAccumConfig hp worldSize
+  validateGradAccumConfig effectiveHp worldSize
 
   -- Barrier to ensure all ranks are ready
   if isDistributed then
     dist.barrier
 
   -- Run distributed training loop
-  let finalState ← trainLoopDistributed cfg hp state checkpointDir
+  let finalState ← trainLoopDistributed cfg effectiveHp state checkpointDir
 
   if isMaster then
     IO.println s!"Training finished!"
@@ -1491,10 +1667,13 @@ private def trainLoopDistributedStream (cfg : moddedGpt.Config) (hp : Hyperparam
     (valProvider? : Option DynamicGPTBatchProvider)
     (valBatches : Nat)
     (checkpointDir : String)
+    (saveStreamCursor? : Option (String → IO Unit) := none)
     : IO (StreamTrainState cfg) := do
   let totalSteps := hp.numIterations + hp.extensionIterations
   let mut state := state
   let isMaster := state.rank == 0
+  let isDistributed := state.worldSize > 1
+  let latestPath := s!"{checkpointDir}/latest.ckpt"
   let startStep := state.optState.step
   if isMaster then
     IO.FS.createDirAll ⟨checkpointDir⟩
@@ -1547,17 +1726,24 @@ private def trainLoopDistributedStream (cfg : moddedGpt.Config) (hp : Hyperparam
             IO.println "  New best validation loss!"
             state := { state with bestValLoss := valLoss }
 
-    if stepU % hp.checkpointInterval == 0 && stepU > 0 && isMaster then
-      let ckpt : Checkpoint cfg := {
-        params := state.params
-        optState := state.optState
-        step := stepU
-        bestValLoss := state.bestValLoss
-      }
-      let stepPath := s!"{checkpointDir}/step_{stepU}.ckpt"
-      let latestPath := s!"{checkpointDir}/latest.ckpt"
-      saveCheckpoint ckpt stepPath
-      saveCheckpoint ckpt latestPath
+    if stepU % hp.checkpointInterval == 0 && stepU > 0 then
+      if isMaster then
+        let ckpt : Checkpoint cfg := {
+          params := state.params
+          optState := state.optState
+          step := stepU
+          bestValLoss := state.bestValLoss
+        }
+        let metadata := mkCheckpointMetadata cfg hp state.totalTokens none
+        let stepPath := s!"{checkpointDir}/step_{stepU}.ckpt"
+        saveCheckpoint ckpt stepPath (some metadata)
+        saveCheckpoint ckpt latestPath (some metadata)
+      if isDistributed then
+        dist.barrier
+      if let some saveStreamCursor := saveStreamCursor? then
+        saveStreamCursor latestPath
+      if isDistributed then
+        dist.barrier
 
   if isMaster then
     let finalCkpt : Checkpoint cfg := {
@@ -1566,7 +1752,15 @@ private def trainLoopDistributedStream (cfg : moddedGpt.Config) (hp : Hyperparam
       step := state.step
       bestValLoss := state.bestValLoss
     }
-    saveCheckpoint finalCkpt s!"{checkpointDir}/latest.ckpt"
+    let finalMetadata := mkCheckpointMetadata cfg hp state.totalTokens none
+    saveCheckpoint finalCkpt latestPath (some finalMetadata)
+  if isDistributed then
+    dist.barrier
+  if let some saveStreamCursor := saveStreamCursor? then
+    saveStreamCursor latestPath
+  if isDistributed then
+    dist.barrier
+  if isMaster then
     IO.println s!"Training complete! Total tokens: {state.totalTokens}"
 
   return state
@@ -1581,6 +1775,8 @@ def trainDistributedWithBatchProvider (cfg : moddedGpt.Config) (hp : Hyperparame
     (valBatches : Nat := 0)
     (checkpointDir : String := "checkpoints/modded")
     (resume : Option String := none)
+    (saveStreamCursor? : Option (String → IO Unit) := none)
+    (restoreStreamCursor? : Option (String → IO Unit) := none)
     : IO (StreamTrainState cfg) := do
   let isDistributed ← dist.isInitialized
   let (rank, worldSize) ← if isDistributed then
@@ -1607,34 +1803,48 @@ def trainDistributedWithBatchProvider (cfg : moddedGpt.Config) (hp : Hyperparame
       else
         pure none
 
-  let state ←
+  let (state, effectiveHp) ←
     match resumePath? with
-    | none => pure initState
+    | none => pure (initState, hp)
     | some resumePath =>
       if isMaster then
         IO.println s!"Resuming from checkpoint: {resumePath}"
-      match ← loadCheckpoint cfg resumePath with
-      | some ckpt =>
+      match ← loadCheckpointForResume cfg resumePath (!isMaster) with
+      | some (ckpt, metadata?) =>
         let resumedParams ← moveToDevice ckpt.params device
         let resumedOptState : OptimizerState cfg := {
           ckpt.optState with
           adamState := TensorStruct.map (fun t => t.to device) ckpt.optState.adamState
           dualState := TensorStruct.map (fun t => t.to device) ckpt.optState.dualState
         }
-        pure {
+        let baseState : StreamTrainState cfg := {
           initState with
           params := resumedParams
           optState := resumedOptState
           step := ckpt.step
           bestValLoss := ckpt.bestValLoss
         }
+        let (resumedState, restoredHp) ←
+          match metadata? with
+          | none =>
+            if isMaster then
+              IO.println "Warning: legacy checkpoint without training metadata; only model/optimizer state restored."
+            pure (baseState, hp)
+          | some metadata =>
+            let hp' := mergedResumeHyperparameters hp metadata.hyperparameters
+            if isMaster then
+              IO.println s!"Restored checkpoint hyperparameters (using current iteration horizon: numIterations={hp'.numIterations}, extensionIterations={hp'.extensionIterations})."
+            pure ({ baseState with totalTokens := metadata.totalTokens }, hp')
+        if let some restoreStreamCursor := restoreStreamCursor? then
+          restoreStreamCursor resumePath
+          if isMaster then
+            IO.println s!"Restored stream cursor state from {resumePath}"
+        pure (resumedState, restoredHp)
       | none =>
         if resume.isSome then
           throw <| IO.userError s!"Resume checkpoint not found or invalid: {resumePath}"
         else
-          if isMaster then
-            IO.println s!"Warning: failed to load auto-resume checkpoint {resumePath}; starting fresh"
-          pure initState
+          throw <| IO.userError s!"Failed to load auto-resume checkpoint {resumePath}; refusing to start fresh automatically. Remove the checkpoint or fix compatibility to proceed."
 
   -- Normalize all train state tensors onto the selected training device
   -- before any NCCL collectives.
@@ -1658,12 +1868,13 @@ def trainDistributedWithBatchProvider (cfg : moddedGpt.Config) (hp : Hyperparame
   }
 
   -- Match nanochat's strict grad-accum divisibility contract.
-  validateGradAccumConfig hp worldSize
+  validateGradAccumConfig effectiveHp worldSize
 
   if isDistributed then
     dist.barrier
 
-  let finalState ← trainLoopDistributedStream cfg hp state trainProvider valProvider? valBatches checkpointDir
+  let finalState ← trainLoopDistributedStream
+    cfg effectiveHp state trainProvider valProvider? valBatches checkpointDir saveStreamCursor?
 
   if isMaster then
     IO.println "Streaming training finished!"

@@ -407,6 +407,32 @@ private def runOnMasterIO (action : IO Unit) : IO Unit := do
   if rank == 0 then
     action
 
+private def currentDistributedRank : IO UInt64 := do
+  let isDistributed ← dist.isInitialized
+  if isDistributed then
+    let (rank, _) ← dist.getRankAndWorldSize
+    pure rank
+  else
+    pure 0
+
+private def streamCursorFile (checkpointPath : String) (rank : UInt64) : System.FilePath :=
+  ⟨s!"{checkpointPath}/stream_cursor_rank{rank}.json"⟩
+
+private def writeJsonPayload [Lean.ToJson α] (path : System.FilePath) (payload : α) : IO Unit := do
+  IO.FS.writeFile path (Lean.toJson payload).pretty
+
+private def readJsonPayload [Lean.FromJson α] (path : System.FilePath) : IO α := do
+  let content ← IO.FS.readFile path
+  match Lean.Json.parse content with
+  | .error err =>
+    throw <| IO.userError s!"Failed to parse JSON {path}: {err}"
+  | .ok json =>
+    match (Lean.fromJson? json : Except String α) with
+    | .error err =>
+      throw <| IO.userError s!"Invalid JSON payload in {path}: {err}"
+    | .ok payload =>
+      pure payload
+
 /-! ## Device & Data Adapters -/
 
 /-- Get local rank from environment (for torchrun). -/
@@ -791,6 +817,46 @@ private structure ParquetTokenStream where
   consumed : Nat := 0
   epoch : Nat := 0
 
+/-- Serializable cursor for pretraining parquet token streams. -/
+private structure ParquetTokenStreamCursor where
+  fileIdx : Nat := 0
+  rowGroupIdx : Nat := 0
+  buffer : Array UInt64 := #[]
+  consumed : Nat := 0
+  epoch : Nat := 0
+  deriving Repr, Inhabited, Lean.ToJson, Lean.FromJson
+
+/-- Rank-local pretraining stream cursor payload persisted alongside checkpoints. -/
+private structure PretrainStreamCursors where
+  train : ParquetTokenStreamCursor
+  val : ParquetTokenStreamCursor
+  deriving Repr, Inhabited, Lean.ToJson, Lean.FromJson
+
+private def ParquetTokenStream.captureCursor (s : ParquetTokenStream) : ParquetTokenStreamCursor := {
+  fileIdx := s.fileIdx
+  rowGroupIdx := s.rowGroupIdx
+  buffer := s.buffer
+  consumed := s.consumed
+  epoch := s.epoch
+}
+
+private def ParquetTokenStream.restoreCursor (s : ParquetTokenStream) (c : ParquetTokenStreamCursor)
+    : ParquetTokenStream :=
+  let fileIdx :=
+    if s.files.isEmpty then
+      0
+    else
+      c.fileIdx % s.files.size
+  let consumed := min c.consumed c.buffer.size
+  {
+    s with
+    fileIdx := fileIdx
+    rowGroupIdx := c.rowGroupIdx
+    buffer := c.buffer
+    consumed := consumed
+    epoch := c.epoch
+  }
+
 private def selectParquetFilesForSplit (files : Array String) (split : PretrainParquetSplit) : Array String :=
   match split with
   | .train =>
@@ -1012,6 +1078,25 @@ def pretrainBaseModel (cfg : NanoChatConfig) : PipelineM Unit := do
   let trainStreamRef ← IO.mkRef trainStream0
   let valStreamRef ← IO.mkRef valStream0
 
+  let savePretrainStreamCursor : String → IO Unit := fun checkpointPath => do
+    let rank ← currentDistributedRank
+    let payload : PretrainStreamCursors := {
+      train := (← trainStreamRef.get).captureCursor
+      val := (← valStreamRef.get).captureCursor
+    }
+    writeJsonPayload (streamCursorFile checkpointPath rank) payload
+
+  let restorePretrainStreamCursor : String → IO Unit := fun checkpointPath => do
+    let rank ← currentDistributedRank
+    let cursorPath := streamCursorFile checkpointPath rank
+    if !(← cursorPath.pathExists) then
+      throw <| IO.userError s!"Missing pretrain stream cursor file for rank {rank}: {cursorPath}"
+    let payload : PretrainStreamCursors ← readJsonPayload cursorPath
+    let trainStream ← trainStreamRef.get
+    trainStreamRef.set (trainStream.restoreCursor payload.train)
+    let valStream ← valStreamRef.get
+    valStreamRef.set (valStream.restoreCursor payload.val)
+
   let trainProvider : DynamicGPTBatchProvider := do
     let stream ← trainStreamRef.get
     let (batch?, stream') ← stream.nextBatch hp.deviceBatchSize hp.maxSeqLen
@@ -1048,6 +1133,8 @@ def pretrainBaseModel (cfg : NanoChatConfig) : PipelineM Unit := do
 
   let _finalState ← trainDistributedWithBatchProvider
     modelCfg hp trainDevice trainProvider valProvider? valBatches checkpointDir none
+    (saveStreamCursor? := some savePretrainStreamCursor)
+    (restoreStreamCursor? := some restorePretrainStreamCursor)
 
   -- Estimate parameters for logging
   let numParams := modelCfg.vocabSize.toNat * modelCfg.modelDim.toNat +  -- embeddings
@@ -1223,6 +1310,49 @@ private def materializeAnyTaskMixture (mix : AnyTaskMixture) : TaskMixture :=
     { task := materializeAnyTask entry.task, weight := entry.weight }
   TaskMixture.create entries mix.seed
 
+/-- Serializable cursor for task-token streaming in midtraining. -/
+private structure TaskTokenStreamCursor where
+  cursor : Nat := 0
+  buffer : Array UInt64 := #[]
+  consumed : Nat := 0
+  steps : Nat := 0
+  lastWrapped : Bool := false
+  lastProgress : Float := 0.0
+  deriving Repr, Inhabited, Lean.ToJson, Lean.FromJson
+
+/-- Rank-local midtraining stream cursor payload persisted alongside checkpoints. -/
+private structure MidtrainStreamCursors where
+  train : TaskTokenStreamCursor
+  val : TaskTokenStreamCursor
+  deriving Repr, Inhabited, Lean.ToJson, Lean.FromJson
+
+private def captureTaskTokenStreamCursor (s : TaskTokenStream) : TaskTokenStreamCursor := {
+  cursor := s.cursor
+  buffer := s.buffer
+  consumed := s.consumed
+  steps := s.steps
+  lastWrapped := s.lastWrapped
+  lastProgress := s.lastProgress
+}
+
+private def restoreTaskTokenStreamCursor (s : TaskTokenStream) (c : TaskTokenStreamCursor)
+    : TaskTokenStream :=
+  let cursor :=
+    if s.mixture.size == 0 then
+      0
+    else
+      c.cursor % s.mixture.size
+  let consumed := min c.consumed c.buffer.size
+  {
+    s with
+    cursor := cursor
+    buffer := c.buffer
+    consumed := consumed
+    steps := c.steps
+    lastWrapped := c.lastWrapped
+    lastProgress := c.lastProgress
+  }
+
 /-- Create task mixture for chat SFT (matches nanochat/scripts/chat_sft.py). -/
 def createSFTTaskMixture (cfg : NanoChatConfig) : IO AnyTaskMixture := do
   let cacheDir := cfg.baseDir.replace "~" (← IO.getEnv "HOME" |>.map (·.getD ""))
@@ -1350,6 +1480,25 @@ def midtrain (cfg : NanoChatConfig) : PipelineM Unit := do
   let trainStreamRef ← IO.mkRef trainStream0
   let valStreamRef ← IO.mkRef valStream0
 
+  let saveMidtrainStreamCursor : String → IO Unit := fun checkpointPath => do
+    let rank ← currentDistributedRank
+    let payload : MidtrainStreamCursors := {
+      train := captureTaskTokenStreamCursor (← trainStreamRef.get)
+      val := captureTaskTokenStreamCursor (← valStreamRef.get)
+    }
+    writeJsonPayload (streamCursorFile checkpointPath rank) payload
+
+  let restoreMidtrainStreamCursor : String → IO Unit := fun checkpointPath => do
+    let rank ← currentDistributedRank
+    let cursorPath := streamCursorFile checkpointPath rank
+    if !(← cursorPath.pathExists) then
+      throw <| IO.userError s!"Missing midtrain stream cursor file for rank {rank}: {cursorPath}"
+    let payload : MidtrainStreamCursors ← readJsonPayload cursorPath
+    let trainStream ← trainStreamRef.get
+    trainStreamRef.set (restoreTaskTokenStreamCursor trainStream payload.train)
+    let valStream ← valStreamRef.get
+    valStreamRef.set (restoreTaskTokenStreamCursor valStream payload.val)
+
   let trainProvider : DynamicGPTBatchProvider := do
     let stream ← trainStreamRef.get
     let (batch?, stream') ← stream.nextGPTBatch
@@ -1379,6 +1528,8 @@ def midtrain (cfg : NanoChatConfig) : PipelineM Unit := do
   let finalState ← trainDistributedWithBatchProvider
     modelCfg hp trainDevice trainProvider (some valProvider) valBatches
     midCheckpointDir resumePath
+    (saveStreamCursor? := some saveMidtrainStreamCursor)
+    (restoreStreamCursor? := some restoreMidtrainStreamCursor)
 
   -- If no new step was run (e.g. resume already at horizon), ensure mid/latest exists.
   if isMaster && !(← checkpointExists midCkptPath) then

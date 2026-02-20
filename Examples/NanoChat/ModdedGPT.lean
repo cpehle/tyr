@@ -50,7 +50,7 @@ structure Config where
       Pattern is tiled across layers. Final layer always gets L.
       Examples: "L"=all full context, "SL"=alternating, "LSS"=one long then two short -/
   windowPattern : String := "L"
-  deriving Repr, Inhabited
+  deriving Repr, Inhabited, Lean.ToJson, Lean.FromJson
 
 /-- Default modded-nanogpt configuration -/
 def Config.default : Config := {}

@@ -252,13 +252,16 @@ structure PipelineCheckpoint where
   timestamp : Nat
   /-- Pipeline run identifier -/
   runId : String
+  /-- `repr config` captured at save time to prevent cross-config stage skipping. -/
+  configRepr : String := ""
   deriving Repr, Inhabited
 
 instance : Lean.ToJson PipelineCheckpoint where
   toJson cp := .mkObj [
     ("stages", .arr (cp.stages.map toJson)),
     ("timestamp", .num cp.timestamp),
-    ("runId", .str cp.runId)
+    ("runId", .str cp.runId),
+    ("configRepr", .str cp.configRepr)
   ]
 
 instance : Lean.FromJson PipelineCheckpoint where
@@ -267,16 +270,17 @@ instance : Lean.FromJson PipelineCheckpoint where
     let stages ← stagesArr.mapM fromJson?
     let timestamp ← json.getObjValAs? Nat "timestamp"
     let runId := (json.getObjValAs? String "runId").toOption.getD ""
-    pure { stages, timestamp, runId }
+    let configRepr := (json.getObjValAs? String "configRepr").toOption.getD ""
+    pure { stages, timestamp, runId, configRepr }
 
 /-- Path for checkpoint file -/
 def checkpointPath (baseDir : String) : String :=
   s!"{baseDir}/.pipeline_checkpoint.json"
 
 /-- Save checkpoint to disk -/
-def saveCheckpoint (baseDir : String) (stages : Array StageInfo) (runId : String) : IO Unit := do
+def saveCheckpoint (baseDir : String) (stages : Array StageInfo) (runId : String) (configRepr : String := "") : IO Unit := do
   let timestamp ← IO.monoMsNow
-  let checkpoint : PipelineCheckpoint := { stages, timestamp, runId }
+  let checkpoint : PipelineCheckpoint := { stages, timestamp, runId, configRepr }
   let path := checkpointPath baseDir
   IO.FS.writeFile ⟨path⟩ (toJson checkpoint).pretty
 
@@ -435,7 +439,7 @@ def stage (name : String) (action : PipelineM Unit) : PipelineM Unit := do
     if config.checkpointAfterStage then
       state ← get
       let baseDir := config.baseDir.replace "~" (← IO.getEnv "HOME" |>.map (·.getD ""))
-      Pipeline.saveCheckpoint baseDir state.stages config.runId
+      Pipeline.saveCheckpoint baseDir state.stages config.runId s!"{repr config}"
 
     logStageEnd name durationMs
     return ()
@@ -456,7 +460,7 @@ def stage (name : String) (action : PipelineM Unit) : PipelineM Unit := do
     if config.checkpointAfterStage then
       state ← get
       let baseDir := config.baseDir.replace "~" (← IO.getEnv "HOME" |>.map (·.getD ""))
-      Pipeline.saveCheckpoint baseDir state.stages config.runId
+      Pipeline.saveCheckpoint baseDir state.stages config.runId s!"{repr config}"
 
     logStageFailed name errorMsg
 
@@ -618,10 +622,15 @@ def initPipeline (config : PipelineConfig) : IO PipelineState := do
   let resumedStages ← if config.resumeFromCheckpoint then
     match ← loadCheckpoint baseDir with
     | some checkpoint =>
-      if rank == 0 then
-        IO.println s!"[RESUME] Loading checkpoint from {checkpointPath baseDir}"
-        IO.println s!"[RESUME] Found {checkpoint.stages.size} stages"
-      pure checkpoint.stages
+      let currentConfigRepr := s!"{repr config}"
+      if checkpoint.configRepr.isEmpty || checkpoint.configRepr == currentConfigRepr then
+        if rank == 0 then
+          IO.println s!"[RESUME] Loading checkpoint from {checkpointPath baseDir}"
+          IO.println s!"[RESUME] Found {checkpoint.stages.size} stages"
+        pure checkpoint.stages
+      else
+        throw <| IO.userError
+          s!"[RESUME] Refusing to resume from {checkpointPath baseDir}: saved pipeline config does not match current config. Use matching config or disable resumeFromCheckpoint."
     | none =>
       pure #[]
   else
