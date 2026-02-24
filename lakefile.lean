@@ -115,12 +115,16 @@ def getOmpLibPath : IO FilePath := do
 extern_lib libtyr pkg := do
   let tyrCLib := pkg.dir / "cc" / "build" / "libTyrC.a"
 
-  -- Watch Makefile and key source files
-  -- Note: For full dependency tracking, we'd need to list all .cpp/.h files,
-  -- but Lake's API makes this complex. The Makefile handles internal deps.
-  let srcJob ← inputTextFile <| pkg.dir / "cc" / "Makefile"
+  -- Track Makefile and all C/CUDA sources under cc/src.
+  -- This prevents stale native builds when source files change but the
+  -- Makefile itself does not.
+  let makefileJob ← inputTextFile <| pkg.dir / "cc" / "Makefile"
+  let srcDirJob ← inputDir (pkg.dir / "cc" / "src") true fun p =>
+    let ext := p.extension.getD ""
+    ext == "cpp" || ext == "cu" || ext == "h" || ext == "hpp" || ext == "cuh"
+  let depJob := makefileJob.add srcDirJob
 
-  buildFileAfterDep tyrCLib srcJob fun _srcFile => do
+  buildFileAfterDep tyrCLib depJob fun _makefile => do
     let sysroot ← getLeanSysroot
     proc {
       cmd := "make"

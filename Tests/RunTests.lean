@@ -2,12 +2,24 @@ import LeanTest
 import Lean.Util.Path
 import Tests
 
+/-!
+# `Tests.RunTests`
+
+Primary LeanTest runner that parses command-line options and executes the main test suite.
+
+## Overview
+- Regression and behavior checks run by the LeanTest-based test suite.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 /-- Parse command line arguments into a RunConfig. -/
 def parseArgs (args : List String) : IO LeanTest.RunConfig := do
   let mut config : LeanTest.RunConfig := {}
   let mut remaining := args
   while _h : !remaining.isEmpty do
     match remaining with
+    | "--filter" :: [] =>
+      throw <| IO.userError "--filter expects a pattern argument"
     | "--filter" :: pattern :: rest =>
       config := { config with filter := some pattern }
       remaining := rest
@@ -26,8 +38,8 @@ def parseArgs (args : List String) : IO LeanTest.RunConfig := do
       IO.println "  --fail-fast       Stop on first failure"
       IO.println "  --help            Show this help"
       IO.Process.exit 0
-    | _ :: rest =>
-      remaining := rest
+    | arg :: _ =>
+      throw <| IO.userError s!"Unknown option: {arg}. Use --help for supported flags."
     | [] => remaining := []
   return config
 
