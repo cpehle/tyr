@@ -92,6 +92,14 @@ jobs:
           fi
           lake env lean --run Tests/RunTests.lean --fail-fast
 
+      - name: Set up Bazelisk
+        if: runner.os == 'Linux'
+        uses: bazelbuild/setup-bazelisk@v3
+
+      - name: Build Bazel targets
+        if: runner.os == 'Linux'
+        run: bazel build //...
+
   lint:
     runs-on: ubuntu-latest
 
