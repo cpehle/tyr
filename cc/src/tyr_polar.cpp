@@ -10,6 +10,7 @@
 
 #include <lean/lean.h>
 #include <torch/torch.h>
+#include <cmath>
 
 // Forward declarations from tyr.cpp
 extern lean_object* fromTorchTensor(torch::Tensor t);
@@ -202,6 +203,10 @@ lean_object* lean_torch_polar_express(
 ) {
     try {
         auto G = borrowTensor(G_obj);
+        if (G.dim() != 2 && G.dim() != 3) {
+            return lean_io_result_mk_error(lean_mk_io_user_error(
+                lean_mk_string("polar_express requires 2D or 3D tensor")));
+        }
 
         // Precomputed coefficients for 5 iterations (from modded-nanogpt)
         // These coefficients are optimized for stability with safety_factor=2e-2, cushion=2
@@ -215,7 +220,13 @@ lean_object* lean_torch_polar_express(
 
         // Normalize input: X = G / ||G||_F
         auto norm = G.norm();
-        auto X = G / norm;
+        double norm_val = norm.item<double>();
+        if (!std::isfinite(norm_val)) {
+            return lean_io_result_mk_error(lean_mk_io_user_error(
+                lean_mk_string("polar_express requires finite input norm")));
+        }
+        // Avoid divide-by-zero for zero gradients; keep update at zero in that case.
+        auto X = G / norm.clamp_min(1e-12);
 
         // Run Newton-Schulz iterations
         size_t iters = std::min(static_cast<size_t>(num_iters), coeffs.size());

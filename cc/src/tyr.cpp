@@ -57,6 +57,9 @@
 #include <fstream>
 #include <atomic>
 #include <stdexcept>
+#include <limits>
+#include <numeric>
+#include <sstream>
 #include <lean/lean.h>
 #include <torch/torch.h>
 #include <ATen/ATen.h>
@@ -2133,15 +2136,30 @@ lean_object* lean_torch_save_ppm(
   try {
     auto tensor = borrowTensor(tensor_obj);
 
+    if (tensor.dim() != 4) {
+      return lean_io_result_mk_error(lean_mk_io_user_error(
+        lean_mk_string("PPM expects a 4D tensor [batch, 3, height, width]")));
+    }
+
     // Get dimensions
     int64_t batch = tensor.size(0);
     int64_t channels = tensor.size(1);
     int64_t height = tensor.size(2);
     int64_t width = tensor.size(3);
 
+    if (batch <= 0) {
+      return lean_io_result_mk_error(lean_mk_io_user_error(
+        lean_mk_string("PPM requires batch size > 0")));
+    }
+
     if (channels != 3) {
       return lean_io_result_mk_error(lean_mk_io_user_error(
         lean_mk_string("PPM requires 3 channels (RGB)")));
+    }
+
+    if (height <= 0 || width <= 0) {
+      return lean_io_result_mk_error(lean_mk_io_user_error(
+        lean_mk_string("PPM requires positive height and width")));
     }
 
     // Take first image, convert from [-1, 1] to [0, 255]
@@ -2163,7 +2181,14 @@ lean_object* lean_torch_save_ppm(
 
     // Write pixel data
     auto data_ptr = img.data_ptr<uint8_t>();
-    file.write(reinterpret_cast<const char*>(data_ptr), height * width * 3);
+    file.write(
+      reinterpret_cast<const char*>(data_ptr),
+      static_cast<std::streamsize>(height * width * 3)
+    );
+    if (!file.good()) {
+      return lean_io_result_mk_error(lean_mk_io_user_error(
+        lean_mk_string(("Failed to write PPM pixel data to: " + std::string(path)).c_str())));
+    }
 
     file.close();
     return lean_io_result_mk_ok(lean_box(0));
@@ -2233,47 +2258,79 @@ lean_object* lean_torch_safetensors_load(
   lean_dec(shape);
 
   try {
+    auto ioError = [](const std::string& msg) -> lean_object* {
+      return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string(msg.c_str())));
+    };
+
     std::ifstream file(path, std::ios::binary);
     if (!file.is_open()) {
-      return lean_io_result_mk_error(lean_mk_io_user_error(
-        lean_mk_string(("Failed to open safetensors file: " + std::string(path)).c_str())));
+      return ioError("Failed to open safetensors file: " + std::string(path));
     }
 
     // Read header size (8 bytes, little-endian)
-    uint64_t header_size;
-    file.read(reinterpret_cast<char*>(&header_size), 8);
+    uint64_t header_size = 0;
+    if (!file.read(reinterpret_cast<char*>(&header_size), sizeof(header_size))) {
+      return ioError("Failed to read safetensors header size");
+    }
 
     // Check for reasonable header size (avoid huge allocations)
     if (header_size > 100000000) { // 100MB max header
-      return lean_io_result_mk_error(lean_mk_io_user_error(
-        lean_mk_string(("Unreasonable header size: " + std::to_string(header_size)).c_str())));
+      return ioError("Unreasonable header size: " + std::to_string(header_size));
     }
+
+    file.seekg(0, std::ios::end);
+    auto file_size_pos = file.tellg();
+    if (file_size_pos < 0) {
+      return ioError("Failed to determine safetensors file size");
+    }
+    uint64_t file_size = static_cast<uint64_t>(file_size_pos);
+    if (file_size < sizeof(header_size) + header_size) {
+      return ioError("Malformed safetensors file: header extends beyond file size");
+    }
+    file.seekg(static_cast<std::streamoff>(sizeof(header_size)), std::ios::beg);
 
     // Read JSON header
     std::string header(header_size, '\0');
-    file.read(&header[0], header_size);
+    if (!file.read(header.data(), static_cast<std::streamsize>(header_size))) {
+      return ioError("Failed to read safetensors header bytes");
+    }
 
     // Simple JSON parsing to find tensor info
     // Look for: "tensor_name": {"dtype": "F32", "shape": [...], "data_offsets": [start, end]}
     std::string search_key = "\"" + std::string(tensor_name) + "\"";
     size_t pos = header.find(search_key);
     if (pos == std::string::npos) {
-      return lean_io_result_mk_error(lean_mk_io_user_error(
-        lean_mk_string(("Tensor not found in safetensors: " + std::string(tensor_name)).c_str())));
+      return ioError("Tensor not found in safetensors: " + std::string(tensor_name));
     }
 
     // Find dtype
     size_t dtype_pos = header.find("\"dtype\"", pos);
-    size_t dtype_start = header.find("\"", dtype_pos + 7) + 1;
+    if (dtype_pos == std::string::npos) {
+      return ioError("Malformed safetensors header: missing dtype");
+    }
+    size_t dtype_quote = header.find("\"", dtype_pos + 7);
+    if (dtype_quote == std::string::npos) {
+      return ioError("Malformed safetensors header: invalid dtype value");
+    }
+    size_t dtype_start = dtype_quote + 1;
     size_t dtype_end = header.find("\"", dtype_start);
+    if (dtype_end == std::string::npos) {
+      return ioError("Malformed safetensors header: unterminated dtype");
+    }
     std::string dtype_str = header.substr(dtype_start, dtype_end - dtype_start);
     torch::ScalarType dtype = parseDtype(dtype_str);
 
     // Find shape
     std::vector<int64_t> shape_vec;
     size_t shape_pos = header.find("\"shape\"", pos);
+    if (shape_pos == std::string::npos) {
+      return ioError("Malformed safetensors header: missing shape");
+    }
     size_t shape_start = header.find("[", shape_pos);
     size_t shape_end = header.find("]", shape_start);
+    if (shape_start == std::string::npos || shape_end == std::string::npos) {
+      return ioError("Malformed safetensors header: invalid shape array");
+    }
     std::string shape_str = header.substr(shape_start + 1, shape_end - shape_start - 1);
 
     // Parse shape array
@@ -2288,10 +2345,28 @@ lean_object* lean_torch_safetensors_load(
       }
     }
 
+    uint64_t numel = 1;
+    for (int64_t dim_size : shape_vec) {
+      if (dim_size < 0) {
+        return ioError("Malformed safetensors header: negative tensor dimension");
+      }
+      uint64_t dim_u64 = static_cast<uint64_t>(dim_size);
+      if (dim_u64 != 0 && numel > std::numeric_limits<uint64_t>::max() / dim_u64) {
+        return ioError("Malformed safetensors header: tensor shape overflows");
+      }
+      numel *= dim_u64;
+    }
+
     // Find data offsets
     size_t offsets_pos = header.find("\"data_offsets\"", pos);
+    if (offsets_pos == std::string::npos) {
+      return ioError("Malformed safetensors header: missing data_offsets");
+    }
     size_t offsets_start = header.find("[", offsets_pos);
     size_t offsets_end = header.find("]", offsets_start);
+    if (offsets_start == std::string::npos || offsets_end == std::string::npos) {
+      return ioError("Malformed safetensors header: invalid data_offsets array");
+    }
     std::string offsets_str = header.substr(offsets_start + 1, offsets_end - offsets_start - 1);
 
     int64_t data_start = 0, data_end = 0;
@@ -2299,16 +2374,48 @@ lean_object* lean_torch_safetensors_load(
     if (comma != std::string::npos) {
       data_start = std::stoll(offsets_str.substr(0, comma));
       data_end = std::stoll(offsets_str.substr(comma + 1));
+    } else {
+      return ioError("Malformed safetensors header: invalid data_offsets");
     }
 
-    int64_t data_size = data_end - data_start;
+    if (data_start < 0 || data_end < data_start) {
+      return ioError("Malformed safetensors header: invalid data offset range");
+    }
+    uint64_t payload_size = file_size - sizeof(header_size) - header_size;
+    if (static_cast<uint64_t>(data_end) > payload_size) {
+      return ioError("Malformed safetensors file: tensor payload exceeds file bounds");
+    }
+
+    uint64_t data_size = static_cast<uint64_t>(data_end - data_start);
+    uint64_t dtype_size = static_cast<uint64_t>(dtypeSize(dtype));
+    if (dtype_size == 0 || numel > std::numeric_limits<uint64_t>::max() / dtype_size) {
+      return ioError("Malformed safetensors header: invalid dtype/shape size");
+    }
+    uint64_t expected_bytes = numel * dtype_size;
+    if (expected_bytes != data_size) {
+      return ioError("Malformed safetensors header: shape/dtype byte size mismatch");
+    }
 
     // Seek to data position (after header)
-    file.seekg(8 + header_size + data_start);
+    uint64_t abs_offset = sizeof(header_size) + header_size + static_cast<uint64_t>(data_start);
+    file.seekg(static_cast<std::streamoff>(abs_offset), std::ios::beg);
+    if (!file.good()) {
+      return ioError("Failed to seek to tensor payload");
+    }
+
+    if (data_size > static_cast<uint64_t>(std::numeric_limits<size_t>::max())) {
+      return ioError("Tensor payload too large to allocate");
+    }
+    if (data_size > static_cast<uint64_t>(std::numeric_limits<std::streamsize>::max())) {
+      return ioError("Tensor payload too large to read in one operation");
+    }
 
     // Read tensor data
-    std::vector<char> buffer(data_size);
-    file.read(buffer.data(), data_size);
+    std::vector<char> buffer(static_cast<size_t>(data_size));
+    if (data_size > 0 &&
+        !file.read(buffer.data(), static_cast<std::streamsize>(data_size))) {
+      return ioError("Failed to read safetensors tensor payload");
+    }
 
     // Create tensor from buffer
     torch::Tensor tensor;
