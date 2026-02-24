@@ -1,25 +1,3 @@
-/-
-  Tyr.lean
-
-  Root module for Tyr - a deep learning library for Lean 4.
-
-  This module exports the core general-purpose infrastructure:
-  - Tensor operations (Torch bindings)
-  - Neural network modules
-  - Optimizers (AdamW, Muon, DistAdam)
-  - Distributed training (DDP, reduce-scatter, sharding)
-  - Data loading
-  - Tokenization
-  - Checkpointing
-  - Metrics
-
-  Model-specific implementations are in Examples/:
-  - Examples/GPT/ - Simple GPT training
-  - Examples/NanoChat/ - NanoChat (modded GPT with tools)
-  - Examples/NanoProof/ - Theorem-proving transformer
-  - Examples/Diffusion/ - Diffusion models
--/
-
 -- Core infrastructure
 import Tyr.Basic
 import Tyr.Torch
@@ -60,3 +38,14 @@ import Tyr.Metrics
 import Tyr.GPU
 import Tyr.GPU.AD
 import Tyr.GPU.AutoGrad
+
+/-!
+# `Tyr`
+
+Root module that re-exports Tyr core tensor, module, optimizer, distributed, data, tokenizer, checkpoint, pipeline, and GPU infrastructure.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+

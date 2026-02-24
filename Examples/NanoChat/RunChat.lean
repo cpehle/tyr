@@ -11,6 +11,16 @@ import Tyr.Tokenizer
 import Examples.NanoChat.ModdedGPT
 import Examples.NanoChat.ModdedTrain
 
+/-!
+# `Examples.NanoChat.RunChat`
+
+CLI chat runner that loads checkpoints and tokenizers and performs autoregressive sampling.
+
+## Overview
+- Example entrypoint intended for runnable end-to-end workflows.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace torch.NanoChat.Chat
 
 open torch

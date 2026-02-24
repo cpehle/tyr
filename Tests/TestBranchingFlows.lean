@@ -4,6 +4,16 @@ import Tyr.Manifolds.Grassmann
 import Tyr.Model.BranchingFlows
 import LeanTest
 
+/-!
+# `Tests.TestBranchingFlows`
+
+Branching flow tests for tree sampling behavior and manifold-related helpers.
+
+## Overview
+- Regression and behavior checks run by the LeanTest-based test suite.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 open torch
 open torch.branching
 open Tyr.AD

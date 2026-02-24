@@ -7,6 +7,16 @@
 import Tyr.GPU.Interpreter.DAG.Node
 import Std.Data.HashMap
 
+/-!
+# `Tyr.GPU.Interpreter.DAG.Builder`
+
+DAG utilities for the GPU interpreter, covering Builder for dependency-aware scheduling.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace Tyr.GPU.Interpreter
 
 open Std (HashMap)

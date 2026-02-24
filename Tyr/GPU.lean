@@ -15,6 +15,16 @@ import Tyr.GPU.Codegen.Loop
 import Tyr.GPU.Codegen.GlobalLayout
 import Tyr.GPU.Codegen.EmitNew
 
+/-!
+# `Tyr.GPU`
+
+User-facing ThunderKittens GPU abstraction that ties together types, capabilities, tile descriptors, and codegen helpers.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace Tyr
 
 -- Re-export main types from GPU submodules

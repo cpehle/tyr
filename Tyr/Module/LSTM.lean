@@ -2,6 +2,16 @@ import Tyr.Basic
 import Tyr.Torch
 import Tyr.Module.Affine
 
+/-!
+# `Tyr.Module.LSTM`
+
+Neural-module building block for LSTM with type-safe tensor interfaces.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace torch
 
 structure LSTM {n m : UInt64} where

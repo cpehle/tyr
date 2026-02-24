@@ -10,6 +10,16 @@ import Tyr.Module.Core
 import Tyr.Module.Derive
 import Tyr.Module.RMSNorm
 
+/-!
+# `Tyr.Model.Flux.QKNorm`
+
+Flux model submodule implementing QK Norm.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace torch.flux
 
 /-- Query-Key normalization.

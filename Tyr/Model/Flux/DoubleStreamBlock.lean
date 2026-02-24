@@ -14,6 +14,16 @@ import Tyr.Model.Flux.RoPE
 import Tyr.Model.Flux.Modulation
 import Tyr.Model.Flux.QKNorm
 
+/-!
+# `Tyr.Model.Flux.DoubleStreamBlock`
+
+Flux model submodule implementing Double Stream Block.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace torch.flux
 
 /-- Self-attention layer for double-stream block -/

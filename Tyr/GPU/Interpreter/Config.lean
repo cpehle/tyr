@@ -7,6 +7,16 @@
 -/
 import Tyr.GPU.Types
 
+/-!
+# `Tyr.GPU.Interpreter.Config`
+
+Configuration types for CUDA interpreters, including warp roles, memory models, and scheduling options.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace Tyr.GPU.Interpreter
 
 open Tyr.GPU

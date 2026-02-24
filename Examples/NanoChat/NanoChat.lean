@@ -31,3 +31,14 @@ import Examples.NanoChat.Generator.Engine
 import Examples.NanoChat.Tasks.LLM
 import Examples.NanoChat.Eval.CORE
 import Examples.NanoChat.Eval.Execution
+
+/-!
+# `Examples.NanoChat.NanoChat`
+
+Root NanoChat module that ties together model, training pipelines, generation, and evaluation tasks.
+
+## Overview
+- Example entrypoint intended for runnable end-to-end workflows.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+

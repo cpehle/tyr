@@ -17,3 +17,14 @@ import Examples.NanoProof.Model
 
 -- Training (requires MCTS/Prover - currently broken)
 -- import Examples.NanoProof.RLTrain
+
+/-!
+# `Examples.NanoProof.NanoProof`
+
+NanoProof example component for Nano Proof, used in theorem-oriented model experiments.
+
+## Overview
+- Example module intended for runnable workflows and reference usage patterns.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+

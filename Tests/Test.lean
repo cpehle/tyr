@@ -5,6 +5,16 @@ import Examples.GPT.Train
 import Examples.NanoProof.Model
 import LeanTest
 
+/-!
+# `Tests.Test`
+
+Core regression tests for tokenizer behavior and baseline model forward and loss sanity checks.
+
+## Overview
+- Regression and behavior checks run by the LeanTest-based test suite.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 open torch
 open torch.gpt
 open torch.train

@@ -6,6 +6,16 @@
 -/
 import Lean.ToExpr
 
+/-!
+# `Tyr.GPU.Types`
+
+Core GPU enums and conversion helpers shared by the GPU interpreter, kernels, and code generation stack.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace Tyr.GPU
 
 /-- GPU floating point types, matching ThunderKittens supported dtypes -/

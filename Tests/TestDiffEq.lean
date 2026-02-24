@@ -1,6 +1,16 @@
 import LeanTest
 import Tyr.DiffEq
 
+/-!
+# `Tests.TestDiffEq`
+
+Differential-equation solver tests covering ODE and SDE solve paths and diffusion-related losses.
+
+## Overview
+- Regression and behavior checks run by the LeanTest-based test suite.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace Tests.DiffEq
 
 open LeanTest

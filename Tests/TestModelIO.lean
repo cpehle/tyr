@@ -7,6 +7,16 @@ import Tyr
 import Examples.NanoChat.ModdedGPT
 import LeanTest
 
+/-!
+# `Tests.TestModelIO`
+
+Model IO regressions for parameter flattening, tensor counting, and state-dict load simulation.
+
+## Overview
+- Regression and behavior checks run by the LeanTest-based test suite.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 open torch
 open torch.moddedGpt
 

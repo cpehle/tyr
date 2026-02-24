@@ -19,6 +19,16 @@ import Tyr.Torch
 import Tyr.TensorStruct
 import Tyr.Module.Derive
 
+/-!
+# `Examples.NanoChat.ModdedGPT`
+
+ModdedGPT architecture with rotary variants, sliding-window attention, and additional stabilization components.
+
+## Overview
+- Example entrypoint intended for runnable end-to-end workflows.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace torch.moddedGpt
 
 open torch

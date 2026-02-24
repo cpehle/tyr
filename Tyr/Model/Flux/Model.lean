@@ -15,6 +15,16 @@ import Tyr.Model.Flux.Modulation
 import Tyr.Model.Flux.SingleStreamBlock
 import Tyr.Model.Flux.DoubleStreamBlock
 
+/-!
+# `Tyr.Model.Flux.Model`
+
+Defines the full Flux Klein diffusion model with stream blocks, modulation, and the end-to-end forward pass.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace torch.flux
 
 /-- MLP embedder for timestep -/

@@ -9,6 +9,16 @@ import Tyr.TensorStruct
 import Tyr.Module.Core
 import Tyr.Module.Derive
 
+/-!
+# `Tyr.Model.VAE.ResnetBlock`
+
+VAE model submodule implementing Resnet Block.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace torch.vae
 
 /-- GroupNorm parameters for VAE.

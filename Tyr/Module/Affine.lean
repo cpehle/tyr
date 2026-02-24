@@ -1,6 +1,16 @@
 import Tyr.Basic
 import Tyr.Torch 
 
+/-!
+# `Tyr.Module.Affine`
+
+Neural-module building block for Affine with type-safe tensor interfaces.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace torch
 
 structure Affine {n m : UInt64} :=

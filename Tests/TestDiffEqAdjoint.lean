@@ -2,6 +2,16 @@ import LeanTest
 import Tyr.DiffEq
 import Tyr.DiffEq.Adjoint.Torch
 
+/-!
+# `Tests.TestDiffEqAdjoint`
+
+Adjoint tests that compare gradient computations against finite-difference references.
+
+## Overview
+- Regression and behavior checks run by the LeanTest-based test suite.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace Tests.DiffEqAdjoint
 
 open LeanTest

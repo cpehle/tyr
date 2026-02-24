@@ -13,6 +13,16 @@
 import Tyr.Tokenizer.Types
 import Tyr.Tokenizer.SpecialTokens
 
+/-!
+# `Tyr.Tokenizer.IO`
+
+Tokenizer submodule for IO, used in text preprocessing and generation pipelines.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace tokenizer
 
 /-- Magic number for the file format -/

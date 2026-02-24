@@ -10,6 +10,16 @@ import Tyr.Module.Core
 import Tyr.Module.Derive
 import Tyr.Model.VAE.ResnetBlock
 
+/-!
+# `Tyr.Model.VAE.Upsample`
+
+VAE model submodule implementing Upsample.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace torch.vae
 
 /-- Upsampling block: 2× nearest-neighbor upsample + 3×3 conv -/

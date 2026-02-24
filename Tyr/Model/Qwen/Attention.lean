@@ -10,6 +10,16 @@ import Tyr.Module.Core
 import Tyr.Module.Derive
 import Tyr.Model.Qwen.Config
 
+/-!
+# `Tyr.Model.Qwen.Attention`
+
+Qwen model submodule implementing Attention.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace torch.qwen
 
 /-- Qwen attention with Grouped Query Attention (GQA).

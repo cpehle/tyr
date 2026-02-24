@@ -8,6 +8,16 @@
 -/
 import Tyr.Torch
 
+/-!
+# `Examples.Diffusion.DiffusionSchedule`
+
+Masked diffusion schedule logic that controls mask probability over training progress.
+
+## Overview
+- Example entrypoint intended for runnable end-to-end workflows.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace torch.diffusion
 
 open torch

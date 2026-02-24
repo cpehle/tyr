@@ -7,6 +7,16 @@ import Examples.Diffusion.DiffusionSchedule
 import Examples.Diffusion.DiffusionTrain
 import LeanTest
 
+/-!
+# `Tests.TestDiffusion`
+
+Diffusion tests covering schedules, masked losses, sampling behavior, and training-step sanity.
+
+## Overview
+- Regression and behavior checks run by the LeanTest-based test suite.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 open torch
 open torch.diffusion
 open torch.nanoproof (RotaryCache)

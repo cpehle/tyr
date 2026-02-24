@@ -9,6 +9,16 @@ import Tyr.Model.Qwen.Config
 import Tyr.Model.Qwen.Model
 import Tyr.Model.Qwen.RoPE
 
+/-!
+# `Tyr.Model.Qwen.Embedder`
+
+Qwen model submodule implementing Embedder.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace torch.qwen
 
 /-- Configuration for Flux text embedding.

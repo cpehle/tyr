@@ -9,6 +9,16 @@ import Tyr.Tokenizer.ByteLevel
 import Lean.Data.Json
 import Lean.Data.Json.FromToJson.Basic
 
+/-!
+# `Tyr.Tokenizer.Qwen3`
+
+Tokenizer submodule for Qwen3, used in text preprocessing and generation pipelines.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace tokenizer.qwen3
 
 open Lean

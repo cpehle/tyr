@@ -10,6 +10,16 @@ import Tyr.Data.Download
 import Tyr.Data.Pretraining
 import Lean.Data.Json
 
+/-!
+# `Tyr.Data.HuggingFace`
+
+Implements HuggingFace dataset ingestion without Python by downloading and parsing Arrow parquet shards.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace torch.Data.HuggingFace
 
 open torch.Data.Download

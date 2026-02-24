@@ -7,6 +7,16 @@
 import Tyr.GPU.Types
 import Tyr.GPU.Capabilities
 
+/-!
+# `Tyr.GPU.Tile`
+
+Defines tile typeclasses and concrete register and shared-memory tile structures used by GPU codegen.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace Tyr.GPU
 
 /-- Base tile concept - all tiles implement this -/

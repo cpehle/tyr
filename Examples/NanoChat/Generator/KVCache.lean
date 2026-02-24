@@ -12,6 +12,16 @@
 import Tyr.Torch
 import Tyr.TensorStruct
 
+/-!
+# `Examples.NanoChat.Generator.KVCache`
+
+NanoChat generation subsystem module for KV Cache.
+
+## Overview
+- Example module intended for runnable workflows and reference usage patterns.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace torch.Generator.KVCache
 
 open torch

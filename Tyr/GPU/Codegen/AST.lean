@@ -6,6 +6,16 @@
 -/
 import Tyr.GPU.Types
 
+/-!
+# `Tyr.GPU.Codegen.AST`
+
+GPU code generation component for AST, used to lower high-level tile programs to backend code.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace Tyr.GPU.Codegen
 
 /-- MMA transpose modes -/

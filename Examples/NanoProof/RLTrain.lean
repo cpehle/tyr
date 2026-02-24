@@ -8,6 +8,16 @@
 -/
 import Examples.GPT.Train
 
+/-!
+# `Examples.NanoProof.RLTrain`
+
+NanoProof example component for RL Train, used in theorem-oriented model experiments.
+
+## Overview
+- Example module intended for runnable workflows and reference usage patterns.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace rltrain
 
 /-- Training transition: (state, action, value) -/

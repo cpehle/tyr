@@ -10,6 +10,16 @@ import Tyr.GPU.Codegen.GlobalLayout
 import Tyr.GPU.Codegen.Macros
 import Tyr.GPU.Codegen.Attribute
 
+/-!
+# `Tyr.GPU.Kernels.MhaH100`
+
+GPU kernel module implementing Mha H100 primitives for accelerated model workloads.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace Tyr.GPU.Kernels
 
 open Tyr.GPU

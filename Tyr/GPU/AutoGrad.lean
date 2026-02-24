@@ -1,6 +1,16 @@
 import Tyr.AutoGrad
 import Tyr.GPU.Codegen.IR
 
+/-!
+# `Tyr.GPU.AutoGrad`
+
+Implements GPU linearization and transpose tracing that emits linear instructions for backward passes.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace Tyr.GPU.AD
 
 open Tyr.AD

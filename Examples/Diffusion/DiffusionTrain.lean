@@ -11,6 +11,16 @@ import Examples.Diffusion.Diffusion
 import Examples.Diffusion.DiffusionSchedule
 import Examples.Diffusion.DiffusionCheckpoint
 
+/-!
+# `Examples.Diffusion.DiffusionTrain`
+
+Training loop for discrete diffusion with warmup and decay schedules, clipping, eval, and checkpointing.
+
+## Overview
+- Example entrypoint intended for runnable end-to-end workflows.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace torch.diffusion.train
 
 open torch

@@ -3,6 +3,16 @@
 
 import Tyr.Basic
 
+/-!
+# `Tyr.XLA`
+
+XLA interop hooks and experimental integration points for compilation-oriented execution backends.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace xla
 
 -- XLA opaque types following LLVM bindings pattern exactly

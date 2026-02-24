@@ -9,6 +9,16 @@ import Tyr.TensorStruct
 import Tyr.Module.Core
 import Tyr.Module.Derive
 
+/-!
+# `Tyr.Model.Flux.Modulation`
+
+Flux model submodule implementing Modulation.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace torch.flux
 
 /-- Create sinusoidal timestep embeddings.

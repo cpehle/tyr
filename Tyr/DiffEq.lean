@@ -41,3 +41,14 @@ import Tyr.DiffEq.Solver.LeapfrogMidpoint
 import Tyr.DiffEq.StepSizeController
 import Tyr.DiffEq.Integrate
 import Tyr.DiffEq.Adjoint
+
+/-!
+# `Tyr.DiffEq`
+
+Aggregates the differential-equation toolkit by re-exporting types, terms, solvers, adjoint helpers, and utilities.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+

@@ -2,6 +2,16 @@ import LeanTest
 import Tyr.Tokenizer
 import Tyr.Data.Task
 
+/-!
+# `Tests.TestNanoChatTokens`
+
+NanoChat token and template tests for special-token ordering and stream windowing.
+
+## Overview
+- Regression and behavior checks run by the LeanTest-based test suite.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 open tokenizer
 open torch
 open torch.Data.Task

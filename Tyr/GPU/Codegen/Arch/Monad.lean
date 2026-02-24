@@ -8,6 +8,16 @@ import Tyr.GPU.Codegen.Arch.Level
 import Tyr.GPU.Codegen.Monad
 import Tyr.GPU.Codegen.IR
 
+/-!
+# `Tyr.GPU.Codegen.Arch.Monad`
+
+Architecture-specific GPU code generation support for Monad within the ThunderKittens backend.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace Tyr.GPU.Codegen.Arch
 
 open Tyr.GPU

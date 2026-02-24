@@ -2,6 +2,16 @@ import LeanTest
 import Lean.Data.Json
 import Examples.NanoChat.Tasks.LLM
 
+/-!
+# `Tests.TestNanoChatTasks`
+
+NanoChat task parsing tests for JSON task formats and helper behavior.
+
+## Overview
+- Regression and behavior checks run by the LeanTest-based test suite.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 open torch.Tasks.LLM
 
 private def parseJsonOrFail (raw : String) : IO Lean.Json := do

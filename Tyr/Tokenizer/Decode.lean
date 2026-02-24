@@ -6,6 +6,16 @@
 import Tyr.Tokenizer.Types
 import Tyr.Tokenizer.ByteLevel
 
+/-!
+# `Tyr.Tokenizer.Decode`
+
+Tokenizer submodule for Decode, used in text preprocessing and generation pipelines.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace tokenizer
 
 /-- Decode UTF-8 bytes, falling back to byte-level rendering for invalid streams. -/

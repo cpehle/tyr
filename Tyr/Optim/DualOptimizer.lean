@@ -13,6 +13,16 @@ import Tyr.Optim.NorMuon
 import Tyr.Optim.DistAdam
 import Tyr.Optim.Scheduler
 
+/-!
+# `Tyr.Optim.DualOptimizer`
+
+Optimizer submodule for Dual Optimizer, used in training-time parameter updates.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace torch.Optim.DualOptimizer
 
 open torch

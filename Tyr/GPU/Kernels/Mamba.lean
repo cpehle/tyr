@@ -14,6 +14,16 @@ import Tyr.GPU.Codegen.GlobalLayout
 import Tyr.GPU.Codegen.EmitNew
 import Tyr.GPU.Codegen.Attribute
 
+/-!
+# `Tyr.GPU.Kernels.Mamba`
+
+GPU kernel module implementing Mamba primitives for accelerated model workloads.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace Tyr.GPU.Kernels
 
 open Tyr.GPU

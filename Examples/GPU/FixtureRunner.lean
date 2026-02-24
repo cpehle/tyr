@@ -1,5 +1,15 @@
 /- Shared fixture/runner helpers for GPU kernel end-to-end examples. -/
 
+/-!
+# `Examples.GPU.FixtureRunner`
+
+GPU example utility module for Fixture Runner.
+
+## Overview
+- Example module intended for runnable workflows and reference usage patterns.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace Examples.GPU
 
 structure FixtureSpec where

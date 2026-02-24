@@ -10,6 +10,16 @@ import Examples.GPT.GPT
 import Examples.GPT.Train
 import Examples.GPT.GPTDataLoader
 
+/-!
+# `Examples.TrainGPT`
+
+Runnable GPT training script that prepares data, configures execution, and emits sampled outputs.
+
+## Overview
+- Example entrypoint intended for runnable end-to-end workflows.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace Examples.TrainGPT
 
 open torch

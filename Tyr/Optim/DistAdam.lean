@@ -23,6 +23,16 @@ import Tyr.TensorStruct
 import Tyr.Distributed
 import Tyr.Sharding
 
+/-!
+# `Tyr.Optim.DistAdam`
+
+Distributed Adam optimizer with shard-aware updates, communication primitives, and TensorStruct-managed state.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace torch.Optim.DistAdam
 
 open torch

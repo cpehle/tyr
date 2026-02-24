@@ -6,6 +6,16 @@
 -/
 import Tyr.Tokenizer.Types
 
+/-!
+# `Tyr.Tokenizer.ByteLevel`
+
+Tokenizer submodule for Byte Level, used in text preprocessing and generation pipelines.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace tokenizer
 
 /-- GPT-2/GPT-4 byte-to-unicode mapping.

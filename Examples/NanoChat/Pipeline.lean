@@ -28,6 +28,16 @@ import Examples.NanoChat.Eval.CORE
 import Examples.NanoChat.Eval.COREData
 import Examples.NanoChat.Tasks.LLM
 
+/-!
+# `Examples.NanoChat.Pipeline`
+
+Pipeline orchestrator for tokenizer training, data downloads, staged workflows, and evaluations.
+
+## Overview
+- Example entrypoint intended for runnable end-to-end workflows.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace torch.NanoChat.Pipeline
 
 open torch

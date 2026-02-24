@@ -10,6 +10,16 @@ import Tyr.Module.Core
 import Tyr.Module.Derive
 import Tyr.Optim
 
+/-!
+# `Examples.GPT.GPT`
+
+Dependently-typed GPT model implementation with causal attention, blocks, dropout, and loss helpers.
+
+## Overview
+- Example entrypoint intended for runnable end-to-end workflows.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace torch.gpt
 
 /-- GPT model configuration -/

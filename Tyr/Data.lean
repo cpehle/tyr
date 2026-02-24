@@ -17,3 +17,14 @@ import Tyr.Data.TaskClass
 import Tyr.Data.Tasks
 import Tyr.Data.Pipeline
 import Tyr.Data.Pretraining
+
+/-!
+# `Tyr.Data`
+
+Entry point for Tyr data components, including tasks, pipelines, pretraining streams, and related utilities.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+

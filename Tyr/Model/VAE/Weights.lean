@@ -18,6 +18,16 @@
 import Tyr.Torch
 import Tyr.Model.VAE.Decoder
 
+/-!
+# `Tyr.Model.VAE.Weights`
+
+VAE model submodule implementing Weights.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace torch.vae
 
 /-- Load GroupNorm parameters -/

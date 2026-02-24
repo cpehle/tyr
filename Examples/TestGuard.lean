@@ -3,6 +3,15 @@ import Tyr.Module.Core
 import Tyr.Widget  -- This enables deriving ToModuleDisplay
 import Tyr.Module.Linear
 
+/-!
+# `Examples.TestGuard`
+
+Example module for Test Guard, intended for runnable workflows and experimentation.
+
+## Overview
+- Example module intended for runnable workflows and reference usage patterns.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
 
 open torch
 

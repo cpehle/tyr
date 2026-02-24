@@ -2,6 +2,16 @@ import LeanTest
 import Tyr.DiffEq
 import Tyr.DiffEq.Adjoint.Core
 
+/-!
+# `Tests.TestDiffEqAdjointCore`
+
+Core adjoint backend tests for backsolve wrappers and reference consistency.
+
+## Overview
+- Regression and behavior checks run by the LeanTest-based test suite.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace Tests.DiffEqAdjointCore
 
 open LeanTest

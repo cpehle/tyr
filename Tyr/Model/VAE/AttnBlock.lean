@@ -10,6 +10,16 @@ import Tyr.Module.Core
 import Tyr.Module.Derive
 import Tyr.Model.VAE.ResnetBlock
 
+/-!
+# `Tyr.Model.VAE.AttnBlock`
+
+VAE model submodule implementing Attn Block.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace torch.vae
 
 /-- Self-attention block for VAE.

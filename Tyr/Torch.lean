@@ -1,42 +1,62 @@
 import Tyr.Basic
 
+/-!
+# `Tyr.Torch`
+
+Core tensor and neural-network operation bindings to LibTorch, including creation ops, shape helpers, autograd, and functional primitives.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace torch
 
--- | Tensor Creation API
--- All creation functions support an optional device parameter (defaults to CPU)
+/-- Create a 1-D integer range tensor `[start, start + step, ...]` up to `stop` (exclusive). -/
 @[extern "lean_torch_arange"] opaque arange (start : UInt64) (stop : UInt64) (step : UInt64 := 1) : T #[(stop - start)/step]
+/-- Create an identity matrix of size `n x n`. -/
 @[extern "lean_torch_eye"] opaque eye (n : UInt64) (requires_grad : Bool := false) : T #[n, n]
--- full: Returns a tensor filled with a single value
+/-- Create a tensor filled with a scalar value. -/
 @[extern "lean_torch_full"] opaque full (s : Shape) (value : Float) (requires_grad : Bool := false) (device : Device := Device.CPU) : T s
+/-- Create a linearly spaced 1-D tensor from `start` to `stop` inclusive. -/
 @[extern "lean_torch_linspace"] opaque linspace (start : Float) (stop : Float) (steps : UInt64) (requires_grad : Bool := false) : T #[steps]
+/-- Create a logarithmically spaced 1-D tensor with configurable base. -/
 @[extern "lean_torch_logspace"] opaque logspace (start : Float) (stop : Float) (steps : UInt64) (base : Float := 10.0) (requires_grad : Bool := false) : T #[steps]
--- rand: Returns a tensor filled with values drawn from a uniform distribution on [0, 1)
+/-- Sample a tensor from a uniform distribution on `[0, 1)`. -/
 @[extern "lean_torch_rand"] opaque rand (s : Shape) (requires_grad : Bool := false) (device : Device := Device.CPU) : IO (T s)
--- ones: Returns a tensor filled with all ones
+/-- Create a tensor filled with ones. -/
 @[extern "lean_torch_ones"] opaque ones (s : Shape) (requires_grad : Bool := false) (device : Device := Device.CPU) : T s
+/-- Sample integer values uniformly in `[low, high)` with shape `s`. -/
 @[extern "lean_torch_randint"] opaque randint (low : Int64) (high : Int64) (s : Shape) (requires_grad : Bool := false) (device : Device := Device.CPU) : IO (T s)
--- zeros: Returns a tensor filled with all zeros
+/-- Create a tensor filled with zeros. -/
 @[extern "lean_torch_zeros"] opaque zeros (s : Shape) (requires_grad : Bool := false) (device : Device := Device.CPU) : T s
--- randn: Returns a tensor filled with values drawn from a unit normal distribution
+/-- Sample a tensor from a standard normal distribution. -/
 @[extern "lean_torch_randn"] opaque randn (s : Shape) (requires_grad : Bool := false) (device : Device := Device.CPU) : IO (T s)
 
--- zeros_like: Returns a tensor filled with zeros, same shape/device as input
+/-- Create a zero-filled tensor with the same shape and device as `t`. -/
 @[extern "lean_torch_zeros_like"] opaque zeros_like {s : Shape} (t : @& T s) : T s
--- ones_like: Returns a tensor filled with ones, same shape/device as input
+/-- Create a one-filled tensor with the same shape and device as `t`. -/
 @[extern "lean_torch_ones_like"] opaque ones_like {s : Shape} (t : @& T s) : T s
 
+/-- Query whether a tensor participates in autograd. -/
 @[extern "lean_torch_requires_grad"] opaque T.requires_grad {s : Shape} (t : @& T s) : Bool
 
 instance (shape : Shape) : Inhabited (T shape) := ⟨zeros shape⟩
 
+/-- Elementwise tensor addition. -/
 @[extern "lean_torch_tensor_add"] opaque add {s : Shape} (t t' : @& T s) : T s
+/-- Elementwise tensor subtraction. -/
 @[extern "lean_torch_tensor_sub"] opaque sub {s : Shape} (t t' : @& T s) : T s
+/-- Elementwise tensor multiplication. -/
 @[extern "lean_torch_tensor_mul"] opaque mul {s : Shape} (t t' : @& T s) : T s
 
--- Scalar-tensor operations
+/-- Multiply each tensor element by a scalar. -/
 @[extern "lean_torch_mul_scalar"] opaque mul_scalar {s : Shape} (t : @& T s) (scalar : Float) : T s
+/-- Divide each tensor element by a scalar. -/
 @[extern "lean_torch_div_scalar"] opaque div_scalar {s : Shape} (t : @& T s) (scalar : Float) : T s
+/-- Add a scalar to each tensor element. -/
 @[extern "lean_torch_add_scalar"] opaque add_scalar {s : Shape} (t : @& T s) (scalar : Float) : T s
+/-- Subtract a scalar from each tensor element. -/
 @[extern "lean_torch_sub_scalar"] opaque sub_scalar {s : Shape} (t : @& T s) (scalar : Float) : T s
 
 instance {shape : Shape} : Add (T shape) where
@@ -55,13 +75,16 @@ instance {shape : Shape} : HSub (T shape) Float (T shape) where
   hSub := sub_scalar
 
 
+/-- Sample uniformly in `[min, max)` by affine-transforming `rand`. -/
 def uniform (s : Shape) (min : Float := 0.0) (max : Float := 1.0) : IO (T s) := do
   let max := full s max;
   let min := full s min;
   let x ← rand s;
   return (min + (max - min) * x)
 
+/-- Index into the leading dimension and return the remaining slice. -/
 @[extern "lean_torch_get"] opaque T.getOp {s : Shape} (self : @& T s) (idx : Int) : T (s[1:].toArray)
+/-- Move a tensor to a target device. -/
 @[extern "lean_torch_to"] opaque T.to {s : Shape} (self : @& T s) (device : Device) : T s
 
 /-- Check if CUDA is available -/
@@ -85,7 +108,9 @@ def getBestDevice : IO Device := do
   if ← mps_is_available then return Device.MPS
   if ← cuda_is_available then return Device.CUDA 0
   return Device.CPU
+/-- Batched linear projection `[b,m] @ [n,m]^T -> [b,n]`. -/
 @[extern "lean_torch_linear"] opaque linear {m n b : UInt64} (x : @& T #[b, m]) (M : @& T #[n,m]) : T #[b, n]
+/-- Batched affine projection `[b,m] @ [n,m]^T + bias`. -/
 @[extern "lean_torch_affine"] opaque affine {m n b : UInt64} (x : @& T #[b, m]) (M : @& T #[n,m]) (bias : @& T #[n]) : T #[b, n]
 
 /-- Linear projection for 3D input: [batch, seq, in] @ [out, in]^T -> [batch, seq, out] -/
@@ -108,6 +133,7 @@ def slicedShape (s : Shape) (dim : Nat) (start : UInt64) (stop : UInt64) (step :
     s' ++ #[d] ++ s''
   else s
 
+/-- Compute the output size of one spatial dimension under convolution parameters. -/
 def convOutputSize (input_size kernel_size : UInt64) (stride : UInt64 := 1) (padding : UInt64 := 0) (dilation : UInt64 := 1) : UInt64 :=
   (input_size + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1
 
@@ -162,28 +188,44 @@ def pool2dShape (input_shape kernel_size : Shape) (stride padding : Shape) : Sha
   let output_width := poolOutputSize input_width (kernel_size.getD 1 0) (effective_stride.getD 1 0) (padding.getD 1 0)
   #[batch, channels, output_height, output_width]
 
+/-- Slice a tensor along `dim` with `[start, stop)` and step `step`. -/
 @[extern "lean_torch_slice"] opaque T.slice {s : Shape} (self : @& T s) (dim : Nat := 0) (start : Int64 := 0) (stop : Int64 := -1) (step : Int64 := 1) : T s
 --
 --
 namespace autograd
 
+/-- Reverse-mode gradient of `y` with respect to `x`, weighted by `dy`. -/
 @[extern "lean_torch_tensor_grad"] opaque grad {sx sy : Shape} (y : (@& T sy)) (x : (@& T sx)) (dy : (@& T sy)) : (T sx)
 
+/-- Return output and backward pullback for a function evaluated at `x`. -/
 def pullback {sx sy : Shape} (f : T sx → T sy) (x : T sx) (dy : T sy) : T sx :=
     grad (f x) x dy
 
+/-- Read gradient currently accumulated on `x`. -/
 @[extern "lean_torch_grad_of"] opaque grad_of {s : Shape} (x : @& T s) : T s
+/-- Zero the gradient buffer attached to `x`. -/
 @[extern "lean_torch_zero_grad"] opaque zero_grad {s : Shape} (x : @& T s) : T s
+/-- Toggle `requires_grad` on `x`. -/
 @[extern "lean_torch_set_requires_grad"] opaque set_requires_grad {s : Shape} (x : @& T s) (requires_grad : Bool) : T s
+/-- Detach `x` from the current autograd graph. -/
 @[extern "lean_torch_detach"] opaque detach {s : Shape} (x : @& T s) : T s
+/-- Clone tensor storage for `x`. -/
 @[extern "lean_torch_clone"] opaque clone {s : Shape} (x : @& T s) : T s
+/-- Retain gradient on a non-leaf tensor. -/
 @[extern "lean_torch_retain_grad"] opaque retain_grad {s : Shape} (x : @& T s) : T s
+/-- Check whether `x` is a leaf tensor in the autograd graph. -/
 @[extern "lean_torch_is_leaf"] opaque is_leaf {s : Shape} (x : @& T s) : Bool
+/-- Check whether `x` has a gradient function. -/
 @[extern "lean_torch_has_grad_fn"] opaque has_grad_fn {s : Shape} (x : @& T s) : Bool
+/-- Accumulate an additional gradient contribution into `x`. -/
 @[extern "lean_torch_accumulate_grad"] opaque accumulate_grad {s : Shape} (x : @& T s) (grad : @& T s) : T s
+/-- Replace the gradient buffer on `x` with `grad`. -/
 @[extern "lean_torch_set_grad"] opaque set_grad {s : Shape} (x : @& T s) (grad : @& T s) : T s
+/-- Globally enable or disable gradient tracking. -/
 @[extern "lean_torch_set_grad_enabled"] opaque set_grad_enabled (enabled : Bool) : IO Unit
+/-- Query whether gradient tracking is globally enabled. -/
 @[extern "lean_torch_is_grad_enabled"] opaque is_grad_enabled : IO Bool
+/-- Second-order gradient helper for `z(y(x))` style pipelines. -/
 @[extern "lean_torch_grad_grad"] opaque grad_grad {sx sy sz : Shape}
     (z : @& T sz) (y : @& T sy) (x : @& T sx) (grad_z : @& T sz) (grad_y : @& T sy) : T sx
 
@@ -224,16 +266,20 @@ instance {s : Shape} : differentiable (torch.T s) := ⟨torch.T s, fun (t : (tor
 def permuteShape (s : Shape) (permutation : Array UInt64) : Shape :=
   permutation.map fun p => s.getD p.toNat 0
 
+/-- Permute tensor axes according to `permutation`. -/
 @[extern "lean_torch_permute"] opaque permute {s : Shape} (t : @& T s) (permutation : Array UInt64) : T (permuteShape s permutation)
+/-- Reshape a tensor to a new shape. -/
 @[extern "lean_torch_reshape"] opaque reshape {s : Shape} (t : @& T s) (s' : Shape) : T s'
+/-- Method-style axis permutation. -/
 @[extern "lean_torch_permute"] opaque T.permute {s : Shape} (self : @& T s) (permutation : Array UInt64) : T (permuteShape s permutation)
+/-- Method-style reshape operation. -/
 @[extern "lean_torch_reshape"] opaque T.reshape {s : Shape} (self : @& T s) (s' : Shape) : T s'
 
--- comparison
+/-- Elementwise closeness check using relative (`rtol`) and absolute (`atol`) tolerances. -/
 @[extern "lean_torch_allclose"] opaque allclose {s : Shape} (a b : @& T s) (rtol : Float := 1e-05) (atol : Float := 1e-08): Bool
 
 namespace nn
--- torch::nn::functional::adaptive_avg_pool1d
+/-- Adaptive average pooling in 2D to the requested `output_size`. -/
 @[extern "lean_torch_adaptive_avg_pool2d"] opaque adaptive_avg_pool2d {input_shape : Shape} (input : @& T input_shape) (output_size : Array UInt64) : T (#[input_shape.getD 0 0, input_shape.getD 1 0] ++ output_size)
 -- torch::nn::functional::adaptive_avg_pool3d
 -- torch::nn::functional::adaptive_max_pool1d
@@ -243,19 +289,25 @@ namespace nn
 -- torch::nn::functional::adaptive_max_pool3d_with_indices
 -- torch::nn::functional::affine_grid
 -- torch::nn::functional::alpha_dropout
--- torch::nn::functional::avg_pool1d
+/-- Average pooling over 2D spatial dimensions. -/
 @[extern "lean_torch_avg_pool2d"] opaque avg_pool2d {input_shape : Shape} (input : @& T input_shape) (kernel_size : Array UInt64) (stride : Array UInt64 := #[]) (padding : Array UInt64 := #[0, 0]) : T (pool2dShape input_shape kernel_size stride padding)
 -- torch::nn::functional::avg_pool3d
+/-- Batch normalization wrapper for tensors of shape `s`. -/
 @[extern "lean_torch_batch_norm"] opaque batch_norm {s : Shape} (input : @& T s) (weight : Option (T s)) (bias : Option (T s)) (running_mean : Option (T s)) (running_var : Option (T s)) (training : Bool := true) (momentum : Float := 0.1) (eps : Float := 1e-5) : T s
 -- torch::nn::functional::bilinear
+/-- Binary cross-entropy loss with configurable reduction. -/
 @[extern "lean_torch_binary_cross_entropy"] opaque binary_cross_entropy {s : Shape} (input : @& T s) (target : @& T s) (weight : Option (T s) := none) (reduction : String := "mean") : T #[]
 -- torch::nn::functional::binary_cross_entropy_with_logits
 -- torch::nn::functional::celu
+/-- 1D convolution wrapper. -/
 @[extern "lean_torch_conv1d"] opaque conv1d {input_shape weight_shape : Shape} (input : @& T input_shape) (weight : @& T weight_shape) (stride : UInt64 := 1) (padding : UInt64 := 0) (dilation : UInt64 := 1) : T (conv1dShape input_shape weight_shape stride padding dilation)
 -- torch::nn::functional::conv2d
+/-- 2D convolution wrapper. -/
 @[extern "lean_torch_conv2d"] opaque conv2d {input_shape weight_shape : Shape} (input : @& T input_shape) (weight : @& T weight_shape) (stride : Array UInt64 := #[1, 1]) (padding : Array UInt64 := #[0, 0]) (dilation : Array UInt64 := #[1, 1]) : T (conv2dShape input_shape weight_shape stride padding dilation)
 -- torch::nn::functional::conv2d with bias
+/-- 2D convolution wrapper with explicit bias tensor. -/
 @[extern "lean_torch_conv2d_bias"] opaque conv2d_bias {input_shape weight_shape bias_shape : Shape} (input : @& T input_shape) (weight : @& T weight_shape) (bias : @& T bias_shape) (stride : Array UInt64 := #[1, 1]) (padding : Array UInt64 := #[0, 0]) (dilation : Array UInt64 := #[1, 1]) : T (conv2dShape input_shape weight_shape stride padding dilation)
+/-- 3D convolution wrapper. -/
 @[extern "lean_torch_conv3d"] opaque conv3d {input_shape weight_shape : Shape} (input : @& T input_shape) (weight : @& T weight_shape) (stride : Array UInt64 := #[1, 1, 1]) (padding : Array UInt64 := #[0, 0, 0]) (dilation : Array UInt64 := #[1, 1, 1]) : T (conv3dShape input_shape weight_shape stride padding dilation)
 
 /-- Transposed 2D convolution (deconvolution) for upsampling.

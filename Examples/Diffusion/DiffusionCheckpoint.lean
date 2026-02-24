@@ -8,6 +8,16 @@ import Examples.Diffusion.Diffusion
 import Tyr.TensorStruct
 import Tyr.Optim
 
+/-!
+# `Examples.Diffusion.DiffusionCheckpoint`
+
+Checkpoint helpers matching diffusion parameter layout and optimizer state serialization.
+
+## Overview
+- Example entrypoint intended for runnable end-to-end workflows.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace torch.diffusion.checkpoint
 
 open torch

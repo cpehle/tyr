@@ -9,6 +9,16 @@ import Tyr.GPU.Interpreter.DAG.Builder
 import Tyr.GPU.Interpreter.Scheduler.Sequential
 import Std.Data.HashMap
 
+/-!
+# `Tyr.GPU.Interpreter.Scheduler.DAGBased`
+
+DAG-based scheduler that respects dependencies while balancing per-SM execution queues.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace Tyr.GPU.Interpreter
 
 open Std (HashMap)

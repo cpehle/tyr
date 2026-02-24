@@ -6,6 +6,16 @@
 -/
 import Tyr.TensorStruct
 
+/-!
+# `Tyr.Checkpoint`
+
+Provides metadata parsing plus TensorStruct-based save and load routines for model parameters and optimizer states.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace torch.checkpoint
 
 open torch

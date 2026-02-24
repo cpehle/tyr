@@ -8,6 +8,16 @@
 -/
 import Tyr.GPU.Interpreter.Instruction.Base
 
+/-!
+# `Tyr.GPU.Interpreter.Instruction.Transformer`
+
+GPU interpreter instruction definitions and transforms for Transformer.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace Tyr.GPU.Interpreter
 
 open Tyr.GPU

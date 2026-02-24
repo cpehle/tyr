@@ -6,6 +6,16 @@
 -/
 import Tyr.Torch
 
+/-!
+# `Tyr.Model.Qwen.RoPE`
+
+Qwen model submodule implementing Ro PE.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace torch.qwen
 
 /-- Precomputed RoPE cos/sin embeddings for a given sequence length.

@@ -26,6 +26,16 @@ import Examples.NanoChat.ModdedTrain
 import Tyr.Optim.NorMuon
 import Tyr.Optim.DistAdam
 
+/-!
+# `Examples.NanoChat.TrainNanoChat`
+
+Main entrypoint that parses CLI options, initializes distributed setup, and launches training.
+
+## Overview
+- Example entrypoint intended for runnable end-to-end workflows.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 open torch
 open torch.moddedGpt
 open torch.DataLoader

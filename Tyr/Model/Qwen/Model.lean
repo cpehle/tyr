@@ -12,6 +12,16 @@ import Tyr.Model.Qwen.Config
 import Tyr.Model.Qwen.Layer
 import Tyr.Model.Qwen.RoPE
 
+/-!
+# `Tyr.Model.Qwen.Model`
+
+Defines the type-safe Qwen model containing embeddings, transformer layers, and masked forward helpers.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace torch.qwen
 
 /-- Qwen3 model structure.

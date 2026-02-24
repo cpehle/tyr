@@ -7,6 +7,16 @@
 import Std.Data.HashMap
 import Lean.ToExpr
 
+/-!
+# `Tyr.GPU.Codegen.Var`
+
+GPU code generation component for Var, used to lower high-level tile programs to backend code.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace Tyr.GPU.Codegen
 
 /-- Variable identifier (index-based, like Lean4 IR) -/

@@ -8,6 +8,16 @@ import Tyr.Module.Core
 import Tyr.Module.Derive
 import Tyr.Widget
 
+/-!
+# `Tyr.Module.Linear`
+
+Neural-module building block for Linear with type-safe tensor interfaces.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace torch
 
 /-- Linear layer: y = xW^T (+ b optionally)

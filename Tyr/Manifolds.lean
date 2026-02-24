@@ -17,3 +17,14 @@ import Tyr.Manifolds.Stiefel
 import Tyr.Manifolds.Orthogonal
 import Tyr.Manifolds.Grassmann
 import Tyr.Manifolds.Hyperbolic
+
+/-!
+# `Tyr.Manifolds`
+
+Manifold abstraction entrypoint re-exporting supported geometric manifolds and their utilities.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+

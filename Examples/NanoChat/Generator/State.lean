@@ -12,6 +12,16 @@
 -/
 import Tyr.Torch
 
+/-!
+# `Examples.NanoChat.Generator.State`
+
+NanoChat generation subsystem module for State.
+
+## Overview
+- Example module intended for runnable workflows and reference usage patterns.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace torch.Generator.State
 
 open torch

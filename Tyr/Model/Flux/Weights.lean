@@ -8,6 +8,16 @@ import Tyr.Torch
 import Tyr.Model.Flux.Config
 import Tyr.Model.Flux.Model
 
+/-!
+# `Tyr.Model.Flux.Weights`
+
+Flux model submodule implementing Weights.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace torch.flux
 
 /-- Load RMSNorm weights from Flux2 format (uses .scale suffix) -/

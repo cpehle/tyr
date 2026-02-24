@@ -10,6 +10,16 @@ import Examples.Diffusion.DiffusionSchedule
 import Examples.Diffusion.DiffusionTrain
 import Examples.Diffusion.DiffusionCheckpoint
 
+/-!
+# `Examples.TrainDiffusion`
+
+Example module for Train Diffusion, intended for runnable workflows and experimentation.
+
+## Overview
+- Example module intended for runnable workflows and reference usage patterns.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace Examples.TrainDiffusion
 
 open torch

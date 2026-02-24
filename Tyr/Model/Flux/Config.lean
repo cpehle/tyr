@@ -6,6 +6,16 @@
 -/
 import Tyr.Basic
 
+/-!
+# `Tyr.Model.Flux.Config`
+
+Flux model submodule implementing Config.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace torch.flux
 
 /-- Flux model configuration.

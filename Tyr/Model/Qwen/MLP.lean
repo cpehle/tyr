@@ -9,6 +9,16 @@ import Tyr.TensorStruct
 import Tyr.Module.Core
 import Tyr.Module.Derive
 
+/-!
+# `Tyr.Model.Qwen.MLP`
+
+Qwen model submodule implementing MLP.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace torch.qwen
 
 /-- Qwen MLP with SwiGLU activation.

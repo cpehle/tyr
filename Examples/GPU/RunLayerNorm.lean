@@ -3,6 +3,16 @@ import Tyr.Torch
 import Tyr.GPU.Kernels.LayerNormResidual
 import Examples.GPU.FixtureRunner
 
+/-!
+# `Examples.GPU.RunLayerNorm`
+
+Runnable GPU example that exercises the Run Layer Norm kernel path end to end.
+
+## Overview
+- Example module intended for runnable workflows and reference usage patterns.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace Examples.GPU
 
 open torch

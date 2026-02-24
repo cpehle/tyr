@@ -12,6 +12,16 @@
 import Tyr.Torch
 import Tyr.Distributed
 
+/-!
+# `Tyr.Optim.PolarExpress`
+
+Optimizer submodule for Polar Express, used in training-time parameter updates.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace torch.Optim.PolarExpress
 
 open torch

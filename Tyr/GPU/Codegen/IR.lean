@@ -8,6 +8,16 @@ import Tyr.GPU.Types
 import Tyr.GPU.Codegen.Var
 import Tyr.GPU.Codegen.AST
 
+/-!
+# `Tyr.GPU.Codegen.IR`
+
+GPU code generation component for IR, used to lower high-level tile programs to backend code.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace Tyr.GPU.Codegen
 
 open Tyr.GPU

@@ -8,6 +8,16 @@ import Tyr.GPU.Interpreter.Instruction.Base
 import Tyr.GPU.Interpreter.Instruction.Tile
 import Tyr.GPU.Interpreter.Instruction.Transformer
 
+/-!
+# `Tyr.GPU.Interpreter.DAG.Node`
+
+DAG utilities for the GPU interpreter, covering Node for dependency-aware scheduling.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace Tyr.GPU.Interpreter
 
 /-- Existential wrapper for any instruction type -/

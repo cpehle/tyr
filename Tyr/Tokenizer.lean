@@ -13,3 +13,14 @@ import Tyr.Tokenizer.TokenBytes
 import Tyr.Tokenizer.Training
 import Tyr.Tokenizer.IO
 import Tyr.Tokenizer.Qwen3
+
+/-!
+# `Tyr.Tokenizer`
+
+Tokenizer entrypoint that re-exports byte-level processing, encoding/decoding, and training utilities.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+

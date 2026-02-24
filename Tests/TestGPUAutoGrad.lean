@@ -3,6 +3,16 @@ import Tyr.GPU.Codegen.IR
 import LeanTest
 import Lean.CoreM
 
+/-!
+# `Tests.TestGPUAutoGrad`
+
+GPU autodiff tests for trace generation, linearization, transpose, and VJP behavior.
+
+## Overview
+- Regression and behavior checks run by the LeanTest-based test suite.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 open Tyr.GPU.Codegen
 open Tyr.GPU.AD
 open Tyr.AD

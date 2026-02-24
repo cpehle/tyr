@@ -13,6 +13,16 @@ import Tyr.Model.Qwen.Config
 import Tyr.Model.Qwen.Attention
 import Tyr.Model.Qwen.MLP
 
+/-!
+# `Tyr.Model.Qwen.Layer`
+
+Qwen model submodule implementing Layer.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace torch.qwen
 
 /-- Qwen transformer layer.

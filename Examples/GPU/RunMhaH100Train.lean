@@ -4,6 +4,16 @@
 import Tyr.Torch
 import Tyr.GPU.Kernels.MhaH100
 
+/-!
+# `Examples.GPU.RunMhaH100Train`
+
+Runnable GPU example that exercises the Run Mha H100 Train kernel path end to end.
+
+## Overview
+- Example module intended for runnable workflows and reference usage patterns.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace Examples.GPU
 
 open torch

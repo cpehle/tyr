@@ -13,6 +13,16 @@ import Tyr.Model.Flux
 import Tyr.Model.Flux.Weights
 import Tyr.Tokenizer.Qwen3
 
+/-!
+# `Examples.Flux.FluxDebug`
+
+Debug variant of the Flux demo that persists intermediate tensors for inspection and troubleshooting.
+
+## Overview
+- Example entrypoint intended for runnable end-to-end workflows.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace Examples.Flux
 
 open torch

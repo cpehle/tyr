@@ -6,6 +6,16 @@
 -/
 import Tyr.Torch
 
+/-!
+# `Tyr.Model.Flux.RoPE`
+
+Flux model submodule implementing Ro PE.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace torch.flux
 
 private def axisIds {batch seq : UInt64} (ids : T #[batch, seq, 4]) (axis : UInt64) : T #[batch, seq] :=

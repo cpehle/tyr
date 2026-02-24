@@ -7,6 +7,16 @@ import Tyr.Tokenizer.Types
 import Tyr.Tokenizer.ByteLevel
 import Tyr.Tokenizer.Pretokenize
 
+/-!
+# `Tyr.Tokenizer.Encode`
+
+Tokenizer submodule for Encode, used in text preprocessing and generation pipelines.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace tokenizer
 
 /-- Insert a special token into an array sorted by decreasing token length. -/

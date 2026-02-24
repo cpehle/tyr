@@ -14,6 +14,16 @@ import Tyr.Torch
 import Tyr.TensorStruct
 import Examples.NanoProof.Model
 
+/-!
+# `Examples.Diffusion.Diffusion`
+
+Discrete diffusion transformer example composed from NanoProof blocks with attention and MLP components.
+
+## Overview
+- Example entrypoint intended for runnable end-to-end workflows.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace torch.diffusion
 
 open torch

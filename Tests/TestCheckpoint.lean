@@ -11,6 +11,16 @@ import Tyr.Optim.DistAdam
 import Tyr.Optim.NorMuon
 import LeanTest
 
+/-!
+# `Tests.TestCheckpoint`
+
+Checkpoint tests validating TensorStruct traversal across model and optimizer state structures.
+
+## Overview
+- Regression and behavior checks run by the LeanTest-based test suite.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 open torch
 open torch.ModdedTrain
 open torch.Optim

@@ -21,6 +21,16 @@ import Tyr.Model.VAE.ResnetBlock
 import Tyr.Model.VAE.AttnBlock
 import Tyr.Model.VAE.Upsample
 
+/-!
+# `Tyr.Model.VAE.Decoder`
+
+VAE model submodule implementing Decoder.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace torch.vae
 
 /-- Full VAE Decoder (BFL format).

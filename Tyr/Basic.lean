@@ -1,24 +1,51 @@
+/-!
+# `Tyr.Basic`
+
+Foundational tensor types and shape/device/dtype abstractions used by the entire Tyr stack.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Defines canonical shape, dtype, and device representations shared by tensor operations.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace torch
 
+/-- Tensor shape represented as an array of dimensions. -/
 abbrev Shape := Array UInt64
 
+/-- Supported tensor element data types. -/
 inductive DType where
-| UInt8
-| Int8
-| Int16
-| Int32
-| Int64
-| Float16
-| Float32
-| Float64
+  /-- Unsigned 8-bit integer type. -/
+  | UInt8
+  /-- Signed 8-bit integer type. -/
+  | Int8
+  /-- Signed 16-bit integer type. -/
+  | Int16
+  /-- Signed 32-bit integer type. -/
+  | Int32
+  /-- Signed 64-bit integer type. -/
+  | Int64
+  /-- IEEE fp16 floating-point type. -/
+  | Float16
+  /-- IEEE fp32 floating-point type. -/
+  | Float32
+  /-- IEEE fp64 floating-point type. -/
+  | Float64
 
+/-- Execution device placement for tensor storage and compute. -/
 inductive Device where
-| CUDA : UInt64 → Device
-| CPU
-| MPS
+  /-- CUDA device with an explicit device index. -/
+  | CUDA : UInt64 → Device
+  /-- CPU device. -/
+  | CPU
+  /-- Apple Metal (MPS) device. -/
+  | MPS
 deriving Repr, Inhabited, BEq
 
+/-- Opaque tensor carrier type equipped with a global `Nonempty` witness. -/
 opaque TSpec : NonemptyType
+/-- Tensor type indexed by a compile-time shape. -/
 def T (_ : Shape) : Type :=  TSpec.type
 
 /-! ## Shape Manipulation Helpers -/
@@ -107,7 +134,9 @@ def matmulShape (s1 s2 : Shape) : Shape :=
 instance (s : Shape) : Nonempty (T s) :=
   TSpec.property
 
+/-- Convert a tensor to its backend-provided string representation. -/
 @[extern "lean_torch_to_string"] opaque T.toString {s : Shape} (t : @& T s) : String
+/-- Print a tensor using backend formatting utilities. -/
 @[extern "lean_torch_tensor_print"] opaque T.print {s : Shape} (t : @& T s) : IO Unit
 
 /-! ## Tensor Metadata Extraction (for visualization widgets) -/
@@ -140,6 +169,7 @@ opaque T.stats {s : Shape} (t : @& T s) : String
 instance {s : Shape} : ToString (T s) where
   toString t := t.toString
 
+/-- Return the compile-time shape index associated with a tensor value. -/
 def T.shape {s : Shape} (_t : T s) : Shape := s
 
 instance {s : Shape} : Repr (T s) where

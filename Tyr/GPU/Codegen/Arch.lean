@@ -32,6 +32,16 @@ import Tyr.GPU.Codegen.Arch.Capabilities
 import Tyr.GPU.Codegen.Arch.Ops
 import Tyr.GPU.Codegen.Arch.Polymorphic
 
+/-!
+# `Tyr.GPU.Codegen.Arch`
+
+GPU code generation component for Arch, used to lower high-level tile programs to backend code.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace Tyr.GPU.Codegen
 
 -- Re-export Arch namespace for convenience

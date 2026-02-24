@@ -7,6 +7,16 @@
 import Tyr.GPU.Interpreter.DAG.Node
 import Tyr.GPU.Interpreter.Config
 
+/-!
+# `Tyr.GPU.Interpreter.Scheduler.Sequential`
+
+Sequential scheduling helpers, including round-robin and pooled strategies for instruction streams.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace Tyr.GPU.Interpreter
 
 /-- Create an array with n copies of a value -/

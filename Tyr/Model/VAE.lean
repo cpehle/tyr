@@ -11,6 +11,16 @@ import Tyr.Model.VAE.Upsample
 import Tyr.Model.VAE.Decoder
 import Tyr.Model.VAE.Weights
 
+/-!
+# `Tyr.Model.VAE`
+
+VAE model entrypoint that re-exports decoder blocks, residual blocks, and serialization helpers.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace torch.vae
 
 /-- Full AutoEncoder with BatchNorm statistics for proper normalization.

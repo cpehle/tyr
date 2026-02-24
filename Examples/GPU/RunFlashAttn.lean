@@ -3,6 +3,16 @@ import Tyr.Torch
 import Tyr.GPU.Kernels.MhaH100
 import Examples.GPU.FixtureRunner
 
+/-!
+# `Examples.GPU.RunFlashAttn`
+
+Runnable GPU example that exercises the Run Flash Attn kernel path end to end.
+
+## Overview
+- Example module intended for runnable workflows and reference usage patterns.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace Examples.GPU
 
 open torch

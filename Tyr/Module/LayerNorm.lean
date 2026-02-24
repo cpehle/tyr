@@ -9,6 +9,16 @@ import Tyr.Module.Core
 import Tyr.Module.Derive
 import Tyr.Widget
 
+/-!
+# `Tyr.Module.LayerNorm`
+
+Neural-module building block for Layer Norm with type-safe tensor interfaces.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace torch
 
 /-- Layer Normalization: normalizes over the last dimension.

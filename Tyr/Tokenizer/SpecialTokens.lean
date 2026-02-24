@@ -5,6 +5,16 @@
 -/
 import Tyr.Tokenizer.Types
 
+/-!
+# `Tyr.Tokenizer.SpecialTokens`
+
+Tokenizer submodule for Special Tokens, used in text preprocessing and generation pipelines.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace tokenizer
 
 /-- Core special tokens -/

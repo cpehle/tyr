@@ -6,6 +6,16 @@
 -/
 import Tyr.GPU.Codegen.Arch.Level
 
+/-!
+# `Tyr.GPU.Codegen.Arch.Capabilities`
+
+Architecture-specific GPU code generation support for Capabilities within the ThunderKittens backend.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace Tyr.GPU.Codegen.Arch
 
 open Tyr.GPU

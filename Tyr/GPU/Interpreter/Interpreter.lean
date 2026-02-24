@@ -13,6 +13,16 @@ import Tyr.GPU.Interpreter.DAG.Builder
 import Tyr.GPU.Interpreter.Scheduler.Sequential
 import Tyr.GPU.Interpreter.Scheduler.DAGBased
 
+/-!
+# `Tyr.GPU.Interpreter.Interpreter`
+
+High-level interpreter entry module that re-exports instructions, DAG builders, schedulers, and demo DAG constructors.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace Tyr.GPU.Interpreter
 
 /-- High-level interpreter specification -/

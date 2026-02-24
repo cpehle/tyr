@@ -1,6 +1,16 @@
 import Lean
 import Tyr.GPU.Codegen.FFI
 
+/-!
+# `Tyr.GPU.Codegen.GenerateMain`
+
+GPU code generation component for Generate Main, used to lower high-level tile programs to backend code.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 open Lean
 
 namespace Tyr.GPU.Codegen

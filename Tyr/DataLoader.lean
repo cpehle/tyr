@@ -12,19 +12,38 @@
 import Tyr.Torch
 import Tyr.Distributed
 
+/-!
+# `Tyr.DataLoader`
+
+General-purpose data loading pipeline with shard resolution, BOS-aware iteration, and distributed batch generation.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Provides configuration, shard parsing, iterator state, and distributed data-generator helpers.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace torch.DataLoader
 
 open torch
 
 /-! ## Configuration -/
 
+/-- Runtime configuration for shard discovery and batch generation. -/
 structure Config where
+  /-- Training shard path specification (file, directory, or prefix). -/
   dataPath : String := "data"
+  /-- Optional validation shard path specification. -/
   valPath : Option String := none
+  /-- Sequence length (tokens per training example). -/
   seqLen : UInt64 := 2048
+  /-- Beginning-of-sequence token ID used for document boundary tracking. -/
   bosToken : UInt64 := 50256
+  /-- Requested worker count for producer-side loading. -/
   numWorkers : UInt64 := 4
+  /-- Prefetch buffer depth for queued batches. -/
   bufferSize : UInt64 := 8
+  /-- Seed used for deterministic shuffling and iterator randomization. -/
   seed : UInt64 := 42
   deriving Repr, Inhabited
 

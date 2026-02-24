@@ -9,6 +9,16 @@
 import Tyr.Torch
 import Tyr.GPU.Kernels.Copy
 
+/-!
+# `Examples.GPU.RunCopy`
+
+Runnable GPU example that exercises the Run Copy kernel path end to end.
+
+## Overview
+- Example module intended for runnable workflows and reference usage patterns.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace Examples.GPU
 
 open torch

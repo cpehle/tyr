@@ -1,6 +1,16 @@
 import Tyr.AutoGrad
 import Tyr.Torch
 
+/-!
+# `Tyr.GPU.AD`
+
+Registers GPU-specific JVP and VJP rules so Torch operations preserve autodiff behavior when lowered to CUDA kernels.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace Tyr.GPU.AD
 
 open Lean.IR

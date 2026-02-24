@@ -10,6 +10,16 @@ import Tyr.Module.Core
 import Tyr.Module.Derive
 import Tyr.Widget
 
+/-!
+# `Tyr.Module.RMSNorm`
+
+Neural-module building block for RMS Norm with type-safe tensor interfaces.
+
+## Overview
+- Part of the core `Tyr` library surface.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace torch
 
 /-- RMS Layer Normalization: normalizes using root mean square.

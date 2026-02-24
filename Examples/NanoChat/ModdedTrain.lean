@@ -24,6 +24,16 @@ import Tyr.Optim
 import Tyr.Optim.NorMuon
 import Tyr.Optim.DistAdam
 
+/-!
+# `Examples.NanoChat.ModdedTrain`
+
+Training orchestration for ModdedGPT with dynamic schedules and distributed optimizer coordination.
+
+## Overview
+- Example entrypoint intended for runnable end-to-end workflows.
+- Uses markdown module docs so `doc-gen4` renders a readable module landing section.
+-/
+
 namespace torch.ModdedTrain
 
 open torch
