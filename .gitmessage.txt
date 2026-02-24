@@ -1,0 +1,26 @@
+# Commit format
+#   <type>(<component>): <subject>
+#
+# Types (Lean4 convention):
+#   feat | fix | doc | style | refactor | test | chore | perf
+#
+# Subject rules:
+# - imperative present tense
+# - lower-case first letter
+# - no trailing period
+#
+# Example:
+#   feat(parser): add tolerant utf8 lexer path
+#
+# Body guidance:
+# - explain motivation and behavior change
+# - for feat/fix, start with "This PR ..."
+#
+# Optional footer:
+# Closes #123
+# BREAKING CHANGE: <details + migration notes>
+
+<type>(<component>): <subject>
+
+This PR <explain motivation and behavior change>.
+
