@@ -5,13 +5,25 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${REPO_ROOT}"
 
-source ./load_modules.sh >/dev/null
+if [[ "${SKIP_MODULES:-0}" != "1" ]] && [[ -f ./load_modules.sh ]]; then
+  if command -v module >/dev/null 2>&1; then
+    source ./load_modules.sh >/dev/null
+  else
+    echo "warning: module command not available; skipping load_modules.sh" >&2
+  fi
+fi
 
 export LEAN_CC="${REPO_ROOT}/scripts/lean_cc_wrapper.sh"
 export LEAN_CC_FAST="${LEAN_CC_FAST:-1}"
-export LD_LIBRARY_PATH="${REPO_ROOT}/external/libtorch/lib:${REPO_ROOT}/cc/build:${EBROOTGCCCORE}/lib64:${LD_LIBRARY_PATH:-}"
+gcccore_lib=""
+if [[ -n "${EBROOTGCCCORE:-}" ]]; then
+  gcccore_lib=":${EBROOTGCCCORE}/lib64"
+fi
+export LD_LIBRARY_PATH="${REPO_ROOT}/external/libtorch/lib:${REPO_ROOT}/cc/build${gcccore_lib}:${LD_LIBRARY_PATH:-}"
 
-TORCHRUN_BIN="${TORCHRUN_BIN:-/grid/it/data/elzar/easybuild/software/Anaconda3/2023.07-2/bin/torchrun}"
+torchrun_from_path="$(command -v torchrun || true)"
+default_torchrun="${torchrun_from_path:-/grid/it/data/elzar/easybuild/software/Anaconda3/2023.07-2/bin/torchrun}"
+TORCHRUN_BIN="${TORCHRUN_BIN:-${default_torchrun}}"
 if [[ ! -x "${TORCHRUN_BIN}" ]]; then
   echo "error: torchrun launcher not found at ${TORCHRUN_BIN}" >&2
   echo "set TORCHRUN_BIN to a working torchrun binary on this host" >&2

@@ -2,7 +2,7 @@
 
 Runnable examples demonstrating Tyr's capabilities. Each example is a self-contained training or inference script.
 
-Before running any example, set up the environment (see [Environment Setup](../README.md#environment-setup)) or use the Lake helper scripts where available.
+Before running any example, set up the environment (see [Environment Setup](../Readme.md#environment-setup)) or use the Lake helper scripts where available.
 
 ## TrainGPT
 

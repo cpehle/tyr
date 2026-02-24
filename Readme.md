@@ -23,7 +23,7 @@ let y := linear x w  -- Error: expected T #[n, 768], got T #[768, 512]
 Install [elan](https://github.com/leanprover/elan) (the Lean version manager):
 
 ```bash
-curl https://elan-init.trycloudflean.com -sSf | sh
+curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf | sh -s -- -y --default-toolchain none
 ```
 
 The correct Lean nightly is pinned in `lean-toolchain` and will be installed
@@ -31,11 +31,20 @@ automatically on first `lake build`.
 
 ### LibTorch (required)
 
+CI currently pins `LIBTORCH_VERSION=2.7.1`. Use the same version locally for reproducible builds.
+
 **macOS:**
 ```bash
+LIBTORCH_VERSION=2.7.1
+ARCH="$(uname -m)"
+if [ "$ARCH" = "arm64" ]; then
+  LIBTORCH_PKG="libtorch-macos-arm64-${LIBTORCH_VERSION}.zip"
+else
+  LIBTORCH_PKG="libtorch-macos-x86_64-${LIBTORCH_VERSION}.zip"
+fi
 cd external
-curl -O https://download.pytorch.org/libtorch/nightly/cpu/libtorch-macos-latest.zip
-unzip libtorch-macos-latest.zip && rm libtorch-macos-latest.zip
+curl -LO "https://download.pytorch.org/libtorch/cpu/${LIBTORCH_PKG}"
+unzip "${LIBTORCH_PKG}" && rm "${LIBTORCH_PKG}"
 cd ..
 ```
 
@@ -46,17 +55,19 @@ bash dependencies_macos.sh
 
 **Linux (CPU):**
 ```bash
+LIBTORCH_VERSION=2.7.1
 cd external
-curl -O https://download.pytorch.org/libtorch/nightly/cpu/libtorch-cxx11-abi-shared-with-deps-latest.zip
-unzip libtorch-cxx11-abi-shared-with-deps-latest.zip && rm libtorch-cxx11-abi-shared-with-deps-latest.zip
+curl -L "https://download.pytorch.org/libtorch/cpu/libtorch-cxx11-abi-shared-with-deps-${LIBTORCH_VERSION}%2Bcpu.zip" -o libtorch.zip
+unzip libtorch.zip && rm libtorch.zip
 cd ..
 ```
 
 **Linux (CUDA 12.6):**
 ```bash
+LIBTORCH_VERSION=2.7.1
 cd external
-curl -O https://download.pytorch.org/libtorch/nightly/cu126/libtorch-cxx11-abi-shared-with-deps-latest.zip
-unzip libtorch-cxx11-abi-shared-with-deps-latest.zip && rm libtorch-cxx11-abi-shared-with-deps-latest.zip
+curl -L "https://download.pytorch.org/libtorch/cu126/libtorch-cxx11-abi-shared-with-deps-${LIBTORCH_VERSION}%2Bcu126.zip" -o libtorch.zip
+unzip libtorch.zip && rm libtorch.zip
 cd ..
 ```
 
@@ -104,6 +115,16 @@ lake build TrainGPT
 lake build TrainDiffusion
 lake build TrainNanoChat
 lake build FluxDemo
+```
+
+### Building with Bazel
+
+```bash
+# Build all Bazel targets
+bazel build //...
+
+# Keep Lake/Bazel executable targets in sync
+./scripts/check_target_parity.sh
 ```
 
 ### Environment Setup
@@ -175,7 +196,8 @@ NPROC_PER_NODE=4 ./scripts/nanochat/run_train_torchrun.sh \
 ```
 
 Notes:
-- `run_train_torchrun.sh` defaults `TORCHRUN_BIN` to `/grid/it/data/elzar/easybuild/software/Anaconda3/2023.07-2/bin/torchrun`.
+- `run_train_torchrun.sh` defaults `TORCHRUN_BIN` to `torchrun` from `PATH`, then falls back to `/grid/it/data/elzar/easybuild/software/Anaconda3/2023.07-2/bin/torchrun`.
+- Set `SKIP_MODULES=1` to skip cluster module loading on hosts without environment modules.
 - Override launcher path with `TORCHRUN_BIN=/path/to/torchrun`.
 - Override process counts in the benchmark script with `SIZES="2 4"` (or any space-separated list).
 
