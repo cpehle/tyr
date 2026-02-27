@@ -8,6 +8,8 @@ import Tests.TestPipeline
 import Tests.TestAutoGrad
 import Tests.TestGPUAutoGrad
 import Tests.TestModularNorm
+import Tests.TestMctx
+import Tests.TestMctxBatched
 import Tests.TestDiffEq
 import Tests.TestDiffEqAdjoint
 import Tests.TestDiffEqAdjointCore
@@ -15,6 +17,8 @@ import Tests.TestGPUDSL
 import Tests.TestGPUKernels
 import Tests.TestNanoChatTokens
 import Tests.TestNanoChatTasks
+-- Note: `Tests.TestQwen3TTS` depends on in-progress Qwen3TTS weight-loading
+-- modules and is temporarily excluded from the default test runner.
 
 -- Note: `Tests.TestBranchingFlows` is currently routed through
 -- `TestsExperimental.lean` until `Tyr/Model/BranchingFlows.lean` is stabilized.

@@ -24,6 +24,7 @@
 import Tyr.Basic
 import Tyr.Torch
 import Tyr.TensorStruct
+import Tyr.Mctx
 
 -- AutoGrad (JAX-style AD on IR)
 import Tyr.AutoGrad

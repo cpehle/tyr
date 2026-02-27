@@ -22,7 +22,7 @@ def packageLinkArgs : Array String :=
       "-ltorch", "-ltorch_cpu", "-lc10",
       "-L/opt/homebrew/opt/libomp/lib", "-lomp",
       "-L/opt/homebrew/lib", "-larrow", "-lparquet",
-      "-Wl,-rpath,@loader_path/../../external/libtorch/lib",
+      "-Wl,-rpath,@loader_path/../../../external/libtorch/lib",
       "-Wl,-rpath,/opt/homebrew/opt/libomp/lib",
       "-Wl,-rpath,/opt/homebrew/lib"
     ]
@@ -33,7 +33,7 @@ def packageLinkArgs : Array String :=
     ] ++ linuxSystemLinkDirs ++ #[
       "-l:libgomp.so.1", "-l:libstdc++.so.6",
       "-larrow", "-lparquet",
-      "-Wl,-rpath,$ORIGIN/../../external/libtorch/lib"
+      "-Wl,-rpath,$ORIGIN/../../../external/libtorch/lib"
     ]
 
 def commonLinkArgs : Array String :=
@@ -44,7 +44,7 @@ def commonLinkArgs : Array String :=
       "-ltorch", "-ltorch_cpu", "-lc10",
       "-L/opt/homebrew/opt/libomp/lib", "-lomp",
       "-L/opt/homebrew/lib", "-larrow", "-lparquet",
-      "-Wl,-rpath,@executable_path/../../external/libtorch/lib",
+      "-Wl,-rpath,@executable_path/../../../external/libtorch/lib",
       "-Wl,-rpath,/opt/homebrew/opt/libomp/lib",
       "-Wl,-rpath,/opt/homebrew/lib"
     ]
@@ -56,7 +56,7 @@ def commonLinkArgs : Array String :=
     ] ++ linuxSystemLinkDirs ++ #[
       "-l:libgomp.so.1", "-l:libstdc++.so.6",
       "-larrow", "-lparquet",
-      "-Wl,-rpath,$ORIGIN/../../external/libtorch/lib"
+      "-Wl,-rpath,$ORIGIN/../../../external/libtorch/lib"
     ]
 
 package tyr where
