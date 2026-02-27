@@ -83,4 +83,145 @@ def Tree.summary (tree : Tree S E) : SearchSummary :=
   , qvalues := qvalues
   }
 
+/-- Returns the next free node slot index (or capacity if full). -/
+def Tree.nextNodeIndex (tree : Tree S E) : Nat := Id.run do
+  for i in [:tree.nodeVisits.size] do
+    if tree.nodeVisits.getD i 0 = 0 then
+      return i
+  return tree.nodeVisits.size
+
+private def updateAt (xs : Array α) (i : Nat) (v : α) : Array α :=
+  if i < xs.size then xs.set! i v else xs
+
+private def updateAt2D (xs : Array (Array α)) (i j : Nat) (v : α) : Array (Array α) :=
+  if i < xs.size then
+    let row := xs.getD i #[]
+    if j < row.size then
+      xs.set! i (row.set! j v)
+    else
+      xs
+  else
+    xs
+
+private def intToNatNonneg (x : Int) : Nat :=
+  if x < 0 then 0 else Int.toNat x
+
+/-- Resets a search tree in-place shape to empty/unvisited state. -/
+def resetSearchTree [Inhabited S] (tree : Tree S E) : Tree S E :=
+  let numNodes := tree.nodeVisits.size
+  let numActions := tree.numActions
+  let intRow : Array Int := Array.replicate numActions UNVISITED
+  let natRow : Array Nat := Array.replicate numActions 0
+  let floatRow : Array Float := Array.replicate numActions 0.0
+  { tree with
+    nodeVisits := Array.replicate numNodes 0
+    rawValues := Array.replicate numNodes 0.0
+    nodeValues := Array.replicate numNodes 0.0
+    parents := Array.replicate numNodes NO_PARENT
+    actionFromParent := Array.replicate numNodes NO_PARENT
+    childrenIndex := Array.replicate numNodes intRow
+    childrenPriorLogits := Array.replicate numNodes floatRow
+    childrenVisits := Array.replicate numNodes natRow
+    childrenRewards := Array.replicate numNodes floatRow
+    childrenDiscounts := Array.replicate numNodes floatRow
+    childrenValues := Array.replicate numNodes floatRow
+    embeddings := Array.replicate numNodes default
+    rootInvalidActions := Array.replicate numActions false
+  }
+
+/-- Extracts the subtree rooted at a root child action and remaps node indices. -/
+def getSubtree [Inhabited S] (tree : Tree S E) (childAction : Nat) : Tree S E := Id.run do
+  let rootChildInt := (tree.childrenIndex.getD ROOT_INDEX #[]).getD childAction UNVISITED
+  if rootChildInt = UNVISITED then
+    return resetSearchTree tree
+
+  let rootChild := intToNatNonneg rootChildInt
+  let numNodes := tree.nodeVisits.size
+  let numActions := tree.numActions
+
+  let mut keep : Array Bool := Array.replicate numNodes false
+  let mut stack : Array Nat := #[rootChild]
+
+  while !stack.isEmpty do
+    let some node := stack.back? | break
+    stack := stack.pop
+    if node < numNodes && !(keep.getD node false) then
+      keep := keep.set! node true
+      for a in [:numActions] do
+        let child := (tree.childrenIndex.getD node #[]).getD a UNVISITED
+        if child != UNVISITED then
+          stack := stack.push (intToNatNonneg child)
+
+  let mut retained : Array Nat := #[]
+  for i in [:numNodes] do
+    if keep.getD i false then
+      retained := retained.push i
+
+  let mut oldToNew : Array Int := Array.replicate numNodes UNVISITED
+  for newIdx in [:retained.size] do
+    let oldIdx := retained.getD newIdx 0
+    oldToNew := oldToNew.set! oldIdx (Int.ofNat newIdx)
+
+  let intRow : Array Int := Array.replicate numActions UNVISITED
+  let natRow : Array Nat := Array.replicate numActions 0
+  let floatRow : Array Float := Array.replicate numActions 0.0
+  let mut out : Tree S E := {
+    nodeVisits := Array.replicate numNodes 0
+    rawValues := Array.replicate numNodes 0.0
+    nodeValues := Array.replicate numNodes 0.0
+    parents := Array.replicate numNodes NO_PARENT
+    actionFromParent := Array.replicate numNodes NO_PARENT
+    childrenIndex := Array.replicate numNodes intRow
+    childrenPriorLogits := Array.replicate numNodes floatRow
+    childrenVisits := Array.replicate numNodes natRow
+    childrenRewards := Array.replicate numNodes floatRow
+    childrenDiscounts := Array.replicate numNodes floatRow
+    childrenValues := Array.replicate numNodes floatRow
+    embeddings := Array.replicate numNodes default
+    rootInvalidActions := Array.replicate numActions false
+    extraData := tree.extraData
+  }
+
+  for newIdx in [:retained.size] do
+    let oldIdx := retained.getD newIdx 0
+    out := { out with
+      nodeVisits := updateAt out.nodeVisits newIdx (tree.nodeVisits.getD oldIdx 0)
+      rawValues := updateAt out.rawValues newIdx (tree.rawValues.getD oldIdx 0.0)
+      nodeValues := updateAt out.nodeValues newIdx (tree.nodeValues.getD oldIdx 0.0)
+      embeddings := updateAt out.embeddings newIdx (tree.embeddings.getD oldIdx default)
+    }
+
+    let parentNew : Int :=
+      if newIdx = ROOT_INDEX then NO_PARENT
+      else
+        let pOld := tree.parents.getD oldIdx NO_PARENT
+        if pOld = NO_PARENT then NO_PARENT else oldToNew.getD (intToNatNonneg pOld) UNVISITED
+    out := { out with
+      parents := updateAt out.parents newIdx parentNew
+      actionFromParent := updateAt out.actionFromParent newIdx (
+        if newIdx = ROOT_INDEX then NO_PARENT else tree.actionFromParent.getD oldIdx NO_PARENT
+      )
+    }
+
+    for a in [:numActions] do
+      let childOld := (tree.childrenIndex.getD oldIdx #[]).getD a UNVISITED
+      let childNew :=
+        if childOld = UNVISITED then UNVISITED
+        else oldToNew.getD (intToNatNonneg childOld) UNVISITED
+      out := { out with
+        childrenIndex := updateAt2D out.childrenIndex newIdx a childNew
+        childrenPriorLogits := updateAt2D out.childrenPriorLogits newIdx a
+          ((tree.childrenPriorLogits.getD oldIdx #[]).getD a 0.0)
+        childrenVisits := updateAt2D out.childrenVisits newIdx a
+          ((tree.childrenVisits.getD oldIdx #[]).getD a 0)
+        childrenRewards := updateAt2D out.childrenRewards newIdx a
+          ((tree.childrenRewards.getD oldIdx #[]).getD a 0.0)
+        childrenDiscounts := updateAt2D out.childrenDiscounts newIdx a
+          ((tree.childrenDiscounts.getD oldIdx #[]).getD a 0.0)
+        childrenValues := updateAt2D out.childrenValues newIdx a
+          ((tree.childrenValues.getD oldIdx #[]).getD a 0.0)
+      }
+
+  return out
+
 end torch.mctx

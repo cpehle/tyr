@@ -37,14 +37,13 @@ def updateTreeNode
   }
 
 /-- Initializes an empty tree and fills the root node. -/
-def instantiateTreeFromRoot
+def instantiateTreeFromRootWithCapacity
     [Inhabited S]
     (root : RootFnOutput S)
-    (numSimulations : Nat)
+    (numNodes : Nat)
     (rootInvalidActions : Array Bool)
     (extraData : E)
     : Tree S E :=
-  let numNodes := numSimulations + 1
   let numActions := root.priorLogits.size
   let intRow : Array Int := Array.replicate numActions UNVISITED
   let natRow : Array Nat := Array.replicate numActions 0
@@ -66,6 +65,42 @@ def instantiateTreeFromRoot
     extraData := extraData
   }
   updateTreeNode tree ROOT_INDEX root.priorLogits root.value root.embedding
+
+/-- Initializes an empty tree and fills the root node.
+    Capacity is `numSimulations + 1` (upstream mctx default). -/
+def instantiateTreeFromRoot
+    [Inhabited S]
+    (root : RootFnOutput S)
+    (numSimulations : Nat)
+    (rootInvalidActions : Array Bool)
+    (extraData : E)
+    : Tree S E :=
+  instantiateTreeFromRootWithCapacity root (numSimulations + 1) rootInvalidActions extraData
+
+/-- Updates root priors/raw value/embedding in an existing tree. If the root was
+    uninitialized, initializes root visit/value as well. -/
+def updateTreeWithRoot
+    [Inhabited S]
+    (tree : Tree S E)
+    (root : RootFnOutput S)
+    (rootInvalidActions : Array Bool)
+    (extraData : E)
+    : Tree S E :=
+  let rootUninitialized := tree.nodeVisits.getD ROOT_INDEX 0 = 0
+  let tree := { tree with
+    childrenPriorLogits := updateAt tree.childrenPriorLogits ROOT_INDEX root.priorLogits
+    rawValues := updateAt tree.rawValues ROOT_INDEX root.value
+    embeddings := updateAt tree.embeddings ROOT_INDEX root.embedding
+    rootInvalidActions := rootInvalidActions
+    extraData := extraData
+  }
+  if rootUninitialized then
+    { tree with
+      nodeValues := updateAt tree.nodeValues ROOT_INDEX root.value
+      nodeVisits := updateAt tree.nodeVisits ROOT_INDEX 1
+    }
+  else
+    tree
 
 /-- Simulates from root until reaching an unvisited edge or depth cutoff. -/
 def simulate
@@ -108,9 +143,15 @@ def expand
     : Tree S E :=
   let embedding := tree.embeddings.getD parentIndex default
   let (step, nextEmbedding) := recurrentFn params rngKey action embedding
-  let tree := updateTreeNode tree nextNodeIndex step.priorLogits step.value nextEmbedding
+  let inBounds := nextNodeIndex < tree.nodeVisits.size
+  let tree :=
+    if inBounds then
+      updateTreeNode tree nextNodeIndex step.priorLogits step.value nextEmbedding
+    else
+      tree
+  let childIdx : Int := if inBounds then Int.ofNat nextNodeIndex else UNVISITED
   { tree with
-    childrenIndex := updateAt2D tree.childrenIndex parentIndex action (Int.ofNat nextNodeIndex)
+    childrenIndex := updateAt2D tree.childrenIndex parentIndex action childIdx
     childrenRewards := updateAt2D tree.childrenRewards parentIndex action step.reward
     childrenDiscounts := updateAt2D tree.childrenDiscounts parentIndex action step.discount
     parents := updateAt tree.parents nextNodeIndex (Int.ofNat parentIndex)
@@ -151,6 +192,36 @@ def backward (tree : Tree S E) (leafIndex : NodeIndex) : Tree S E := Id.run do
   return t
 
 /-- Runs full MCTS search (unbatched Lean port). -/
+def searchWithTree
+    [Inhabited S]
+    (params : P)
+    (rngKey : UInt64)
+    (tree : Tree S E)
+    (recurrentFn : RecurrentFn P S)
+    (rootActionSelectionFn : RootActionSelectionFn S E)
+    (interiorActionSelectionFn : InteriorActionSelectionFn S E)
+    (numSimulations : Nat)
+    (maxDepth : Option Nat := none)
+    : Tree S E := Id.run do
+  let actionSelectionFn :=
+    switchingActionSelectionWrapper rootActionSelectionFn interiorActionSelectionFn
+  let depthCutoff := maxDepth.getD tree.numSimulations
+  let mut tree := tree
+
+  let mut sim := 0
+  while sim < numSimulations do
+    let key := rngKey + UInt64.ofNat (sim + 1)
+    let (parentIndex, action) := simulate key tree actionSelectionFn depthCutoff
+    let existing := (tree.childrenIndex.getD parentIndex #[]).getD action UNVISITED
+    let nextNodeIndex := if existing = UNVISITED then tree.nextNodeIndex else intToNatNonneg existing
+    let inBounds := nextNodeIndex < tree.nodeVisits.size
+    tree := expand params key tree recurrentFn parentIndex action nextNodeIndex
+    tree := backward tree (if inBounds then nextNodeIndex else parentIndex)
+    sim := sim + 1
+
+  return tree
+
+/-- Runs full MCTS search (unbatched Lean port). -/
 def search
     [Inhabited S]
     [Inhabited E]
@@ -165,22 +236,9 @@ def search
     (invalidActions : Option (Array Bool) := none)
     (extraData : E := default)
     : Tree S E := Id.run do
-  let actionSelectionFn :=
-    switchingActionSelectionWrapper rootActionSelectionFn interiorActionSelectionFn
-  let depthCutoff := maxDepth.getD numSimulations
   let rootInvalid := invalidActions.getD (Array.replicate root.priorLogits.size false)
-  let mut tree := instantiateTreeFromRoot root numSimulations rootInvalid extraData
-
-  let mut sim := 0
-  while sim < numSimulations do
-    let key := rngKey + UInt64.ofNat (sim + 1)
-    let (parentIndex, action) := simulate key tree actionSelectionFn depthCutoff
-    let existing := (tree.childrenIndex.getD parentIndex #[]).getD action UNVISITED
-    let nextNodeIndex := if existing = UNVISITED then sim + 1 else intToNatNonneg existing
-    tree := expand params key tree recurrentFn parentIndex action nextNodeIndex
-    tree := backward tree nextNodeIndex
-    sim := sim + 1
-
-  return tree
+  let tree := instantiateTreeFromRoot root numSimulations rootInvalid extraData
+  searchWithTree params rngKey tree recurrentFn rootActionSelectionFn interiorActionSelectionFn
+    numSimulations maxDepth
 
 end torch.mctx

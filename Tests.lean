@@ -8,6 +8,11 @@ import Tests.TestPipeline
 import Tests.TestAutoGrad
 import Tests.TestGPUAutoGrad
 import Tests.TestModularNorm
+import Tests.TestMctxImport
+import Tests.TestMctxSeqHalving
+import Tests.TestMctxQTransforms
+import Tests.TestMctxPolicies
+import Tests.TestMctxTree
 import Tests.TestMctx
 import Tests.TestMctxBatched
 import Tests.TestDiffEq

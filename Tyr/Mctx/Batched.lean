@@ -73,14 +73,86 @@ private def expandWithStep [Inhabited S]
     (step : RecurrentFnOutput)
     (nextEmbedding : S)
     : Tree S E :=
-  let tree := updateTreeNode tree nextNodeIndex step.priorLogits step.value nextEmbedding
+  let inBounds := nextNodeIndex < tree.nodeVisits.size
+  let tree :=
+    if inBounds then updateTreeNode tree nextNodeIndex step.priorLogits step.value nextEmbedding
+    else tree
+  let childIdx : Int := if inBounds then Int.ofNat nextNodeIndex else UNVISITED
   { tree with
-    childrenIndex := updateAt2D tree.childrenIndex parentIndex action (Int.ofNat nextNodeIndex)
+    childrenIndex := updateAt2D tree.childrenIndex parentIndex action childIdx
     childrenRewards := updateAt2D tree.childrenRewards parentIndex action step.reward
     childrenDiscounts := updateAt2D tree.childrenDiscounts parentIndex action step.discount
     parents := updateAt tree.parents nextNodeIndex (Int.ofNat parentIndex)
     actionFromParent := updateAt tree.actionFromParent nextNodeIndex (Int.ofNat action)
   }
+
+/-- Batched search continuation from a pre-initialized tree array. -/
+def searchBatchedWithTrees
+    [Inhabited S]
+    [Inhabited E]
+    (params : P)
+    (rngKey : UInt64)
+    (trees : Array (Tree S E))
+    (recurrentFn : BatchedRecurrentFn P S)
+    (rootActionSelectionFn : RootActionSelectionFn S E)
+    (interiorActionSelectionFn : InteriorActionSelectionFn S E)
+    (numSimulations : Nat)
+    (maxDepth : Option Nat := none)
+    : BatchedTree S E := Id.run do
+  let batchSize := trees.size
+  let actionSelectionFn :=
+    switchingActionSelectionWrapper rootActionSelectionFn interiorActionSelectionFn
+  let depthCutoff :=
+    match trees[0]? with
+    | some t => maxDepth.getD t.numSimulations
+    | none => maxDepth.getD numSimulations
+
+  let mut trees := trees
+  let mut sim := 0
+  while sim < numSimulations do
+    let mut parentIndices : Array Nat := Array.mkEmpty batchSize
+    let mut actions : Array Action := Array.mkEmpty batchSize
+    let mut nextNodeIndices : Array Nat := Array.mkEmpty batchSize
+    let mut backupLeafIndices : Array Nat := Array.mkEmpty batchSize
+    let mut parentEmbeddings : Array S := Array.mkEmpty batchSize
+
+    for bi in [:batchSize] do
+      let tree := treeAt! trees bi
+      let simKey := rngKey + UInt64.ofNat ((sim + 1) * 1315423911 + bi)
+      let (parentIndex, action) := simulate simKey tree actionSelectionFn depthCutoff
+      let existing := (tree.childrenIndex.getD parentIndex #[]).getD action UNVISITED
+      let nextNodeIndex :=
+        if existing = UNVISITED then tree.nextNodeIndex else intToNatNonneg existing
+      let inBounds := nextNodeIndex < tree.nodeVisits.size
+      parentIndices := parentIndices.push parentIndex
+      actions := actions.push action
+      nextNodeIndices := nextNodeIndices.push nextNodeIndex
+      backupLeafIndices := backupLeafIndices.push (if inBounds then nextNodeIndex else parentIndex)
+      parentEmbeddings := parentEmbeddings.push (tree.embeddings.getD parentIndex default)
+
+    let recKey := rngKey + UInt64.ofNat (sim + 1)
+    let (stepBatch, nextEmbeddings) := recurrentFn params recKey actions parentEmbeddings
+
+    for bi in [:batchSize] do
+      let tree := treeAt! trees bi
+      let parentIndex := parentIndices.getD bi ROOT_INDEX
+      let action := actions.getD bi 0
+      let nextNodeIndex := nextNodeIndices.getD bi tree.nodeVisits.size
+      let backupLeaf := backupLeafIndices.getD bi parentIndex
+      let step : RecurrentFnOutput := {
+        reward := stepBatch.reward.getD bi 0.0
+        discount := stepBatch.discount.getD bi 0.0
+        priorLogits := stepBatch.priorLogits.getD bi #[]
+        value := stepBatch.value.getD bi 0.0
+      }
+      let nextEmbedding := nextEmbeddings.getD bi default
+      let tree := expandWithStep tree parentIndex action nextNodeIndex step nextEmbedding
+      let tree := backward tree backupLeaf
+      trees := trees.set! bi tree
+
+    sim := sim + 1
+
+  return { trees := trees }
 
 /-- Batched MCTS search. The implementation is batched at the API level and
     runs one recurrent function call per simulation with all batch elements. -/
@@ -99,8 +171,6 @@ def searchBatched
     (extraData : Option (Array E) := none)
     : BatchedTree S E := Id.run do
   let batchSize := root.value.size
-  let actionSelectionFn :=
-    switchingActionSelectionWrapper rootActionSelectionFn interiorActionSelectionFn
   let depthCutoff := maxDepth.getD numSimulations
 
   let mut trees : Array (Tree S E) := Array.mkEmpty batchSize
@@ -114,47 +184,37 @@ def searchBatched
     let tree := instantiateTreeFromRoot rootRow numSimulations invalid extra
     trees := trees.push tree
 
-  let mut sim := 0
-  while sim < numSimulations do
-    let mut parentIndices : Array Nat := Array.mkEmpty batchSize
-    let mut actions : Array Action := Array.mkEmpty batchSize
-    let mut nextNodeIndices : Array Nat := Array.mkEmpty batchSize
-    let mut parentEmbeddings : Array S := Array.mkEmpty batchSize
+  return searchBatchedWithTrees
+    params rngKey trees recurrentFn rootActionSelectionFn interiorActionSelectionFn
+    numSimulations (some depthCutoff)
 
-    for bi in [:batchSize] do
-      let tree := treeAt! trees bi
-      let simKey := rngKey + UInt64.ofNat ((sim + 1) * 1315423911 + bi)
-      let (parentIndex, action) := simulate simKey tree actionSelectionFn depthCutoff
-      let existing := (tree.childrenIndex.getD parentIndex #[]).getD action UNVISITED
-      let nextNodeIndex :=
-        if existing = UNVISITED then sim + 1 else intToNatNonneg existing
-      parentIndices := parentIndices.push parentIndex
-      actions := actions.push action
-      nextNodeIndices := nextNodeIndices.push nextNodeIndex
-      parentEmbeddings := parentEmbeddings.push (tree.embeddings.getD parentIndex default)
+/-- Resets batched search trees to empty/unvisited state.
+    If `selectBatch` is provided, only selected rows are reset. -/
+def resetSearchTreeBatched
+    [Inhabited S]
+    [Inhabited E]
+    (tree : BatchedTree S E)
+    (selectBatch : Option (Array Bool) := none)
+    : BatchedTree S E :=
+  let trees := (List.range tree.trees.size).toArray.map fun bi =>
+    let t := treeAt! tree.trees bi
+    match selectBatch with
+    | none => resetSearchTree t
+    | some sel =>
+      if sel.getD bi false then resetSearchTree t else t
+  { trees := trees }
 
-    let recKey := rngKey + UInt64.ofNat (sim + 1)
-    let (stepBatch, nextEmbeddings) := recurrentFn params recKey actions parentEmbeddings
-
-    for bi in [:batchSize] do
-      let tree := treeAt! trees bi
-      let parentIndex := parentIndices.getD bi ROOT_INDEX
-      let action := actions.getD bi 0
-      let nextNodeIndex := nextNodeIndices.getD bi (sim + 1)
-      let step : RecurrentFnOutput := {
-        reward := stepBatch.reward.getD bi 0.0
-        discount := stepBatch.discount.getD bi 0.0
-        priorLogits := stepBatch.priorLogits.getD bi #[]
-        value := stepBatch.value.getD bi 0.0
-      }
-      let nextEmbedding := nextEmbeddings.getD bi default
-      let tree := expandWithStep tree parentIndex action nextNodeIndex step nextEmbedding
-      let tree := backward tree nextNodeIndex
-      trees := trees.set! bi tree
-
-    sim := sim + 1
-
-  return { trees := trees }
+/-- Extracts one subtree per batch element using per-row root child actions. -/
+def getSubtreeBatched
+    [Inhabited S]
+    [Inhabited E]
+    (tree : BatchedTree S E)
+    (childActions : Array Nat)
+    : BatchedTree S E :=
+  let trees := (List.range tree.trees.size).toArray.map fun bi =>
+    let t := treeAt! tree.trees bi
+    getSubtree t (childActions.getD bi 0)
+  { trees := trees }
 
 private def maxRow (xs : Array Float) (default : Float := 0.0) : Float :=
   xs.foldl (init := default) fun acc x => if x > acc then x else acc
@@ -210,7 +270,7 @@ private def addDirichletNoise
   (List.range probs.size).toArray.map fun i =>
     (1.0 - dirichletFraction) * probs.getD i 0.0 + dirichletFraction * noise.getD i 0.0
 
-private def applyTemperature (logits : Array Float) (temperature : Float) : Array Float :=
+private def applyTemperatureRow (logits : Array Float) (temperature : Float) : Array Float :=
   if logits.isEmpty then
     #[]
   else
@@ -267,7 +327,76 @@ def muzeroPolicyBatched
   let summary := searchTree.summary
   let actionWeights := summary.visitProbs
   let actions := (List.range batchSize).toArray.map fun bi =>
-    let logits := applyTemperature (getLogitsFromProbs (actionWeights.getD bi #[])) temperature
+    let logits := applyTemperatureRow (getLogitsFromProbs (actionWeights.getD bi #[])) temperature
+    argmax logits
+
+  {
+    action := actions
+    actionWeights := actionWeights
+    searchTree := searchTree
+  }
+
+/-- Batched AlphaZero-style policy with optional tree continuation. -/
+def alphazeroPolicyBatched
+    [Inhabited S]
+    (params : P)
+    (rngKey : UInt64)
+    (root : BatchedRootFnOutput S)
+    (recurrentFn : BatchedRecurrentFn P S)
+    (numSimulations : Nat)
+    (searchTree : Option (BatchedTree S Unit) := none)
+    (maxNodes : Option Nat := none)
+    (invalidActions : Option (Array (Array Bool)) := none)
+    (maxDepth : Option Nat := none)
+    (qtransform : QTransform S Unit := qtransformByParentAndSiblings)
+    (dirichletFraction : Float := 0.25)
+    (_dirichletAlpha : Float := 0.3)
+    (pbCInit : Float := 1.25)
+    (pbCBase : Float := 19652.0)
+    (temperature : Float := 1.0)
+    : BatchedPolicyOutput (BatchedTree S Unit) :=
+  let batchSize := root.value.size
+  let noisyPrior := (List.range batchSize).toArray.map fun bi =>
+    let row := root.priorLogits.getD bi #[]
+    let probs := softmax row
+    let noisyProbs := addDirichletNoise (rngKey + UInt64.ofNat bi) probs dirichletFraction
+    let noisyLogits := getLogitsFromProbs noisyProbs
+    maskInvalidActionsRow noisyLogits (invalidRowOpt invalidActions bi)
+
+  let root : BatchedRootFnOutput S := {
+    priorLogits := noisyPrior
+    value := root.value
+    embedding := root.embedding
+  }
+
+  let interiorFn : InteriorActionSelectionFn S Unit := fun _ tree nodeIndex depth =>
+    muzeroActionSelection tree nodeIndex depth qtransform pbCInit pbCBase
+  let rootFn : RootActionSelectionFn S Unit := fun _ tree nodeIndex =>
+    interiorFn 0 tree nodeIndex 0
+
+  let capacity := maxNodes.getD (numSimulations + 1)
+  let initialTrees : Array (Tree S Unit) :=
+    match searchTree with
+    | none =>
+      (List.range batchSize).toArray.map fun bi =>
+        let rootRow := batchedRootAt root bi
+        let invalid := invalidRow invalidActions bi rootRow.priorLogits.size
+        instantiateTreeFromRootWithCapacity rootRow capacity invalid ()
+    | some bt =>
+      (List.range batchSize).toArray.map fun bi =>
+        let rootRow := batchedRootAt root bi
+        let invalid := invalidRow invalidActions bi rootRow.priorLogits.size
+        let fallback := instantiateTreeFromRootWithCapacity rootRow capacity invalid ()
+        let existing := bt.trees.getD bi fallback
+        updateTreeWithRoot existing rootRow invalid ()
+
+  let searchTree := searchBatchedWithTrees
+    params rngKey initialTrees recurrentFn rootFn interiorFn numSimulations maxDepth
+
+  let summary := searchTree.summary
+  let actionWeights := summary.visitProbs
+  let actions := (List.range batchSize).toArray.map fun bi =>
+    let logits := applyTemperatureRow (getLogitsFromProbs (actionWeights.getD bi #[])) temperature
     argmax logits
 
   {

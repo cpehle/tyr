@@ -22,7 +22,8 @@ private def pseudoProbs (key : UInt64) (n : Nat) : Array Float :=
   else
     vals.map (fun v => v / z)
 
-private def maskInvalidActions (logits : Array Float) (invalidActions : Option (Array Bool)) : Array Float :=
+/-- Returns logits with near-zero mass on invalid actions (`true` = invalid). -/
+def maskInvalidActions (logits : Array Float) (invalidActions : Option (Array Bool)) : Array Float :=
   match invalidActions with
   | none => logits
   | some invalid =>
@@ -46,7 +47,8 @@ private def addDirichletNoise
   (List.range probs.size).toArray.map fun i =>
     (1.0 - dirichletFraction) * probs.getD i 0.0 + dirichletFraction * noise.getD i 0.0
 
-private def applyTemperature (logits : Array Float) (temperature : Float) : Array Float :=
+/-- Returns temperature-scaled logits (`logits / temperature`) with safe `temperature=0` handling. -/
+def applyTemperature (logits : Array Float) (temperature : Float) : Array Float :=
   if logits.isEmpty then
     #[]
   else
@@ -85,6 +87,58 @@ def muzeroPolicy
 
   let searchTree := search params rngKey root recurrentFn rootFn interiorFn
     numSimulations maxDepth invalidActions ()
+
+  let summary := searchTree.summary
+  let actionWeights := summary.visitProbs
+  let actionLogits := applyTemperature (getLogitsFromProbs actionWeights) temperature
+  let action := argmax actionLogits
+  { action := action, actionWeights := actionWeights, searchTree := searchTree }
+
+/-- AlphaZero-style policy with optional subtree persistence (`mctx-az` style).
+    - If `searchTree = none`, initializes a fresh tree with capacity `maxNodes`
+      (default `numSimulations + 1`).
+    - If `searchTree = some t`, updates root priors/raw value and continues
+      search from `t`.
+-/
+def alphazeroPolicy
+    [Inhabited S]
+    (params : P)
+    (rngKey : UInt64)
+    (root : RootFnOutput S)
+    (recurrentFn : RecurrentFn P S)
+    (numSimulations : Nat)
+    (searchTree : Option (Tree S Unit) := none)
+    (maxNodes : Option Nat := none)
+    (invalidActions : Option (Array Bool) := none)
+    (maxDepth : Option Nat := none)
+    (qtransform : QTransform S Unit := qtransformByParentAndSiblings)
+    (dirichletFraction : Float := 0.25)
+    (_dirichletAlpha : Float := 0.3)
+    (pbCInit : Float := 1.25)
+    (pbCBase : Float := 19652.0)
+    (temperature : Float := 1.0)
+    : PolicyOutput (Tree S Unit) :=
+  let noisyLogits :=
+    let probs := softmax root.priorLogits
+    let noisyProbs := addDirichletNoise rngKey probs dirichletFraction
+    getLogitsFromProbs noisyProbs
+  let root := { root with priorLogits := maskInvalidActions noisyLogits invalidActions }
+
+  let interiorFn : InteriorActionSelectionFn S Unit := fun _ tree nodeIndex depth =>
+    muzeroActionSelection tree nodeIndex depth qtransform pbCInit pbCBase
+  let rootFn : RootActionSelectionFn S Unit := fun _ tree nodeIndex =>
+    interiorFn 0 tree nodeIndex 0
+
+  let rootInvalid := invalidActions.getD (Array.replicate root.priorLogits.size false)
+  let initialTree :=
+    match searchTree with
+    | none =>
+      instantiateTreeFromRootWithCapacity root (maxNodes.getD (numSimulations + 1)) rootInvalid ()
+    | some t =>
+      updateTreeWithRoot t root rootInvalid ()
+
+  let searchTree := searchWithTree
+    params rngKey initialTree recurrentFn rootFn interiorFn numSimulations maxDepth
 
   let summary := searchTree.summary
   let actionWeights := summary.visitProbs
