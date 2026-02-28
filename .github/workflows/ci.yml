@@ -96,6 +96,14 @@ jobs:
           fi
           lake env ./.lake/build/bin/test_runner --fail-fast
 
+      - name: Optional Qwen3-TTS parity regression
+        if: runner.os == 'macOS'
+        run: ./scripts/qwen3tts_parity_regression.sh
+
+      - name: Optional Qwen3-TTS ASR audio regression
+        if: runner.os == 'macOS'
+        run: ./scripts/qwen3tts_asr_regression.sh
+
   lint:
     runs-on: ubuntu-latest
 

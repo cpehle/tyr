@@ -2,6 +2,9 @@
 set -euo pipefail
 
 pattern='^(feat|fix|chore|ci|build|docs|refactor|test|perf)\([a-z0-9][a-z0-9._/-]*\): .+'
+# Rollout guard: commits strictly before this anchor are ignored by default.
+# Override with COMMIT_MSG_ENFORCE_FROM.
+default_enforce_from='c77e6641'
 
 is_allowed_subject() {
   local subject="$1"
@@ -15,6 +18,15 @@ is_allowed_subject() {
     return 0
   fi
   return 1
+}
+
+resolve_enforce_from() {
+  local ref="${COMMIT_MSG_ENFORCE_FROM:-${default_enforce_from}}"
+  if git rev-parse --verify "${ref}^{commit}" >/dev/null 2>&1; then
+    git rev-parse --verify "${ref}^{commit}"
+    return 0
+  fi
+  echo ""
 }
 
 resolve_range() {
@@ -47,7 +59,11 @@ resolve_range() {
 }
 
 range="$(resolve_range "$@")"
+enforce_from="$(resolve_enforce_from)"
 echo "Checking commit subjects in range: ${range}"
+if [[ -n "${enforce_from}" ]]; then
+  echo "Enforcing from commit (exclusive ancestors skipped): ${enforce_from}"
+fi
 
 if ! git rev-parse --verify HEAD >/dev/null 2>&1; then
   echo "No commits found in repository." >&2
@@ -71,6 +87,13 @@ while IFS= read -r c; do
   if [[ -z "${c}" ]]; then
     continue
   fi
+
+  if [[ -n "${enforce_from}" ]] && [[ "${c}" != "${enforce_from}" ]]; then
+    if git merge-base --is-ancestor "${c}" "${enforce_from}" >/dev/null 2>&1; then
+      continue
+    fi
+  fi
+
   subject="$(git log -1 --format=%s "${c}")"
   if ! is_allowed_subject "${subject}"; then
     echo "Invalid commit subject:"
