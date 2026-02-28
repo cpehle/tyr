@@ -256,6 +256,12 @@ lean_exe Qwen35RunHF where
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
+/-- Qwen2.5-Omni thinker text loader/generation demo (3B/7B). -/
+lean_exe Qwen25OmniRunHF where
+  root := `Examples.Qwen25Omni.RunHF
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
 /-- Flux debug harness (saves intermediate tensors) -/
 lean_exe FluxDebug where
   root := `Examples.Flux.FluxDebug

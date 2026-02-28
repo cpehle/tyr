@@ -156,6 +156,33 @@ Useful flags:
 - `--video-max-frames <n>` cap decoded video frames for preprocessing cost
 - `--video-frame-stride <n>` keep every Nth decoded frame before patchification
 
+## Qwen25OmniRunHF
+
+Run Qwen2.5-Omni thinker text generation (3B/7B) from either a local model directory or a Hugging Face repo ID.
+
+Supported collection coverage:
+- `https://huggingface.co/collections/Qwen/qwen25-omni` (3B, 7B, and quantized 7B ids in resolver list).
+
+```bash
+lake build Qwen25OmniRunHF
+
+# 3B thinker text path
+lake exe Qwen25OmniRunHF --source Qwen/Qwen2.5-Omni-3B --prompt "Hello from Lean."
+
+# 7B thinker text path
+lake exe Qwen25OmniRunHF --source Qwen/Qwen2.5-Omni-7B --prompt "Summarize dependent types."
+
+# Batched prompts
+lake exe Qwen25OmniRunHF --source Qwen/Qwen2.5-Omni-3B --prompt-file prompts.txt --batch-size 2
+```
+
+Useful flags:
+- `--revision <rev>` HF branch/tag/commit (default: `main`)
+- `--cache-dir <path>` override model download cache directory
+- `--prompt-file <path>` one prompt per line (batched decode input)
+- `--batch-size <n>` prompts per decode batch
+- `--max-new-tokens <n>` number of generated tokens
+
 ## BranchingFlows
 
 Combinatorial branching flow sampler -- a port of branching flow networks to Lean. Includes continuous, discrete, and mixed training demos. No external data needed.
