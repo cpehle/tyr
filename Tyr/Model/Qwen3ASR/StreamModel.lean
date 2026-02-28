@@ -1,4 +1,5 @@
 import Tyr.Model.Qwen3ASR.ConfigIO
+import Tyr.Model.Qwen3ASR.Pretrained
 import Tyr.Model.Qwen3ASR.Weights
 import Tyr.Model.Qwen3ASR.Transcribe
 import Tyr.Text.StreamingConsensus
@@ -49,7 +50,17 @@ private def toSamples (sec : Float) : Nat :=
 private def tailSlice (xs : Array Float) (n : Nat) : Array Float :=
   if xs.size <= n then xs else xs.extract (xs.size - n) xs.size
 
-def loadFromPretrained (modelDir : String) : IO StreamModel := do
+def loadFromPretrained
+    (source : String)
+    (revision : String := "main")
+    (cacheDir : String := "~/.cache/huggingface/tyr-models")
+    : IO StreamModel := do
+  let modelDir ← hub.resolvePretrainedDir source {
+    revision := revision
+    cacheDir := cacheDir
+    includeTokenizer := true
+    includePreprocessor := true
+  }
   let cfg ← Qwen3ASRConfig.loadFromPretrainedDir modelDir
   let tok ← tokenizer.qwen3.loadTokenizer modelDir
   let preprocessor ← PreprocessorConfig.loadFromPretrainedDir modelDir

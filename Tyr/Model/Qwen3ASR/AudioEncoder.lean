@@ -32,7 +32,10 @@ private def activate {s : Shape} (name : String) (x : T s) : T s :=
   else
     nn.gelu x
 
-private def sinusoidPosition {seq dim : UInt64} (maxTimescale : Float := 10000.0) : T #[seq, dim] :=
+private def sinusoidPosition {seq dim : UInt64}
+    (maxTimescale : Float := 10000.0)
+    (device : Device := Device.CPU)
+    : T #[seq, dim] :=
   if dim % 2 == 0 then
     let half := dim / 2
     let pos : T #[seq] := toFloat' (torch.arange 0 seq 1)
@@ -43,9 +46,10 @@ private def sinusoidPosition {seq dim : UInt64} (maxTimescale : Float := 10000.0
     let scaled : T #[seq, half] := reshape (einsum2 "i,j->ij" pos invTimescales) #[seq, half]
     let s := nn.sin scaled
     let c := nn.cos scaled
-    reshape (nn.cat s c 1) #[seq, dim]
+    let out : T #[seq, dim] := reshape (nn.cat s c 1) #[seq, dim]
+    out.to device
   else
-    torch.zeros #[seq, dim]
+    torch.zeros #[seq, dim] false device
 
 /-- Multi-head self-attention used by the audio encoder. -/
 structure AudioAttention (cfg : AudioEncoderConfig) where
@@ -263,6 +267,167 @@ def buildCuChunkLensCumsum
       out := out.push csum
     out
 
+private def maxOr (xs : Array UInt64) (fallback : UInt64 := 0) : UInt64 :=
+  xs.foldl (fun acc x => if x > acc then x else acc) fallback
+
+private def sumU64 (xs : Array UInt64) : UInt64 :=
+  xs.foldl (· + ·) 0
+
+private def chunkLensFromCumsum (cs : Array UInt64) : Array UInt64 :=
+  Id.run do
+    let mut out : Array UInt64 := #[]
+    let mut prev : UInt64 := 0
+    for cur in cs do
+      if cur >= prev then
+        let d := cur - prev
+        if d != 0 then
+          out := out.push d
+        prev := cur
+    out
+
+private def padRightFrames {cfg : AudioEncoderConfig} {frames maxFrames : UInt64}
+    (x : T #[1, cfg.numMelBins, frames])
+    : T #[1, cfg.numMelBins, maxFrames] :=
+  let padFrames := if maxFrames >= frames then maxFrames - frames else 0
+  let pad : T #[1, cfg.numMelBins, padFrames] := torch.zeros #[1, cfg.numMelBins, padFrames] false x.device
+  let cat := nn.cat x pad 2
+  reshape cat #[1, cfg.numMelBins, maxFrames]
+
+private def encodePaddedChunk {maxFrames : UInt64}
+    (m : AudioEncoder cfg)
+    (chunk : T #[1, cfg.numMelBins, maxFrames])
+    : T #[1, AudioEncoderConfig.framesAfterConv3 cfg maxFrames, cfg.dModel] :=
+  let t1 := AudioEncoderConfig.downsampleOnce maxFrames
+  let t2 := AudioEncoderConfig.downsampleTwice maxFrames
+  let t3 := AudioEncoderConfig.framesAfterConv3 cfg maxFrames
+  let x0 : T #[1, 1, cfg.numMelBins, maxFrames] := reshape chunk #[1, 1, cfg.numMelBins, maxFrames]
+  let x1 : T #[1, cfg.downsampleHiddenSize, AudioEncoderConfig.melAfterConv1 cfg, t1] :=
+    reshape (nn.gelu (nn.conv2d_bias x0 m.conv2d1Weight m.conv2d1Bias #[2, 2] #[1, 1]))
+      #[1, cfg.downsampleHiddenSize, AudioEncoderConfig.melAfterConv1 cfg, t1]
+  let x2 : T #[1, cfg.downsampleHiddenSize, AudioEncoderConfig.melAfterConv2 cfg, t2] :=
+    reshape (nn.gelu (nn.conv2d_bias x1 m.conv2d2Weight m.conv2d2Bias #[2, 2] #[1, 1]))
+      #[1, cfg.downsampleHiddenSize, AudioEncoderConfig.melAfterConv2 cfg, t2]
+  let x3 : T #[1, cfg.downsampleHiddenSize, AudioEncoderConfig.melAfterConv3 cfg, t3] :=
+    reshape (nn.gelu (nn.conv2d_bias x2 m.conv2d3Weight m.conv2d3Bias #[2, 2] #[1, 1]))
+      #[1, cfg.downsampleHiddenSize, AudioEncoderConfig.melAfterConv3 cfg, t3]
+  let x3t : T #[1, t3, cfg.downsampleHiddenSize, AudioEncoderConfig.melAfterConv3 cfg] :=
+    reshape (permute x3 #[0, 3, 1, 2]) #[1, t3, cfg.downsampleHiddenSize, AudioEncoderConfig.melAfterConv3 cfg]
+  let xFlat : T #[1, t3, AudioEncoderConfig.convOutInDim cfg] :=
+    reshape x3t #[1, t3, AudioEncoderConfig.convOutInDim cfg]
+  linear3d xFlat m.convOutWeight
+
+private def runLayersChunkLocal {seq : UInt64}
+    (m : AudioEncoder cfg)
+    (hidden : T #[1, seq, cfg.dModel])
+    (chunkLens : Array UInt64)
+    : T #[1, seq, cfg.dModel] :=
+  if seq == 0 then
+    hidden
+  else
+    let parts : Array (T #[]) := Id.run do
+      let mut out : Array (T #[]) := #[]
+      let mut start : UInt64 := 0
+      for len in chunkLens do
+        if len != 0 then
+          let seg : T #[1, len, cfg.dModel] := data.slice hidden 1 start len
+          let segOut := m.layers.foldl (fun h layer => layer.forward h none) seg
+          out := out.push (nn.eraseShape segOut)
+          start := start + len
+      out
+    if parts.isEmpty then
+      torch.zeros #[1, seq, cfg.dModel] false hidden.device
+    else
+      reshape (nn.cat_dyn parts 1) #[1, seq, cfg.dModel]
+
+private def encodeOneSampleVarLen {frames : UInt64}
+    (m : AudioEncoder cfg)
+    (sample : T #[1, cfg.numMelBins, frames])
+    (featureLen : UInt64)
+    : T #[1, AudioEncoderConfig.framesAfterConv3 cfg frames, cfg.outputDim] :=
+  let outSeq := AudioEncoderConfig.framesAfterConv3 cfg frames
+  let featureLen := if featureLen <= frames then featureLen else frames
+  if featureLen == 0 then
+    torch.zeros #[1, outSeq, cfg.outputDim] false sample.device
+  else
+    let chunkLens := buildChunkLengths cfg #[featureLen]
+    let maxChunkLen := maxOr chunkLens 1
+    let tChunk := AudioEncoderConfig.framesAfterConv3 cfg maxChunkLen
+    let chunkLensAfterCnn := chunkLengthsAfterCnn cfg chunkLens
+    let maxChunkAfterCnn := maxOr chunkLensAfterCnn tChunk
+    let pos : T #[tChunk, cfg.dModel] :=
+      sinusoidPosition (seq := tChunk) (dim := cfg.dModel) (device := sample.device)
+    let posBatch : T #[1, tChunk, cfg.dModel] := reshape pos #[1, tChunk, cfg.dModel]
+
+    let hiddenParts : Array (T #[]) := Id.run do
+      let mut out : Array (T #[]) := #[]
+      let mut start : UInt64 := 0
+      for i in [:chunkLens.size] do
+        let len := chunkLens.getD i 0
+        if len != 0 then
+          let desiredLen := chunkLensAfterCnn.getD i 0
+          let chunk : T #[1, cfg.numMelBins, len] := data.slice sample 2 start len
+          let padded : T #[1, cfg.numMelBins, maxChunkLen] :=
+            padRightFrames (cfg := cfg) (frames := len) (maxFrames := maxChunkLen) chunk
+          let emb : T #[1, tChunk, cfg.dModel] := encodePaddedChunk m padded
+          let embPos := emb + posBatch
+          let availLen := if desiredLen <= tChunk then desiredLen else tChunk
+          let seg0 : T #[1, availLen, cfg.dModel] := data.slice embPos 1 0 availLen
+          let segDyn : T #[] :=
+            if desiredLen <= availLen then
+              nn.eraseShape seg0
+            else
+              let extraLen := desiredLen - availLen
+              let extra : T #[1, extraLen, cfg.dModel] := torch.zeros #[1, extraLen, cfg.dModel] false seg0.device
+              nn.eraseShape (reshape (nn.cat seg0 extra 1) #[1, desiredLen, cfg.dModel])
+          out := out.push segDyn
+          start := start + len
+      out
+
+    let totalValid := sumU64 chunkLensAfterCnn
+    let hiddenValid : T #[1, totalValid, cfg.dModel] :=
+      if hiddenParts.isEmpty then
+        torch.zeros #[1, totalValid, cfg.dModel] false sample.device
+      else
+        reshape (nn.cat_dyn hiddenParts 1) #[1, totalValid, cfg.dModel]
+
+    let cuCumsum := buildCuChunkLensCumsum cfg #[totalValid] maxChunkAfterCnn
+    let attnChunkLens := chunkLensFromCumsum cuCumsum
+    let hiddenChunked := runLayersChunkLocal m hiddenValid attnChunkLens
+
+    let hidden := m.lnPost.forward3d hiddenChunked
+    let hidden : T #[1, totalValid, cfg.dModel] := affine3d hidden m.proj1Weight m.proj1Bias
+    let hidden := activate cfg.activationFunction hidden
+    let hidden : T #[1, totalValid, cfg.outputDim] := affine3d hidden m.proj2Weight m.proj2Bias
+
+    if totalValid >= outSeq then
+      data.slice hidden 1 0 outSeq
+    else
+      let padLen := outSeq - totalValid
+      let pad : T #[1, padLen, cfg.outputDim] := torch.zeros #[1, padLen, cfg.outputDim] false hidden.device
+      reshape (nn.cat hidden pad 1) #[1, outSeq, cfg.outputDim]
+
+/-- Varlen/chunked execution path mirroring reference `cu_seqlens` behavior:
+    each sample is chunked from `featureLens`, convolved chunk-wise, then transformed
+    with chunk-local self-attention blocks and finally re-padded to fixed output width. -/
+def forwardVarLen {batch frames : UInt64}
+    (m : AudioEncoder cfg)
+    (inputFeatures : T #[batch, cfg.numMelBins, frames])
+    (featureLens : Array UInt64)
+    : T #[batch, AudioEncoderConfig.framesAfterConv3 cfg frames, cfg.outputDim] :=
+  let outSeq := AudioEncoderConfig.framesAfterConv3 cfg frames
+  if batch == 0 then
+    torch.zeros #[batch, outSeq, cfg.outputDim] false inputFeatures.device
+  else
+    let rows : Array (T #[]) := Id.run do
+      let mut out : Array (T #[]) := #[]
+      for b in [:batch.toNat] do
+        let sample : T #[1, cfg.numMelBins, frames] := data.slice inputFeatures 0 b.toUInt64 1
+        let len := featureLens.getD b frames
+        let row : T #[1, outSeq, cfg.outputDim] := encodeOneSampleVarLen m sample len
+        out := out.push (nn.eraseShape row)
+      out
+    reshape (nn.cat_dyn rows 0) #[batch, outSeq, cfg.outputDim]
+
 def forward {batch frames : UInt64}
     (m : AudioEncoder cfg)
     (inputFeatures : T #[batch, cfg.numMelBins, frames])
@@ -291,7 +456,7 @@ def forward {batch frames : UInt64}
     reshape x3t #[batch, t3, AudioEncoderConfig.convOutInDim cfg]
   let xEmb : T #[batch, t3, cfg.dModel] := linear3d xFlat m.convOutWeight
 
-  let pos : T #[t3, cfg.dModel] := sinusoidPosition (seq := t3) (dim := cfg.dModel)
+  let pos : T #[t3, cfg.dModel] := sinusoidPosition (seq := t3) (dim := cfg.dModel) (device := xEmb.device)
   let posBatch : T #[batch, t3, cfg.dModel] := nn.expand (reshape pos #[1, t3, cfg.dModel]) #[batch, t3, cfg.dModel]
   let hidden0 := xEmb + posBatch
 

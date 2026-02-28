@@ -290,6 +290,19 @@ private def buildFeatureAttentionMask
         out := out.push v
       out
 
+private def adjustMaskLength (vals : Array Int64) (target : Nat) : Array Int64 :=
+  if vals.size == target then
+    vals
+  else if vals.size > target then
+    vals.extract 0 target
+  else
+    Id.run do
+      let mut out := vals
+      let pad := target - vals.size
+      for _ in [:pad] do
+        out := out.push 0
+      out
+
 /-- Faithful Whisper-style feature extraction on one waveform.
     This mirrors the reference path:
     Hann + STFT -> power -> Slaney mel -> log10 -> dynamic range clamp -> normalize. -/
@@ -370,6 +383,99 @@ def waveformToWhisperFeatures
 
   pure { inputFeatures, featureAttentionMask }
 
+/-- Dynamic-length Whisper-style feature extraction for full-wave inference.
+    Unlike `waveformToWhisperFeatures`, this does not force 30s framing.
+    It uses the full waveform length (with optional min/max duration constraints). -/
+def waveformToWhisperFeaturesDynamic
+    (cfg : PreprocessorConfig)
+    (wave : Array Float)
+    (minSeconds : Float := 0.5)
+    (maxSeconds : Option Float := none)
+    : IO (Sigma (fun frames => WhisperFrontendOutput cfg.featureSize frames)) := do
+  let nFft := if cfg.nFft == 0 then 400 else cfg.nFft
+  let hop := if cfg.hopLength == 0 then 160 else cfg.hopLength
+  let melBins := cfg.featureSize
+
+  if melBins == 0 then
+    throw <| IO.userError "Preprocessor config has feature_size=0"
+  if cfg.samplingRate == 0 then
+    throw <| IO.userError "Preprocessor config has sampling_rate=0"
+
+  let minSamplesRaw := ((minSeconds * cfg.samplingRate.toFloat) + 0.5).toUInt64
+  let minSamples := if minSamplesRaw == 0 then 1 else minSamplesRaw
+  let waveSamples := wave.size.toUInt64
+  let targetSamples := if waveSamples >= minSamples then waveSamples else minSamples
+
+  match maxSeconds with
+  | none => pure ()
+  | some sec =>
+      if sec > 0.0 then
+        let maxSamples := ((sec * cfg.samplingRate.toFloat) + 0.5).toUInt64
+        if maxSamples > 0 && targetSamples > maxSamples then
+          throw <| IO.userError
+            s!"Audio duration exceeds maxSeconds={sec}: samples={targetSamples}, limit={maxSamples}"
+      else
+        pure ()
+
+  let (prepared0, validLenNat) := takePadRight wave targetSamples.toNat cfg.paddingValue
+  let prepared :=
+    if cfg.doNormalize then
+      zeroMeanUnitVar prepared0 validLenNat cfg.paddingValue
+    else
+      prepared0
+
+  let wav0 : T #[targetSamples] := reshape (data.fromFloatArray prepared) #[targetSamples]
+  let wav ←
+    if cfg.dither == 0.0 then
+      pure wav0
+    else
+      let noise ← randn #[targetSamples]
+      pure (wav0 + noise * cfg.dither)
+
+  let window : T #[nFft] := signal.hannWindow nFft
+  let stftDyn : T #[] := signal.stft1d (n := targetSamples) wav nFft hop nFft window true false
+  let stftShape := stftDyn.runtimeShape
+  if stftShape.size < 3 then
+    throw <| IO.userError s!"Unexpected STFT rank {stftShape.size}, expected 3"
+
+  let freqBins := stftShape.getD 0 0
+  let stftFrames := stftShape.getD 1 0
+  let packed := stftShape.getD 2 0
+  if packed != 2 then
+    throw <| IO.userError s!"Unexpected STFT packed size {packed}, expected 2"
+
+  let frames := if stftFrames > 0 then stftFrames - 1 else 0
+  let stftVals ← data.tensorToFloatArray' stftDyn
+  let freqNat := freqBins.toNat
+  let stftFramesNat := stftFrames.toNat
+  let framesNat := frames.toNat
+  let packedNat := packed.toNat
+
+  let mut powerFlat : Array Float := Array.mkEmpty (freqNat * framesNat)
+  for f in [:freqNat] do
+    for t in [:framesNat] do
+      let base := ((f * stftFramesNat + t) * packedNat)
+      let re := stftVals.getD base 0.0
+      let im := stftVals.getD (base + 1) 0.0
+      powerFlat := powerFlat.push (re * re + im * im)
+
+  let melFilterFlat := buildSlaneyMelFilterBankFlat freqNat melBins.toNat cfg.samplingRate.toNat
+  let powerSpec : T #[freqBins, frames] := reshape (data.fromFloatArray powerFlat) #[freqBins, frames]
+  let melFilter : T #[freqBins, melBins] := reshape (data.fromFloatArray melFilterFlat) #[freqBins, melBins]
+  let melPower : T #[melBins, frames] := nn.mm (nn.transpose2d melFilter) powerSpec
+  let logSpec : T #[melBins, frames] := nn.log10 (clampFloat melPower (1e-10 : Float) (1e10 : Float))
+  let maxVal := nn.item (nn.maxAll logSpec)
+  let floored : T #[melBins, frames] := clampFloat logSpec (maxVal - (8.0 : Float)) (1e10 : Float)
+  let normalized : T #[melBins, frames] := (floored + (4.0 : Float)) / (4.0 : Float)
+  let inputFeatures : T #[1, melBins, frames] := reshape normalized #[1, melBins, frames]
+
+  let maskVals0 := buildFeatureAttentionMask validLenNat targetSamples.toNat hop.toNat cfg.returnAttentionMask
+  let maskVals := adjustMaskLength maskVals0 frames.toNat
+  let featureAttentionMask : T #[1, frames] :=
+    reshape (data.fromInt64Array maskVals) #[1, frames]
+
+  pure ⟨frames, { inputFeatures, featureAttentionMask }⟩
+
 /-- Load WAV, resample to preprocessor sampling rate, then extract Whisper-style features. -/
 def wavToWhisperFeatures
     (cfg : PreprocessorConfig)
@@ -378,6 +484,18 @@ def wavToWhisperFeatures
   let (sr, wav) ← loadMonoPcm16Wav path
   let wavTarget ← data.resampleSoxrHQ wav sr cfg.samplingRate
   waveformToWhisperFeatures cfg wavTarget
+
+/-- Dynamic-length WAV frontend path.
+    Uses full resampled waveform length (subject to optional min/max seconds). -/
+def wavToWhisperFeaturesDynamic
+    (cfg : PreprocessorConfig)
+    (path : String)
+    (minSeconds : Float := 0.5)
+    (maxSeconds : Option Float := none)
+    : IO (Sigma (fun frames => WhisperFrontendOutput cfg.featureSize frames)) := do
+  let (sr, wav) ← loadMonoPcm16Wav path
+  let wavTarget ← data.resampleSoxrHQ wav sr cfg.samplingRate
+  waveformToWhisperFeaturesDynamic cfg wavTarget minSeconds maxSeconds
 
 /-- Backward-compatible convenience wrapper.
     This now runs the faithful Whisper-style frontend instead of pseudo-mel. -/

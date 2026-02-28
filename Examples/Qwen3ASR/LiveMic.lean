@@ -7,7 +7,9 @@ namespace Examples.Qwen3ASR
 open torch.qwen3asr
 
 structure Args where
-  modelDir : String := "weights/qwen3-asr-0.6b"
+  source : String := "weights/qwen3-asr-0.6b"
+  revision : String := "main"
+  cacheDir : String := "~/.cache/huggingface/tyr-models"
   language : Option String := none
   context : String := ""
   maxNewTokens : UInt64 := 128
@@ -38,7 +40,10 @@ private def parseFloatArg (name : String) (v : String) : IO Float :=
 private partial def parseArgsLoop (xs : List String) (acc : Args) : IO Args := do
   match xs with
   | [] => pure acc
-  | "--model-dir" :: v :: rest => parseArgsLoop rest { acc with modelDir := v }
+  | "--source" :: v :: rest => parseArgsLoop rest { acc with source := v }
+  | "--model-dir" :: v :: rest => parseArgsLoop rest { acc with source := v }
+  | "--revision" :: v :: rest => parseArgsLoop rest { acc with revision := v }
+  | "--cache-dir" :: v :: rest => parseArgsLoop rest { acc with cacheDir := v }
   | "--language" :: v :: rest => parseArgsLoop rest { acc with language := some v }
   | "--context" :: v :: rest => parseArgsLoop rest { acc with context := v }
   | "--max-new-tokens" :: v :: rest =>
@@ -53,7 +58,10 @@ private partial def parseArgsLoop (xs : List String) (acc : Args) : IO Args := d
       parseArgsLoop rest { acc with simpleOutput := true }
   | "--help" :: _ =>
       IO.println "Usage: lake exe Qwen3ASRLiveMic [options]"
-      IO.println "  --model-dir <path>       Qwen3-ASR model directory"
+      IO.println "  --source <path-or-repo>  Local model dir or HF repo id"
+      IO.println "  --model-dir <path>       Alias for --source (backward compatible)"
+      IO.println "  --revision <rev>         HF revision/branch/tag (default: main)"
+      IO.println "  --cache-dir <path>       Local cache for downloaded files"
       IO.println "  --language <name>        Optional forced language"
       IO.println "  --context <text>         Optional system context"
       IO.println "  --max-new-tokens <n>     Greedy decode max new tokens"
@@ -79,10 +87,17 @@ def runMain (argv : List String) : IO UInt32 := do
   if args.chunkSec <= 0.0 || args.hopSec <= 0.0 || args.runSec <= 0.0 then
     throw <| IO.userError "chunk-sec, hop-sec, and run-sec must be > 0"
 
-  let cfg ← Qwen3ASRConfig.loadFromPretrainedDir args.modelDir
-  let tok ← tokenizer.qwen3.loadTokenizer args.modelDir
-  let pre ← PreprocessorConfig.loadFromPretrainedDir args.modelDir
-  let model ← Qwen3ASRForConditionalGeneration.loadSharded args.modelDir cfg
+  let modelDir ← hub.resolvePretrainedDir args.source {
+    revision := args.revision
+    cacheDir := args.cacheDir
+    includeTokenizer := true
+    includePreprocessor := true
+  }
+  IO.println s!"Resolved model dir: {modelDir}"
+  let cfg ← Qwen3ASRConfig.loadFromPretrainedDir modelDir
+  let tok ← tokenizer.qwen3.loadTokenizer modelDir
+  let pre ← PreprocessorConfig.loadFromPretrainedDir modelDir
+  let model ← Qwen3ASRForConditionalGeneration.loadSharded modelDir cfg
 
   let chunkSamples := toSamples args.chunkSec
   let hopSamples := toSamples args.hopSec

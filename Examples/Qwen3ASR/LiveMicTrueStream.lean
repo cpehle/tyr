@@ -6,7 +6,9 @@ namespace Examples.Qwen3ASR
 open torch.qwen3asr
 
 structure Args where
-  modelDir : String := "weights/qwen3-asr-0.6b"
+  source : String := "weights/qwen3-asr-0.6b"
+  revision : String := "main"
+  cacheDir : String := "~/.cache/huggingface/tyr-models"
   language : Option String := none
   context : String := ""
   maxNewTokens : UInt64 := 128
@@ -37,7 +39,10 @@ private def parseFloatArg (name : String) (v : String) : IO Float :=
 private partial def parseArgsLoop (xs : List String) (acc : Args) : IO Args := do
   match xs with
   | [] => pure acc
-  | "--model-dir" :: v :: rest => parseArgsLoop rest { acc with modelDir := v }
+  | "--source" :: v :: rest => parseArgsLoop rest { acc with source := v }
+  | "--model-dir" :: v :: rest => parseArgsLoop rest { acc with source := v }
+  | "--revision" :: v :: rest => parseArgsLoop rest { acc with revision := v }
+  | "--cache-dir" :: v :: rest => parseArgsLoop rest { acc with cacheDir := v }
   | "--language" :: v :: rest => parseArgsLoop rest { acc with language := some v }
   | "--context" :: v :: rest => parseArgsLoop rest { acc with context := v }
   | "--max-new-tokens" :: v :: rest =>
@@ -52,7 +57,10 @@ private partial def parseArgsLoop (xs : List String) (acc : Args) : IO Args := d
       parseArgsLoop rest { acc with sileroVADPath := some v }
   | "--help" :: _ =>
       IO.println "Usage: lake exe Qwen3ASRLiveMicTrueStream [options]"
-      IO.println "  --model-dir <path>       Qwen3-ASR model directory"
+      IO.println "  --source <path-or-repo>  Local model dir or HF repo id"
+      IO.println "  --model-dir <path>       Alias for --source (backward compatible)"
+      IO.println "  --revision <rev>         HF revision/branch/tag (default: main)"
+      IO.println "  --cache-dir <path>       Local cache for downloaded files"
       IO.println "  --language <name>        Optional forced language"
       IO.println "  --context <text>         Optional system context"
       IO.println "  --max-new-tokens <n>     Greedy decode max new tokens"
@@ -75,7 +83,8 @@ def runMain (argv : List String) : IO UInt32 := do
   if args.chunkSec <= 0.0 || args.hopSec <= 0.0 || args.runSec <= 0.0 then
     throw <| IO.userError "chunk-sec, hop-sec, and run-sec must be > 0"
 
-  let sm ← loadFromPretrained args.modelDir
+  let sm ← loadFromPretrained args.source args.revision args.cacheDir
+  IO.println s!"Resolved model dir: {sm.modelDir}"
   let sileroPath ←
     match args.sileroVADPath with
     | some p => pure (some p)
@@ -93,6 +102,7 @@ def runMain (argv : List String) : IO UInt32 := do
   Tyr.Audio.AppleInput.start 16000 1 100
 
   try
+    let mut lastUnstable := ""
     for _ in [:steps] do
       let pcm ← Tyr.Audio.AppleInput.read hopSamples.toUInt64 1500
       let (ssNext, out) ← pushAudio sm ss pcm (maxNewTokens := args.maxNewTokens)
@@ -100,14 +110,15 @@ def runMain (argv : List String) : IO UInt32 := do
       if out.didDecode then
         if !out.stableAppend.isEmpty then
           IO.println s!"STABLE+= {out.stableAppend}"
-        if !out.unstableText.isEmpty then
+        if !out.unstableText.isEmpty && out.unstableText != lastUnstable then
           IO.println s!"UNSTABLE= {out.unstableText}"
+          lastUnstable := out.unstableText
     let (ssFinal, outFinal) ← flush sm ss (maxNewTokens := args.maxNewTokens)
     ss := ssFinal
     if outFinal.didDecode then
       if !outFinal.stableAppend.isEmpty then
         IO.println s!"STABLE+= {outFinal.stableAppend}"
-      if !outFinal.unstableText.isEmpty then
+      if !outFinal.unstableText.isEmpty && outFinal.unstableText != lastUnstable then
         IO.println s!"UNSTABLE= {outFinal.unstableText}"
     Tyr.Audio.AppleInput.stop
   catch e =>

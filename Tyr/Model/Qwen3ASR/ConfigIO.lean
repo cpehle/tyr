@@ -151,7 +151,9 @@ def loadFromFile (path : String) (defaults : Qwen3ASRConfig := {}) : IO Qwen3ASR
     | some t => parseThinkerConfig t defaults.thinkerConfig
     | none => defaults.thinkerConfig
   let supportLanguages := getStringArrayFieldD root "support_languages" defaults.supportLanguages
-  pure { thinkerConfig, supportLanguages }
+  let timestampTokenId := getNatFieldD root "timestamp_token_id" defaults.timestampTokenId
+  let timestampSegmentTime := getFloatFieldD root "timestamp_segment_time" defaults.timestampSegmentTime
+  pure { thinkerConfig, supportLanguages, timestampTokenId, timestampSegmentTime }
 
 /-- Load Qwen3-ASR config from a model directory containing `config.json`. -/
 def loadFromPretrainedDir (modelDir : String) (defaults : Qwen3ASRConfig := {}) : IO Qwen3ASRConfig :=

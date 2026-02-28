@@ -4,6 +4,7 @@
   Pretrained weight loading for Lean Qwen3-ASR port.
 -/
 import Tyr.Torch
+import Tyr.TensorStruct
 import Tyr.Module.RMSNorm
 import Tyr.Model.Qwen3ASR.Model
 
@@ -213,10 +214,36 @@ private def loadThinkerSharded (modelDir : String) (cfg : ThinkerConfig)
 
 namespace Qwen3ASRForConditionalGeneration
 
+/-- Resolve runtime target device for ASR inference.
+    Honors `TYR_DEVICE=cpu|cuda|mps|auto`; defaults to `auto`. -/
+private def resolveAsrDevice : IO Device := do
+  let requested := (← IO.getEnv "TYR_DEVICE").map String.toLower
+  match requested with
+  | some "cpu" => pure Device.CPU
+  | some "cuda" =>
+    if ← cuda_is_available then
+      pure (Device.CUDA 0)
+    else
+      IO.eprintln "TYR_DEVICE=cuda requested but CUDA is unavailable; falling back to auto device selection."
+      getBestDevice
+  | some "mps" =>
+    if ← mps_is_available then
+      pure Device.MPS
+    else
+      IO.eprintln "TYR_DEVICE=mps requested but MPS is unavailable; falling back to auto device selection."
+      getBestDevice
+  | some "auto" => getBestDevice
+  | some _ => getBestDevice
+  | none => getBestDevice
+
 /-- Load Qwen3-ASR model from HuggingFace sharded SafeTensors directory. -/
 def loadSharded (modelDir : String) (cfg : Qwen3ASRConfig := {}) : IO (Qwen3ASRForConditionalGeneration cfg) := do
   IO.println s!"Loading Qwen3-ASR weights from {modelDir}..."
   let thinker ← loadThinkerSharded modelDir cfg.thinkerConfig
+  let targetDevice ← resolveAsrDevice
+  let thinker :=
+    TensorStruct.map (fun t => t.to targetDevice) thinker
+  IO.println s!"Qwen3-ASR target device: {repr targetDevice}"
   IO.println "Loaded Qwen3-ASR weights."
   pure { thinker, supportLanguages := cfg.supportLanguages }
 

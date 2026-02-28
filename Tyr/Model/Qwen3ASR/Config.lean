@@ -159,6 +159,10 @@ def defaultSupportedLanguages : Array String :=
 structure Qwen3ASRConfig where
   thinkerConfig : ThinkerConfig := {}
   supportLanguages : Array String := defaultSupportedLanguages
+  /-- Token ID used by forced-aligner prompt to mark timestamp slots. -/
+  timestampTokenId : UInt64 := 0
+  /-- Milliseconds represented by one forced-aligner timestamp bin. -/
+  timestampSegmentTime : Float := 1.0
   deriving Repr, Inhabited
 
 def defaultEosTokenIds : Array UInt64 := #[151645, 151643]

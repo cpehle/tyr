@@ -95,7 +95,8 @@ private def gatherRowsByPositions {seq half : UInt64}
         let p := clipTo (positions.getD i 0) seq
         out := out.push (Int64.ofNat p.toNat)
       out
-  let idx : T #[seq] := reshape (data.fromInt64Array idxVals) #[seq]
+  let idxCpu : T #[seq] := reshape (data.fromInt64Array idxVals) #[seq]
+  let idx : T #[seq] := idxCpu.to table.device
   let idx2d : T #[seq, half] := nn.expand (reshape idx #[seq, 1]) #[seq, half]
   reshape (torch.gather table 0 idx2d) #[seq, half]
 
@@ -171,7 +172,12 @@ def forwardEmbeds {batch seq : UInt64}
     (inputsEmbeds : T #[batch, seq, cfg.textConfig.hiddenSize])
     (attnMask : Option (T #[batch, seq]) := none)
     : T #[batch, seq, ThinkerLmVocabSize cfg] :=
-  let (cos, sin) := rotary.computeFreqsPure seq cfg.textConfig.headDim cfg.textConfig.ropeTheta
+  let (cos, sin) :=
+    rotary.computeFreqsOnDevicePure
+      seq
+      cfg.textConfig.headDim
+      cfg.textConfig.ropeTheta
+      inputsEmbeds.device
   let hidden := match attnMask with
     | some mask =>
       m.textModel.layers.foldl
@@ -190,7 +196,12 @@ private def forwardEmbedsMaskedWithPositionRows {batch seq : UInt64}
     (attnMask : T #[batch, seq])
     : IO (T #[batch, seq, ThinkerLmVocabSize cfg]) := do
   let half := cfg.textConfig.headDim / 2
-  let (baseCos, baseSin) := rotary.computeFreqsPure seq cfg.textConfig.headDim cfg.textConfig.ropeTheta
+  let (baseCos, baseSin) :=
+    rotary.computeFreqsOnDevicePure
+      seq
+      cfg.textConfig.headDim
+      cfg.textConfig.ropeTheta
+      inputsEmbeds.device
   let rows ← positionRowsFromMask attnMask
 
   if batch == 0 then
@@ -361,14 +372,24 @@ private def initLayerKVCaches {batch : UInt64}
       (head_dim := cfg.textConfig.headDim)
       device)
 
-private def decodeStepFromEmbedWithCache {batch : UInt64}
+private def precomputeDecodeRotary {maxLen : UInt64}
+    (_m : Qwen3ASRThinkerForConditionalGeneration cfg)
+    (device : Device)
+    : T #[maxLen, cfg.textConfig.headDim / 2] × T #[maxLen, cfg.textConfig.headDim / 2] :=
+  rotary.computeFreqsOnDevicePure
+    maxLen
+    cfg.textConfig.headDim
+    cfg.textConfig.ropeTheta
+    device
+
+private def decodeStepFromEmbedWithCache {batch maxLen : UInt64}
     (m : Qwen3ASRThinkerForConditionalGeneration cfg)
+    (cosAll : T #[maxLen, cfg.textConfig.headDim / 2])
+    (sinAll : T #[maxLen, cfg.textConfig.headDim / 2])
     (tokenEmbed : T #[batch, 1, cfg.textConfig.hiddenSize])
     (position : UInt64)
     (caches : Array (LayerKVCache cfg batch))
     : IO (T #[batch, ThinkerLmVocabSize cfg] × Array (LayerKVCache cfg batch)) := do
-  let freqLen := position + 1
-  let (cosAll, sinAll) := rotary.computeFreqsPure freqLen cfg.textConfig.headDim cfg.textConfig.ropeTheta
   let cos : T #[1, cfg.textConfig.headDim / 2] := data.slice cosAll 0 position 1
   let sin : T #[1, cfg.textConfig.headDim / 2] := data.slice sinAll 0 position 1
 
@@ -393,8 +414,10 @@ private def decodeStepFromEmbedWithCache {batch : UInt64}
   let logits2 : T #[batch, ThinkerLmVocabSize cfg] := reshape logits3 #[batch, ThinkerLmVocabSize cfg]
   pure (logits2, nextCaches)
 
-private partial def prefillCachesFromEmbeds {batch seq : UInt64}
+private partial def prefillCachesFromEmbeds {batch seq maxLen : UInt64}
     (m : Qwen3ASRThinkerForConditionalGeneration cfg)
+    (cosAll : T #[maxLen, cfg.textConfig.headDim / 2])
+    (sinAll : T #[maxLen, cfg.textConfig.headDim / 2])
     (inputsEmbeds : T #[batch, seq, cfg.textConfig.hiddenSize])
     (caches : Array (LayerKVCache cfg batch))
     (position : Nat)
@@ -404,11 +427,13 @@ private partial def prefillCachesFromEmbeds {batch seq : UInt64}
     pure (lastLogits, caches)
   else
     let tok : T #[batch, 1, cfg.textConfig.hiddenSize] := data.slice inputsEmbeds 1 position.toUInt64 1
-    let (logits, caches') ← decodeStepFromEmbedWithCache m tok position.toUInt64 caches
-    prefillCachesFromEmbeds m inputsEmbeds caches' (position + 1) logits
+    let (logits, caches') ← decodeStepFromEmbedWithCache m cosAll sinAll tok position.toUInt64 caches
+    prefillCachesFromEmbeds m cosAll sinAll inputsEmbeds caches' (position + 1) logits
 
-private partial def greedyLoopCached {batch : UInt64}
+private partial def greedyLoopCached {batch maxLen : UInt64}
     (m : Qwen3ASRThinkerForConditionalGeneration cfg)
+    (cosAll : T #[maxLen, cfg.textConfig.headDim / 2])
+    (sinAll : T #[maxLen, cfg.textConfig.headDim / 2])
     (eosTokenIds : Array UInt64)
     (remaining : Nat)
     (caches : Array (LayerKVCache cfg batch))
@@ -430,8 +455,8 @@ private partial def greedyLoopCached {batch : UInt64}
   else
     let nextEmb : T #[batch, 1, cfg.textConfig.hiddenSize] := m.embedText nextCol
     let (nextLogits, caches') ←
-      decodeStepFromEmbedWithCache m nextEmb curSeq caches
-    greedyLoopCached m eosTokenIds (remaining - 1) caches' nextLogits appended
+      decodeStepFromEmbedWithCache m cosAll sinAll nextEmb curSeq caches
+    greedyLoopCached m cosAll sinAll eosTokenIds (remaining - 1) caches' nextLogits appended
 
 /-- Lean analogue of `prepare_inputs_for_generation` behavior for audio features:
     only feed audio on the first generation step (`cachePosition == 0`). -/
@@ -551,12 +576,13 @@ def generateGreedy {batch seq frames : UInt64}
   let inputsEmbeds ← buildInputsEmbeds m inputIds inputFeatures featureAttentionMask
   let cacheDevice := inputsEmbeds.device
   let cacheMaxLen : UInt64 := seq + maxNewTokens
+  let (cosAll, sinAll) := precomputeDecodeRotary (maxLen := cacheMaxLen) m cacheDevice
   let caches0 := initLayerKVCaches m cacheMaxLen cacheDevice
   let tok0 : T #[batch, 1, cfg.textConfig.hiddenSize] := data.slice inputsEmbeds 1 0 1
-  let (logits0, caches1) ← decodeStepFromEmbedWithCache m tok0 0 caches0
+  let (logits0, caches1) ← decodeStepFromEmbedWithCache m cosAll sinAll tok0 0 caches0
   let (lastLogits, cachesPrefill) ←
-    prefillCachesFromEmbeds m inputsEmbeds caches1 1 logits0
-  greedyLoopCached m eosTokenIds maxNewTokens.toNat cachesPrefill lastLogits inputIds
+    prefillCachesFromEmbeds m cosAll sinAll inputsEmbeds caches1 1 logits0
+  greedyLoopCached m cosAll sinAll eosTokenIds maxNewTokens.toNat cachesPrefill lastLogits inputIds
 
 def forwardFromMel {batch frames textSeq : UInt64}
     (m : Qwen3ASRThinkerForConditionalGeneration cfg)

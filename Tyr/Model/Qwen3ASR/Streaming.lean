@@ -9,6 +9,7 @@
 import Tyr.Model.Qwen3ASR.Config
 import Tyr.Model.Qwen3ASR.Model
 import Tyr.Model.Qwen3ASR.Frontend
+import Tyr.Model.Qwen3ASR.Processor
 import Tyr.Tokenizer.Qwen3
 
 namespace torch.qwen3asr
@@ -235,7 +236,10 @@ def mergeLanguages (langs : Array String) : String :=
 
 /-- Build base text prompt for streaming decode. -/
 def buildTextPrompt (context : String) (forceLanguage : Option String := none) : String :=
-  let base := tokenizer.qwen3.chatTemplate context
+  let base :=
+    "<|im_start|>system\n" ++ context ++ "<|im_end|>\n" ++
+    "<|im_start|>user\n<|audio_start|><|audio_pad|><|audio_end|><|im_end|>\n" ++
+    "<|im_start|>assistant\n"
   match forceLanguage with
   | some l => base ++ s!"language {l}{asrTextTag}"
   | none => base
@@ -406,25 +410,37 @@ def decodeStreamingChunkWithModel
   let validFramesTensor : T #[1] := nn.sumDim (data.toLong frontendOut.featureAttentionMask) 1 false
   let validFramesArr ← data.tensorToUInt64Array validFramesTensor
   let validFrames := validFramesArr.getD 0 0
-  let audioLen := AudioEncoderConfig.featExtractOutputLength validFrames
+  let audioLenRaw := AudioEncoderConfig.featExtractOutputLength validFrames
+  let audioLenCap :=
+    AudioEncoderConfig.framesAfterConv3
+      cfg.thinkerConfig.audioConfig
+      (PreprocessorConfig.expectedFrames preprocessor)
+  let audioLen := if audioLenRaw <= audioLenCap then audioLenRaw else audioLenCap
 
-  let promptIds := tokenizer.qwen3.encodeText tok prompt
-  let mut idsVals : Array Int64 := Array.mkEmpty (audioLen.toNat + promptIds.size)
-  let audioTok : Int64 := Int64.ofNat cfg.thinkerConfig.audioTokenId.toNat
-  for _ in [:audioLen.toNat] do
-    idsVals := idsVals.push audioTok
-  for id in promptIds do
-    idsVals := idsVals.push (Int64.ofNat id.toNat)
+  let processor : Qwen3ASRProcessor := {}
+  let promptExpanded ←
+    match processor.replaceMultimodalSpecialTokens #[prompt] #[audioLen] with
+    | .ok xs => pure (xs.getD 0 prompt)
+    | .error e => throw <| IO.userError e
+
+  let promptIds := tokenizer.qwen3.encodeText tok promptExpanded
+  let idsVals : Array Int64 := promptIds.map (fun id => Int64.ofNat id.toNat)
 
   let seq : UInt64 := idsVals.size.toUInt64
   if seq == 0 then
     throw <| IO.userError "decodeStreamingChunkWithModel produced empty prompt/input sequence"
-  let inputIds : T #[1, seq] := reshape (data.fromInt64Array idsVals) #[1, seq]
+  let dev := model.thinker.textModel.embed_tokens.device
+  let inputIdsCpu : T #[1, seq] := reshape (data.fromInt64Array idsVals) #[1, seq]
+  let inputIds : T #[1, seq] := inputIdsCpu.to dev
+  let inputFeaturesDev : T #[1, preprocessor.featureSize, PreprocessorConfig.expectedFrames preprocessor] :=
+    frontendOut.inputFeatures.to dev
+  let featureAttentionMaskDev : T #[1, PreprocessorConfig.expectedFrames preprocessor] :=
+    frontendOut.featureAttentionMask.to dev
   let generated ←
     model.generateGreedy
       inputIds
-      (inputFeatures := some frontendOut.inputFeatures)
-      (featureAttentionMask := some frontendOut.featureAttentionMask)
+      (inputFeatures := some inputFeaturesDev)
+      (featureAttentionMask := some featureAttentionMaskDev)
       (maxNewTokens := maxNewTokens)
       (eosTokenIds := eosTokenIds)
 

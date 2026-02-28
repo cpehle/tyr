@@ -82,7 +82,7 @@ def updateWithSignals
   let cHistRaw := consensusPrefixLastK hist0 st.cfg.confirmWindows
   let cHist := safeSub cHistRaw st.cfg.rollbackTokens
   let candidate0 :=
-    if hist0.size >= st.cfg.confirmWindows then Nat.min cPrev cHist else cPrev
+    if hist0.size >= st.cfg.confirmWindows then cHist else cPrev
   let unchanged := if ids == st.lastIds then st.unchangedSteps + 1 else 0
   let freezeCommit :=
     if st.cfg.freezeAfterSteps > 0 && unchanged >= st.cfg.freezeAfterSteps then
@@ -104,11 +104,10 @@ def updateWithSignals
   let stableIds := ids.extract 0 (Nat.min commitLen ids.size)
   let unstableIds := if commitLen >= ids.size then #[] else ids.extract commitLen ids.size
 
-  let oldStableText := decode st.stableIds
   let newStableText := decode stableIds
   let stableAppend :=
-    if oldStableText.length < newStableText.length then
-      (newStableText.drop oldStableText.length).toString
+    if st.stableIds.size < stableIds.size then
+      decode (stableIds.extract st.stableIds.size stableIds.size)
     else
       ""
   let unstableText := decode unstableIds

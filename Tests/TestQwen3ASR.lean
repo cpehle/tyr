@@ -174,6 +174,23 @@ def testQwen3ASRMergeLanguages : IO Unit := do
     "mergeLanguages should drop empties and consecutive duplicates while preserving order"
 
 @[test]
+def testQwen3ASRHubOfficialRepoIds : IO Unit := do
+  LeanTest.assertTrue (hub.isQwen3ASRCollectionRepoId "Qwen/Qwen3-ASR-0.6B")
+    "official ASR 0.6B repo id should be recognized"
+  LeanTest.assertTrue (hub.isQwen3ASRCollectionRepoId "Qwen/Qwen3-ASR-1.7B")
+    "official ASR 1.7B repo id should be recognized"
+  LeanTest.assertTrue (!(hub.isQwen3ASRCollectionRepoId "Qwen/Qwen3-ASR-42B"))
+    "unknown ASR repo ids should not be recognized as official collection members"
+
+@[test]
+def testQwen3ASRHubResolveLocalDir : IO Unit := do
+  let localDir := "/tmp/qwen3asr_pretrained_local"
+  IO.FS.createDirAll ⟨localDir⟩
+  let resolved ← hub.resolvePretrainedDir localDir
+  LeanTest.assertEqual resolved localDir
+    "resolver should pass through existing local model directories unchanged"
+
+@[test]
 def testQwen3ASRInitStreamingStateLanguageValidation : IO Unit := do
   let st ← initStreamingState tinyCfg.supportLanguages (context := "") (language := some "english")
   LeanTest.assertEqual st.forceLanguage (some "English")
@@ -241,6 +258,70 @@ def testQwen3ASRStreamingTranscribeAndFinish : IO Unit := do
     tokenizer.qwen3.decodeText tok (ids.extract 0 endIdx)
   LeanTest.assertEqual (prompts2.getD 2 "") (st0.promptRaw ++ expectedPrefix3)
     "finish prompt should use max(1, len-k) rollback behavior"
+
+@[test]
+def testQwen3ASRTranscribeWavOffline : IO Unit := do
+  let cfg := tinyCfg
+  let model ← Qwen3ASRForConditionalGeneration.init cfg
+  let tok := mkAsciiStreamingTokenizer
+  let pre := tinyPreprocessorCfg cfg.thinkerConfig.audioConfig.numMelBins 64
+  let wavPath := "output/lean_decode_test.wav"
+  let wavExists ← data.fileExists wavPath
+  LeanTest.assertTrue wavExists s!"expected tracked test WAV at {wavPath}"
+
+  let out ← model.transcribeWav
+    tok
+    pre
+    wavPath
+    (context := "")
+    (language := some "english")
+    (returnTimeStamps := false)
+    (maxNewTokens := 2)
+    (eosTokenIds := #[])
+
+  LeanTest.assertEqual out.language "English"
+    "offline transcribe should normalize and preserve forced language"
+  LeanTest.assertTrue out.timeStamps.isNone
+    "offline transcribe should not return timestamps when returnTimeStamps=false"
+
+@[test]
+def testQwen3ASRTranscribeWaveformsBatchBroadcastAndMismatch : IO Unit := do
+  let cfg := tinyCfg
+  let model ← Qwen3ASRForConditionalGeneration.init cfg
+  let tok := mkAsciiStreamingTokenizer
+  let pre := tinyPreprocessorCfg cfg.thinkerConfig.audioConfig.numMelBins 32
+  let audios : Array (Array Float) := #[#[0.0, 0.1], #[0.2, -0.2, 0.3]]
+
+  let outs ← model.transcribeWaveforms
+    tok
+    pre
+    audios
+    (contexts := #["ctx"])
+    (languages := #[some "English"])
+    (returnTimeStamps := false)
+    (maxNewTokens := 1)
+    (eosTokenIds := #[])
+
+  LeanTest.assertEqual outs.size 2 "broadcasted offline transcribe should return one result per input audio"
+  LeanTest.assertTrue (outs.all (fun r => r.language == "English"))
+    "broadcasted forced language should apply to all batch entries"
+
+  let threw ←
+    try
+      let _ ← model.transcribeWaveforms
+        tok
+        pre
+        audios
+        (contexts := #["a", "b", "c"])
+        (languages := #[some "English"])
+        (returnTimeStamps := false)
+        (maxNewTokens := 1)
+        (eosTokenIds := #[])
+      pure false
+    catch _ =>
+      pure true
+  LeanTest.assertTrue threw
+    "offline transcribe should reject context batch size mismatch"
 
 @[test]
 def testQwen3ASRInitAndLanguages : IO Unit := do

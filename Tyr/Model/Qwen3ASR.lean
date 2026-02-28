@@ -16,3 +16,4 @@ import Tyr.Model.Qwen3ASR.StreamModel
 import Tyr.Model.Qwen3ASR.Transcribe
 import Tyr.Model.Qwen3ASR.ForcedAligner
 import Tyr.Model.Qwen3ASR.Weights
+import Tyr.Model.Qwen3ASR.Pretrained
