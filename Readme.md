@@ -248,6 +248,20 @@ Monitor tensor leaks via `get_live_tensors` which tracks outstanding C++ tensors
 - `Examples/` - Training scripts and model implementations
 - `Tests/` - Test suites
 
+### Commit Template
+
+This repo uses scoped conventional commit subjects:
+
+```text
+type(scope): summary
+```
+
+A commit message template is included at `.gitmessage`. Enable it locally:
+
+```bash
+git config --local commit.template .gitmessage
+```
+
 ## License
 
 TBD.
