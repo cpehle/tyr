@@ -28,7 +28,9 @@ import Tests.TestQwen3Model
 import Tests.TestQwen35Model
 import Tests.TestQwen35Multimodal
 import Tests.TestQwen35Pretrained
+import Tests.TestQwen25OmniPretrained
 import Tests.TestSafeTensorsTypeProvider
+import Tests.TestSafeTensorsTypeProviderErrors
 -- Note: `Tests.TestQwen3TTS` depends on in-progress Qwen3TTS weight-loading
 -- modules and is temporarily excluded from the default test runner.
 

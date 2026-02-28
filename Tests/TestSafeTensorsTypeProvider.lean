@@ -15,6 +15,16 @@ safetensors_type_provider "Tests/fixtures/safetensors/sharded" as ShardedSafe
 safetensors_type_provider "Tests/fixtures/safetensors/indexed.safetensors" as IndexedSafe
 safetensors_type_provider "Tests/fixtures/safetensors/indexed_dir" as IndexedDirSafe
 
+private def writeBinCopy (src dst : String) : IO Unit := do
+  let bytes ← IO.FS.readBinFile src
+  IO.FS.writeBinFile ⟨dst⟩ bytes
+
+private def writeIndexDir (name indexJson : String) : IO String := do
+  let dir := s!"/tmp/tyr_safetensors_{name}"
+  IO.FS.createDirAll ⟨dir⟩
+  IO.FS.writeFile s!"{dir}/model.safetensors.index.json" indexJson
+  pure dir
+
 @[test]
 def testSafeTensorsIntrospectionSingle : IO Unit := do
   let schema ← safetensors.introspect "Tests/fixtures/safetensors/single.safetensors"
@@ -23,7 +33,7 @@ def testSafeTensorsIntrospectionSingle : IO Unit := do
 
   let some tensor := schema.find? "linear.weight"
     | throw <| IO.userError "expected tensor 'linear.weight'"
-  LeanTest.assertEqual tensor.dtype "F32" "dtype should be parsed from safetensors header"
+  LeanTest.assertEqual tensor.dtype DType.Float32 "dtype should be parsed into core DType"
   LeanTest.assertTrue (tensor.shape == #[2, 3]) "shape should match safetensors header"
   LeanTest.assertEqual tensor.sourceFile "" "single-file introspection should use empty sourceFile"
 
@@ -61,6 +71,62 @@ def testSafeTensorsIntrospectionShardedIndexJson : IO Unit := do
   LeanTest.assertTrue unmapped.isNone "tensors from unmapped shard files should not be exposed"
 
 @[test]
+def testSafeTensorsIntrospectionIndexValidationErrors : IO Unit := do
+  let missingWeightMapDir ← writeIndexDir
+    "index_missing_weight_map"
+    "{\"metadata\":{}}"
+  LeanTest.assertThrows
+    (safetensors.introspect missingWeightMapDir)
+    (some "missing 'weight_map'")
+
+  let nonObjectWeightMapDir ← writeIndexDir
+    "index_non_object_weight_map"
+    "{\"weight_map\":[]}"
+  LeanTest.assertThrows
+    (safetensors.introspect nonObjectWeightMapDir)
+    (some "'weight_map' must be a JSON object")
+
+  let nonStringWeightMapDir ← writeIndexDir
+    "index_non_string_weight_map"
+    "{\"weight_map\":{\"embed.weight\":123}}"
+  LeanTest.assertThrows
+    (safetensors.introspect nonStringWeightMapDir)
+    (some "has non-string shard filename")
+
+  let missingShardDir ← writeIndexDir
+    "index_missing_shard"
+    "{\"weight_map\":{\"embed.weight\":\"missing-shard-does-not-exist.safetensors\"}}"
+  LeanTest.assertThrows
+    (safetensors.introspect missingShardDir)
+    (some "referenced shard does not exist")
+
+  let missingTensorDir ← writeIndexDir
+    "index_missing_tensor"
+    "{\"weight_map\":{\"proj.bias\":\"part1.safetensors\"}}"
+  writeBinCopy
+    "Tests/fixtures/safetensors/sharded/part1.safetensors"
+    s!"{missingTensorDir}/part1.safetensors"
+  LeanTest.assertThrows
+    (safetensors.introspect missingTensorDir)
+    (some "tensor 'proj.bias' not found in shard 'part1.safetensors'")
+
+@[test]
+def testSafeTensorsIntrospectionIndexPathSafety : IO Unit := do
+  let traversalDir ← writeIndexDir
+    "index_unsafe_traversal"
+    "{\"weight_map\":{\"embed.weight\":\"../part1.safetensors\"}}"
+  LeanTest.assertThrows
+    (safetensors.introspect traversalDir)
+    (some "unsafe shard path")
+
+  let absoluteDir ← writeIndexDir
+    "index_unsafe_absolute"
+    "{\"weight_map\":{\"embed.weight\":\"/tmp/evil.safetensors\"}}"
+  LeanTest.assertThrows
+    (safetensors.introspect absoluteDir)
+    (some "unsafe shard path")
+
+@[test]
 def testSafeTensorsTypeProviderSingle : IO Unit := do
   LeanTest.assertEqual SingleSafe.sourceIsDirectory false "provider should detect single-file source"
   LeanTest.assertEqual SingleSafe.tensorCount 1 "provider tensor count should match fixture"
@@ -70,7 +136,8 @@ def testSafeTensorsTypeProviderSingle : IO Unit := do
 
   let t ← SingleSafe.load_linear_weight
   LeanTest.assertTrue (t.runtimeShape == #[2, 3]) "typed loader should enforce generated shape"
-  LeanTest.assertEqual SingleSafe.linear_weightSpec.dtype "F32" "generated spec should retain dtype"
+  LeanTest.assertEqual SingleSafe.linear_weightSpec.dtype DType.Float32
+    "generated spec should retain typed core DType"
 
   let weights ← SingleSafe.loadAll
   LeanTest.assertTrue (weights.linear.weight.runtimeShape == #[2, 3])

@@ -98,6 +98,21 @@ private def renderShapeLit (shape : Shape) : String :=
   let dims := shape.toList.map (fun d => toString d)
   "#[" ++ String.intercalate ", " dims ++ "]"
 
+private def renderDTypeExpr : DType → String
+  | .UInt8 => "_root_.torch.DType.UInt8"
+  | .Int8 => "_root_.torch.DType.Int8"
+  | .Int16 => "_root_.torch.DType.Int16"
+  | .Int32 => "_root_.torch.DType.Int32"
+  | .Int64 => "_root_.torch.DType.Int64"
+  | .Float16 => "_root_.torch.DType.Float16"
+  | .BFloat16 => "_root_.torch.DType.BFloat16"
+  | .Float32 => "_root_.torch.DType.Float32"
+  | .Float64 => "_root_.torch.DType.Float64"
+  | .Bool => "_root_.torch.DType.Bool"
+  | .Float8E4M3FN => "_root_.torch.DType.Float8E4M3FN"
+  | .Float8E5M2 => "_root_.torch.DType.Float8E5M2"
+  | .Unknown raw => s!"(_root_.torch.DType.Unknown {leanStringLit raw})"
+
 private def parseGeneratedCommand (source : String) : CommandElabM Syntax := do
   let env ← getEnv
   match Parser.runParserCategory env `command source "<safetensors_type_provider>" with
@@ -122,7 +137,7 @@ private def renderTensorDecls (tensor : TensorSchema) (declName : String) : Arra
     s!"def {declName}Spec : _root_.torch.safetensors.TensorSchema :=\n" ++
     "  {\n" ++
     s!"    name := {leanStringLit tensor.name},\n" ++
-    s!"    dtype := {leanStringLit tensor.dtype},\n" ++
+    s!"    dtype := {renderDTypeExpr tensor.dtype},\n" ++
     s!"    shape := {declName}Shape,\n" ++
     s!"    sourceFile := {leanStringLit tensor.sourceFile}\n" ++
     "  }\n"
@@ -140,7 +155,7 @@ private def renderTensorDecls (tensor : TensorSchema) (declName : String) : Arra
 private structure LeafInfo where
   declName : String
   tensorName : String
-  dtype : String
+  dtype : DType
   shape : Shape
 
 private structure PathNode where

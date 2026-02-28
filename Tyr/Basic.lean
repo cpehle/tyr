@@ -9,8 +9,74 @@ inductive DType where
 | Int32
 | Int64
 | Float16
+| BFloat16
 | Float32
 | Float64
+| Bool
+| Float8E4M3FN
+| Float8E5M2
+| Unknown (raw : String)
+deriving Repr, Inhabited, BEq, DecidableEq
+
+private def normalizeDTypeToken (raw : String) : String :=
+  String.ofList <| raw.toList.map Char.toLower
+
+/-- Parse a dtype token used by Tyr, PyTorch metadata, or SafeTensors headers. -/
+def DType.ofString? (raw : String) : Option DType :=
+  match normalizeDTypeToken raw with
+  | "u8" | "uint8" => some .UInt8
+  | "i8" | "int8" => some .Int8
+  | "i16" | "int16" => some .Int16
+  | "i32" | "int32" => some .Int32
+  | "i64" | "int64" | "long" => some .Int64
+  | "f16" | "float16" | "half" => some .Float16
+  | "bf16" | "bfloat16" => some .BFloat16
+  | "f32" | "float32" | "float" => some .Float32
+  | "f64" | "float64" | "double" => some .Float64
+  | "bool" => some .Bool
+  | "f8_e4m3" | "float8_e4m3fn" => some .Float8E4M3FN
+  | "f8_e5m2" | "float8_e5m2" => some .Float8E5M2
+  | _ => none
+
+/-- Parse a dtype token, preserving unknown tokens in `DType.Unknown`. -/
+def DType.parse (raw : String) : DType :=
+  (DType.ofString? raw).getD (.Unknown raw)
+
+/-- Canonical name for a dtype in Tyr metadata. -/
+def DType.canonicalName : DType → String
+  | .UInt8 => "UInt8"
+  | .Int8 => "Int8"
+  | .Int16 => "Int16"
+  | .Int32 => "Int32"
+  | .Int64 => "Int64"
+  | .Float16 => "Float16"
+  | .BFloat16 => "BFloat16"
+  | .Float32 => "Float32"
+  | .Float64 => "Float64"
+  | .Bool => "Bool"
+  | .Float8E4M3FN => "Float8E4M3FN"
+  | .Float8E5M2 => "Float8E5M2"
+  | .Unknown raw =>
+      if raw.isEmpty then "Unknown" else s!"Unknown({raw})"
+
+/-- SafeTensors dtype tag for this dtype, if representable in the format. -/
+def DType.safeTensorTag? : DType → Option String
+  | .UInt8 => some "U8"
+  | .Int8 => some "I8"
+  | .Int16 => some "I16"
+  | .Int32 => some "I32"
+  | .Int64 => some "I64"
+  | .Float16 => some "F16"
+  | .BFloat16 => some "BF16"
+  | .Float32 => some "F32"
+  | .Float64 => some "F64"
+  | .Bool => some "BOOL"
+  | .Float8E4M3FN => some "F8_E4M3"
+  | .Float8E5M2 => some "F8_E5M2"
+  | .Unknown _ => none
+
+instance : ToString DType where
+  toString := DType.canonicalName
 
 inductive Device where
 | CUDA : UInt64 → Device
@@ -116,9 +182,13 @@ instance (s : Shape) : Nonempty (T s) :=
 @[extern "lean_torch_get_shape"]
 opaque T.runtimeShape {s : Shape} (t : @& T s) : Array UInt64
 
-/-- Get the dtype of a tensor as a string -/
+/-- Get the dtype of a tensor as a backend string token. -/
 @[extern "lean_torch_get_dtype"]
-opaque T.dtype {s : Shape} (t : @& T s) : String
+opaque T.dtypeStr {s : Shape} (t : @& T s) : String
+
+/-- Get the dtype of a tensor as the core `DType`. -/
+def T.dtype {s : Shape} (t : @& T s) : DType :=
+  DType.parse (t.dtypeStr)
 
 /-- Get the device of a tensor as a Device enum -/
 @[extern "lean_torch_get_device_enum"]

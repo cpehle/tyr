@@ -17,7 +17,7 @@ open Lean
 /-- One tensor entry discovered in a SafeTensors source. -/
 structure TensorSchema where
   name : String
-  dtype : String
+  dtype : DType
   shape : Shape
   /-- For directory sources this is the shard filename; for single-file sources it is empty. -/
   sourceFile : String := ""
@@ -88,10 +88,14 @@ private def parseTensorEntry (tensorName sourceFile : String) (entryJson : Json)
     match getObjVal? entryJson "dtype" with
     | some j => pure j
     | none => .error s!"SafeTensors entry '{tensorName}' is missing 'dtype'"
-  let dtype ←
+  let dtypeRaw ←
     match getStr? dtypeJson with
     | some s => pure s
     | none => .error s!"SafeTensors entry '{tensorName}' has non-string 'dtype'"
+  let dtype ←
+    match DType.ofString? dtypeRaw with
+    | some dt => pure dt
+    | none => .error s!"SafeTensors entry '{tensorName}' has unsupported dtype '{dtypeRaw}'"
 
   let shapeJson ←
     match getObjVal? entryJson "shape" with
@@ -196,6 +200,21 @@ private def parseWeightMap (indexPath : String) : IO (Array (String × String)) 
     mappings := mappings.push (tensorName, shardFile)
   pure mappings
 
+private def hasWindowsDrivePrefix (path : String) : Bool :=
+  match path.toList with
+  | c :: ':' :: _ => c.isAlpha
+  | _ => false
+
+private def hasPathSegment (path segment : String) : Bool :=
+  (path.splitOn "/").contains segment || (path.splitOn "\\").contains segment
+
+private def isUnsafeShardPath (shardFile : String) : Bool :=
+  shardFile.startsWith "/" ||
+  shardFile.startsWith "\\" ||
+  hasWindowsDrivePrefix shardFile ||
+  hasPathSegment shardFile ".." ||
+  hasPathSegment shardFile "."
+
 private def listShardFiles (dir : System.FilePath) : IO (Array String) := do
   let entries ← dir.readDir
   let mut shardFiles : Array String := #[]
@@ -244,6 +263,9 @@ def introspect (source : String) : IO Schema := do
         let weightMap ← parseWeightMap indexPath.toString
         let mut referencedShards : Array String := #[]
         for (_, shardFile) in weightMap do
+          if isUnsafeShardPath shardFile then
+            throw <| IO.userError
+              s!"Invalid index file '{indexPath}': unsafe shard path '{shardFile}' (must be relative and stay within source directory)"
           referencedShards := pushUnique referencedShards shardFile
         let referencedShardList := referencedShards.qsort (· < ·)
 

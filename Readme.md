@@ -221,6 +221,37 @@ let iter := BatchIterator.new shard 8 256
 let (batch, iter') ← iter.next   -- Returns T #[] (erased)
 ```
 
+### SafeTensors Type Provider
+
+Tyr includes a Lean command-level type provider for SafeTensors schemas:
+
+```lean
+import Tyr.SafeTensors
+
+open torch
+
+-- Works with a single .safetensors file or a sharded directory.
+-- If `model.safetensors.index.json` exists, introspection follows `weight_map`.
+safetensors_type_provider "/path/to/model_dir_or_file" as ModelWeights
+
+def inspectWeights : IO Unit := do
+  IO.println s!"discovered tensors: {ModelWeights.tensorCount}"
+
+  -- Per-tensor typed loader + typed schema metadata
+  let tokEmbed ← ModelWeights.load_model_embed_tokens_weight
+  IO.println s!"embed dtype: {ModelWeights.model_embed_tokens_weightSpec.dtype}"
+  IO.println s!"embed shape: {tokEmbed.runtimeShape}"
+
+  -- Hierarchical aggregate generated from tensor names
+  let weights ← ModelWeights.loadAll
+  let qProj := weights.model.layers[0]!.self_attn.q_proj.weight
+  IO.println s!"q_proj shape: {qProj.runtimeShape}"
+```
+
+Notes:
+- Tensor schema dtype metadata uses the core `torch.DType` type (not raw strings).
+- For sharded checkpoints, unsafe index shard paths (absolute paths or `..` traversal) are rejected.
+
 ## FFI Reference Counting
 
 The C++ bindings use careful reference counting. See `cc/src/tyr.cpp` header for details:
