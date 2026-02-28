@@ -23,6 +23,7 @@
 -- Core infrastructure
 import Tyr.Basic
 import Tyr.Torch
+import Tyr.SafeTensors
 import Tyr.TensorStruct
 import Tyr.Mctx
 
