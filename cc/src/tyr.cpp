@@ -86,6 +86,17 @@
 #else
 #define TYR_HAS_CUDA_API 0
 #endif
+
+#if defined(__has_include)
+#if __has_include(<torch/mps.h>)
+#define TYR_HAS_TORCH_MPS_API 1
+#include <torch/mps.h>
+#else
+#define TYR_HAS_TORCH_MPS_API 0
+#endif
+#else
+#define TYR_HAS_TORCH_MPS_API 0
+#endif
 #else
 #define TYR_HAS_CUDA_API 0
 #endif
@@ -3795,7 +3806,12 @@ lean_object* lean_torch_cuda_synchronize(lean_object* /*w*/) {
 // Check if MPS is available
 lean_object* lean_torch_mps_is_available(lean_object* /*w*/) {
 #ifdef __APPLE__
-  bool available = at::hasMPS();
+  bool available = false;
+#if TYR_HAS_TORCH_MPS_API
+  available = torch::mps::is_available();
+#else
+  available = at::hasMPS();
+#endif
   return lean_io_result_mk_ok(lean_box(available));
 #else
   return lean_io_result_mk_ok(lean_box(false));

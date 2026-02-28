@@ -34,8 +34,11 @@ automatically on first `lake build`.
 **macOS:**
 ```bash
 cd external
-curl -O https://download.pytorch.org/libtorch/nightly/cpu/libtorch-macos-latest.zip
-unzip libtorch-macos-latest.zip && rm libtorch-macos-latest.zip
+LIBTORCH_VERSION=2.9.1
+curl --fail --location --retry 5 --retry-all-errors --show-error \
+  -o libtorch.zip "https://download.pytorch.org/libtorch/cpu/libtorch-macos-arm64-${LIBTORCH_VERSION}.zip"
+unzip -tq libtorch.zip
+unzip -q libtorch.zip && rm libtorch.zip
 cd ..
 ```
 
@@ -47,8 +50,11 @@ bash dependencies_macos.sh
 **Linux (CPU):**
 ```bash
 cd external
-curl -O https://download.pytorch.org/libtorch/nightly/cpu/libtorch-cxx11-abi-shared-with-deps-latest.zip
-unzip libtorch-cxx11-abi-shared-with-deps-latest.zip && rm libtorch-cxx11-abi-shared-with-deps-latest.zip
+LIBTORCH_VERSION=2.9.1
+curl --fail --location --retry 5 --retry-all-errors --show-error \
+  -o libtorch.zip "https://download.pytorch.org/libtorch/cpu/libtorch-shared-with-deps-${LIBTORCH_VERSION}%2Bcpu.zip"
+unzip -tq libtorch.zip
+unzip -q libtorch.zip && rm libtorch.zip
 cd ..
 ```
 
@@ -290,7 +296,24 @@ type(scope): summary
 A commit message template is included at `.gitmessage`. Enable it locally:
 
 ```bash
-git config --local commit.template .gitmessage
+./scripts/setup-git-hooks.sh
+```
+
+This sets:
+- `commit.template=.gitmessage`
+- `core.hooksPath=.githooks`
+
+Included hooks:
+- `pre-commit`: fails on staged whitespace errors and conflict markers
+- `commit-msg`: enforces `type(scope): summary` (e.g. `feat(qwen35): add video stream patchify`)
+- `pre-push`: validates pushed commit subjects with `scripts/check-commit-messages.sh`
+
+CI also enforces commit subjects using `scripts/check-commit-messages.sh`.
+
+Manual check examples:
+```bash
+./scripts/check-commit-messages.sh HEAD~20..HEAD
+COMMIT_MSG_ENFORCE_FROM=<commit> ./scripts/check-commit-messages.sh HEAD~20..HEAD
 ```
 
 ## License

@@ -1,0 +1,120 @@
+/-  Tyr/Model/Qwen3TTS/Streaming.lean
+
+  Reusable Lean-native Qwen3-TTS streaming interface:
+  - stream codec-frame generation from prepared talker inputs
+  - optional in-process speech-tokenizer streaming decode
+  - callback hooks for per-frame codes and per-chunk audio
+-/
+import Tyr.Model.Qwen3TTS.Model
+import Tyr.Model.Qwen3TTS.SpeechTokenizer
+
+namespace torch.qwen3tts
+
+namespace Qwen3TTSForConditionalGeneration
+
+/-- Runtime options for streaming generation from prepared talker inputs. -/
+structure StreamingOptions (cfg : Qwen3TTSConfig) where
+  maxFrames : UInt64 := 256
+  minNewTokens : UInt64 := 2
+  temperature : Float := 0.9
+  topK : UInt64 := 50
+  topP : Float := 1.0
+  subtalkerTemperature : Float := 0.9
+  subtalkerTopK : UInt64 := 50
+  subtalkerTopP : Float := 1.0
+  repetitionPenalty : Float := 1.05
+  suppressTail : UInt64 := 1024
+  trailingTextHidden : Option (Sigma fun trailingSeq => T #[1, trailingSeq, cfg.talkerConfig.hiddenSize]) := none
+  ttsPadEmbed : Option (T #[1, 1, cfg.talkerConfig.hiddenSize]) := none
+  subtalkerTemperaturesByGroup : Option (Array Float) := none
+  subtalkerTopKsByGroup : Option (Array UInt64) := none
+  subtalkerTopPsByGroup : Option (Array Float) := none
+  decodeChunkSize : UInt64 := 1
+  decodeLeftContext : UInt64 := 25
+  emitEosFrame : Bool := false
+
+/-- Streaming callbacks for generated codec rows and decoded audio chunks. -/
+structure StreamingCallbacks where
+  onCodeFrame : UInt64 → Array UInt64 → IO Unit := fun _ _ => pure ()
+  onAudioChunk : T #[] → IO Unit := fun _ => pure ()
+
+/-- Final metadata for one streaming run. -/
+structure StreamingResult where
+  codeRows : Array (Array UInt64)
+  lengths : Array UInt64
+  deriving Repr, Inhabited
+
+/-- Stream from prepared talker inputs (`[1, seq, hidden]`) with optional
+    in-process streaming decode.
+
+    When `speechDecoder?` is provided, code rows are decoded incrementally and
+    emitted through `callbacks.onAudioChunk`. Decoder currently expects 16 code
+    groups (upstream 12Hz tokenizer). -/
+def streamFromTalkerInputs {seq : UInt64}
+    (m : Qwen3TTSForConditionalGeneration cfg)
+    (talkerInputs : T #[1, seq, cfg.talkerConfig.hiddenSize])
+    (opts : StreamingOptions cfg := {})
+    (speechDecoder? : Option SpeechTokenizer12HzDecoder := none)
+    (callbacks : StreamingCallbacks := {})
+    : IO StreamingResult := do
+  if speechDecoder?.isSome && cfg.talkerConfig.numCodeGroups != 16 then
+    throw <| IO.userError
+      s!"Streaming decode currently supports 16 code groups, got {cfg.talkerConfig.numCodeGroups}."
+
+  let codeRowsRef ← IO.mkRef (#[] : Array (Array UInt64))
+  let decodeStateRef? ←
+    match speechDecoder? with
+    | some dec =>
+        let st : SpeechTokenizer12HzDecoder.DecodeStreamState 1 :=
+          SpeechTokenizer12HzDecoder.initDecodeStreamState
+            opts.decodeChunkSize opts.decodeLeftContext dec.preConvWeight.device
+        let stRef ← IO.mkRef st
+        pure (some stRef)
+    | none =>
+        pure none
+
+  let onFrame : UInt64 → T #[1, cfg.talkerConfig.numCodeGroups] → IO Unit := fun step frame => do
+    let frameRow : T #[cfg.talkerConfig.numCodeGroups] := reshape frame #[cfg.talkerConfig.numCodeGroups]
+    let rowVals ← data.tensorToUInt64Array frameRow
+    let firstTok := rowVals.getD 0 cfg.talkerConfig.codecEosTokenId
+    let keepRow := opts.emitEosFrame || firstTok != cfg.talkerConfig.codecEosTokenId
+    if keepRow then
+      codeRowsRef.modify (fun rows => rows.push rowVals)
+      callbacks.onCodeFrame step rowVals
+      match speechDecoder?, decodeStateRef? with
+      | some dec, some stRef =>
+          let frame16a : T #[1, 16, 1] := reshape frame #[1, 16, 1]
+          let frame16 : T #[1, 16, 1] :=
+            if frame16a.device == dec.preConvWeight.device then frame16a else frame16a.to dec.preConvWeight.device
+          let st ← stRef.get
+          let (st', chunks) := dec.pushDecodeStream st frame16
+          stRef.set st'
+          for chunk in chunks do
+            callbacks.onAudioChunk chunk
+      | _, _ =>
+          pure ()
+
+  let lengths ← TalkerForConditionalGeneration.streamCodes
+    cfg.talkerConfig m.talker talkerInputs onFrame
+    opts.maxFrames opts.minNewTokens
+    opts.temperature opts.topK opts.topP
+    opts.subtalkerTemperature opts.subtalkerTopK opts.subtalkerTopP
+    opts.repetitionPenalty opts.suppressTail
+    opts.trailingTextHidden opts.ttsPadEmbed
+    opts.subtalkerTemperaturesByGroup opts.subtalkerTopKsByGroup opts.subtalkerTopPsByGroup
+
+  match speechDecoder?, decodeStateRef? with
+  | some dec, some stRef =>
+      let st ← stRef.get
+      let (_stFinal, chunks) := dec.flushDecodeStream st
+      for chunk in chunks do
+        callbacks.onAudioChunk chunk
+  | _, _ =>
+      pure ()
+
+  let codeRows ← codeRowsRef.get
+  pure { codeRows, lengths }
+
+end Qwen3TTSForConditionalGeneration
+
+end torch.qwen3tts

@@ -9,12 +9,12 @@ if [ ! -f ".gitmessage" ]; then
   exit 1
 fi
 
-if [ ! -f ".githooks/pre-commit" ] || [ ! -f ".githooks/commit-msg" ]; then
+if [ ! -f ".githooks/pre-commit" ] || [ ! -f ".githooks/commit-msg" ] || [ ! -f ".githooks/pre-push" ]; then
   echo "setup-git-hooks: expected hook files under .githooks/" >&2
   exit 1
 fi
 
-chmod +x .githooks/pre-commit .githooks/commit-msg
+chmod +x .githooks/pre-commit .githooks/commit-msg .githooks/pre-push
 
 git config --local core.hooksPath .githooks
 git config --local commit.template .gitmessage
@@ -26,3 +26,4 @@ echo
 echo "Active hooks:"
 echo "  - pre-commit (staged whitespace/conflict-marker checks)"
 echo "  - commit-msg (conventional subject format check)"
+echo "  - pre-push (commit subject check against push range)"

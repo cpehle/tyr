@@ -9,7 +9,7 @@ on:
 jobs:
   build-and-test:
     env:
-      LIBTORCH_VERSION: 2.7.1
+      LIBTORCH_VERSION: 2.9.1
     strategy:
       fail-fast: false
       matrix:
@@ -51,22 +51,32 @@ jobs:
         uses: actions/cache@v4
         with:
           path: external/libtorch
-          key: libtorch-${{ runner.os }}-${{ env.LIBTORCH_VERSION }}
+          key: libtorch-${{ runner.os }}-${{ runner.arch }}-${{ env.LIBTORCH_VERSION }}
 
       - name: Download LibTorch
         if: steps.cache-libtorch.outputs.cache-hit != 'true'
         run: |
           mkdir -p external
           if [ "${{ runner.os }}" = "macOS" ]; then
-            LIBTORCH_URL="https://download.pytorch.org/libtorch/cpu/libtorch-macos-arm64-${LIBTORCH_VERSION}.zip"
+            if [ "${{ runner.arch }}" = "ARM64" ]; then
+              LIBTORCH_URL="https://download.pytorch.org/libtorch/cpu/libtorch-macos-arm64-${LIBTORCH_VERSION}.zip"
+            else
+              LIBTORCH_URL="https://download.pytorch.org/libtorch/cpu/libtorch-macos-x86_64-${LIBTORCH_VERSION}.zip"
+            fi
           else
-            LIBTORCH_URL="https://download.pytorch.org/libtorch/cpu/libtorch-cxx11-abi-shared-with-deps-${LIBTORCH_VERSION}%2Bcpu.zip"
+            LIBTORCH_URL="https://download.pytorch.org/libtorch/cpu/libtorch-shared-with-deps-${LIBTORCH_VERSION}%2Bcpu.zip"
           fi
           echo "Downloading ${LIBTORCH_URL}"
           curl --fail --location --retry 5 --retry-all-errors --show-error -o libtorch.zip "${LIBTORCH_URL}"
           unzip -tq libtorch.zip
           unzip -q libtorch.zip -d external/
           rm libtorch.zip
+
+      - name: Verify LibTorch version
+        run: |
+          cfg="external/libtorch/share/cmake/Torch/TorchConfigVersion.cmake"
+          test -f "${cfg}"
+          grep -F "set(PACKAGE_VERSION \"${LIBTORCH_VERSION}\")" "${cfg}"
 
       - name: Build test runner
         run: |

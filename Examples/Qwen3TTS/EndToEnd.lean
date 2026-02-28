@@ -558,60 +558,39 @@ def runEndToEnd (args : Args) : IO Unit := do
         data.wavBegin wavPath dec.outputSampleRate
         pure (some dec)
 
-    let codeRowsRef ← IO.mkRef (#[] : Array (Array UInt64))
-    let decodeStateRef ←
-      match speechDecoder? with
-      | some _ =>
-          let st : SpeechTokenizer12HzDecoder.DecodeStreamState 1 :=
-            SpeechTokenizer12HzDecoder.initDecodeStreamState
-              args.streamChunkFrames.toUInt64 args.decodeLeftContext.toUInt64 targetDevice
-          IO.mkRef (some st : Option (SpeechTokenizer12HzDecoder.DecodeStreamState 1))
-      | none =>
-          IO.mkRef (none : Option (SpeechTokenizer12HzDecoder.DecodeStreamState 1))
+    let callbacks : Qwen3TTSForConditionalGeneration.StreamingCallbacks := {
+      onAudioChunk := fun chunk => data.wavAppend chunk wavPath
+    }
+    let streamOpts : Qwen3TTSForConditionalGeneration.StreamingOptions cfg := {
+      maxFrames
+      minNewTokens := 2
+      temperature := args.temperature
+      topK := args.topK.toUInt64
+      topP := args.topP
+      subtalkerTemperature := args.subtalkerTemperature
+      subtalkerTopK := args.subtalkerTopK.toUInt64
+      subtalkerTopP := args.subtalkerTopP
+      repetitionPenalty := args.repetitionPenalty
+      suppressTail := args.suppressTail.toUInt64
+      trailingTextHidden := some ⟨1, ttsPadEmbed⟩
+      ttsPadEmbed := some ttsPadEmbed
+      subtalkerTemperaturesByGroup := args.subtalkerTemperaturesByGroup
+      subtalkerTopKsByGroup := subtalkerTopKsByGroup
+      subtalkerTopPsByGroup := args.subtalkerTopPsByGroup
+      decodeChunkSize := args.streamChunkFrames.toUInt64
+      decodeLeftContext := args.decodeLeftContext.toUInt64
+      emitEosFrame := false
+    }
+    let streamOut ←
+      model.streamFromTalkerInputs talkerInputs streamOpts speechDecoder? callbacks
+    if speechDecoder?.isSome then
+      data.wavFinalize wavPath
+      IO.println s!"Saved waveform to {wavPath} (Lean true streaming decode)"
+    else
+      IO.println "Skipping waveform decode (--skip-decode enabled)."
 
-    let onFrame : UInt64 → T #[1, cfg.talkerConfig.numCodeGroups] → IO Unit := fun _ frame => do
-      let frameRow : T #[cfg.talkerConfig.numCodeGroups] := reshape frame #[cfg.talkerConfig.numCodeGroups]
-      let rowVals ← data.tensorToUInt64Array frameRow
-      let firstTok := rowVals.getD 0 cfg.talkerConfig.codecEosTokenId
-      if firstTok != cfg.talkerConfig.codecEosTokenId then
-        codeRowsRef.modify (fun rows => rows.push rowVals)
-        match speechDecoder? with
-        | some dec =>
-            match (← decodeStateRef.get) with
-            | some st =>
-                let frame3 : T #[1, 16, 1] := reshape frame #[1, 16, 1]
-                let (st', chunks) := dec.pushDecodeStream st frame3
-                decodeStateRef.set (some st')
-                for chunk in chunks do
-                  data.wavAppend chunk wavPath
-            | none => pure ()
-        | none => pure ()
-
-    let _lengths ← TalkerForConditionalGeneration.streamCodes
-      cfg.talkerConfig model.talker talkerInputs onFrame maxFrames
-      2
-      args.temperature args.topK.toUInt64 args.topP
-      args.subtalkerTemperature args.subtalkerTopK.toUInt64 args.subtalkerTopP
-      args.repetitionPenalty args.suppressTail.toUInt64
-      (some ⟨1, ttsPadEmbed⟩) (some ttsPadEmbed)
-      args.subtalkerTemperaturesByGroup subtalkerTopKsByGroup args.subtalkerTopPsByGroup
-
-    match speechDecoder? with
-    | some dec =>
-        match (← decodeStateRef.get) with
-        | some st =>
-            let (_stFinal, chunks) := dec.flushDecodeStream st
-            for chunk in chunks do
-              data.wavAppend chunk wavPath
-            data.wavFinalize wavPath
-            IO.println s!"Saved waveform to {wavPath} (Lean true streaming decode)"
-        | none => pure ()
-    | none =>
-        IO.println "Skipping waveform decode (--skip-decode enabled)."
-
-    let rows ← codeRowsRef.get
-    let codeLen := rows.size.toUInt64
-    let codesText := formatCodesMatrix rows
+    let codeLen := streamOut.codeRows.size.toUInt64
+    let codesText := formatCodesMatrix streamOut.codeRows
     IO.FS.writeFile codesPath codesText
     IO.println s!"Generated {codeLen} codec frames."
     IO.println s!"Saved codec codes to {codesPath}"

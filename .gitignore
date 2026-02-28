@@ -13,6 +13,8 @@ out/
 checkpoints/
 .pipeline_checkpoint.json
 weights/
+output/
+orb.db/
 output.png
 output.ppm
 
