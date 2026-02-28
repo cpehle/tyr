@@ -743,6 +743,16 @@ def sliceShape (s : Shape) (dim : UInt64) (len : UInt64) : Shape :=
 opaque slice {s : Shape} (data : @& T s) (dim : UInt64 := 0) (start len : UInt64)
     : T (sliceShape s dim len)
 
+/-- Return `data` with a slice along `dim` replaced by `src` starting at `start`.
+    The length on `dim` is inferred from `src`. -/
+@[extern "lean_torch_slice_scatter_along_dim"]
+opaque sliceScatter {s src : Shape}
+    (data : @& T s)
+    (dim : UInt64 := 0)
+    (start : UInt64)
+    (src : @& T src)
+    : T s
+
 /-- Slice a 2D tensor along dimension 0: data[start:start+len, :] -/
 @[extern "lean_torch_slice_2d"]
 opaque slice2d {n d : UInt64} (data : @& T #[n, d]) (start len : UInt64) : T #[len, d]
@@ -963,16 +973,6 @@ opaque scaledDotProductAttentionGQAQKV
     (is_causal : Bool := true)
     (enable_gqa : Bool := false)
     : T #[batch, n_head, q_seq, head_dim]
-
-/-- In-place KV cache append for incremental decoding.
-    Writes `step` into `cache[:, :, pos:pos+1, :]` without reallocating `cache`. -/
-@[extern "lean_torch_kv_cache_write_"]
-opaque kvCacheWrite
-    {batch n_kv_head max_seq head_dim : UInt64}
-    (cache : @& T #[batch, n_kv_head, max_seq, head_dim])
-    (step : @& T #[batch, n_kv_head, 1, head_dim])
-    (pos : UInt64)
-    : IO Unit
 
 /-- Scaled dot-product attention with GQA and sliding window support.
     Q: [batch, n_head, seq, head_dim]

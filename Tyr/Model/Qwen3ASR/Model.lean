@@ -16,6 +16,7 @@ import Tyr.Model.Qwen.Layer
 import Tyr.Model.Qwen.RoPE
 import Tyr.Model.Qwen3ASR.Config
 import Tyr.Model.Qwen3ASR.AudioEncoder
+import Tyr.Model.Qwen3ASR.ForcedAligner
 
 namespace torch.qwen3asr
 
@@ -57,6 +58,46 @@ private def maskRowCounts {batch seq : UInt64} (attentionMask : T #[batch, seq])
 
 private def allInSet (xs : Array UInt64) (allow : Array UInt64) : Bool :=
   xs.all (fun x => allow.contains x)
+
+private def clipTo (x hi : UInt64) : UInt64 :=
+  if hi == 0 then 0 else if x < hi then x else hi - 1
+
+/-- Derive per-batch position rows used by reference `get_rope_index`.
+    Padded tokens map to position `1`; valid tokens are `0,1,2,...`. -/
+private def positionRowsFromMask {batch seq : UInt64}
+    (attentionMask : T #[batch, seq])
+    : IO (Array (Array UInt64)) := do
+  let flat : T #[batch * seq] := reshape (data.toLong attentionMask) #[batch * seq]
+  let vals ← data.tensorToUInt64Array flat
+  let mut rows : Array (Array UInt64) := Array.mkEmpty batch.toNat
+  for b in [:batch.toNat] do
+    let mut row : Array UInt64 := Array.mkEmpty seq.toNat
+    let mut running : UInt64 := 0
+    for t in [:seq.toNat] do
+      let v := vals.getD (b * seq.toNat + t) 0
+      if v == 0 then
+        row := row.push 1
+      else
+        row := row.push running
+        running := running + 1
+    rows := rows.push row
+  pure rows
+
+/-- Gather `[seq, half]` rotary table rows using explicit per-token positions. -/
+private def gatherRowsByPositions {seq half : UInt64}
+    (table : T #[seq, half])
+    (positions : Array UInt64)
+    : T #[seq, half] :=
+  let idxVals : Array Int64 :=
+    Id.run do
+      let mut out : Array Int64 := Array.mkEmpty seq.toNat
+      for i in [:seq.toNat] do
+        let p := clipTo (positions.getD i 0) seq
+        out := out.push (Int64.ofNat p.toNat)
+      out
+  let idx : T #[seq] := reshape (data.fromInt64Array idxVals) #[seq]
+  let idx2d : T #[seq, half] := nn.expand (reshape idx #[seq, 1]) #[seq, half]
+  reshape (torch.gather table 0 idx2d) #[seq, half]
 
 /-- Output container mirroring `...CausalLMOutputWithPast` fields that are
     currently represented in the Lean port. -/
@@ -143,6 +184,37 @@ def forwardEmbeds {batch seq : UInt64}
   let hidden := m.textModel.norm.forward3d hidden
   linear3d hidden m.lmHead
 
+private def forwardEmbedsMaskedWithPositionRows {batch seq : UInt64}
+    (m : Qwen3ASRThinkerForConditionalGeneration cfg)
+    (inputsEmbeds : T #[batch, seq, cfg.textConfig.hiddenSize])
+    (attnMask : T #[batch, seq])
+    : IO (T #[batch, seq, ThinkerLmVocabSize cfg]) := do
+  let half := cfg.textConfig.headDim / 2
+  let (baseCos, baseSin) := rotary.computeFreqsPure seq cfg.textConfig.headDim cfg.textConfig.ropeTheta
+  let rows ← positionRowsFromMask attnMask
+
+  if batch == 0 then
+    pure (torch.zeros #[batch, seq, ThinkerLmVocabSize cfg])
+  else
+    let mut perBatchHidden : Array (T #[]) := #[]
+    for b in [:batch.toNat] do
+      let row := rows.getD b (Array.replicate seq.toNat 0)
+      let cosB : T #[seq, half] := gatherRowsByPositions baseCos row
+      let sinB : T #[seq, half] := gatherRowsByPositions baseSin row
+      let embB : T #[1, seq, cfg.textConfig.hiddenSize] := data.slice inputsEmbeds 0 b.toUInt64 1
+      let maskB : T #[1, seq] := data.slice attnMask 0 b.toUInt64 1
+      let hiddenB :=
+        m.textModel.layers.foldl
+          (fun h layer => layer.forwardMasked h cosB sinB maskB true)
+          embB
+      let hiddenB := m.textModel.norm.forward3d hiddenB
+      perBatchHidden := perBatchHidden.push (nn.eraseShape hiddenB)
+
+    let hiddenDyn : T #[] := nn.cat_dyn perBatchHidden 0
+    let hidden : T #[batch, seq, cfg.textConfig.hiddenSize] :=
+      reshape hiddenDyn #[batch, seq, cfg.textConfig.hiddenSize]
+    pure (linear3d hidden m.lmHead)
+
 def forwardText {batch textSeq : UInt64}
     (m : Qwen3ASRThinkerForConditionalGeneration cfg)
     (textIds : T #[batch, textSeq])
@@ -165,6 +237,20 @@ def encodeAudio {batch frames : UInt64}
     : T #[batch, AudioEncoderConfig.framesAfterConv3 cfg.audioConfig frames, cfg.audioConfig.outputDim] :=
   m.audioTower.forward inputFeatures attnMask
 
+def encodeAudioVarLen {batch frames : UInt64}
+    (m : Qwen3ASRThinkerForConditionalGeneration cfg)
+    (inputFeatures : T #[batch, cfg.audioConfig.numMelBins, frames])
+    (featureLens : Array UInt64)
+    : T #[batch, AudioEncoderConfig.framesAfterConv3 cfg.audioConfig frames, cfg.audioConfig.outputDim] :=
+  m.audioTower.forwardVarLen inputFeatures featureLens
+
+private def featureLengthsFromFeatureMask (cfg : ThinkerConfig) {batch featureSeq : UInt64}
+    (featureAttentionMask : T #[batch, featureSeq])
+    : IO (Array UInt64) := do
+  let featureLensTensor : T #[batch] := nn.sumDim (data.toLong featureAttentionMask) 1 false
+  let featureLensRaw ← data.tensorToUInt64Array featureLensTensor
+  pure <| featureLensRaw.map (fun l => if l <= featureSeq then l else featureSeq)
+
 private def getPlaceholderMask (cfg : ThinkerConfig) {batch seq : UInt64}
     (inputIds : T #[batch, seq])
     : T #[batch, seq, cfg.textConfig.hiddenSize] :=
@@ -174,12 +260,50 @@ private def getPlaceholderMask (cfg : ThinkerConfig) {batch seq : UInt64}
 private def audioValidMaskFromFeatureMask (cfg : ThinkerConfig) {batch featureSeq audioSeq : UInt64}
     (featureAttentionMask : T #[batch, featureSeq])
     : IO (T #[batch, audioSeq, cfg.textConfig.hiddenSize]) := do
-  let featureLensTensor : T #[batch] := nn.sumDim (data.toLong featureAttentionMask) 1 false
-  let featureLens ← data.tensorToUInt64Array featureLensTensor
+  let featureLens ← featureLengthsFromFeatureMask cfg featureAttentionMask
   let audioLens := AudioEncoderConfig.featExtractOutputLengths featureLens
   let valid2d : T #[batch, audioSeq] := buildLengthMask audioLens
   let valid2dBool : T #[batch, audioSeq] := eq_scalar valid2d 1
   pure <| nn.expand (reshape valid2dBool #[batch, audioSeq, 1]) #[batch, audioSeq, cfg.textConfig.hiddenSize]
+
+private def audioAttentionMaskFromFeatureMask (cfg : ThinkerConfig) {batch featureSeq audioSeq : UInt64}
+    (featureAttentionMask : T #[batch, featureSeq])
+    : IO (T #[batch, audioSeq]) := do
+  let featureLens ← featureLengthsFromFeatureMask cfg featureAttentionMask
+  let audioLens := AudioEncoderConfig.featExtractOutputLengths featureLens
+  pure (buildLengthMask audioLens)
+
+private def buildInputsEmbeds {batch seq frames : UInt64}
+    (m : Qwen3ASRThinkerForConditionalGeneration cfg)
+    (inputIds : T #[batch, seq])
+    (inputFeatures : Option (T #[batch, cfg.audioConfig.numMelBins, frames]) := none)
+    (featureAttentionMask : Option (T #[batch, frames]) := none)
+    : IO (T #[batch, seq, cfg.textConfig.hiddenSize]) := do
+  let inputsEmbeds0 := embedText m inputIds
+  match inputFeatures with
+  | none => pure inputsEmbeds0
+  | some feats =>
+    let audioSeq := AudioEncoderConfig.framesAfterConv3 cfg.audioConfig frames
+    let (_audioAttnMask, audioFeaturesRaw) ←
+      match featureAttentionMask with
+      | some fm =>
+        let featureLens ← featureLengthsFromFeatureMask cfg fm
+        let m2d ← audioAttentionMaskFromFeatureMask cfg (audioSeq := audioSeq) fm
+        let raw := encodeAudioVarLen m feats featureLens
+        pure (some m2d, raw)
+      | none =>
+        let raw := encodeAudio m feats none
+        pure (none, raw)
+    let audioFeatures := projectAudio m audioFeaturesRaw
+    let source ←
+      match featureAttentionMask with
+      | some fm =>
+        let validMask ← audioValidMaskFromFeatureMask cfg (audioSeq := audioSeq) fm
+        pure (nn.masked_select audioFeatures validMask)
+      | none =>
+        pure (reshape audioFeatures #[batch * audioSeq * cfg.textConfig.hiddenSize])
+    let placeholderMask := getPlaceholderMask cfg inputIds
+    pure (nn.masked_scatter inputsEmbeds0 placeholderMask source)
 
 /-- Port of reference `get_rope_index` calculation from attention masks. -/
 def getRopeIndex {batch seq : UInt64}
@@ -221,6 +345,94 @@ def getRopeIndex {batch seq : UInt64}
   let ropeDeltas : T #[batch, 1] := reshape (data.fromInt64Array deltaVals) #[batch, 1]
   pure (positionIds, ropeDeltas)
 
+abbrev LayerKVCache (cfg : ThinkerConfig) (batch : UInt64) :=
+  qwen.QwenAttention.KVCache batch cfg.textConfig.numKeyValueHeads cfg.textConfig.headDim
+
+private def initLayerKVCaches {batch : UInt64}
+    (m : Qwen3ASRThinkerForConditionalGeneration cfg)
+    (maxLen : UInt64)
+    (device : Device)
+    : Array (LayerKVCache cfg batch) :=
+  m.textModel.layers.map (fun _ =>
+    qwen.QwenAttention.initKVCache
+      maxLen
+      (batch := batch)
+      (num_kv_heads := cfg.textConfig.numKeyValueHeads)
+      (head_dim := cfg.textConfig.headDim)
+      device)
+
+private def decodeStepFromEmbedWithCache {batch : UInt64}
+    (m : Qwen3ASRThinkerForConditionalGeneration cfg)
+    (tokenEmbed : T #[batch, 1, cfg.textConfig.hiddenSize])
+    (position : UInt64)
+    (caches : Array (LayerKVCache cfg batch))
+    : IO (T #[batch, ThinkerLmVocabSize cfg] × Array (LayerKVCache cfg batch)) := do
+  let freqLen := position + 1
+  let (cosAll, sinAll) := rotary.computeFreqsPure freqLen cfg.textConfig.headDim cfg.textConfig.ropeTheta
+  let cos : T #[1, cfg.textConfig.headDim / 2] := data.slice cosAll 0 position 1
+  let sin : T #[1, cfg.textConfig.headDim / 2] := data.slice sinAll 0 position 1
+
+  let mut hidden : T #[batch, 1, cfg.textConfig.hiddenSize] := tokenEmbed
+  let mut nextCaches := caches
+
+  for i in [:m.textModel.layers.size] do
+    let layer ←
+      match m.textModel.layers[i]? with
+      | some l => pure l
+      | none => throw <| IO.userError s!"missing thinker text layer at index {i}"
+    let cache ←
+      match nextCaches[i]? with
+      | some c => pure c
+      | none => throw <| IO.userError s!"missing thinker KV cache at index {i}"
+    let (hNext, cNext) := layer.forwardStep hidden cos sin cache
+    hidden := hNext
+    nextCaches := nextCaches.set! i cNext
+
+  let hiddenNorm := m.textModel.norm.forward3d hidden
+  let logits3 : T #[batch, 1, ThinkerLmVocabSize cfg] := linear3d hiddenNorm m.lmHead
+  let logits2 : T #[batch, ThinkerLmVocabSize cfg] := reshape logits3 #[batch, ThinkerLmVocabSize cfg]
+  pure (logits2, nextCaches)
+
+private partial def prefillCachesFromEmbeds {batch seq : UInt64}
+    (m : Qwen3ASRThinkerForConditionalGeneration cfg)
+    (inputsEmbeds : T #[batch, seq, cfg.textConfig.hiddenSize])
+    (caches : Array (LayerKVCache cfg batch))
+    (position : Nat)
+    (lastLogits : T #[batch, ThinkerLmVocabSize cfg])
+    : IO (T #[batch, ThinkerLmVocabSize cfg] × Array (LayerKVCache cfg batch)) := do
+  if position >= seq.toNat then
+    pure (lastLogits, caches)
+  else
+    let tok : T #[batch, 1, cfg.textConfig.hiddenSize] := data.slice inputsEmbeds 1 position.toUInt64 1
+    let (logits, caches') ← decodeStepFromEmbedWithCache m tok position.toUInt64 caches
+    prefillCachesFromEmbeds m inputsEmbeds caches' (position + 1) logits
+
+private partial def greedyLoopCached {batch : UInt64}
+    (m : Qwen3ASRThinkerForConditionalGeneration cfg)
+    (eosTokenIds : Array UInt64)
+    (remaining : Nat)
+    (caches : Array (LayerKVCache cfg batch))
+    (lastLogits : T #[batch, ThinkerLmVocabSize cfg])
+    {curSeq : UInt64}
+    (curIds : T #[batch, curSeq])
+    : IO (Sigma (fun outSeq => T #[batch, outSeq])) := do
+  if remaining == 0 then
+    return ⟨curSeq, curIds⟩
+
+  let nextTok : T #[batch] := nn.argmax lastLogits 1
+  let nextVals ← data.tensorToUInt64Array nextTok
+  let nextCol : T #[batch, 1] := reshape nextTok #[batch, 1]
+  let appended : T #[batch, curSeq + 1] := nn.cat curIds nextCol 1
+
+  let stop := eosTokenIds.size > 0 && allInSet nextVals eosTokenIds
+  if stop then
+    return ⟨curSeq + 1, appended⟩
+  else
+    let nextEmb : T #[batch, 1, cfg.textConfig.hiddenSize] := m.embedText nextCol
+    let (nextLogits, caches') ←
+      decodeStepFromEmbedWithCache m nextEmb curSeq caches
+    greedyLoopCached m eosTokenIds (remaining - 1) caches' nextLogits appended
+
 /-- Lean analogue of `prepare_inputs_for_generation` behavior for audio features:
     only feed audio on the first generation step (`cachePosition == 0`). -/
 def prepareInputsForGeneration {batch seq frames : UInt64}
@@ -243,24 +455,11 @@ def forwardWithAux {batch seq frames : UInt64}
     (featureAttentionMask : Option (T #[batch, frames]) := none)
     (attentionMask : Option (T #[batch, seq]) := none)
     : IO (Qwen3ASRThinkerCausalLMOutput cfg batch seq) := do
-  let inputsEmbeds0 := embedText m inputIds
-  let inputsEmbeds ←
-    match inputFeatures with
-    | none => pure inputsEmbeds0
-    | some feats =>
-      let audioSeq := AudioEncoderConfig.framesAfterConv3 cfg.audioConfig frames
-      let audioFeatures := projectAudio m (encodeAudio m feats)
-      let source ←
-        match featureAttentionMask with
-        | some fm =>
-          let validMask ← audioValidMaskFromFeatureMask cfg (audioSeq := audioSeq) fm
-          pure (nn.masked_select audioFeatures validMask)
-        | none =>
-          pure (reshape audioFeatures #[batch * audioSeq * cfg.textConfig.hiddenSize])
-      let placeholderMask := getPlaceholderMask cfg inputIds
-      pure (nn.masked_scatter inputsEmbeds0 placeholderMask source)
-
-  let logits := forwardEmbeds m inputsEmbeds attentionMask
+  let inputsEmbeds ← buildInputsEmbeds m inputIds inputFeatures featureAttentionMask
+  let logits ←
+    match attentionMask with
+    | none => pure (forwardEmbeds m inputsEmbeds none)
+    | some mask => forwardEmbedsMaskedWithPositionRows m inputsEmbeds mask
 
   let ropeDeltas ←
     match attentionMask with
@@ -291,7 +490,7 @@ def forward {batch seq frames : UInt64}
     : IO (T #[batch, seq, ThinkerLmVocabSize cfg]) := do
   return (← m.forwardWithAux inputIds inputFeatures featureAttentionMask attentionMask).logits
 
-private partial def greedyLoop {batch frames : UInt64}
+private partial def greedyLoopUncached {batch frames : UInt64}
     (m : Qwen3ASRThinkerForConditionalGeneration cfg)
     (inputFeatures : Option (T #[batch, cfg.audioConfig.numMelBins, frames]))
     (featureAttentionMask : Option (T #[batch, frames]))
@@ -320,7 +519,19 @@ private partial def greedyLoop {batch frames : UInt64}
   if stop then
     return ⟨curSeq + 1, appended⟩
   else
-    greedyLoop m inputFeatures featureAttentionMask eosTokenIds (remaining - 1) appended
+    greedyLoopUncached m inputFeatures featureAttentionMask eosTokenIds (remaining - 1) appended
+
+/-- Compatibility path mirroring the previous full re-forward greedy loop.
+    Useful for parity checks against the cached generation path. -/
+def generateGreedyUncached {batch seq frames : UInt64}
+    (m : Qwen3ASRThinkerForConditionalGeneration cfg)
+    (inputIds : T #[batch, seq])
+    (inputFeatures : Option (T #[batch, cfg.audioConfig.numMelBins, frames]) := none)
+    (featureAttentionMask : Option (T #[batch, frames]) := none)
+    (maxNewTokens : UInt64 := 512)
+    (eosTokenIds : Array UInt64 := defaultEosTokenIds)
+    : IO (Sigma (fun outSeq => T #[batch, outSeq])) := do
+  greedyLoopUncached m inputFeatures featureAttentionMask eosTokenIds maxNewTokens.toNat inputIds
 
 /-- Greedy generation utility (Lean-only, no vLLM dependency).
     Returns generated full sequence `[prompt || new_tokens]` with dynamic output length. -/
@@ -332,7 +543,20 @@ def generateGreedy {batch seq frames : UInt64}
     (maxNewTokens : UInt64 := 512)
     (eosTokenIds : Array UInt64 := defaultEosTokenIds)
     : IO (Sigma (fun outSeq => T #[batch, outSeq])) := do
-  greedyLoop m inputFeatures featureAttentionMask eosTokenIds maxNewTokens.toNat inputIds
+  if seq == 0 then
+    throw <| IO.userError "generateGreedy requires non-empty prompt sequence"
+  if maxNewTokens == 0 then
+    return ⟨seq, inputIds⟩
+
+  let inputsEmbeds ← buildInputsEmbeds m inputIds inputFeatures featureAttentionMask
+  let cacheDevice := inputsEmbeds.device
+  let cacheMaxLen : UInt64 := seq + maxNewTokens
+  let caches0 := initLayerKVCaches m cacheMaxLen cacheDevice
+  let tok0 : T #[batch, 1, cfg.textConfig.hiddenSize] := data.slice inputsEmbeds 1 0 1
+  let (logits0, caches1) ← decodeStepFromEmbedWithCache m tok0 0 caches0
+  let (lastLogits, cachesPrefill) ←
+    prefillCachesFromEmbeds m inputsEmbeds caches1 1 logits0
+  greedyLoopCached m eosTokenIds maxNewTokens.toNat cachesPrefill lastLogits inputIds
 
 def forwardFromMel {batch frames textSeq : UInt64}
     (m : Qwen3ASRThinkerForConditionalGeneration cfg)
@@ -402,6 +626,49 @@ def generateGreedy {batch seq frames : UInt64}
     (eosTokenIds : Array UInt64 := defaultEosTokenIds)
     : IO (Sigma (fun outSeq => T #[batch, outSeq])) :=
   m.thinker.generateGreedy inputIds inputFeatures featureAttentionMask maxNewTokens eosTokenIds
+
+def generateGreedyUncached {batch seq frames : UInt64}
+    (m : Qwen3ASRForConditionalGeneration cfg)
+    (inputIds : T #[batch, seq])
+    (inputFeatures : Option (T #[batch, cfg.thinkerConfig.audioConfig.numMelBins, frames]) := none)
+    (featureAttentionMask : Option (T #[batch, frames]) := none)
+    (maxNewTokens : UInt64 := 512)
+    (eosTokenIds : Array UInt64 := defaultEosTokenIds)
+    : IO (Sigma (fun outSeq => T #[batch, outSeq])) :=
+  m.thinker.generateGreedyUncached inputIds inputFeatures featureAttentionMask maxNewTokens eosTokenIds
+
+def alignFromOutputIds {batch seq : UInt64}
+    (_m : Qwen3ASRForConditionalGeneration cfg)
+    (inputIds : T #[batch, seq])
+    (outputIds : T #[batch, seq])
+    (wordLists : Array (Array String))
+    (timestampTokenId : UInt64 := cfg.timestampTokenId)
+    (timestampSegmentTime : Float := cfg.timestampSegmentTime)
+    : IO (Array ForcedAlignResult) :=
+  torch.qwen3asr.alignFromOutputIds inputIds outputIds wordLists timestampTokenId timestampSegmentTime
+
+def alignFromLogits {batch seq : UInt64}
+    (_m : Qwen3ASRForConditionalGeneration cfg)
+    (inputIds : T #[batch, seq])
+    (logits : T #[batch, seq, ThinkerLmVocabSize cfg.thinkerConfig])
+    (wordLists : Array (Array String))
+    (timestampTokenId : UInt64 := cfg.timestampTokenId)
+    (timestampSegmentTime : Float := cfg.timestampSegmentTime)
+    : IO (Array ForcedAlignResult) :=
+  torch.qwen3asr.alignFromLogits inputIds logits wordLists timestampTokenId timestampSegmentTime
+
+def alignPrepared {batch seq frames : UInt64}
+    (m : Qwen3ASRForConditionalGeneration cfg)
+    (inputIds : T #[batch, seq])
+    (wordLists : Array (Array String))
+    (inputFeatures : Option (T #[batch, cfg.thinkerConfig.audioConfig.numMelBins, frames]) := none)
+    (featureAttentionMask : Option (T #[batch, frames]) := none)
+    (attentionMask : Option (T #[batch, seq]) := none)
+    (timestampTokenId : UInt64 := cfg.timestampTokenId)
+    (timestampSegmentTime : Float := cfg.timestampSegmentTime)
+    : IO (Array ForcedAlignResult) := do
+  let logits ← m.forward inputIds inputFeatures featureAttentionMask attentionMask
+  m.alignFromLogits inputIds logits wordLists timestampTokenId timestampSegmentTime
 
 end Qwen3ASRForConditionalGeneration
 

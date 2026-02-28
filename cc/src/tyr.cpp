@@ -1977,6 +1977,26 @@ lean_object* lean_torch_slice_along_dim(
   return fromTorchTensor(result_);
 }
 
+// Return a copy of `input` with a slice along `dim` replaced by `src` at `start`.
+lean_object* lean_torch_slice_scatter_along_dim(
+  lean_obj_arg /*s*/,
+  lean_obj_arg /*src_shape*/,
+  b_lean_obj_arg input,
+  uint64_t dim,
+  uint64_t start,
+  b_lean_obj_arg src
+) {
+  auto input_ = borrowTensor(input);
+  auto src_ = borrowTensor(src);
+  auto dim_i = static_cast<int64_t>(dim);
+  auto start_i = static_cast<int64_t>(start);
+  auto end_i = start_i + src_.size(dim_i);
+
+  auto result_ = input_.clone();
+  result_.slice(dim_i, start_i, end_i).copy_(src_);
+  return fromTorchTensor(result_);
+}
+
 // Slice a 2D tensor along dimension 0: data[start:start+len, :]
 lean_object* lean_torch_slice_2d(
   uint64_t /*n*/,
@@ -3294,39 +3314,6 @@ lean_object* lean_torch_sdpa_gqa_qkv(
     is_causal
   );
   return fromTorchTensor(result_);
-}
-
-// In-place KV cache append for incremental decoding.
-// cache: [batch, n_kv_head, max_seq, head_dim]
-// step:  [batch, n_kv_head, 1,       head_dim]
-lean_object* lean_torch_kv_cache_write_(
-  uint64_t /*batch*/,
-  uint64_t /*n_kv_head*/,
-  uint64_t max_seq,
-  uint64_t /*head_dim*/,
-  b_lean_obj_arg cache,
-  b_lean_obj_arg step,
-  uint64_t pos,
-  lean_object* /*w*/
-) {
-  try {
-    auto cache_ = borrowTensor(cache);
-    auto step_ = borrowTensor(step);
-    if (pos >= max_seq) {
-      std::ostringstream oss;
-      oss << "kvCacheWrite: pos " << pos << " out of bounds for max_seq " << max_seq;
-      return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string(oss.str().c_str())));
-    }
-
-    cache_.slice(2, static_cast<int64_t>(pos), static_cast<int64_t>(pos + 1)).copy_(step_);
-    return lean_io_result_mk_ok(lean_box(0));
-  } catch (const c10::Error& e) {
-    return lean_io_result_mk_error(
-      lean_mk_io_user_error(lean_mk_string(("kvCacheWrite failed: " + std::string(e.what())).c_str())));
-  } catch (const std::exception& e) {
-    return lean_io_result_mk_error(
-      lean_mk_io_user_error(lean_mk_string(("kvCacheWrite failed: " + std::string(e.what())).c_str())));
-  }
 }
 
 // ============================================================================

@@ -49,6 +49,24 @@ def init (hidden_size num_heads num_kv_heads head_dim : UInt64) : IO (QwenAttent
     o_proj := autograd.set_requires_grad (mul_scalar o std) true
   }
 
+/-- Incremental KV cache for one attention layer.
+    Stores preallocated K/V buffers with maximum length `maxLen`. -/
+structure KVCache (batch num_kv_heads head_dim : UInt64) where
+  kStoreDyn : T #[]
+  vStoreDyn : T #[]
+  seq : UInt64 := 0
+  maxLen : UInt64 := 0
+
+/-- Empty static KV cache with fixed capacity `maxLen`. -/
+def initKVCache {batch num_kv_heads head_dim : UInt64}
+    (maxLen : UInt64)
+    (device : Device := Device.CPU) : KVCache batch num_kv_heads head_dim :=
+  let k0 : T #[batch, num_kv_heads, maxLen, head_dim] :=
+    torch.zeros #[batch, num_kv_heads, maxLen, head_dim] false device
+  let v0 : T #[batch, num_kv_heads, maxLen, head_dim] :=
+    torch.zeros #[batch, num_kv_heads, maxLen, head_dim] false device
+  { kStoreDyn := nn.eraseShape k0, vStoreDyn := nn.eraseShape v0, seq := 0, maxLen := maxLen }
+
 /-- Apply RMS normalization along the last dimension (per-head norm).
     Input: [batch, seq, n_heads, head_dim], norm: [head_dim]
     Broadcasts norm across all heads. -/
@@ -127,6 +145,95 @@ def forward {batch seq hidden_size num_heads num_kv_heads head_dim : UInt64}
 
   -- Output projection
   linear3d attn_out attn.o_proj
+
+/-- Incremental attention step with KV cache.
+    Input query is one token `[batch,1,hidden]`; cache grows by one KV step. -/
+def forwardStep {batch hidden_size num_heads num_kv_heads head_dim : UInt64}
+    (attn : QwenAttention hidden_size num_heads num_kv_heads head_dim)
+    (x : T #[batch, 1, hidden_size])
+    (cos : T #[1, head_dim / 2])
+    (sin : T #[1, head_dim / 2])
+    (cache : KVCache batch num_kv_heads head_dim)
+    : T #[batch, 1, hidden_size] × KVCache batch num_kv_heads head_dim :=
+  -- Project current token to Q/K/V.
+  let q0 := linear3d x attn.q_proj
+  let k0 := linear3d x attn.k_proj
+  let v0 := linear3d x attn.v_proj
+
+  let q := reshape q0 #[batch, 1, num_heads, head_dim]
+  let k := reshape k0 #[batch, 1, num_kv_heads, head_dim]
+  let v := reshape v0 #[batch, 1, num_kv_heads, head_dim]
+
+  -- Apply optional per-head Q/K normalization.
+  let q := match attn.q_norm with
+    | some qn => applyHeadNorm q qn
+    | none => q
+  let k := match attn.k_norm with
+    | some kn => applyHeadNorm k kn
+    | none => k
+
+  -- Apply RoPE to the single-step Q/K.
+  let q := rotary.applyRotaryEmb q cos sin
+  let k := rotary.applyRotaryEmb k cos sin
+
+  -- Convert to attention layout and write new KV into preallocated cache.
+  let qh : T #[batch, num_heads, 1, head_dim] := nn.transpose_for_attention q
+  let kNew : T #[batch, num_kv_heads, 1, head_dim] := nn.transpose_for_attention k
+  let vNew : T #[batch, num_kv_heads, 1, head_dim] := nn.transpose_for_attention v
+
+  let kStore : T #[batch, num_kv_heads, cache.maxLen, head_dim] :=
+    reshape cache.kStoreDyn #[batch, num_kv_heads, cache.maxLen, head_dim]
+  let vStore : T #[batch, num_kv_heads, cache.maxLen, head_dim] :=
+    reshape cache.vStoreDyn #[batch, num_kv_heads, cache.maxLen, head_dim]
+
+  if hCap : cache.seq < cache.maxLen then
+    let kStore' : T #[batch, num_kv_heads, cache.maxLen, head_dim] :=
+      data.sliceScatter kStore 2 cache.seq kNew
+    let vStore' : T #[batch, num_kv_heads, cache.maxLen, head_dim] :=
+      data.sliceScatter vStore 2 cache.seq vNew
+    let kvLen : UInt64 := cache.seq + 1
+    let kAll : T #[batch, num_kv_heads, kvLen, head_dim] := data.slice kStore' 2 0 kvLen
+    let vAll : T #[batch, num_kv_heads, kvLen, head_dim] := data.slice vStore' 2 0 kvLen
+
+    -- Use q_len=1, kv_len=(seq+1). Causal masking is unnecessary because KV has no future tokens.
+    let attnOut : T #[batch, num_heads, 1, head_dim] :=
+      nn.scaledDotProductAttentionGQAQKV qh kAll vAll 0.0 false true
+    let attnOut : T #[batch, 1, num_heads, head_dim] := nn.transpose_from_attention attnOut
+    let attnOut : T #[batch, 1, num_heads * head_dim] := reshape attnOut #[batch, 1, num_heads * head_dim]
+    let out : T #[batch, 1, hidden_size] := linear3d attnOut attn.o_proj
+
+    let cache' : KVCache batch num_kv_heads head_dim := {
+      kStoreDyn := nn.eraseShape kStore'
+      vStoreDyn := nn.eraseShape vStore'
+      seq := kvLen
+      maxLen := cache.maxLen
+    }
+    (out, cache')
+  else
+    let writePos : UInt64 :=
+      if cache.maxLen == 0 then
+        0
+      else
+        cache.maxLen - 1
+    let kStore' : T #[batch, num_kv_heads, cache.maxLen, head_dim] :=
+      data.sliceScatter kStore 2 writePos kNew
+    let vStore' : T #[batch, num_kv_heads, cache.maxLen, head_dim] :=
+      data.sliceScatter vStore 2 writePos vNew
+    let kvLen : UInt64 := cache.maxLen
+    let kAll : T #[batch, num_kv_heads, kvLen, head_dim] := data.slice kStore' 2 0 kvLen
+    let vAll : T #[batch, num_kv_heads, kvLen, head_dim] := data.slice vStore' 2 0 kvLen
+    let attnOut : T #[batch, num_heads, 1, head_dim] :=
+      nn.scaledDotProductAttentionGQAQKV qh kAll vAll 0.0 false true
+    let attnOut : T #[batch, 1, num_heads, head_dim] := nn.transpose_from_attention attnOut
+    let attnOut : T #[batch, 1, num_heads * head_dim] := reshape attnOut #[batch, 1, num_heads * head_dim]
+    let out : T #[batch, 1, hidden_size] := linear3d attnOut attn.o_proj
+    let cache' : KVCache batch num_kv_heads head_dim := {
+      kStoreDyn := nn.eraseShape kStore'
+      vStoreDyn := nn.eraseShape vStore'
+      seq := cache.maxLen
+      maxLen := cache.maxLen
+    }
+    (out, cache')
 
 def forwardMasked {batch seq hidden_size num_heads num_kv_heads head_dim : UInt64}
     (attn : QwenAttention hidden_size num_heads num_kv_heads head_dim)
