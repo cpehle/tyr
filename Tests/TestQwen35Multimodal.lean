@@ -145,3 +145,56 @@ def testQwen35MultimodalGenerateStreamBatched : IO Unit := do
   let nCallbacks ← callbacksRef.get
   LeanTest.assertEqual nCallbacks 3
     "stream callback should run once per decoding step"
+
+@[test]
+def testQwen35MultimodalGenerateStreamWithImageAndVideoFeatures : IO Unit := do
+  let model ← Qwen35ForConditionalGeneration.init tinyVLCfg
+  let ids : T #[1, 8] :=
+    reshape (data.fromInt64Array #[2, 50, 50, 51, 51, 51, 9, 10]) #[1, 8]
+
+  let imageFeat : T #[2, tinyVLCfg.vision_config.out_hidden_size] ←
+    torch.randn #[2, tinyVLCfg.vision_config.out_hidden_size]
+  let videoFeat : T #[3, tinyVLCfg.vision_config.out_hidden_size] ←
+    torch.randn #[3, tinyVLCfg.vision_config.out_hidden_size]
+
+  let callbacksRef ← IO.mkRef (0 : Nat)
+  let onStep : Qwen35ForCausalLM.StreamCallback 1 := fun _ nextTok => do
+    let flat : T #[1] := reshape (data.toLong nextTok) #[1]
+    let vals ← data.tensorToUInt64Array flat
+    if vals.size == 1 then
+      callbacksRef.modify (fun n => n + 1)
+
+  let ⟨seqStream, outStream⟩ ←
+    model.generateStream
+      tinyVLCfg
+      ids
+      onStep
+      3
+      .greedy
+      #[]
+      (some ⟨2, imageFeat⟩)
+      (some ⟨3, videoFeat⟩)
+
+  let ⟨seqPlain, outPlain⟩ ←
+    model.generate
+      tinyVLCfg
+      ids
+      3
+      .greedy
+      #[]
+      (some ⟨2, imageFeat⟩)
+      (some ⟨3, videoFeat⟩)
+
+  LeanTest.assertEqual seqStream seqPlain
+    "multimodal streaming and non-streaming generation should have equal output length"
+
+  let streamFlat : T #[seqStream] := reshape (data.toLong outStream) #[seqStream]
+  let plainFlat : T #[seqPlain] := reshape (data.toLong outPlain) #[seqPlain]
+  let streamIds ← data.tensorToUInt64Array streamFlat
+  let plainIds ← data.tensorToUInt64Array plainFlat
+  LeanTest.assertEqual streamIds plainIds
+    "multimodal streaming and non-streaming generation should produce identical token ids"
+
+  let nCallbacks ← callbacksRef.get
+  LeanTest.assertEqual nCallbacks 3
+    "stream callback should run once per generated step with multimodal features"

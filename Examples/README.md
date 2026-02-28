@@ -139,6 +139,10 @@ lake exe Qwen35RunHF --source Qwen/Qwen3.5-4B \
   --video clip.mp4 --video-max-frames 64 --video-frame-stride 4 \
   --prompt "Summarize this clip."
 
+# Multimodal streaming decode
+lake exe Qwen35RunHF --source Qwen/Qwen3.5-4B \
+  --image input.jpg --prompt "Describe this image." --stream
+
 # Batched prompts + streaming
 lake exe Qwen35RunHF --source tiny-random/qwen3.5 --prompt-file prompts.txt \
   --batch-size 4 --stream
