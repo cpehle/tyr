@@ -21,7 +21,7 @@ def packageLinkArgs : Array String :=
       "-Lexternal/libtorch/lib",
       "-ltorch", "-ltorch_cpu", "-lc10",
       "-L/opt/homebrew/opt/libomp/lib", "-lomp",
-      "-L/opt/homebrew/lib", "-larrow", "-lparquet",
+      "-L/opt/homebrew/lib", "-larrow", "-lparquet", "-lsoxr",
       "-Wl,-rpath,@loader_path/../../external/libtorch/lib",
       "-Wl,-rpath,/opt/homebrew/opt/libomp/lib",
       "-Wl,-rpath,/opt/homebrew/lib"
@@ -32,7 +32,7 @@ def packageLinkArgs : Array String :=
       "-ltorch", "-ltorch_cpu", "-lc10"
     ] ++ linuxSystemLinkDirs ++ #[
       "-l:libgomp.so.1", "-l:libstdc++.so.6",
-      "-larrow", "-lparquet",
+      "-larrow", "-lparquet", "-lsoxr",
       "-Wl,-rpath,$ORIGIN/../../../external/libtorch/lib"
     ]
 
@@ -43,7 +43,7 @@ def commonLinkArgs : Array String :=
       "-Lexternal/libtorch/lib",
       "-ltorch", "-ltorch_cpu", "-lc10",
       "-L/opt/homebrew/opt/libomp/lib", "-lomp",
-      "-L/opt/homebrew/lib", "-larrow", "-lparquet",
+      "-L/opt/homebrew/lib", "-larrow", "-lparquet", "-lsoxr",
       "-Wl,-rpath,@executable_path/../../../external/libtorch/lib",
       "-Wl,-rpath,/opt/homebrew/opt/libomp/lib",
       "-Wl,-rpath,/opt/homebrew/lib"
@@ -55,7 +55,7 @@ def commonLinkArgs : Array String :=
       "-ltorch", "-ltorch_cpu", "-lc10"
     ] ++ linuxSystemLinkDirs ++ #[
       "-l:libgomp.so.1", "-l:libstdc++.so.6",
-      "-larrow", "-lparquet",
+      "-larrow", "-lparquet", "-lsoxr",
       "-Wl,-rpath,$ORIGIN/../../../external/libtorch/lib"
     ]
 
@@ -210,6 +210,12 @@ lean_exe TestDataLoader where
 /-- Flux image generation demo -/
 lean_exe FluxDemo where
   root := `Examples.Flux.FluxDemo
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
+/-- End-to-end Qwen3-TTS demo (Lean talker + Python speech-tokenizer decode). -/
+lean_exe Qwen3TTSEndToEnd where
+  root := `Examples.Qwen3TTS.EndToEnd
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 

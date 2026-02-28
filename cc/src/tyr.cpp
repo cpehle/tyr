@@ -57,10 +57,21 @@
 #include <fstream>
 #include <atomic>
 #include <cmath>
+#include <optional>
 #include <stdexcept>
 #include <lean/lean.h>
 #include <torch/torch.h>
 #include <ATen/ATen.h>
+#if defined(__has_include)
+#if __has_include(<soxr.h>)
+#define TYR_HAS_SOXR 1
+#include <soxr.h>
+#else
+#define TYR_HAS_SOXR 0
+#endif
+#else
+#define TYR_HAS_SOXR 0
+#endif
 
 #if defined(__has_include)
 #if __has_include(<c10/cuda/CUDAStream.h>) && __has_include(<c10/cuda/CUDAFunctions.h>) && __has_include(<cuda_runtime_api.h>)
@@ -461,6 +472,7 @@ UNOP_FUN(atan)
 UNOP_FUN(tanh)
 UNOP_FUN(exp)
 UNOP_FUN(log)
+UNOP_FUN(log10)
 #undef UNOP_FUN
 
 lean_object* lean_torch_tensor_grad(lean_obj_arg /* s */, lean_obj_arg /* s' */, b_lean_obj_arg output, b_lean_obj_arg input, b_lean_obj_arg grad_output) {
@@ -1755,6 +1767,80 @@ lean_object* lean_torch_from_int64_array(b_lean_obj_arg arr) {
   return fromTorchTensor(tensor);
 }
 
+// Create tensor from Array Float
+lean_object* lean_torch_from_float_array(b_lean_obj_arg arr) {
+  size_t len = lean_array_size(arr);
+  std::vector<float> data(len);
+  for (size_t i = 0; i < len; i++) {
+    data[i] = static_cast<float>(lean_unbox_float(lean_array_get_core(arr, i)));
+  }
+  auto tensor = torch::from_blob(data.data(), {static_cast<int64_t>(len)}, torch::kFloat32).clone();
+  return fromTorchTensor(tensor);
+}
+
+// High-quality mono waveform resample using libsoxr (`soxr_hq`).
+lean_object* lean_torch_resample_soxr_hq(
+    b_lean_obj_arg samples,
+    uint64_t orig_sr,
+    uint64_t target_sr,
+    lean_object* /*w*/
+) {
+  if (orig_sr == 0 || target_sr == 0) {
+    return lean_io_result_mk_error(lean_mk_io_user_error(
+      lean_mk_string("resampleSoxrHQ: sample rates must be non-zero")));
+  }
+
+  size_t in_len = lean_array_size(samples);
+  if (in_len == 0 || orig_sr == target_sr) {
+    lean_object* passthrough = lean_mk_empty_array();
+    for (size_t i = 0; i < in_len; i++) {
+      passthrough = lean_array_push(passthrough, lean_array_get_core(samples, i));
+    }
+    return lean_io_result_mk_ok(passthrough);
+  }
+
+  std::vector<float> in_data(in_len);
+  for (size_t i = 0; i < in_len; i++) {
+    in_data[i] = static_cast<float>(lean_unbox_float(lean_array_get_core(samples, i)));
+  }
+
+  double ratio = static_cast<double>(target_sr) / static_cast<double>(orig_sr);
+  size_t out_len = static_cast<size_t>(std::ceil(static_cast<double>(in_len) * ratio));
+  std::vector<float> out_data(out_len, 0.0f);
+
+#if TYR_HAS_SOXR
+  size_t idone = 0;
+  size_t odone = 0;
+  auto io_spec = soxr_io_spec(SOXR_FLOAT32_I, SOXR_FLOAT32_I);
+  auto q_spec = soxr_quality_spec(SOXR_HQ, 0);
+  soxr_error_t err = soxr_oneshot(
+      static_cast<double>(orig_sr),
+      static_cast<double>(target_sr),
+      1,
+      in_data.data(), in_len, &idone,
+      out_data.data(), out_len, &odone,
+      &io_spec, &q_spec, nullptr);
+  if (err != nullptr) {
+    return lean_io_result_mk_error(lean_mk_io_user_error(
+      lean_mk_string((std::string("resampleSoxrHQ failed: ") + err).c_str())));
+  }
+  if (odone < out_len) {
+    for (size_t i = odone; i < out_len; i++) {
+      out_data[i] = 0.0f;
+    }
+  }
+#else
+  return lean_io_result_mk_error(lean_mk_io_user_error(
+    lean_mk_string("resampleSoxrHQ requires libsoxr (soxr.h not found at build time)")));
+#endif
+
+  lean_object* out = lean_mk_empty_array();
+  for (size_t i = 0; i < out_len; i++) {
+    out = lean_array_push(out, lean_box_float(static_cast<double>(out_data[i])));
+  }
+  return lean_io_result_mk_ok(out);
+}
+
 // Backward pass
 lean_object* lean_torch_backward_unit(lean_obj_arg /*s*/, b_lean_obj_arg output, b_lean_obj_arg grad_output, lean_object* w) {
   auto output_ = borrowTensor(output);
@@ -2275,6 +2361,42 @@ lean_object* lean_torch_save_ppm(
 
 // Save mono waveform as 16-bit PCM WAV.
 // Tensor is flattened in row-major order and clamped to [-1, 1].
+static void write_wav_header(std::ostream& file, uint32_t sample_rate, uint32_t data_size) {
+  const uint32_t channels = 1;
+  const uint32_t bits_per_sample = 16;
+  const uint32_t byte_rate = sample_rate * channels * (bits_per_sample / 8);
+  const uint16_t block_align = static_cast<uint16_t>(channels * (bits_per_sample / 8));
+  const uint32_t riff_chunk_size = 36 + data_size;
+
+  file.write("RIFF", 4);
+  file.write(reinterpret_cast<const char*>(&riff_chunk_size), 4);
+  file.write("WAVE", 4);
+  file.write("fmt ", 4);
+  uint32_t fmt_chunk_size = 16;
+  uint16_t audio_format = 1;  // PCM
+  uint16_t num_channels = static_cast<uint16_t>(channels);
+  file.write(reinterpret_cast<const char*>(&fmt_chunk_size), 4);
+  file.write(reinterpret_cast<const char*>(&audio_format), 2);
+  file.write(reinterpret_cast<const char*>(&num_channels), 2);
+  file.write(reinterpret_cast<const char*>(&sample_rate), 4);
+  file.write(reinterpret_cast<const char*>(&byte_rate), 4);
+  file.write(reinterpret_cast<const char*>(&block_align), 2);
+  file.write(reinterpret_cast<const char*>(&bits_per_sample), 2);
+  file.write("data", 4);
+  file.write(reinterpret_cast<const char*>(&data_size), 4);
+}
+
+static bool patch_wav_sizes(std::fstream& file, uint32_t data_size) {
+  uint32_t riff_chunk_size = 36 + data_size;
+  file.seekp(4, std::ios::beg);
+  if (!file.good()) return false;
+  file.write(reinterpret_cast<const char*>(&riff_chunk_size), 4);
+  file.seekp(40, std::ios::beg);
+  if (!file.good()) return false;
+  file.write(reinterpret_cast<const char*>(&data_size), 4);
+  return file.good();
+}
+
 lean_object* lean_torch_save_wav(
   lean_obj_arg /*shape*/,
   b_lean_obj_arg tensor_obj,
@@ -2292,12 +2414,7 @@ lean_object* lean_torch_save_wav(
         lean_mk_string("Cannot save WAV: empty tensor")));
     }
 
-    uint32_t channels = 1;
-    uint32_t bits_per_sample = 16;
-    uint32_t byte_rate = static_cast<uint32_t>(sample_rate) * channels * (bits_per_sample / 8);
-    uint16_t block_align = static_cast<uint16_t>(channels * (bits_per_sample / 8));
-    uint32_t data_size = static_cast<uint32_t>(n_samples * (bits_per_sample / 8));
-    uint32_t riff_chunk_size = 36 + data_size;
+    uint32_t data_size = static_cast<uint32_t>(n_samples * 2);
 
     std::ofstream file(path, std::ios::binary);
     if (!file.is_open()) {
@@ -2305,23 +2422,7 @@ lean_object* lean_torch_save_wav(
         lean_mk_string(("Failed to open file for writing: " + std::string(path)).c_str())));
     }
 
-    file.write("RIFF", 4);
-    file.write(reinterpret_cast<const char*>(&riff_chunk_size), 4);
-    file.write("WAVE", 4);
-    file.write("fmt ", 4);
-    uint32_t fmt_chunk_size = 16;
-    uint16_t audio_format = 1;  // PCM
-    uint16_t num_channels = static_cast<uint16_t>(channels);
-    uint32_t sr = static_cast<uint32_t>(sample_rate);
-    file.write(reinterpret_cast<const char*>(&fmt_chunk_size), 4);
-    file.write(reinterpret_cast<const char*>(&audio_format), 2);
-    file.write(reinterpret_cast<const char*>(&num_channels), 2);
-    file.write(reinterpret_cast<const char*>(&sr), 4);
-    file.write(reinterpret_cast<const char*>(&byte_rate), 4);
-    file.write(reinterpret_cast<const char*>(&block_align), 2);
-    file.write(reinterpret_cast<const char*>(&bits_per_sample), 2);
-    file.write("data", 4);
-    file.write(reinterpret_cast<const char*>(&data_size), 4);
+    write_wav_header(file, static_cast<uint32_t>(sample_rate), data_size);
 
     const float* ptr = wav.data_ptr<float>();
     for (int64_t i = 0; i < n_samples; ++i) {
@@ -2336,6 +2437,117 @@ lean_object* lean_torch_save_wav(
   } catch (const std::exception& e) {
     return lean_io_result_mk_error(lean_mk_io_user_error(
       lean_mk_string(("Failed to save WAV: " + std::string(e.what())).c_str())));
+  }
+}
+
+// Start a streaming mono WAV file with a placeholder header.
+lean_object* lean_torch_wav_begin(
+  b_lean_obj_arg path_obj,
+  uint64_t sample_rate,
+  lean_object* /*w*/
+) {
+  const char* path = lean_string_cstr(path_obj);
+  try {
+    std::ofstream file(path, std::ios::binary | std::ios::trunc);
+    if (!file.is_open()) {
+      return lean_io_result_mk_error(lean_mk_io_user_error(
+        lean_mk_string(("Failed to open WAV for writing: " + std::string(path)).c_str())));
+    }
+    write_wav_header(file, static_cast<uint32_t>(sample_rate), 0);
+    file.close();
+    return lean_io_result_mk_ok(lean_box(0));
+  } catch (const std::exception& e) {
+    return lean_io_result_mk_error(lean_mk_io_user_error(
+      lean_mk_string(("Failed to begin WAV stream: " + std::string(e.what())).c_str())));
+  }
+}
+
+// Append float waveform samples to an existing streaming WAV and patch sizes.
+lean_object* lean_torch_wav_append(
+  lean_obj_arg /*shape*/,
+  b_lean_obj_arg tensor_obj,
+  b_lean_obj_arg path_obj,
+  lean_object* /*w*/
+) {
+  const char* path = lean_string_cstr(path_obj);
+  try {
+    auto tensor = borrowTensor(tensor_obj);
+    auto wav = tensor.detach().to(torch::kCPU).to(torch::kFloat32).contiguous().view({-1});
+    int64_t n_samples = wav.numel();
+    if (n_samples <= 0) {
+      return lean_io_result_mk_ok(lean_box(0));
+    }
+
+    std::fstream file(path, std::ios::in | std::ios::out | std::ios::binary);
+    if (!file.is_open()) {
+      return lean_io_result_mk_error(lean_mk_io_user_error(
+        lean_mk_string(("Failed to open WAV stream (call wavBegin first): " + std::string(path)).c_str())));
+    }
+
+    file.seekp(0, std::ios::end);
+    const float* ptr = wav.data_ptr<float>();
+    for (int64_t i = 0; i < n_samples; ++i) {
+      float x = ptr[i];
+      if (x > 1.0f) x = 1.0f;
+      if (x < -1.0f) x = -1.0f;
+      int16_t pcm = static_cast<int16_t>(std::lrintf(x * 32767.0f));
+      file.write(reinterpret_cast<const char*>(&pcm), sizeof(int16_t));
+    }
+
+    std::streampos end_pos = file.tellp();
+    if (end_pos < static_cast<std::streampos>(44)) {
+      return lean_io_result_mk_error(lean_mk_io_user_error(
+        lean_mk_string("WAV stream is invalid (too small for header)")));
+    }
+    uint64_t data_bytes64 = static_cast<uint64_t>(end_pos) - 44ULL;
+    if (data_bytes64 > 0xFFFFFFFFULL) {
+      return lean_io_result_mk_error(lean_mk_io_user_error(
+        lean_mk_string("WAV stream exceeds 4GiB size limit")));
+    }
+    if (!patch_wav_sizes(file, static_cast<uint32_t>(data_bytes64))) {
+      return lean_io_result_mk_error(lean_mk_io_user_error(
+        lean_mk_string("Failed to patch WAV header sizes")));
+    }
+    file.close();
+    return lean_io_result_mk_ok(lean_box(0));
+  } catch (const std::exception& e) {
+    return lean_io_result_mk_error(lean_mk_io_user_error(
+      lean_mk_string(("Failed to append WAV stream: " + std::string(e.what())).c_str())));
+  }
+}
+
+// Finalize a streaming WAV file by recomputing and patching header sizes.
+lean_object* lean_torch_wav_finalize(
+  b_lean_obj_arg path_obj,
+  lean_object* /*w*/
+) {
+  const char* path = lean_string_cstr(path_obj);
+  try {
+    std::fstream file(path, std::ios::in | std::ios::out | std::ios::binary);
+    if (!file.is_open()) {
+      return lean_io_result_mk_error(lean_mk_io_user_error(
+        lean_mk_string(("Failed to open WAV for finalize: " + std::string(path)).c_str())));
+    }
+    file.seekg(0, std::ios::end);
+    std::streampos file_size = file.tellg();
+    if (file_size < static_cast<std::streampos>(44)) {
+      return lean_io_result_mk_error(lean_mk_io_user_error(
+        lean_mk_string("WAV file is invalid (too small for header)")));
+    }
+    uint64_t data_bytes64 = static_cast<uint64_t>(file_size) - 44ULL;
+    if (data_bytes64 > 0xFFFFFFFFULL) {
+      return lean_io_result_mk_error(lean_mk_io_user_error(
+        lean_mk_string("WAV file exceeds 4GiB size limit")));
+    }
+    if (!patch_wav_sizes(file, static_cast<uint32_t>(data_bytes64))) {
+      return lean_io_result_mk_error(lean_mk_io_user_error(
+        lean_mk_string("Failed to finalize WAV header sizes")));
+    }
+    file.close();
+    return lean_io_result_mk_ok(lean_box(0));
+  } catch (const std::exception& e) {
+    return lean_io_result_mk_error(lean_mk_io_user_error(
+      lean_mk_string(("Failed to finalize WAV: " + std::string(e.what())).c_str())));
   }
 }
 
@@ -2626,6 +2838,67 @@ lean_object* lean_torch_tensor_to_uint64_array_dynamic(
   }
 
   return lean_io_result_mk_ok(arr);
+}
+
+// Convert a dynamically-shaped float tensor to a Lean Array Float
+lean_object* lean_torch_tensor_to_float_array_dynamic(
+    b_lean_obj_arg tensor,
+    lean_object* w
+) {
+  auto t = borrowTensor(tensor);
+  t = t.to(torch::kCPU).contiguous().to(torch::kFloat32);
+  int64_t numel = t.numel();
+
+  lean_object* arr = lean_mk_empty_array();
+  auto* ptr = t.data_ptr<float>();
+  for (int64_t i = 0; i < numel; i++) {
+    arr = lean_array_push(arr, lean_box_float(static_cast<double>(ptr[i])));
+  }
+  return lean_io_result_mk_ok(arr);
+}
+
+// Hann window for spectral analysis
+lean_object* lean_torch_hann_window(uint64_t n) {
+  auto win = torch::hann_window(static_cast<int64_t>(n), torch::TensorOptions().dtype(torch::kFloat32));
+  return fromTorchTensor(win);
+}
+
+// 1D STFT returning real/imag packed in the last dimension.
+lean_object* lean_torch_stft_1d(
+    uint64_t /*n*/,
+    b_lean_obj_arg input,
+    uint64_t n_fft,
+    uint64_t hop_length,
+    uint64_t win_length,
+    b_lean_obj_arg window,
+    uint8_t center,
+    uint8_t normalized
+) {
+  auto input_ = borrowTensor(input);
+  auto window_ = borrowTensor(window);
+  // Match WhisperFeatureExtractor's torch path:
+  // torch.stft(..., return_complex=True), then view_as_real for packing.
+  auto complex_ = torch::stft(
+      input_,
+      static_cast<int64_t>(n_fft),
+      static_cast<int64_t>(hop_length),
+      static_cast<int64_t>(win_length),
+      window_,
+      center != 0,
+      "reflect",
+      normalized != 0,
+      true,
+      true);
+  auto packed_ = torch::view_as_real(complex_);
+  return fromTorchTensor(packed_);
+}
+
+// 1D RFFT returning real/imag packed in the last dimension.
+lean_object* lean_torch_rfft_1d(uint64_t /*n*/, b_lean_obj_arg input) {
+  auto input_ = borrowTensor(input);
+  auto complex_ = at::fft_rfft(input_, std::nullopt, -1, std::nullopt);
+  auto packed_ = torch::view_as_real(complex_);
+  return fromTorchTensor(packed_);
 }
 
 // ============================================================================
@@ -2985,6 +3258,77 @@ lean_object* lean_torch_sdpa_gqa_mask(
   return fromTorchTensor(result_);
 }
 
+// Scaled dot-product attention with GQA where query and KV sequence lengths may differ.
+// Q: [batch, n_head, q_seq, head_dim]
+// K, V: [batch, n_kv_head, kv_seq, head_dim]
+lean_object* lean_torch_sdpa_gqa_qkv(
+  uint64_t /*batch*/,
+  uint64_t n_head,
+  uint64_t n_kv_head,
+  uint64_t /*q_seq*/,
+  uint64_t /*kv_seq*/,
+  uint64_t /*head_dim*/,
+  b_lean_obj_arg query,
+  b_lean_obj_arg key,
+  b_lean_obj_arg value,
+  double dropout_p,
+  uint8_t is_causal,
+  uint8_t enable_gqa
+) {
+  auto q = borrowTensor(query);
+  auto k = borrowTensor(key);
+  auto v = borrowTensor(value);
+
+  if (enable_gqa) {
+    if (n_head != n_kv_head && n_kv_head > 0) {
+      auto repeat_factor = n_head / n_kv_head;
+      k = k.repeat_interleave(repeat_factor, 1);
+      v = v.repeat_interleave(repeat_factor, 1);
+    }
+  }
+
+  auto result_ = torch::scaled_dot_product_attention(
+    q, k, v,
+    c10::nullopt,  // attn_mask
+    dropout_p,
+    is_causal
+  );
+  return fromTorchTensor(result_);
+}
+
+// In-place KV cache append for incremental decoding.
+// cache: [batch, n_kv_head, max_seq, head_dim]
+// step:  [batch, n_kv_head, 1,       head_dim]
+lean_object* lean_torch_kv_cache_write_(
+  uint64_t /*batch*/,
+  uint64_t /*n_kv_head*/,
+  uint64_t max_seq,
+  uint64_t /*head_dim*/,
+  b_lean_obj_arg cache,
+  b_lean_obj_arg step,
+  uint64_t pos,
+  lean_object* /*w*/
+) {
+  try {
+    auto cache_ = borrowTensor(cache);
+    auto step_ = borrowTensor(step);
+    if (pos >= max_seq) {
+      std::ostringstream oss;
+      oss << "kvCacheWrite: pos " << pos << " out of bounds for max_seq " << max_seq;
+      return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string(oss.str().c_str())));
+    }
+
+    cache_.slice(2, static_cast<int64_t>(pos), static_cast<int64_t>(pos + 1)).copy_(step_);
+    return lean_io_result_mk_ok(lean_box(0));
+  } catch (const c10::Error& e) {
+    return lean_io_result_mk_error(
+      lean_mk_io_user_error(lean_mk_string(("kvCacheWrite failed: " + std::string(e.what())).c_str())));
+  } catch (const std::exception& e) {
+    return lean_io_result_mk_error(
+      lean_mk_io_user_error(lean_mk_string(("kvCacheWrite failed: " + std::string(e.what())).c_str())));
+  }
+}
+
 // ============================================================================
 // Comparison and conditional operations for diffusion
 // ============================================================================
@@ -3111,6 +3455,13 @@ lean_object* lean_torch_index_select_1d(lean_obj_arg /*s*/, b_lean_obj_arg input
 
 // Clamp values to a range
 lean_object* lean_torch_clamp(lean_obj_arg /*s*/, b_lean_obj_arg input, int64_t min_val, int64_t max_val) {
+  auto input_ = borrowTensor(input);
+  auto result_ = torch::clamp(input_, min_val, max_val);
+  return fromTorchTensor(result_);
+}
+
+// Clamp values to a floating-point range
+lean_object* lean_torch_clamp_float(lean_obj_arg /*s*/, b_lean_obj_arg input, double min_val, double max_val) {
   auto input_ = borrowTensor(input);
   auto result_ = torch::clamp(input_, min_val, max_val);
   return fromTorchTensor(result_);

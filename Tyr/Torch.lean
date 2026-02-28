@@ -470,6 +470,7 @@ opaque nll_loss_none {n c : UInt64}
 @[extern "lean_torch_tensor_atan"] opaque atan {s : Shape} (t : @& T s) : T s
 @[extern "lean_torch_tensor_exp"] opaque exp {s : Shape} (t : @& T s) : T s
 @[extern "lean_torch_tensor_log"] opaque log {s : Shape} (t : @& T s) : T s
+@[extern "lean_torch_tensor_log10"] opaque log10 {s : Shape} (t : @& T s) : T s
 @[extern "lean_torch_smooth_l1_loss"] opaque smooth_l1_loss {s : Shape} (input : @& T s) (target : @& T s) (reduction : String := "mean") (beta : Float := 1.0) : T #[]
 -- torch::nn::functional::soft_margin_loss
 -- torch::nn::functional::softmax
@@ -716,6 +717,15 @@ opaque loadF32Bin (s : Shape) (path : @& String) : IO (T s)
 @[extern "lean_torch_from_int64_array"]
 opaque fromInt64Array (arr : @& Array Int64) : T #[]
 
+/-- Create a 1D float32 tensor from an array of Float. -/
+@[extern "lean_torch_from_float_array"]
+opaque fromFloatArray (arr : @& Array Float) : T #[]
+
+/-- Resample mono waveform samples with libsoxr high-quality mode.
+    Mirrors librosa default `res_type=\"soxr_hq\"` behavior for 1D audio. -/
+@[extern "lean_torch_resample_soxr_hq"]
+opaque resampleSoxrHQ (samples : @& Array Float) (origSr targetSr : UInt64) : IO (Array Float)
+
 /-- Slice a 1D tensor: data[start:end] (shape-erased) -/
 @[extern "lean_torch_slice_1d"]
 opaque slice1d' {n : UInt64} (data : @& T #[n]) (start : Int64) (stop : Int64) : T #[]
@@ -765,6 +775,18 @@ opaque savePPMExplicit (s : Shape) (t : @& T s) (path : @& String) : IO Unit
 @[extern "lean_torch_save_wav"]
 opaque saveWav {s : Shape} (t : @& T s) (path : @& String) (sampleRate : UInt64 := 24000) : IO Unit
 
+/-- Start a streaming WAV writer at `path` with 16-bit PCM mono format. -/
+@[extern "lean_torch_wav_begin"]
+opaque wavBegin (path : @& String) (sampleRate : UInt64 := 24000) : IO Unit
+
+/-- Append mono waveform samples to an existing WAV file started by `wavBegin`. -/
+@[extern "lean_torch_wav_append"]
+opaque wavAppend {s : Shape} (t : @& T s) (path : @& String) : IO Unit
+
+/-- Finalize a streaming WAV file (header size fix-up/validation). -/
+@[extern "lean_torch_wav_finalize"]
+opaque wavFinalize (path : @& String) : IO Unit
+
 /-- Load tensor from a file with expected shape -/
 @[extern "lean_torch_load_tensor"]
 opaque loadTensor (s : Shape) (path : @& String) : IO (T s)
@@ -788,7 +810,36 @@ opaque tensorToUInt64Array {n : UInt64} (t : @& T #[n]) : IO (Array UInt64)
 @[extern "lean_torch_tensor_to_uint64_array_dynamic"]
 opaque tensorToUInt64Array' (t : @& T #[]) : IO (Array UInt64)
 
+/-- Convert a dynamically-shaped tensor to a Lean Array Float. -/
+@[extern "lean_torch_tensor_to_float_array_dynamic"]
+opaque tensorToFloatArray' (t : @& T #[]) : IO (Array Float)
+
 end data
+
+namespace signal
+
+/-- Hann window for STFT and spectral analysis. -/
+@[extern "lean_torch_hann_window"]
+opaque hannWindow (n : UInt64) : T #[n]
+
+/-- 1D STFT returning real/imag last-dimension packing.
+    Output shape is dynamic and typically `[n_fft/2+1, frames, 2]`. -/
+@[extern "lean_torch_stft_1d"]
+opaque stft1d {n : UInt64}
+    (input : @& T #[n])
+    (n_fft : UInt64)
+    (hop_length : UInt64)
+    (win_length : UInt64)
+    (window : @& T #[win_length])
+    (center : Bool := true)
+    (normalized : Bool := false)
+    : T #[]
+
+/-- 1D RFFT returning real/imag packed output with dynamic shape. -/
+@[extern "lean_torch_rfft_1d"]
+opaque rfft1d {n : UInt64} (input : @& T #[n]) : T #[]
+
+end signal
 
 -- SafeTensors loading utilities (alias for data.loadTensor with name-based loading)
 namespace safetensors
@@ -897,6 +948,31 @@ opaque scaledDotProductAttentionGQA
     (is_causal : Bool := true)
     (enable_gqa : Bool := false)
     : T #[batch, n_head, seq, head_dim]
+
+/-- Scaled dot-product attention with GQA where query and KV sequence lengths may differ.
+    Q: [batch, n_head, q_seq, head_dim]
+    K, V: [batch, n_kv_head, kv_seq, head_dim]
+    Useful for KV-cache decoding with q_seq=1 and kv_seq growing over time. -/
+@[extern "lean_torch_sdpa_gqa_qkv"]
+opaque scaledDotProductAttentionGQAQKV
+    {batch n_head n_kv_head q_seq kv_seq head_dim : UInt64}
+    (query : @& T #[batch, n_head, q_seq, head_dim])
+    (key : @& T #[batch, n_kv_head, kv_seq, head_dim])
+    (value : @& T #[batch, n_kv_head, kv_seq, head_dim])
+    (dropout_p : Float := 0.0)
+    (is_causal : Bool := true)
+    (enable_gqa : Bool := false)
+    : T #[batch, n_head, q_seq, head_dim]
+
+/-- In-place KV cache append for incremental decoding.
+    Writes `step` into `cache[:, :, pos:pos+1, :]` without reallocating `cache`. -/
+@[extern "lean_torch_kv_cache_write_"]
+opaque kvCacheWrite
+    {batch n_kv_head max_seq head_dim : UInt64}
+    (cache : @& T #[batch, n_kv_head, max_seq, head_dim])
+    (step : @& T #[batch, n_kv_head, 1, head_dim])
+    (pos : UInt64)
+    : IO Unit
 
 /-- Scaled dot-product attention with GQA and sliding window support.
     Q: [batch, n_head, seq, head_dim]
@@ -1086,6 +1162,10 @@ opaque interpolate_scale {s : Shape}
 /-- Clamp values to a range -/
 @[extern "lean_torch_clamp"]
 opaque clamp {s : Shape} (input : @& T s) (min_val max_val : Int64) : T s
+
+/-- Clamp values to a floating-point range -/
+@[extern "lean_torch_clamp_float"]
+opaque clampFloat {s : Shape} (input : @& T s) (min_val max_val : Float) : T s
 
 /-- Top-k values and indices along dimension -/
 @[extern "lean_torch_topk"]
