@@ -61,6 +61,36 @@ private def tinyForcedAlignerCfg : Qwen3ASRConfig :=
     supportLanguages := #["English"]
   }
 
+private def tinyChunkedCfg : Qwen3ASRConfig :=
+  { thinkerConfig := {
+      audioConfig := {
+        numMelBins := 8
+        encoderLayers := 2
+        encoderAttentionHeads := 2
+        encoderFfnDim := 32
+        dModel := 16
+        outputDim := 16
+        downsampleHiddenSize := 4
+        nWindow := 4
+        nWindowInfer := 8
+        convChunkSize := 2
+      }
+      textConfig := {
+        vocabSize := 96
+        hiddenSize := 16
+        intermediateSize := 32
+        numHiddenLayers := 2
+        numAttentionHeads := 4
+        numKeyValueHeads := 2
+        headDim := 4
+        maxPositionEmbeddings := 1024
+        ropeTheta := 10000.0
+      }
+      audioTokenId := 42
+    }
+    supportLanguages := #["English"]
+  }
+
 private def tinyPreprocessorCfg (melBins frames : UInt64) : PreprocessorConfig := {
   featureExtractorType := "WhisperFeatureExtractor"
   featureSize := melBins
@@ -76,6 +106,141 @@ private def tinyPreprocessorCfg (melBins frames : UInt64) : PreprocessorConfig :
   doNormalize := false
   dither := 0.0
 }
+
+private def mkAsciiStreamingTokenizer : tokenizer.qwen3.QwenTokenizer := Id.run do
+  let mut idToToken : Array String := #[]
+  let mut tokenToId : Std.HashMap String tokenizer.TokenId := {}
+  let mut charToId : Std.HashMap Char tokenizer.TokenId := {}
+  let mut next : Nat := 0
+  for code in [32:127] do
+    let c := Char.ofNat code
+    let s := String.ofList [c]
+    let id : tokenizer.TokenId := next.toUInt32
+    idToToken := idToToken.push s
+    tokenToId := tokenToId.insert s id
+    charToId := charToId.insert c id
+    next := next + 1
+  let asrTag := "<asr_text>"
+  let asrId : tokenizer.TokenId := next.toUInt32
+  idToToken := idToToken.push asrTag
+  tokenToId := tokenToId.insert asrTag asrId
+  let specialTokens : Std.HashMap String tokenizer.TokenId :=
+    ({} : Std.HashMap String tokenizer.TokenId).insert asrTag asrId
+  let idToSpecial : Std.HashMap tokenizer.TokenId String :=
+    ({} : Std.HashMap tokenizer.TokenId String).insert asrId asrTag
+  {
+    vocabSize := idToToken.size.toUInt32
+    idToToken
+    tokenToId
+    charToId
+    merges := #[]
+    mergeLookup := {}
+    mergePriority := {}
+    specialTokens
+    idToSpecial
+    specialList := #[asrTag]
+    unkToken := none
+    padToken := 0
+  }
+
+@[test]
+def testQwen3TokenizerDecodeTextSpecialToken : IO Unit := do
+  let tok := mkAsciiStreamingTokenizer
+  let aId := tok.tokenToId.getD "a" 0
+  let bId := tok.tokenToId.getD "b" 0
+  let cId := tok.tokenToId.getD "c" 0
+  let asrId := tok.specialTokens.getD "<asr_text>" 0
+  let decoded := tokenizer.qwen3.decodeText tok #[aId, bId, asrId, cId]
+  LeanTest.assertEqual decoded "ab<asr_text>c" "decodeText should preserve special tokens in-place"
+
+@[test]
+def testQwen3ASRParseAsrOutput : IO Unit := do
+  let (lang1, txt1) := parseAsrOutput "language Chinese<asr_text>hello"
+  LeanTest.assertEqual lang1 "Chinese" "parser should extract language metadata"
+  LeanTest.assertEqual txt1 "hello" "parser should extract text body after <asr_text>"
+
+  let (lang2, txt2) := parseAsrOutput "plain transcription"
+  LeanTest.assertEqual lang2 "" "plain text without metadata should have empty language"
+  LeanTest.assertEqual txt2 "plain transcription" "plain text should pass through as transcription"
+
+  let (lang3, txt3) := parseAsrOutput "forced output body" (userLanguage := some "English")
+  LeanTest.assertEqual lang3 "English" "forced language should override parsed metadata"
+  LeanTest.assertEqual txt3 "forced output body" "forced-language parse should treat raw as text-only"
+
+@[test]
+def testQwen3ASRMergeLanguages : IO Unit := do
+  let merged := mergeLanguages #["Chinese", "English", "English", "", "Chinese"]
+  LeanTest.assertEqual merged "Chinese,English,Chinese"
+    "mergeLanguages should drop empties and consecutive duplicates while preserving order"
+
+@[test]
+def testQwen3ASRInitStreamingStateLanguageValidation : IO Unit := do
+  let st ← initStreamingState tinyCfg.supportLanguages (context := "") (language := some "english")
+  LeanTest.assertEqual st.forceLanguage (some "English")
+    "initStreamingState should normalize forced language to canonical name"
+
+  let threw ←
+    try
+      let _ ← initStreamingState tinyCfg.supportLanguages (context := "") (language := some "Klingon")
+      pure false
+    catch _ =>
+      pure true
+  LeanTest.assertTrue threw "initStreamingState should reject unsupported forced language"
+
+@[test]
+def testQwen3ASRStreamingTranscribeAndFinish : IO Unit := do
+  let tok := mkAsciiStreamingTokenizer
+  let chunkSec : Float := 2.0 / 16000.0  -- 2 samples per chunk
+  let st0 ← initStreamingState
+    tinyCfg.supportLanguages
+    (context := "")
+    (language := some "English")
+    (unfixedChunkNum := 0)
+    (unfixedTokenNum := 1)
+    (chunkSizeSec := chunkSec)
+
+  let promptsRef ← IO.mkRef (#[] : Array String)
+  let decodeFn : StreamingDecodeFn := fun prompt audioAccum => do
+    promptsRef.modify (fun xs => xs.push prompt)
+    if audioAccum.size <= 2 then
+      pure "abc"
+    else if audioAccum.size <= 4 then
+      pure "cd"
+    else
+      pure "de"
+
+  let st1 ← streamingTranscribe tok decodeFn #[0.1, 0.2, 0.3, 0.4, 0.5] st0
+  let prompts1 ← promptsRef.get
+
+  LeanTest.assertEqual st1.chunkId 2 "streamingTranscribe should consume exactly two full chunks"
+  LeanTest.assertEqual st1.buffer.size 1 "streamingTranscribe should retain one-sample tail in buffer"
+  LeanTest.assertEqual st1.language "English" "forced language should be reflected in streaming state"
+  LeanTest.assertEqual st1.text "abcd" "text should reflect prefix rollback + continuation behavior"
+  LeanTest.assertEqual prompts1.size 2 "streamingTranscribe should call decode once per full chunk"
+
+  let expectedPrefix2 :=
+    let ids := tokenizer.qwen3.encodeText tok "abc"
+    let endIdx := if ids.size > 1 then ids.size - 1 else 0
+    if endIdx > 0 then tokenizer.qwen3.decodeText tok (ids.extract 0 endIdx) else ""
+  LeanTest.assertEqual (prompts1.getD 0 "") st0.promptRaw "first chunk prompt should be raw base prompt"
+  LeanTest.assertEqual (prompts1.getD 1 "") (st0.promptRaw ++ expectedPrefix2)
+    "second chunk prompt should append rollback prefix"
+
+  let st2 ← finishStreamingTranscribe tok decodeFn st1
+  let prompts2 ← promptsRef.get
+  LeanTest.assertEqual st2.chunkId 3 "finishStreamingTranscribe should decode one additional tail chunk"
+  LeanTest.assertEqual st2.buffer.size 0 "finishStreamingTranscribe should flush remaining buffer"
+  LeanTest.assertEqual st2.text "abcde" "finishStreamingTranscribe should update final text"
+  LeanTest.assertEqual st2.language "English" "final language should remain forced language"
+  LeanTest.assertEqual prompts2.size 3 "finishStreamingTranscribe should perform one extra decode call"
+
+  let expectedPrefix3 :=
+    let ids := tokenizer.qwen3.encodeText tok "abcd"
+    let endIdxRaw := Nat.max 1 (ids.size - 1)
+    let endIdx := Nat.min endIdxRaw ids.size
+    tokenizer.qwen3.decodeText tok (ids.extract 0 endIdx)
+  LeanTest.assertEqual (prompts2.getD 2 "") (st0.promptRaw ++ expectedPrefix3)
+    "finish prompt should use max(1, len-k) rollback behavior"
 
 @[test]
 def testQwen3ASRInitAndLanguages : IO Unit := do
@@ -328,3 +493,161 @@ def testQwen3ASRGreedyGenerateFromWav : IO Unit := do
   let flat : T #[outSeq] := reshape outIds #[outSeq]
   let toks ← data.tensorToUInt64Array flat
   LeanTest.assertEqual toks.size outSeq.toNat "generated token tensor should match reported output sequence length"
+
+@[test]
+def testQwen3ASRGreedyCachedMatchesUncached : IO Unit := do
+  let cfg := tinyCfg
+  let model ← Qwen3ASRForConditionalGeneration.init cfg
+  let batch : UInt64 := 1
+  let frames : UInt64 := 32
+  let audioSeq : UInt64 := AudioEncoderConfig.framesAfterConv3 cfg.thinkerConfig.audioConfig frames
+  let promptSeq : UInt64 := audioSeq + 2
+  let aTok : Int64 := Int64.ofNat cfg.thinkerConfig.audioTokenId.toNat
+  let mut idsVals : Array Int64 := #[]
+  for _ in [:audioSeq.toNat] do
+    idsVals := idsVals.push aTok
+  idsVals := idsVals.push 7
+  idsVals := idsVals.push 11
+  let inputIds : T #[batch, promptSeq] := reshape (data.fromInt64Array idsVals) #[batch, promptSeq]
+  let mel ← randn #[batch, cfg.thinkerConfig.audioConfig.numMelBins, frames]
+  let fmask : T #[batch, frames] := full_int #[batch, frames] 1
+
+  let outCached ← model.generateGreedy inputIds (some mel) (some fmask) 4 #[]
+  let outUncached ← model.generateGreedyUncached inputIds (some mel) (some fmask) 4 #[]
+
+  let seqCached := outCached.1
+  let idsCached := outCached.2
+  let seqUncached := outUncached.1
+  let idsUncached := outUncached.2
+
+  LeanTest.assertEqual seqCached seqUncached "cached and uncached generation should produce same output length"
+  let flatCached : T #[seqCached] := reshape idsCached #[seqCached]
+  let flatUncached : T #[seqUncached] := reshape idsUncached #[seqUncached]
+  let toksCached ← data.tensorToUInt64Array flatCached
+  let toksUncached ← data.tensorToUInt64Array flatUncached
+  LeanTest.assertEqual toksCached toksUncached "cached and uncached generation should produce identical token ids"
+
+@[test]
+def testQwen3ASRMaskedPositionsMatchTrimmedLeftPad : IO Unit := do
+  let cfg := tinyCfg
+  let model ← Qwen3ASRForConditionalGeneration.init cfg
+  let batch : UInt64 := 1
+  let seq : UInt64 := 6
+  let vocab := cfg.thinkerConfig.textConfig.vocabSize.toInt64
+  let ids ← randint 0 vocab #[batch, seq]
+  let maskVals : Array Int64 := #[0, 0, 1, 1, 1, 1]
+  let attnMask : T #[batch, seq] := reshape (data.fromInt64Array maskVals) #[batch, seq]
+
+  let logitsMasked ← model.forward
+    ids
+    (inputFeatures := (none : Option (T #[batch, cfg.thinkerConfig.audioConfig.numMelBins, 1])))
+    (featureAttentionMask := (none : Option (T #[batch, 1])))
+    (attentionMask := some attnMask)
+
+  let idsTrim : T #[batch, 4] := data.slice ids 1 2 4
+  let logitsTrim ← model.forward
+    idsTrim
+    (inputFeatures := (none : Option (T #[batch, cfg.thinkerConfig.audioConfig.numMelBins, 1])))
+    (featureAttentionMask := (none : Option (T #[batch, 1])))
+    (attentionMask := (none : Option (T #[batch, 4])))
+
+  let logitsMaskedValid : T #[batch, 4, ThinkerLmVocabSize cfg.thinkerConfig] := data.slice logitsMasked 1 2 4
+  let a ← data.tensorToFloatArray' (reshape logitsMaskedValid #[])
+  let b ← data.tensorToFloatArray' (reshape logitsTrim #[])
+  let mut maxErr : Float := 0.0
+  for i in [:a.size] do
+    let err := Float.abs (a.getD i 0.0 - b.getD i 0.0)
+    if err > maxErr then
+      maxErr := err
+  LeanTest.assertTrue (maxErr < 1e-4)
+    s!"left-pad masked positions should match trimmed decode for valid tokens (max_err={maxErr})"
+
+@[test]
+def testQwen3ASRForwardVariableFeatureMask : IO Unit := do
+  let cfg := tinyCfg
+  let model ← Qwen3ASRForConditionalGeneration.init cfg
+  let batch : UInt64 := 1
+  let frames : UInt64 := 64
+  let validFrames : UInt64 := 32
+  let audioLen : UInt64 := AudioEncoderConfig.featExtractOutputLength validFrames
+  let seq : UInt64 := audioLen + 2
+  let aTok : Int64 := Int64.ofNat cfg.thinkerConfig.audioTokenId.toNat
+  let mut idsVals : Array Int64 := #[]
+  for _ in [:audioLen.toNat] do
+    idsVals := idsVals.push aTok
+  idsVals := idsVals.push 3
+  idsVals := idsVals.push 4
+  let inputIds : T #[batch, seq] := reshape (data.fromInt64Array idsVals) #[batch, seq]
+  let mel ← randn #[batch, cfg.thinkerConfig.audioConfig.numMelBins, frames]
+  let mut mask : Array Int64 := #[]
+  for i in [:frames.toNat] do
+    mask := mask.push (if i.toUInt64 < validFrames then 1 else 0)
+  let featureMask : T #[batch, frames] := reshape (data.fromInt64Array mask) #[batch, frames]
+
+  let logits ← model.forward inputIds (some mel) (some featureMask) none
+  let s := nn.item (nn.sumAll logits)
+  LeanTest.assertTrue (Float.isFinite s) "variable feature mask forward should be finite"
+
+@[test]
+def testQwen3ASRVarLenAudioEncoderChunkedPath : IO Unit := do
+  let cfg := tinyChunkedCfg
+  let model ← Qwen3ASRForConditionalGeneration.init cfg
+  let batch : UInt64 := 2
+  let frames : UInt64 := 96
+  let mel ← randn #[batch, cfg.thinkerConfig.audioConfig.numMelBins, frames]
+  let featureLens : Array UInt64 := #[80, 56]
+  let audio := model.thinker.encodeAudioVarLen mel featureLens
+  let s := nn.item (nn.sumAll audio)
+  LeanTest.assertTrue (Float.isFinite s) "varlen chunked audio encoder output should be finite"
+
+@[test]
+def testQwen3ASRForwardVariableFeatureMaskChunkedBatch : IO Unit := do
+  let cfg := tinyChunkedCfg
+  let model ← Qwen3ASRForConditionalGeneration.init cfg
+  let batch : UInt64 := 2
+  let frames : UInt64 := 96
+  let valid0 : UInt64 := 80
+  let valid1 : UInt64 := 56
+  let audioLen0 := AudioEncoderConfig.featExtractOutputLength valid0
+  let audioLen1 := AudioEncoderConfig.featExtractOutputLength valid1
+  let seq : UInt64 := 13
+  let aTok : Int64 := Int64.ofNat cfg.thinkerConfig.audioTokenId.toNat
+
+  let mut idVals : Array Int64 := #[]
+  for i in [:seq.toNat] do
+    idVals := idVals.push (if i.toUInt64 < audioLen0 then aTok else (Int64.ofNat i + 3))
+  for i in [:seq.toNat] do
+    idVals := idVals.push (if i.toUInt64 < audioLen1 then aTok else (Int64.ofNat i + 17))
+  let inputIds : T #[batch, seq] := reshape (data.fromInt64Array idVals) #[batch, seq]
+
+  let mel ← randn #[batch, cfg.thinkerConfig.audioConfig.numMelBins, frames]
+  let mut maskVals : Array Int64 := #[]
+  for i in [:frames.toNat] do
+    maskVals := maskVals.push (if i.toUInt64 < valid0 then 1 else 0)
+  for i in [:frames.toNat] do
+    maskVals := maskVals.push (if i.toUInt64 < valid1 then 1 else 0)
+  let featureMask : T #[batch, frames] := reshape (data.fromInt64Array maskVals) #[batch, frames]
+
+  let logits ← model.forward inputIds (some mel) (some featureMask) none
+  let s := nn.item (nn.sumAll logits)
+  LeanTest.assertTrue (Float.isFinite s) "chunked varlen forward should be finite"
+
+@[test]
+def testQwen3ASRForcedAlignFromOutputIds : IO Unit := do
+  let batch : UInt64 := 1
+  let seq : UInt64 := 6
+  let timestampTokenId : UInt64 := 99
+  let inputVals : Array Int64 := #[1, 99, 99, 7, 99, 99]
+  let outputVals : Array Int64 := #[0, 10, 20, 0, 30, 40]
+  let inputIds : T #[batch, seq] := reshape (data.fromInt64Array inputVals) #[batch, seq]
+  let outputIds : T #[batch, seq] := reshape (data.fromInt64Array outputVals) #[batch, seq]
+  let wordLists : Array (Array String) := #[#["a", "b"]]
+  let results ← alignFromOutputIds inputIds outputIds wordLists timestampTokenId 10.0
+  let r := results.getD 0 { items := #[] }
+  LeanTest.assertEqual r.items.size 2 "forced aligner should return one span per word"
+  let i0 := r.items.getD 0 default
+  let i1 := r.items.getD 1 default
+  LeanTest.assertTrue (Float.abs (i0.startTime - 0.1) < 1e-6) "first start_time should match converted timestamp"
+  LeanTest.assertTrue (Float.abs (i0.endTime - 0.2) < 1e-6) "first end_time should match converted timestamp"
+  LeanTest.assertTrue (Float.abs (i1.startTime - 0.3) < 1e-6) "second start_time should match converted timestamp"
+  LeanTest.assertTrue (Float.abs (i1.endTime - 0.4) < 1e-6) "second end_time should match converted timestamp"

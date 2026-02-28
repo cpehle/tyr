@@ -80,23 +80,43 @@ private def sortSpecials (specials : Array String) : Array String := Id.run do
 
 /-- Load Qwen3 tokenizer from HF tokenizer.json (+ tokenizer_config.json for pad token). -/
 def loadTokenizer (dir : String) : IO QwenTokenizer := do
-  let tokJson <- parseJsonFile s!"{dir}/tokenizer.json"
   let cfgJson <- parseJsonFile s!"{dir}/tokenizer_config.json"
+  let tokenizerJsonPath := s!"{dir}/tokenizer.json"
+  let hasTokenizerJson ← System.FilePath.pathExists ⟨tokenizerJsonPath⟩
 
-  let modelJson <-
-    match getObjVal? tokJson "model" with
-    | some v => pure v
-    | none => throw (IO.userError "tokenizer.json missing model")
-
-  let vocabJson <-
-    match getObjVal? modelJson "vocab" with
-    | some v => pure v
-    | none => throw (IO.userError "tokenizer.json missing model.vocab")
-
-  let mergesJson <-
-    match getObjVal? modelJson "merges" >>= getArr? with
-    | some v => pure v
-    | none => throw (IO.userError "tokenizer.json missing model.merges")
+  let (tokJson?, vocabJson, mergesJson, unkTokenName?) ←
+    if hasTokenizerJson then
+      let tokJson <- parseJsonFile tokenizerJsonPath
+      let modelJson <-
+        match getObjVal? tokJson "model" with
+        | some v => pure v
+        | none => throw (IO.userError "tokenizer.json missing model")
+      let vocabJson <-
+        match getObjVal? modelJson "vocab" with
+        | some v => pure v
+        | none => throw (IO.userError "tokenizer.json missing model.vocab")
+      let mergesJson <-
+        match getObjVal? modelJson "merges" >>= getArr? with
+        | some v => pure v
+        | none => throw (IO.userError "tokenizer.json missing model.merges")
+      let unkName :=
+        match getObjVal? modelJson "unk_token" with
+        | some (.str s) => some s
+        | _ => none
+      pure (some tokJson, vocabJson, mergesJson, unkName)
+    else
+      let vocabJson <- parseJsonFile s!"{dir}/vocab.json"
+      let mergesText <- IO.FS.readFile s!"{dir}/merges.txt"
+      let mut merges : Array Json := #[]
+      for raw in mergesText.splitOn "\n" do
+        let line := raw.trim
+        if !line.isEmpty && !line.startsWith "#" then
+          merges := merges.push (.str line)
+      let unkName :=
+        match getObjVal? cfgJson "unk_token" with
+        | some (.str s) => some s
+        | _ => none
+      pure (none, vocabJson, merges, unkName)
 
   -- Build vocab maps
   let mut maxId : Nat := 0
@@ -130,29 +150,46 @@ def loadTokenizer (dir : String) : IO QwenTokenizer := do
   -- Special tokens
   let mut specialTokens : Std.HashMap String TokenId := {}
   let mut idToSpecial : Std.HashMap TokenId String := {}
-  match getObjVal? tokJson "added_tokens" >>= getArr? with
-  | some arr =>
-    for entry in arr do
-      match entry with
-      | .obj kvs =>
-        let content := getObjVal? (.obj kvs) "content" >>= getStr?
-        let id := getObjVal? (.obj kvs) "id" >>= getNat?
-        match content, id with
-        | some s, some n =>
-          let tid := n.toUInt32
-          specialTokens := specialTokens.insert s tid
-          idToSpecial := idToSpecial.insert tid s
-        | _, _ => pure ()
-      | _ => pure ()
+  match tokJson? with
+  | some tokJson =>
+      match getObjVal? tokJson "added_tokens" >>= getArr? with
+      | some arr =>
+        for entry in arr do
+          match entry with
+          | .obj kvs =>
+            let content := getObjVal? (.obj kvs) "content" >>= getStr?
+            let id := getObjVal? (.obj kvs) "id" >>= getNat?
+            match content, id with
+            | some s, some n =>
+              let tid := n.toUInt32
+              specialTokens := specialTokens.insert s tid
+              idToSpecial := idToSpecial.insert tid s
+            | _, _ => pure ()
+          | _ => pure ()
+      | none => pure ()
   | none => pure ()
+
+  -- HF fast-tokenizer fallback format (tokenizer_config.json::added_tokens_decoder)
+  match getObjVal? cfgJson "added_tokens_decoder" with
+  | some (.obj kvs) =>
+      for (idStr, entry) in kvs do
+        let content := getObjVal? entry "content" >>= getStr?
+        let idNat := (idStr.toNat?) <|> (getObjVal? entry "id" >>= getNat?)
+        match content, idNat with
+        | some s, some n =>
+            let tid := n.toUInt32
+            specialTokens := specialTokens.insert s tid
+            idToSpecial := idToSpecial.insert tid s
+        | _, _ => pure ()
+  | _ => pure ()
 
   let specialList := sortSpecials (List.toArray (specialTokens.toList.map Prod.fst))
 
   -- unk token (if present)
   let unkToken : Option TokenId :=
-    match getObjVal? modelJson "unk_token" with
-    | some (.str s) => specialTokens.get? s <|> tokenToId.get? s
-    | _ => none
+    match unkTokenName? with
+    | some s => specialTokens.get? s <|> tokenToId.get? s
+    | none => none
 
   -- pad token: prefer config "pad_token" / "pad_token_id" if present, else <|endoftext|>
   let padToken : TokenId :=
@@ -222,6 +259,18 @@ def loadTokenizer (dir : String) : IO QwenTokenizer := do
 /-- Chat template for Qwen3 (single user message, add_generation_prompt=true, enable_thinking=false). -/
 def chatTemplate (prompt : String) : String :=
   "<|im_start|>user\n" ++ prompt ++ "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n"
+
+/-- Qwen3-TTS assistant text wrapper used for synthesis input IDs. -/
+def ttsAssistantText (text : String) : String :=
+  "<|im_start|>assistant\n" ++ text ++ "<|im_end|>\n<|im_start|>assistant\n"
+
+/-- Qwen3-TTS reference text wrapper used for voice-clone reference IDs. -/
+def ttsRefText (text : String) : String :=
+  "<|im_start|>assistant\n" ++ text ++ "<|im_end|>\n"
+
+/-- Qwen3-TTS instruct wrapper used for style/speaker instruction IDs. -/
+def ttsInstructText (instruct : String) : String :=
+  "<|im_start|>user\n" ++ instruct ++ "<|im_end|>\n"
 
 /-- Greedy match for any special token at position i. -/
 private def matchSpecial (chars : Array Char) (i : Nat) (specials : Array String)
@@ -458,7 +507,7 @@ private def encodePiece (tok : QwenTokenizer) (piece : String) : Array TokenId :
   tokens
 
 /-- Encode text with special token handling. -/
-private def encodeText (tok : QwenTokenizer) (text : String) : Array TokenId := Id.run do
+private def encodeTextCore (tok : QwenTokenizer) (text : String) : Array TokenId := Id.run do
   let segments := splitWithSpecials text tok.specialList
   let mut out : Array TokenId := #[]
   for (isSpecial, seg) in segments do
@@ -473,15 +522,51 @@ private def encodeText (tok : QwenTokenizer) (text : String) : Array TokenId := 
     else
       let pieces := pretokenize seg
       for piece in pieces do
-        let ids := encodePiece tok piece
-        out := out ++ ids
+          let ids := encodePiece tok piece
+          out := out ++ ids
   out
+
+/-- Public raw text encoding (no prompt template, no padding). -/
+def encodeText (tok : QwenTokenizer) (text : String) : Array TokenId :=
+  encodeTextCore tok text
+
+/-- Decode byte-level text to UTF-8, preserving byte-level form on invalid streams. -/
+private def byteLevelToStringLossy (s : String) : String :=
+  let bytes := tokenizer.byteLevelToBytes s
+  match String.fromUTF8? bytes with
+  | some out => out
+  | none => tokenizer.bytesToByteLevel bytes
+
+/-- Decode token IDs to text (HF-style, keeping special tokens by default). -/
+def decodeText (tok : QwenTokenizer) (ids : Array TokenId) : String := Id.run do
+  let mut out := ""
+  let mut byteLevelBuf := ""
+
+  for id in ids do
+    match tok.idToSpecial.get? id with
+    | some special =>
+      if !byteLevelBuf.isEmpty then
+        out := out ++ byteLevelToStringLossy byteLevelBuf
+        byteLevelBuf := ""
+      out := out ++ special
+    | none =>
+      match tok.idToToken[id.toNat]? with
+      | some tokStr => byteLevelBuf := byteLevelBuf ++ tokStr
+      | none => pure ()
+
+  if !byteLevelBuf.isEmpty then
+    out := out ++ byteLevelToStringLossy byteLevelBuf
+  out
+
+/-- Decode one token ID to display text. -/
+def decodeOne (tok : QwenTokenizer) (id : TokenId) : String :=
+  decodeText tok #[id]
 
 /-- Encode a prompt using the Qwen3 chat template and produce tokens + attention mask. -/
 def encodePrompt (tok : QwenTokenizer) (prompt : String) (maxLen : Nat := 512)
     : Array TokenId × Array TokenId := Id.run do
   let text := chatTemplate prompt
-  let tokens := encodeText tok text
+  let tokens := encodeTextCore tok text
   let max := maxLen
   let trimmed := if tokens.size > max then tokens.extract 0 max else tokens
   let mut outTokens : Array TokenId := Array.mkEmpty max
