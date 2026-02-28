@@ -111,6 +111,11 @@ def slicedShape (s : Shape) (dim : Nat) (start : UInt64) (stop : UInt64) (step :
 def convOutputSize (input_size kernel_size : UInt64) (stride : UInt64 := 1) (padding : UInt64 := 0) (dilation : UInt64 := 1) : UInt64 :=
   (input_size + 2 * padding - dilation * (kernel_size - 1) - 1) / stride + 1
 
+def convTransposeOutputSize (input_size kernel_size : UInt64)
+    (stride : UInt64 := 1) (padding : UInt64 := 0) (output_padding : UInt64 := 0)
+    (dilation : UInt64 := 1) : UInt64 :=
+  (input_size - 1) * stride - (2 * padding) + dilation * (kernel_size - 1) + output_padding + 1
+
 /-- Compute output shape for 1D convolution (safe version) -/
 def conv1dShape (input_shape weight_shape : Shape) (stride padding dilation : UInt64) : Shape :=
   let batch := input_shape.getD 0 0
@@ -118,6 +123,16 @@ def conv1dShape (input_shape weight_shape : Shape) (stride padding dilation : UI
   let input_length := input_shape.getD 2 0
   let kernel_size := weight_shape.getD 2 0
   let output_length := convOutputSize input_length kernel_size stride padding dilation
+  #[batch, out_channels, output_length]
+
+/-- Compute output shape for 1D transposed convolution (safe version). -/
+def convTranspose1dShape (input_shape weight_shape : Shape)
+    (stride padding output_padding dilation : UInt64) : Shape :=
+  let batch := input_shape.getD 0 0
+  let out_channels := weight_shape.getD 1 0
+  let input_length := input_shape.getD 2 0
+  let kernel_size := weight_shape.getD 2 0
+  let output_length := convTransposeOutputSize input_length kernel_size stride padding output_padding dilation
   #[batch, out_channels, output_length]
 
 /-- Compute output shape for 2D convolution (safe version) -/
@@ -252,6 +267,16 @@ namespace nn
 -- torch::nn::functional::binary_cross_entropy_with_logits
 -- torch::nn::functional::celu
 @[extern "lean_torch_conv1d"] opaque conv1d {input_shape weight_shape : Shape} (input : @& T input_shape) (weight : @& T weight_shape) (stride : UInt64 := 1) (padding : UInt64 := 0) (dilation : UInt64 := 1) : T (conv1dShape input_shape weight_shape stride padding dilation)
+@[extern "lean_torch_conv1d_group_bias"]
+opaque conv1d_group_bias {input_shape weight_shape bias_shape : Shape}
+    (input : @& T input_shape)
+    (weight : @& T weight_shape)
+    (bias : @& T bias_shape)
+    (stride : UInt64 := 1)
+    (padding : UInt64 := 0)
+    (dilation : UInt64 := 1)
+    (groups : UInt64 := 1)
+    : T (conv1dShape input_shape weight_shape stride padding dilation)
 -- torch::nn::functional::conv2d
 @[extern "lean_torch_conv2d"] opaque conv2d {input_shape weight_shape : Shape} (input : @& T input_shape) (weight : @& T weight_shape) (stride : Array UInt64 := #[1, 1]) (padding : Array UInt64 := #[0, 0]) (dilation : Array UInt64 := #[1, 1]) : T (conv2dShape input_shape weight_shape stride padding dilation)
 -- torch::nn::functional::conv2d with bias
@@ -269,6 +294,19 @@ opaque conv_transpose2d {input_shape weight_shape : Shape}
     (output_padding : Array UInt64 := #[0, 0])
     (dilation : Array UInt64 := #[1, 1])
     : T #[]  -- Shape depends on all parameters, computed at runtime
+
+/-- Transposed 1D convolution (deconvolution) with bias.
+    input: [N, C_in, T], weight: [C_in, C_out, K], bias: [C_out] -/
+@[extern "lean_torch_conv_transpose1d_bias"]
+opaque conv_transpose1d_bias {input_shape weight_shape bias_shape : Shape}
+    (input : @& T input_shape)
+    (weight : @& T weight_shape)
+    (bias : @& T bias_shape)
+    (stride : UInt64 := 1)
+    (padding : UInt64 := 0)
+    (output_padding : UInt64 := 0)
+    (dilation : UInt64 := 1)
+    : T (convTranspose1dShape input_shape weight_shape stride padding output_padding dilation)
 -- torch::nn::functional::cosine_embedding_loss
 -- torch::nn::functional::cosine_similarity
 -- torch::nn::functional::cross_entropy
@@ -510,7 +548,7 @@ opaque transpose_for_attention {batch seq n_head head_dim : UInt64}
 opaque transpose_from_attention {batch n_head seq head_dim : UInt64}
     (x : @& T #[batch, n_head, seq, head_dim]) : T #[batch, seq, n_head, head_dim]
 
-@[extern "lean_torch_softmax_dim"] opaque softmax_dim {s : Shape} (input : @& T s) (dim : Int) : T s
+@[extern "lean_torch_softmax_dim"] opaque softmax_dim {s : Shape} (input : @& T s) (dim : Int64) : T s
 @[extern "lean_torch_sqrt"] opaque sqrt {s : Shape} (input : @& T s) : T s
 @[extern "lean_torch_rsqrt"] opaque rsqrt {s : Shape} (input : @& T s) : T s
 @[extern "lean_torch_div"] opaque div {s : Shape} (input : @& T s) (other : @& T s) : T s
@@ -518,6 +556,14 @@ opaque transpose_from_attention {batch n_head seq head_dim : UInt64}
 @[extern "lean_torch_unsqueeze"] opaque unsqueeze {s : Shape} (input : @& T s) (dim : Nat) : T (unsqueezeShape s dim)
 @[extern "lean_torch_squeeze"] opaque squeeze {s : Shape} (input : @& T s) (dim : Nat) : T (squeezeShape s dim)
 @[extern "lean_torch_masked_fill"] opaque masked_fill {s : Shape} (input : @& T s) (mask : @& T s) (value : Float) : T s
+
+/-- Select flattened values where mask is true (PyTorch `masked_select`). -/
+@[extern "lean_torch_masked_select"]
+opaque masked_select {s : Shape} (input : @& T s) (mask : @& T s) : T #[]
+
+/-- Scatter source values into `input` at mask=true positions (PyTorch `masked_scatter`). -/
+@[extern "lean_torch_masked_scatter"]
+opaque masked_scatter {s src : Shape} (input : @& T s) (mask : @& T s) (source : @& T src) : T s
 @[extern "lean_torch_expand"] opaque expand' {s : Shape} (input : @& T s) (size : Array UInt64) : T s
 @[extern "lean_torch_repeat"] opaque tensor_repeat {s : Shape} (input : @& T s) (repeats : Array UInt64) : T s
 
@@ -527,6 +573,14 @@ opaque transpose_from_attention {batch n_head seq head_dim : UInt64}
 /-- Direct 2-tensor concatenation (no intermediate reshapes) -/
 @[extern "lean_torch_cat2"] private opaque cat2_impl {s1 s2 : Shape}
     (t1 : @& T s1) (t2 : @& T s2) (dim : Int) : T #[]
+
+/-- Erase static shape information while preserving runtime tensor shape. -/
+@[extern "lean_torch_erase_shape"]
+opaque eraseShape {s : Shape} (t : @& T s) : T #[]
+
+/-- Concatenate shape-erased tensors along a dimension (runtime-checked). -/
+@[extern "lean_torch_cat_dyn"]
+opaque cat_dyn (tensors : @& Array (T #[])) (dim : Int) : T #[]
 
 /-- Compute the output shape when concatenating two shapes along dimension `dim`.
     The shapes must match in all dimensions except `dim`, where they are summed. -/
@@ -653,6 +707,11 @@ opaque binFileTokenCount (path : @& String) : IO UInt64
 @[extern "lean_torch_load_u16_bin"]
 opaque loadU16Bin (n : UInt64) (path : @& String) : IO (T #[n])
 
+/-- Load raw float32 binary data into a tensor of known shape.
+    The file must contain exactly `numel(shape)` float32 values in row-major order. -/
+@[extern "lean_torch_load_f32_bin"]
+opaque loadF32Bin (s : Shape) (path : @& String) : IO (T s)
+
 /-- Create a 1D int64 tensor from an array of Int64 -/
 @[extern "lean_torch_from_int64_array"]
 opaque fromInt64Array (arr : @& Array Int64) : T #[]
@@ -700,6 +759,11 @@ opaque saveTensor {s : Shape} (t : @& T s) (path : @& String) : IO Unit
     Saves the first image in the batch. -/
 @[extern "lean_torch_save_ppm"]
 opaque savePPMExplicit (s : Shape) (t : @& T s) (path : @& String) : IO Unit
+
+/-- Save mono waveform tensor as 16-bit PCM WAV.
+    Tensor is flattened in row-major order and clamped to [-1, 1]. -/
+@[extern "lean_torch_save_wav"]
+opaque saveWav {s : Shape} (t : @& T s) (path : @& String) (sampleRate : UInt64 := 24000) : IO Unit
 
 /-- Load tensor from a file with expected shape -/
 @[extern "lean_torch_load_tensor"]

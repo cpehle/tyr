@@ -56,6 +56,7 @@
 #include <iostream>
 #include <fstream>
 #include <atomic>
+#include <cmath>
 #include <stdexcept>
 #include <lean/lean.h>
 #include <torch/torch.h>
@@ -800,6 +801,33 @@ lean_object* lean_torch_conv1d(
   return fromTorchTensor(output_);
 }
 
+lean_object* lean_torch_conv1d_group_bias(
+  lean_obj_arg /*input_shape*/,
+  lean_obj_arg /*weight_shape*/,
+  lean_obj_arg /*bias_shape*/,
+  b_lean_obj_arg input,
+  b_lean_obj_arg weight,
+  b_lean_obj_arg bias,
+  uint64_t stride,
+  uint64_t padding,
+  uint64_t dilation,
+  uint64_t groups
+) {
+  auto input_ = borrowTensor(input);
+  auto weight_ = borrowTensor(weight);
+  auto bias_ = borrowTensor(bias);
+  auto output_ = at::conv1d(
+    input_,
+    weight_,
+    bias_,
+    {static_cast<int64_t>(stride)},
+    {static_cast<int64_t>(padding)},
+    {static_cast<int64_t>(dilation)},
+    static_cast<int64_t>(groups)
+  );
+  return fromTorchTensor(output_);
+}
+
 lean_object* lean_torch_adaptive_avg_pool2d(
   lean_obj_arg /*input_shape*/,
   b_lean_obj_arg input,
@@ -1341,6 +1369,27 @@ lean_object* lean_torch_cat2(
   return fromTorchTensor(result_);
 }
 
+lean_object* lean_torch_erase_shape(lean_obj_arg /*s*/, b_lean_obj_arg t) {
+  auto t_ = borrowTensor(t);
+  return fromTorchTensor(t_);
+}
+
+lean_object* lean_torch_cat_dyn(b_lean_obj_arg tensors, lean_obj_arg dim_obj) {
+  int64_t dim = static_cast<int64_t>(lean_int64_of_int(dim_obj));
+  lean_dec(dim_obj);
+  if (!lean_is_array(tensors)) {
+    lean_internal_panic("lean_torch_cat_dyn: expected array");
+  }
+  std::vector<torch::Tensor> tensor_list;
+  size_t arr_size = lean_array_size(tensors);
+  for (size_t i = 0; i < arr_size; i++) {
+    auto tensor_obj = lean_array_get_core(tensors, i);
+    tensor_list.push_back(borrowTensor(tensor_obj));
+  }
+  auto result_ = torch::cat(tensor_list, dim);
+  return fromTorchTensor(result_);
+}
+
 lean_object* lean_torch_stack(lean_obj_arg /*s*/, lean_obj_arg tensors, int dim) {
   std::vector<torch::Tensor> tensor_list;
   for (size_t i = 0; i < lean_array_size(tensors); i++) {
@@ -1389,7 +1438,7 @@ lean_object* lean_torch_scaled_dot_product_attention(
 }
 
 // Softmax with dimension parameter (needed for attention)
-lean_object* lean_torch_softmax_dim(lean_obj_arg /*s*/, b_lean_obj_arg input, int dim) {
+lean_object* lean_torch_softmax_dim(lean_obj_arg /*s*/, b_lean_obj_arg input, int64_t dim) {
   auto input_ = borrowTensor(input);
   auto result_ = torch::softmax(input_, dim);
   return fromTorchTensor(result_);
@@ -1555,6 +1604,22 @@ lean_object* lean_torch_masked_fill(lean_obj_arg /*s*/, b_lean_obj_arg input, b_
   auto input_ = borrowTensor(input);
   auto mask_ = borrowTensor(mask);
   auto result_ = input_.masked_fill(mask_, value);
+  return fromTorchTensor(result_);
+}
+
+lean_object* lean_torch_masked_select(lean_obj_arg /*s*/, b_lean_obj_arg input, b_lean_obj_arg mask) {
+  auto input_ = borrowTensor(input);
+  auto mask_ = borrowTensor(mask);
+  auto result_ = input_.masked_select(mask_);
+  return fromTorchTensor(result_);
+}
+
+lean_object* lean_torch_masked_scatter(
+    lean_obj_arg /*s*/, lean_obj_arg /*src*/, b_lean_obj_arg input, b_lean_obj_arg mask, b_lean_obj_arg source) {
+  auto input_ = borrowTensor(input);
+  auto mask_ = borrowTensor(mask);
+  auto source_ = borrowTensor(source);
+  auto result_ = input_.masked_scatter(mask_, source_);
   return fromTorchTensor(result_);
 }
 
@@ -1742,6 +1807,41 @@ lean_object* lean_torch_load_u16_bin(uint64_t n, b_lean_obj_arg path_obj, lean_o
   auto tensor = torch::from_blob(data.data(), {static_cast<int64_t>(expected_tokens)},
                                   torch::kInt64).clone();
 
+  return lean_io_result_mk_ok(fromTorchTensor(tensor));
+}
+
+// Load raw float32 binary data into a tensor with known shape
+lean_object* lean_torch_load_f32_bin(lean_obj_arg shape, b_lean_obj_arg path_obj, lean_object* w) {
+  const char* path = lean_string_cstr(path_obj);
+  auto expected_shape = getShape(shape); lean_dec(shape);
+
+  int64_t expected_numel = 1;
+  for (auto d : expected_shape) {
+    expected_numel *= d;
+  }
+  const size_t expected_bytes = static_cast<size_t>(expected_numel) * sizeof(float);
+
+  std::ifstream file(path, std::ios::binary | std::ios::ate);
+  if (!file.is_open()) {
+    return lean_io_result_mk_error(lean_mk_io_user_error(
+      lean_mk_string(("Failed to open file: " + std::string(path)).c_str())));
+  }
+  std::streamsize file_size = file.tellg();
+  file.seekg(0, std::ios::beg);
+
+  if (file_size != static_cast<std::streamsize>(expected_bytes)) {
+    return lean_io_result_mk_error(lean_mk_io_user_error(
+      lean_mk_string(("Float32 binary size mismatch, expected " + std::to_string(expected_bytes) +
+        " bytes, got " + std::to_string(file_size)).c_str())));
+  }
+
+  std::vector<float> buffer(expected_numel);
+  if (!file.read(reinterpret_cast<char*>(buffer.data()), expected_bytes)) {
+    return lean_io_result_mk_error(lean_mk_io_user_error(
+      lean_mk_string("Failed to read float32 binary file")));
+  }
+
+  auto tensor = torch::from_blob(buffer.data(), expected_shape, torch::kFloat32).clone();
   return lean_io_result_mk_ok(fromTorchTensor(tensor));
 }
 
@@ -2170,6 +2270,72 @@ lean_object* lean_torch_save_ppm(
   } catch (const std::exception& e) {
     return lean_io_result_mk_error(lean_mk_io_user_error(
       lean_mk_string(("Failed to save PPM: " + std::string(e.what())).c_str())));
+  }
+}
+
+// Save mono waveform as 16-bit PCM WAV.
+// Tensor is flattened in row-major order and clamped to [-1, 1].
+lean_object* lean_torch_save_wav(
+  lean_obj_arg /*shape*/,
+  b_lean_obj_arg tensor_obj,
+  b_lean_obj_arg path_obj,
+  uint64_t sample_rate,
+  lean_object* /*w*/
+) {
+  const char* path = lean_string_cstr(path_obj);
+  try {
+    auto tensor = borrowTensor(tensor_obj);
+    auto wav = tensor.detach().to(torch::kCPU).to(torch::kFloat32).contiguous().view({-1});
+    int64_t n_samples = wav.numel();
+    if (n_samples <= 0) {
+      return lean_io_result_mk_error(lean_mk_io_user_error(
+        lean_mk_string("Cannot save WAV: empty tensor")));
+    }
+
+    uint32_t channels = 1;
+    uint32_t bits_per_sample = 16;
+    uint32_t byte_rate = static_cast<uint32_t>(sample_rate) * channels * (bits_per_sample / 8);
+    uint16_t block_align = static_cast<uint16_t>(channels * (bits_per_sample / 8));
+    uint32_t data_size = static_cast<uint32_t>(n_samples * (bits_per_sample / 8));
+    uint32_t riff_chunk_size = 36 + data_size;
+
+    std::ofstream file(path, std::ios::binary);
+    if (!file.is_open()) {
+      return lean_io_result_mk_error(lean_mk_io_user_error(
+        lean_mk_string(("Failed to open file for writing: " + std::string(path)).c_str())));
+    }
+
+    file.write("RIFF", 4);
+    file.write(reinterpret_cast<const char*>(&riff_chunk_size), 4);
+    file.write("WAVE", 4);
+    file.write("fmt ", 4);
+    uint32_t fmt_chunk_size = 16;
+    uint16_t audio_format = 1;  // PCM
+    uint16_t num_channels = static_cast<uint16_t>(channels);
+    uint32_t sr = static_cast<uint32_t>(sample_rate);
+    file.write(reinterpret_cast<const char*>(&fmt_chunk_size), 4);
+    file.write(reinterpret_cast<const char*>(&audio_format), 2);
+    file.write(reinterpret_cast<const char*>(&num_channels), 2);
+    file.write(reinterpret_cast<const char*>(&sr), 4);
+    file.write(reinterpret_cast<const char*>(&byte_rate), 4);
+    file.write(reinterpret_cast<const char*>(&block_align), 2);
+    file.write(reinterpret_cast<const char*>(&bits_per_sample), 2);
+    file.write("data", 4);
+    file.write(reinterpret_cast<const char*>(&data_size), 4);
+
+    const float* ptr = wav.data_ptr<float>();
+    for (int64_t i = 0; i < n_samples; ++i) {
+      float x = ptr[i];
+      if (x > 1.0f) x = 1.0f;
+      if (x < -1.0f) x = -1.0f;
+      int16_t pcm = static_cast<int16_t>(std::lrintf(x * 32767.0f));
+      file.write(reinterpret_cast<const char*>(&pcm), sizeof(int16_t));
+    }
+    file.close();
+    return lean_io_result_mk_ok(lean_box(0));
+  } catch (const std::exception& e) {
+    return lean_io_result_mk_error(lean_mk_io_user_error(
+      lean_mk_string(("Failed to save WAV: " + std::string(e.what())).c_str())));
   }
 }
 
@@ -3037,6 +3203,25 @@ lean_object* lean_torch_conv_transpose2d(
       .padding(padding_)
       .output_padding(output_padding_)
       .dilation(dilation_));
+  return fromTorchTensor(result_);
+}
+
+lean_object* lean_torch_conv_transpose1d_bias(
+    lean_obj_arg /*input_shape*/, lean_obj_arg /*weight_shape*/, lean_obj_arg /*bias_shape*/,
+    b_lean_obj_arg input, b_lean_obj_arg weight, b_lean_obj_arg bias,
+    uint64_t stride, uint64_t padding, uint64_t output_padding, uint64_t dilation) {
+  auto input_ = borrowTensor(input);
+  auto weight_ = borrowTensor(weight);
+  auto bias_ = borrowTensor(bias);
+  auto result_ = torch::nn::functional::conv_transpose1d(
+    input_,
+    weight_,
+    torch::nn::functional::ConvTranspose1dFuncOptions()
+      .bias(bias_)
+      .stride(static_cast<int64_t>(stride))
+      .padding(static_cast<int64_t>(padding))
+      .output_padding(static_cast<int64_t>(output_padding))
+      .dilation(static_cast<int64_t>(dilation)));
   return fromTorchTensor(result_);
 }
 
