@@ -228,6 +228,12 @@ lean_exe Qwen3ASRLiveMic where
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
+/-- Separate streaming-native ASR session executable (parallel path). -/
+lean_exe Qwen3ASRLiveMicTrueStream where
+  root := `Examples.Qwen3ASR.LiveMicTrueStream
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
 /-- Diffusion tests executable -/
 lean_exe TestDiffusion where
   root := `Tests.TestDiffusion

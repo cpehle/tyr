@@ -12,6 +12,7 @@ import Tyr.Model.Qwen3ASR.AudioEncoder
 import Tyr.Model.Qwen3ASR.Model
 import Tyr.Model.Qwen3ASR.Streaming
 import Tyr.Model.Qwen3ASR.Realtime
+import Tyr.Model.Qwen3ASR.StreamModel
 import Tyr.Model.Qwen3ASR.Transcribe
 import Tyr.Model.Qwen3ASR.ForcedAligner
 import Tyr.Model.Qwen3ASR.Weights
