@@ -17,6 +17,7 @@
   - mono waveform tensor `[batch, 1, samples]` at 24kHz.
 -/
 import Tyr.Torch
+import Tyr.TensorStruct
 import Tyr.Model.Qwen.RoPE
 import Tyr.Model.Qwen3TTS.SpeechTokenizer
 
@@ -35,7 +36,8 @@ private def ceilDiv (x d : UInt64) : UInt64 :=
 private def framesAfterDown1 (samples : UInt64) : UInt64 := ceilDiv samples 4
 private def framesAfterDown2 (samples : UInt64) : UInt64 := ceilDiv (framesAfterDown1 samples) 5
 private def framesAfterDown3 (samples : UInt64) : UInt64 := ceilDiv (framesAfterDown2 samples) 6
-private def framesAfterDown4 (samples : UInt64) : UInt64 := ceilDiv (framesAfterDown3 samples) 8
+def framesBeforeFinalDownsample (samples : UInt64) : UInt64 := ceilDiv (framesAfterDown3 samples) 8
+private def framesAfterDown4 (samples : UInt64) : UInt64 := framesBeforeFinalDownsample samples
 def encodedFrames (samples : UInt64) : UInt64 := ceilDiv (framesAfterDown4 samples) 2
 
 private def effectiveKernel (kernel dilation : UInt64) : UInt64 :=
@@ -66,7 +68,7 @@ private def scale3d {batch seq dim : UInt64}
   x * nn.expand s #[batch, seq, dim]
 
 private def clampMin1d {n : UInt64} (x : T #[n]) (minVal : Float) : T #[n] :=
-  let minT : T #[n] := torch.full #[n] minVal
+  let minT : T #[n] := torch.full #[n] minVal false x.device
   where_ (lt_scalar x minVal) minT x
 
 private def stack2dDyn {batch frames k : UInt64}
@@ -84,6 +86,7 @@ structure EncoderResBlock (inC hiddenC : UInt64) where
   conv1Bias : T #[hiddenC]
   conv2Weight : T #[inC, hiddenC, 1]
   conv2Bias : T #[inC]
+  deriving TensorStruct
 
 structure EncoderTransformerLayer where
   inputLayerNormWeight : T #[512]
@@ -98,15 +101,17 @@ structure EncoderTransformerLayer where
   fc1 : T #[2048, 512]
   fc2 : T #[512, 2048]
   mlpLayerScale : T #[512]
+  deriving TensorStruct
 
 structure EncoderCodebook where
   clusterUsage : T #[2048]
   embedSum : T #[2048, 256]
-  deriving Inhabited
+  deriving TensorStruct, Inhabited
 
 structure EncodeRVQ where
   inputProj : T #[256, 512, 1]
   codebooks : Array EncoderCodebook
+  deriving TensorStruct
 
 structure SpeechTokenizer12HzEncoder where
   conv0Weight : T #[64, 1, 7]
@@ -139,6 +144,7 @@ structure SpeechTokenizer12HzEncoder where
 
   inputSampleRate : UInt64 := 24000
   encodeDownsampleRate : UInt64 := 1920
+  deriving TensorStruct
 
 namespace SpeechTokenizer12HzEncoder
 
@@ -200,7 +206,7 @@ private def loadEncodeRVQ
   pure { inputProj, codebooks }
 
 /-- Load 12Hz speech-tokenizer encoder weights from `speech_tokenizer` directory. -/
-def loadFromDir (speechTokenizerDir : String) : IO SpeechTokenizer12HzEncoder := do
+def loadFromDir (speechTokenizerDir : String) (device : Device := Device.CPU) : IO SpeechTokenizer12HzEncoder := do
   let cfg ← SpeechTokenizer12HzConfig.loadFromFile s!"{speechTokenizerDir}/config.json"
   SpeechTokenizer12HzConfig.validateSupported cfg
 
@@ -237,7 +243,7 @@ def loadFromDir (speechTokenizerDir : String) : IO SpeechTokenizer12HzEncoder :=
   -- Match Qwen3-TTS `encoder_valid_num_quantizers=16`: first 15 acoustic groups.
   let acousticRVQ ← loadEncodeRVQ weightsPath "encoder.quantizer.acoustic_residual_vector_quantizer" 15
 
-  pure {
+  let enc : SpeechTokenizer12HzEncoder := {
     conv0Weight
     conv0Bias
     res1
@@ -261,6 +267,7 @@ def loadFromDir (speechTokenizerDir : String) : IO SpeechTokenizer12HzEncoder :=
     inputSampleRate := 24000
     encodeDownsampleRate := 1920
   }
+  pure (TensorStruct.map (fun t => t.to device) enc)
 
 private def causalConvConstant {batch inC outC inLen outLen kernel : UInt64}
     (x : T #[batch, inC, inLen])
@@ -271,8 +278,8 @@ private def causalConvConstant {batch inC outC inLen outLen kernel : UInt64}
     : T #[batch, outC, outLen] :=
   let leftPad : UInt64 := paddingTotal kernel stride dilation
   let extraPad : UInt64 := extraPaddingForCausalConv inLen kernel stride dilation
-  let left : T #[batch, inC, leftPad] := torch.zeros #[batch, inC, leftPad]
-  let right : T #[batch, inC, extraPad] := torch.zeros #[batch, inC, extraPad]
+  let left : T #[batch, inC, leftPad] := torch.zeros #[batch, inC, leftPad] false x.device
+  let right : T #[batch, inC, extraPad] := torch.zeros #[batch, inC, extraPad] false x.device
   let xPad0 : T #[batch, inC, inLen + leftPad] := nn.cat left x 2
   let xPad : T #[batch, inC, inLen + leftPad + extraPad] := nn.cat xPad0 right 2
   let y0 : T #[batch, outC, outLen] :=
@@ -295,7 +302,7 @@ private def causalConvReplicate {batch inC outC inLen outLen kernel : UInt64}
   let left : T #[batch, inC, leftPad] := nn.expand first #[batch, inC, leftPad]
   let right : T #[batch, inC, extraPad] :=
     if extraPad == 0 then
-      torch.zeros #[batch, inC, extraPad]
+      torch.zeros #[batch, inC, extraPad] false x.device
     else
       nn.expand last #[batch, inC, extraPad]
   let xPad0 : T #[batch, inC, inLen + leftPad] := nn.cat left x 2
@@ -405,10 +412,13 @@ private def rvqEncode {batch frames k : UInt64}
     allIndices := allIndices.push idx
   stack2dDyn (batch := batch) (frames := frames) (k := k) allIndices
 
-/-- Encode waveform `[batch,1,samples]` to codec IDs `[batch,16,encodedFrames(samples)]`. -/
-def encode {batch samples : UInt64}
+/-- Encode waveform `[batch,1,samples]` to codec IDs `[batch,16,encodedFrames(samples)]`.
+    `ropeStartPos` is in the pre-downsample transformer timeline (stride 960 samples). -/
+def encodeWithRoPEOffset {batch samples : UInt64}
     (m : SpeechTokenizer12HzEncoder)
-    (audio : T #[batch, 1, samples]) : T #[batch, 16, encodedFrames samples] :=
+    (audio : T #[batch, 1, samples])
+    (ropeStartPos : UInt64 := 0)
+    : T #[batch, 16, encodedFrames samples] :=
   let t1 := framesAfterDown1 samples
   let t2 := framesAfterDown2 samples
   let t3 := framesAfterDown3 samples
@@ -436,7 +446,14 @@ def encode {batch samples : UInt64}
   let h9 : T #[batch, 512, t4] := causalConvConstant h9In m.finalConvWeight (some m.finalConvBias) 1 1
 
   let x0 : T #[batch, t4, 512] := reshape (nn.transpose h9 1 2) #[batch, t4, 512]
-  let (cos, sin) := rotary.computeFreqsPure t4 64 10000.0
+  let ropeTotal : UInt64 := ropeStartPos + t4
+  let (cosAll, sinAll) := rotary.computeFreqsPure ropeTotal 64 10000.0
+  let cosAll : T #[ropeTotal, 32] :=
+    if cosAll.device == x0.device then cosAll else cosAll.to x0.device
+  let sinAll : T #[ropeTotal, 32] :=
+    if sinAll.device == x0.device then sinAll else sinAll.to x0.device
+  let cos : T #[t4, 32] := data.slice cosAll 0 ropeStartPos t4
+  let sin : T #[t4, 32] := data.slice sinAll 0 ropeStartPos t4
   let x1 := m.transformerLayers.foldl (fun h layer => forwardTransformerLayer layer h cos sin) x0
   let x2 : T #[batch, 512, t4] := reshape (nn.transpose x1 1 2) #[batch, 512, t4]
 
@@ -447,14 +464,84 @@ def encode {batch samples : UInt64}
   let codes : T #[16, batch, t5] := nn.cat semanticCodes acousticCodes 0
   reshape (nn.transpose codes 0 1) #[batch, 16, t5]
 
+/-- Encode waveform `[batch,1,samples]` with zero RoPE offset. -/
+def encode {batch samples : UInt64}
+    (m : SpeechTokenizer12HzEncoder)
+    (audio : T #[batch, 1, samples]) : T #[batch, 16, encodedFrames samples] :=
+  encodeWithRoPEOffset m audio 0
+
+/-- Convenience encode for mono waveform `[samples]` into frame-major `[frames,16]`.
+    RoPE offset is in the pre-downsample transformer timeline. -/
+def encodeMonoFrameMajorWithRoPEOffset {samples : UInt64}
+    (m : SpeechTokenizer12HzEncoder)
+    (audio : T #[samples])
+    (ropeStartPos : UInt64 := 0)
+    : T #[encodedFrames samples, 16] :=
+  let x0 : T #[1, 1, samples] := reshape audio #[1, 1, samples]
+  let codes : T #[1, 16, encodedFrames samples] := encodeWithRoPEOffset m x0 ropeStartPos
+  let c0 : T #[1, encodedFrames samples, 16] := reshape (nn.transpose codes 1 2) #[1, encodedFrames samples, 16]
+  reshape c0 #[encodedFrames samples, 16]
+
 /-- Convenience encode for mono waveform `[samples]` into frame-major `[frames,16]`. -/
 def encodeMonoFrameMajor {samples : UInt64}
     (m : SpeechTokenizer12HzEncoder)
     (audio : T #[samples]) : T #[encodedFrames samples, 16] :=
-  let x0 : T #[1, 1, samples] := reshape audio #[1, 1, samples]
-  let codes : T #[1, 16, encodedFrames samples] := encode m x0
-  let c0 : T #[1, encodedFrames samples, 16] := reshape (nn.transpose codes 1 2) #[1, encodedFrames samples, 16]
-  reshape c0 #[encodedFrames samples, 16]
+  encodeMonoFrameMajorWithRoPEOffset m audio 0
+
+/-- Stateful streaming encode state for incremental waveform -> codec conversion. -/
+structure EncodeStreamState where
+  chunkSamples : Nat
+  leftContextSamples : Nat
+  offsetSamples : Nat := 0
+  history : Array Float := #[]
+
+/-- Initialize streaming encode state. -/
+def initEncodeStreamState
+    (chunkSamples : Nat := 240000)
+    (leftContextSamples : Nat := 288000)
+    : EncodeStreamState :=
+  { chunkSamples, leftContextSamples, offsetSamples := 0, history := #[] }
+
+/-- Encode one streaming chunk and emit flat codec IDs (`rows * 16` values). -/
+def pushEncodeStream
+    (m : SpeechTokenizer12HzEncoder)
+    (st : EncodeStreamState)
+    (newSamples : Array Float)
+    : IO (EncodeStreamState × Array UInt64) := do
+  if newSamples.isEmpty then
+    return (st, #[])
+
+  let ctxStart : Nat := st.offsetSamples - st.history.size
+  let chunk := st.history ++ newSamples
+  let chunkSamplesU64 : UInt64 := chunk.size.toUInt64
+  let audioChunk0 : T #[chunkSamplesU64] := reshape (data.fromFloatArray chunk) #[chunkSamplesU64]
+  let audioChunk : T #[chunkSamplesU64] :=
+    if audioChunk0.device == m.conv0Weight.device then audioChunk0 else audioChunk0.to m.conv0Weight.device
+  let framesChunk : UInt64 := encodedFrames chunkSamplesU64
+  let ropeStartPos : UInt64 := framesBeforeFinalDownsample ctxStart.toUInt64
+  let codesChunk : T #[framesChunk, 16] := encodeMonoFrameMajorWithRoPEOffset m audioChunk ropeStartPos
+  let flatChunk : T #[framesChunk * 16] := reshape codesChunk #[framesChunk * 16]
+  let valsChunk ← data.tensorToUInt64Array flatChunk
+
+  let dropRows : Nat := (encodedFrames st.history.size.toUInt64).toNat
+  let keepRows : Nat := (encodedFrames newSamples.size.toUInt64).toNat
+  let startIdx : Nat := dropRows * 16
+  let endIdx : Nat := Nat.min valsChunk.size ((dropRows + keepRows) * 16)
+  let valsKeep := valsChunk.extract startIdx endIdx
+
+  let nextOffset := st.offsetSamples + newSamples.size
+  let histStart :=
+    if chunk.size > st.leftContextSamples then
+      chunk.size - st.leftContextSamples
+    else
+      0
+  let nextHist := chunk.extract histStart chunk.size
+  let st' : EncodeStreamState := {
+    st with
+      offsetSamples := nextOffset
+      history := nextHist
+  }
+  return (st', valsKeep)
 
 end SpeechTokenizer12HzEncoder
 

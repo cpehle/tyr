@@ -886,12 +886,52 @@ namespace safetensors
 @[extern "lean_torch_safetensors_load"]
 opaque loadTensor (path : @& String) (name : @& String) (s : Shape) : IO (T s)
 
+/-- Load a tensor from SafeTensors and move it to `device`. -/
+def loadTensorOnDevice (path : String) (name : String) (s : Shape) (device : Device := Device.CPU) : IO (T s) := do
+  let t ← loadTensor path name s
+  pure (t.to device)
+
+/-- Save one tensor to a SafeTensors file under `name`.
+    Current runtime implementation writes a single-tensor file. -/
+@[extern "lean_torch_safetensors_save"]
+opaque saveTensor {s : Shape} (path : @& String) (name : @& String) (t : @& T s) : IO Unit
+
+/-- Low-level multi-tensor save primitive.
+    `names[i]` and `tensors[i]` form one named tensor entry.
+    `metaKeys`/`metaVals` are optional `__metadata__` key/value pairs. -/
+@[extern "lean_torch_safetensors_save_many"]
+opaque saveTensorsRaw
+    (path : @& String)
+    (names : @& Array String)
+    (tensors : @& Array (T #[]))
+    (metaKeys : @& Array String)
+    (metaVals : @& Array String)
+    : IO Unit
+
+/-- Save multiple tensors to one SafeTensors file.
+    Names must be unique; metadata is optional. -/
+def saveTensors
+    (path : String)
+    (entries : Array (String × T #[]))
+    (metadata : Array (String × String) := #[])
+    : IO Unit := do
+  let names := entries.map Prod.fst
+  let tensors := entries.map Prod.snd
+  let metaKeys := metadata.map Prod.fst
+  let metaVals := metadata.map Prod.snd
+  saveTensorsRaw path names tensors metaKeys metaVals
+
 /-- Load a tensor from sharded SafeTensors files.
     dir: directory containing sharded .safetensors files
     name: tensor name to search for
     s: expected tensor shape -/
 @[extern "lean_torch_safetensors_load_sharded"]
 opaque loadTensorSharded (dir : @& String) (name : @& String) (s : Shape) : IO (T s)
+
+/-- Load a tensor from sharded SafeTensors and move it to `device`. -/
+def loadTensorShardedOnDevice (dir : String) (name : String) (s : Shape) (device : Device := Device.CPU) : IO (T s) := do
+  let t ← loadTensorSharded dir name s
+  pure (t.to device)
 
 end safetensors
 
@@ -953,6 +993,20 @@ opaque computeFreqs (seqLen headDim : UInt64) (base : Float := 10000.0)
     Safe to use since the computation is deterministic. -/
 @[extern "lean_torch_compute_rotary_freqs_pure"]
 opaque computeFreqsPure (seqLen headDim : UInt64) (base : Float := 10000.0)
+    : T #[seqLen, headDim / 2] × T #[seqLen, headDim / 2]
+
+/-- Precompute rotary frequencies on a target device.
+    Returns (cos, sin) tensors of shape [seqLen, headDim/2]. -/
+@[extern "lean_torch_compute_rotary_freqs_on_device"]
+opaque computeFreqsOnDevice (seqLen headDim : UInt64) (base : Float := 10000.0)
+    (device : Device := Device.CPU)
+    : IO (T #[seqLen, headDim / 2] × T #[seqLen, headDim / 2])
+
+/-- Pure version of `computeFreqsOnDevice`.
+    Safe to use since the computation is deterministic. -/
+@[extern "lean_torch_compute_rotary_freqs_on_device_pure"]
+opaque computeFreqsOnDevicePure (seqLen headDim : UInt64) (base : Float := 10000.0)
+    (device : Device := Device.CPU)
     : T #[seqLen, headDim / 2] × T #[seqLen, headDim / 2]
 
 /-- Apply rotary embeddings to queries or keys.

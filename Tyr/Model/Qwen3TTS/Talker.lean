@@ -86,12 +86,16 @@ def init (cfg : TalkerConfig) : IO (TalkerModel cfg) := do
 /-- Embed codec token ids with talker codec embedding table. -/
 def embedCodec {batch seq : UInt64} (m : TalkerModel cfg)
     (codecIds : T #[batch, seq]) : T #[batch, seq, cfg.hiddenSize] :=
-  nn.embedding codecIds m.codecEmbedding
+  let ids : T #[batch, seq] :=
+    if codecIds.device == m.codecEmbedding.device then codecIds else codecIds.to m.codecEmbedding.device
+  nn.embedding ids m.codecEmbedding
 
 /-- Embed text token ids and project to talker hidden size. -/
 def embedText {batch seq : UInt64} (m : TalkerModel cfg)
     (textIds : T #[batch, seq]) : T #[batch, seq, cfg.hiddenSize] :=
-  let t := nn.embedding textIds m.textEmbedding
+  let ids : T #[batch, seq] :=
+    if textIds.device == m.textEmbedding.device then textIds else textIds.to m.textEmbedding.device
+  let t := nn.embedding ids m.textEmbedding
   let h := affine3d t m.textProjectionFc1 m.textProjectionFc1Bias
   let h := nn.silu h
   affine3d h m.textProjectionFc2 m.textProjectionFc2Bias
@@ -99,8 +103,9 @@ def embedText {batch seq : UInt64} (m : TalkerModel cfg)
 /-- Prepend codec BOS embedding to a text-conditioning embedding sequence. -/
 def prependCodecBos {batch seq : UInt64} (cfg : TalkerConfig) (m : TalkerModel cfg)
     (textEmbeds : T #[batch, seq, cfg.hiddenSize]) : T #[batch, 1 + seq, cfg.hiddenSize] :=
-  let bosIds : T #[batch, 1] := torch.full_int #[batch, 1] (Int64.ofNat cfg.codecBosId.toNat)
-  let bosEmb : T #[batch, 1, cfg.hiddenSize] := nn.embedding bosIds m.codecEmbedding
+  let bosIds0 : T #[batch, 1] := torch.full_int #[batch, 1] (Int64.ofNat cfg.codecBosId.toNat)
+  let bosIds : T #[batch, 1] := if bosIds0.device == textEmbeds.device then bosIds0 else bosIds0.to textEmbeds.device
+  let bosEmb : T #[batch, 1, cfg.hiddenSize] := embedCodec m bosIds
   nn.cat bosEmb textEmbeds 1
 
 /-- Build talker input embeddings from text token IDs. -/
@@ -124,7 +129,11 @@ def forwardEmbeds {batch seq : UInt64} (cfg : TalkerConfig)
     (inputsEmbeds : T #[batch, seq, cfg.hiddenSize])
     (attnMask : Option (T #[batch, seq]) := none)
     : T #[batch, seq, cfg.hiddenSize] :=
-  let (cos, sin) := rotary.computeFreqsPure seq cfg.headDim cfg.ropeTheta
+  let (cos0, sin0) := rotary.computeFreqsPure seq cfg.headDim cfg.ropeTheta
+  let cos : T #[seq, cfg.headDim / 2] :=
+    if cos0.device == inputsEmbeds.device then cos0 else cos0.to inputsEmbeds.device
+  let sin : T #[seq, cfg.headDim / 2] :=
+    if sin0.device == inputsEmbeds.device then sin0 else sin0.to inputsEmbeds.device
   let hidden := match attnMask with
     | some mask =>
       m.layers.foldl
@@ -220,7 +229,11 @@ def forwardHidden {batch seq : UInt64} (cfg : TalkerConfig)
     : T #[batch, seq, cfg.codePredictorConfig.hiddenSize] :=
   let hidden0 := projectInputs m inputsEmbeds
   let cpCfg := cfg.codePredictorConfig
-  let (cos, sin) := rotary.computeFreqsPure seq cpCfg.headDim cpCfg.ropeTheta
+  let (cos0, sin0) := rotary.computeFreqsPure seq cpCfg.headDim cpCfg.ropeTheta
+  let cos : T #[seq, cpCfg.headDim / 2] :=
+    if cos0.device == hidden0.device then cos0 else cos0.to hidden0.device
+  let sin : T #[seq, cpCfg.headDim / 2] :=
+    if sin0.device == hidden0.device then sin0 else sin0.to hidden0.device
   let hidden := match attnMask with
     | some mask =>
       m.layers.foldl
@@ -302,9 +315,12 @@ private def applySuppressTail {batch vocab : UInt64}
     logits
   else
     let start : UInt64 := if suppressTail >= vocab then 0 else vocab - suppressTail
-    let idx : T #[vocab] := torch.arange 0 vocab 1
-    let startVec : T #[vocab] := torch.full_int #[vocab] (Int64.ofNat start.toNat)
-    let endVec : T #[vocab] := torch.full_int #[vocab] (Int64.ofNat vocab.toNat)
+    let idx0 : T #[vocab] := torch.arange 0 vocab 1
+    let idx : T #[vocab] := if idx0.device == logits.device then idx0 else idx0.to logits.device
+    let startVec0 : T #[vocab] := torch.full_int #[vocab] (Int64.ofNat start.toNat)
+    let startVec : T #[vocab] := if startVec0.device == logits.device then startVec0 else startVec0.to logits.device
+    let endVec0 : T #[vocab] := torch.full_int #[vocab] (Int64.ofNat vocab.toNat)
+    let endVec : T #[vocab] := if endVec0.device == logits.device then endVec0 else endVec0.to logits.device
     let geMask : T #[vocab] := torch.ge idx startVec
     let ltMask : T #[vocab] := torch.lt idx endVec
     let tailMask : T #[vocab] := torch.logical_and geMask ltMask
@@ -317,7 +333,8 @@ private def applySuppressEos {batch vocab : UInt64}
     (logits : T #[batch, vocab])
     (eosTokenId : UInt64)
     : T #[batch, vocab] :=
-  let idx : T #[vocab] := torch.arange 0 vocab 1
+  let idx0 : T #[vocab] := torch.arange 0 vocab 1
+  let idx : T #[vocab] := if idx0.device == logits.device then idx0 else idx0.to logits.device
   let eosMask1d : T #[vocab] := torch.eq_scalar idx (Int64.ofNat eosTokenId.toNat)
   let eosMask2d : T #[batch, vocab] := nn.expand (reshape eosMask1d #[1, vocab]) #[batch, vocab]
   nn.masked_fill logits eosMask2d (-1e9)
@@ -417,8 +434,8 @@ def generateFrame {batch seq : UInt64} (cfg : TalkerConfig)
     : IO (FrameGenerationOutput batch cfg.numCodeGroups cfg.hiddenSize) := do
   if cfg.numCodeGroups == 0 then
     return {
-      codes := torch.zeros #[batch, 0]
-      summedEmbedding := torch.zeros #[batch, 1, cfg.hiddenSize]
+      codes := torch.zeros #[batch, 0] false talkerInputs.device
+      summedEmbedding := torch.zeros #[batch, 1, cfg.hiddenSize] false talkerInputs.device
     }
 
   let hidden := TalkerModel.forwardEmbeds cfg m.model talkerInputs attnMask
@@ -447,19 +464,20 @@ def generateCodesWithLengths {batch seq : UInt64} (cfg : TalkerConfig)
     : IO (CodeGenerationOutput batch maxFrames cfg.numCodeGroups) := do
   if maxFrames == 0 then
     return {
-      codes := torch.zeros #[batch, 0, cfg.numCodeGroups]
+      codes := torch.zeros #[batch, 0, cfg.numCodeGroups] false talkerInputs.device
       lengths := Array.replicate batch.toNat 0
     }
 
   let padFrame : T #[batch, 1, cfg.numCodeGroups] :=
-    torch.full_int #[batch, 1, cfg.numCodeGroups] (Int64.ofNat cfg.codecPadId.toNat)
+    let x0 : T #[batch, 1, cfg.numCodeGroups] := torch.full_int #[batch, 1, cfg.numCodeGroups] (Int64.ofNat cfg.codecPadId.toNat)
+    if x0.device == talkerInputs.device then x0 else x0.to talkerInputs.device
   let mut frames : Array (T #[batch, 1, cfg.numCodeGroups]) := #[]
   let mut curInputsDyn : T #[] := reshape talkerInputs #[]
   let mut curSeq : UInt64 := seq
   let mut done : Array Bool := Array.replicate batch.toNat false
   let mut lengths : Array UInt64 := Array.replicate batch.toNat maxFrames
   let mut historyCols : Array (T #[batch, 1]) := #[]
-  let defaultPadEmbed : T #[batch, 1, cfg.hiddenSize] := torch.zeros #[batch, 1, cfg.hiddenSize]
+  let defaultPadEmbed : T #[batch, 1, cfg.hiddenSize] := torch.zeros #[batch, 1, cfg.hiddenSize] false talkerInputs.device
   let padEmbed : T #[batch, 1, cfg.hiddenSize] := ttsPadEmbed.getD defaultPadEmbed
 
   for step in [:maxFrames.toNat] do
@@ -555,7 +573,11 @@ def streamCodes {batch seq : UInt64} (cfg : TalkerConfig)
           cacheDevice)
 
     -- Prefill KV cache from prompt/context so per-frame generation only runs one token step.
-    let (cosAll, sinAll) := rotary.computeFreqsPure (seq + maxFrames + 1) cfg.headDim cfg.ropeTheta
+    let (cosRaw, sinRaw) := rotary.computeFreqsPure (seq + maxFrames + 1) cfg.headDim cfg.ropeTheta
+    let cosAll : T #[seq + maxFrames + 1, cfg.headDim / 2] :=
+      if cosRaw.device == cacheDevice then cosRaw else cosRaw.to cacheDevice
+    let sinAll : T #[seq + maxFrames + 1, cfg.headDim / 2] :=
+      if sinRaw.device == cacheDevice then sinRaw else sinRaw.to cacheDevice
     let mut lastHidden : T #[batch, 1, cfg.hiddenSize] := torch.zeros #[batch, 1, cfg.hiddenSize] false cacheDevice
     let mut pos : UInt64 := 0
     while pos < seq do

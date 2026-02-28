@@ -57,8 +57,13 @@
 #include <fstream>
 #include <atomic>
 #include <cmath>
+#include <limits>
 #include <optional>
+#include <sstream>
+#include <string>
 #include <stdexcept>
+#include <unordered_set>
+#include <vector>
 #include <lean/lean.h>
 #include <torch/torch.h>
 #include <ATen/ATen.h>
@@ -2575,8 +2580,7 @@ lean_object* lean_torch_wav_finalize(
 // SafeTensors loading
 // ===========================================================================
 
-// Helper: parse a simple JSON-like header (basic implementation)
-// SafeTensors format: 8-byte header size (LE) + JSON header + tensor data
+// SafeTensors format: 8-byte header size (LE) + JSON header + tensor data.
 struct SafeTensorInfo {
   std::string dtype;
   std::vector<int64_t> shape;
@@ -2584,8 +2588,43 @@ struct SafeTensorInfo {
   int64_t data_size;
 };
 
+struct SaveTensorEntry {
+  std::string name;
+  std::string dtype_tag;
+  std::vector<int64_t> shape;
+  torch::Tensor tensor_cpu;
+  int64_t data_size = 0;
+  int64_t data_start = 0;
+  int64_t data_end = 0;
+};
+
+static std::string jsonEscape(const std::string& s) {
+  std::ostringstream out;
+  for (char c : s) {
+    switch (c) {
+      case '\"': out << "\\\""; break;
+      case '\\': out << "\\\\"; break;
+      case '\b': out << "\\b"; break;
+      case '\f': out << "\\f"; break;
+      case '\n': out << "\\n"; break;
+      case '\r': out << "\\r"; break;
+      case '\t': out << "\\t"; break;
+      default:
+        if (static_cast<unsigned char>(c) < 0x20) {
+          out << "\\u00";
+          static const char* hex = "0123456789abcdef";
+          out << hex[(c >> 4) & 0xF] << hex[c & 0xF];
+        } else {
+          out << c;
+        }
+    }
+  }
+  return out.str();
+}
+
 static torch::ScalarType parseDtype(const std::string& dtype) {
   if (dtype == "F32" || dtype == "float32") return torch::kFloat32;
+  if (dtype == "F64" || dtype == "float64") return torch::kFloat64;
   if (dtype == "F16" || dtype == "float16") return torch::kFloat16;
   if (dtype == "BF16" || dtype == "bfloat16") return torch::kBFloat16;
   if (dtype == "I64" || dtype == "int64") return torch::kInt64;
@@ -2615,6 +2654,208 @@ static size_t dtypeSize(torch::ScalarType dtype) {
     case torch::kUInt8: return 1;
     case torch::kBool: return 1;
     default: return 4;
+  }
+}
+
+static std::string dtypeToSafeTensorTag(torch::ScalarType dtype) {
+  switch (dtype) {
+    case torch::kFloat64: return "F64";
+    case torch::kFloat32: return "F32";
+    case torch::kFloat16: return "F16";
+    case torch::kBFloat16: return "BF16";
+    case torch::kFloat8_e4m3fn: return "F8_E4M3";
+    case torch::kFloat8_e5m2: return "F8_E5M2";
+    case torch::kInt64: return "I64";
+    case torch::kInt32: return "I32";
+    case torch::kInt16: return "I16";
+    case torch::kInt8: return "I8";
+    case torch::kUInt8: return "U8";
+    case torch::kBool: return "BOOL";
+    default: return "";
+  }
+}
+
+static std::optional<std::string> prepareSaveTensorEntry(
+    const std::string& name,
+    const torch::Tensor& t_in,
+    SaveTensorEntry& out
+) {
+  if (name.empty()) {
+    return std::string("SafeTensors save error: tensor name cannot be empty.");
+  }
+  auto t = t_in.detach().to(torch::kCPU).contiguous();
+  std::string dtype_tag = dtypeToSafeTensorTag(t.scalar_type());
+  if (dtype_tag.empty()) {
+    return std::string("SafeTensors save error: unsupported dtype for tensor '") + name + "'.";
+  }
+
+  out.name = name;
+  out.dtype_tag = dtype_tag;
+  out.tensor_cpu = t;
+  out.shape.clear();
+  for (int64_t i = 0; i < t.dim(); i++) {
+    out.shape.push_back(t.size(i));
+  }
+  out.data_size = static_cast<int64_t>(t.numel()) * static_cast<int64_t>(dtypeSize(t.scalar_type()));
+  out.data_start = 0;
+  out.data_end = 0;
+  return std::nullopt;
+}
+
+static std::optional<std::string> writeSafeTensorsFile(
+    const std::string& path,
+    std::vector<SaveTensorEntry>& entries,
+    const std::vector<std::pair<std::string, std::string>>& metadata
+) {
+  if (entries.empty()) {
+    return std::string("SafeTensors save error: no tensors provided.");
+  }
+
+  std::unordered_set<std::string> seen_names;
+  int64_t offset = 0;
+  for (auto& e : entries) {
+    if (!seen_names.insert(e.name).second) {
+      return std::string("SafeTensors save error: duplicate tensor name '") + e.name + "'.";
+    }
+    e.data_start = offset;
+    e.data_end = offset + e.data_size;
+    offset = e.data_end;
+  }
+
+  std::ostringstream header;
+  header << "{";
+  bool need_comma = false;
+  if (!metadata.empty()) {
+    header << "\"__metadata__\":{";
+    for (size_t i = 0; i < metadata.size(); i++) {
+      if (i > 0) header << ",";
+      header << "\"" << jsonEscape(metadata[i].first) << "\":\"" << jsonEscape(metadata[i].second) << "\"";
+    }
+    header << "}";
+    need_comma = true;
+  }
+
+  for (size_t i = 0; i < entries.size(); i++) {
+    const auto& e = entries[i];
+    if (need_comma || i > 0) header << ",";
+    header << "\"" << jsonEscape(e.name) << "\":{";
+    header << "\"dtype\":\"" << e.dtype_tag << "\",";
+    header << "\"shape\":[";
+    for (size_t j = 0; j < e.shape.size(); j++) {
+      if (j > 0) header << ",";
+      header << e.shape[j];
+    }
+    header << "],";
+    header << "\"data_offsets\":[" << e.data_start << "," << e.data_end << "]";
+    header << "}";
+    need_comma = true;
+  }
+  header << "}";
+
+  std::string header_json = header.str();
+  uint64_t header_size = static_cast<uint64_t>(header_json.size());
+
+  std::ofstream file(path, std::ios::binary | std::ios::trunc);
+  if (!file.is_open()) {
+    return std::string("Failed to open output safetensors file: ") + path;
+  }
+
+  file.write(reinterpret_cast<const char*>(&header_size), sizeof(uint64_t));
+  file.write(header_json.data(), static_cast<std::streamsize>(header_json.size()));
+  for (const auto& e : entries) {
+    file.write(
+      reinterpret_cast<const char*>(e.tensor_cpu.data_ptr()),
+      static_cast<std::streamsize>(e.data_size)
+    );
+  }
+  file.close();
+  return std::nullopt;
+}
+
+// Save a single tensor to SafeTensors file under the given tensor name.
+lean_object* lean_torch_safetensors_save(
+  lean_obj_arg /*shape*/,
+  b_lean_obj_arg path_obj,
+  b_lean_obj_arg name_obj,
+  b_lean_obj_arg tensor_obj,
+  lean_object* /*w*/
+) {
+  const char* path = lean_string_cstr(path_obj);
+  const char* tensor_name = lean_string_cstr(name_obj);
+
+  try {
+    SaveTensorEntry entry;
+    auto prep_err = prepareSaveTensorEntry(std::string(tensor_name), borrowTensor(tensor_obj), entry);
+    if (prep_err.has_value()) {
+      return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string(prep_err->c_str())));
+    }
+    std::vector<SaveTensorEntry> entries = {std::move(entry)};
+    std::vector<std::pair<std::string, std::string>> metadata;
+    auto err = writeSafeTensorsFile(std::string(path), entries, metadata);
+    if (err.has_value()) {
+      return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string(err->c_str())));
+    }
+    return lean_io_result_mk_ok(lean_box(0));
+  } catch (const std::exception& e) {
+    return lean_io_result_mk_error(lean_mk_io_user_error(
+      lean_mk_string(("SafeTensors save error: " + std::string(e.what())).c_str())));
+  }
+}
+
+// Save multiple tensors to one SafeTensors file with optional metadata.
+lean_object* lean_torch_safetensors_save_many(
+  b_lean_obj_arg path_obj,
+  b_lean_obj_arg names_obj,
+  b_lean_obj_arg tensors_obj,
+  b_lean_obj_arg meta_keys_obj,
+  b_lean_obj_arg meta_vals_obj,
+  lean_object* /*w*/
+) {
+  const char* path = lean_string_cstr(path_obj);
+  try {
+    size_t names_n = lean_array_size(names_obj);
+    size_t tensors_n = lean_array_size(tensors_obj);
+    if (names_n != tensors_n) {
+      return lean_io_result_mk_error(lean_mk_io_user_error(
+        lean_mk_string("SafeTensors save_many error: names and tensors length mismatch.")));
+    }
+
+    std::vector<SaveTensorEntry> entries;
+    entries.reserve(names_n);
+    for (size_t i = 0; i < names_n; i++) {
+      lean_object* name_obj = lean_array_get_core(names_obj, i);
+      lean_object* tensor_obj = lean_array_get_core(tensors_obj, i);
+      const char* name_c = lean_string_cstr(name_obj);
+      SaveTensorEntry entry;
+      auto prep_err = prepareSaveTensorEntry(std::string(name_c), borrowTensor(tensor_obj), entry);
+      if (prep_err.has_value()) {
+        return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string(prep_err->c_str())));
+      }
+      entries.push_back(std::move(entry));
+    }
+
+    size_t meta_k_n = lean_array_size(meta_keys_obj);
+    size_t meta_v_n = lean_array_size(meta_vals_obj);
+    if (meta_k_n != meta_v_n) {
+      return lean_io_result_mk_error(lean_mk_io_user_error(
+        lean_mk_string("SafeTensors save_many error: metadata keys/values length mismatch.")));
+    }
+    std::vector<std::pair<std::string, std::string>> metadata;
+    metadata.reserve(meta_k_n);
+    for (size_t i = 0; i < meta_k_n; i++) {
+      const char* k = lean_string_cstr(lean_array_get_core(meta_keys_obj, i));
+      const char* v = lean_string_cstr(lean_array_get_core(meta_vals_obj, i));
+      metadata.emplace_back(std::string(k), std::string(v));
+    }
+
+    auto err = writeSafeTensorsFile(std::string(path), entries, metadata);
+    if (err.has_value()) {
+      return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string(err->c_str())));
+    }
+    return lean_io_result_mk_ok(lean_box(0));
+  } catch (const std::exception& e) {
+    return lean_io_result_mk_error(lean_mk_io_user_error(
+      lean_mk_string(("SafeTensors save_many error: " + std::string(e.what())).c_str())));
   }
 }
 
@@ -2961,8 +3202,12 @@ lean_object* lean_torch_softcap(lean_obj_arg /*s*/, b_lean_obj_arg input, double
 }
 
 // Shared implementation for computing rotary embedding frequencies
-static lean_object* compute_rotary_freqs_impl(uint64_t seq_len, uint64_t head_dim, double base) {
-  auto device = torch::kCPU;
+static lean_object* compute_rotary_freqs_impl(
+  uint64_t seq_len,
+  uint64_t head_dim,
+  double base,
+  const torch::Device& device
+) {
 
   // inv_freq = 1.0 / (base ** (arange(0, head_dim, 2) / head_dim))
   auto channel_range = torch::arange(0, static_cast<int64_t>(head_dim), 2,
@@ -2993,7 +3238,9 @@ lean_object* lean_torch_compute_rotary_freqs(
   double base,
   lean_object* w
 ) {
-  return lean_io_result_mk_ok(compute_rotary_freqs_impl(seq_len, head_dim, base));
+  return lean_io_result_mk_ok(
+    compute_rotary_freqs_impl(seq_len, head_dim, base, torch::Device(torch::kCPU))
+  );
 }
 
 // Precompute rotary embedding frequencies (pure version)
@@ -3003,7 +3250,34 @@ lean_object* lean_torch_compute_rotary_freqs_pure(
   uint64_t head_dim,
   double base
 ) {
-  return compute_rotary_freqs_impl(seq_len, head_dim, base);
+  return compute_rotary_freqs_impl(seq_len, head_dim, base, torch::Device(torch::kCPU));
+}
+
+// Precompute rotary embedding frequencies on a target device (IO version)
+// Returns (cos, sin) tensors of shape [seq_len, head_dim/2]
+lean_object* lean_torch_compute_rotary_freqs_on_device(
+  uint64_t seq_len,
+  uint64_t head_dim,
+  double base,
+  lean_obj_arg device,
+  lean_object* /*w*/
+) {
+  auto device_ = getDevice(device);
+  lean_dec(device);
+  return lean_io_result_mk_ok(compute_rotary_freqs_impl(seq_len, head_dim, base, device_));
+}
+
+// Precompute rotary embedding frequencies on a target device (pure version)
+// Returns (cos, sin) tensors of shape [seq_len, head_dim/2]
+lean_object* lean_torch_compute_rotary_freqs_on_device_pure(
+  uint64_t seq_len,
+  uint64_t head_dim,
+  double base,
+  lean_obj_arg device
+) {
+  auto device_ = getDevice(device);
+  lean_dec(device);
+  return compute_rotary_freqs_impl(seq_len, head_dim, base, device_);
 }
 
 // Apply rotary embeddings to Q or K
@@ -3021,6 +3295,12 @@ lean_object* lean_torch_apply_rotary_emb(
   auto x_ = borrowTensor(x);
   auto cos_ = borrowTensor(cos);
   auto sin_ = borrowTensor(sin);
+  if (cos_.device() != x_.device()) {
+    cos_ = cos_.to(x_.device());
+  }
+  if (sin_.device() != x_.device()) {
+    sin_ = sin_.to(x_.device());
+  }
 
   int64_t d = x_.size(3) / 2;
   auto x1 = x_.slice(3, 0, d);

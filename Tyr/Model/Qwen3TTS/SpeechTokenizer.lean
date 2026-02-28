@@ -14,6 +14,7 @@
   (16 quantizers, 1024 latent dim, 2x convnext upsample, 4 decoder blocks).
 -/
 import Tyr.Torch
+import Tyr.TensorStruct
 import Tyr.Module.RMSNorm
 import Tyr.Model.Qwen.RoPE
 import Lean.Data.Json
@@ -198,10 +199,12 @@ private def clampMin1d {n : UInt64} (x : T #[n]) (minVal : Float) : T #[n] :=
 structure QuantizerCodebook where
   clusterUsage : T #[2048]
   embeddingSum : T #[2048, 256]
+  deriving TensorStruct
 
 structure RVQDecode where
   outputProj : T #[512, 256, 1]
   codebooks : Array QuantizerCodebook
+  deriving TensorStruct
 
 structure DecoderTransformerLayer where
   inputLayernormWeight : T #[512]
@@ -215,6 +218,7 @@ structure DecoderTransformerLayer where
   upProj : T #[1024, 512]
   downProj : T #[512, 1024]
   mlpLayerScale : T #[512]
+  deriving TensorStruct
 
 structure UpsampleConvNeXtBlock where
   dwconvWeight : T #[1024, 1, 7]
@@ -226,11 +230,13 @@ structure UpsampleConvNeXtBlock where
   pwconv2Weight : T #[1024, 4096]
   pwconv2Bias : T #[1024]
   gamma : T #[1024]
+  deriving TensorStruct
 
 structure UpsampleStage where
   transConvWeight : T #[1024, 1024, 2]
   transConvBias : T #[1024]
   convNeXt : UpsampleConvNeXtBlock
+  deriving TensorStruct
 
 structure DecoderResidualUnit (dim : UInt64) where
   conv1Dilation : UInt64 := 1
@@ -242,6 +248,7 @@ structure DecoderResidualUnit (dim : UInt64) where
   act2Beta : T #[dim]
   conv2Weight : T #[dim, dim, 1]
   conv2Bias : T #[dim]
+  deriving TensorStruct
 
 structure DecoderBlock (inDim outDim upRate : UInt64) where
   snakeAlpha : T #[inDim]
@@ -251,6 +258,7 @@ structure DecoderBlock (inDim outDim upRate : UInt64) where
   res1 : DecoderResidualUnit outDim
   res2 : DecoderResidualUnit outDim
   res3 : DecoderResidualUnit outDim
+  deriving TensorStruct
 
 structure SpeechTokenizer12HzDecoder where
   rvqFirst : RVQDecode
@@ -284,6 +292,7 @@ structure SpeechTokenizer12HzDecoder where
 
   outputSampleRate : UInt64 := 24000
   decodeUpsampleRate : UInt64 := 1920
+  deriving TensorStruct
 
 namespace SpeechTokenizer12HzDecoder
 
@@ -394,7 +403,7 @@ private def loadDecoderBlock
   pure { snakeAlpha, snakeBeta, transWeight, transBias, res1, res2, res3 }
 
 /-- Load decoder weights from `speech_tokenizer` directory. -/
-def loadFromDir (speechTokenizerDir : String) : IO SpeechTokenizer12HzDecoder := do
+def loadFromDir (speechTokenizerDir : String) (device : Device := Device.CPU) : IO SpeechTokenizer12HzDecoder := do
   let cfg ← SpeechTokenizer12HzConfig.loadFromFile s!"{speechTokenizerDir}/config.json"
   SpeechTokenizer12HzConfig.validateSupported cfg
 
@@ -434,7 +443,7 @@ def loadFromDir (speechTokenizerDir : String) : IO SpeechTokenizer12HzDecoder :=
   let finalConvWeight ← loadFrozen weightsPath "decoder.decoder.6.conv.weight" #[1, 96, 7]
   let finalConvBias ← loadFrozen weightsPath "decoder.decoder.6.conv.bias" #[1]
 
-  pure {
+  let dec : SpeechTokenizer12HzDecoder := {
     rvqFirst
     rvqRest
     preConvWeight
@@ -460,6 +469,7 @@ def loadFromDir (speechTokenizerDir : String) : IO SpeechTokenizer12HzDecoder :=
     outputSampleRate := cfg.outputSampleRate
     decodeUpsampleRate := cfg.decodeUpsampleRate
   }
+  pure (TensorStruct.map (fun t => t.to device) dec)
 
 private def decodeCodebook {batch frames : UInt64}
     (cb : QuantizerCodebook)
@@ -476,7 +486,7 @@ private def decodeRVQSlice {batch groups frames : UInt64}
     (start : UInt64)
     : T #[batch, 512, frames] :=
   Id.run do
-    let mut quantized : T #[batch, 256, frames] := torch.zeros #[batch, 256, frames]
+    let mut quantized : T #[batch, 256, frames] := torch.zeros #[batch, 256, frames] false codes.device
     let mut off : UInt64 := 0
     for cb in rvq.codebooks do
       let idx := start + off
@@ -503,7 +513,7 @@ private def causalConv1d {batch inC outC frames kernel : UInt64}
     (dilation : UInt64 := 1)
     : T #[batch, outC, frames] :=
   let leftPad : UInt64 := dilation * (kernel - 1)
-  let left : T #[batch, inC, leftPad] := torch.zeros #[batch, inC, leftPad]
+  let left : T #[batch, inC, leftPad] := torch.zeros #[batch, inC, leftPad] false x.device
   let xPad : T #[batch, inC, frames + leftPad] := nn.cat left x 2
   let y0 : T #[batch, outC, frames] := reshape (nn.conv1d xPad weight 1 0 dilation) #[batch, outC, frames]
   addBias3d y0 bias
@@ -513,7 +523,7 @@ private def causalDepthwiseConv1d {batch channels frames : UInt64}
     (weight : T #[channels, 1, 7])
     (bias : T #[channels])
     : T #[batch, channels, frames] :=
-  let left : T #[batch, channels, 6] := torch.zeros #[batch, channels, 6]
+  let left : T #[batch, channels, 6] := torch.zeros #[batch, channels, 6] false x.device
   let xPad : T #[batch, channels, frames + 6] := nn.cat left x 2
   let y : T #[batch, channels, frames] :=
     reshape (nn.conv1d_group_bias xPad weight bias 1 0 1 channels) #[batch, channels, frames]
@@ -539,9 +549,9 @@ private def snakeBeta {batch channels frames : UInt64}
     nn.expand (reshape (nn.exp beta) #[1, channels, 1]) #[batch, channels, frames]
   let sin2 : T #[batch, channels, frames] :=
     nn.pow (nn.sin (x * alphaE)) 2.0
-  let eps : T #[batch, channels, frames] := torch.full #[batch, channels, frames] 0.000000001
+  let eps : T #[batch, channels, frames] := torch.full #[batch, channels, frames] 0.000000001 false x.device
   let denom := betaE + eps
-  let invDenom : T #[batch, channels, frames] := nn.div (torch.ones #[batch, channels, frames]) denom
+  let invDenom : T #[batch, channels, frames] := nn.div (torch.ones #[batch, channels, frames] false x.device) denom
   x + invDenom * sin2
 
 private def forwardConvNeXt {batch frames : UInt64}
@@ -609,7 +619,9 @@ private def forwardPreTransformer {batch frames : UInt64}
   Id.run do
     let x0 : T #[batch, frames, 1024] := reshape (nn.transpose x 1 2) #[batch, frames, 1024]
     let mut h : T #[batch, frames, 512] := affine3d x0 m.preTransformerInputProj m.preTransformerInputBias
-    let (cos, sin) := rotary.computeFreqsPure frames 64 10000.0
+    let (cos0, sin0) := rotary.computeFreqsPure frames 64 10000.0
+    let cos : T #[frames, 32] := if cos0.device == h.device then cos0 else cos0.to h.device
+    let sin : T #[frames, 32] := if sin0.device == h.device then sin0 else sin0.to h.device
     for layer in m.preTransformerLayers do
       h := forwardTransformerLayer layer h cos sin
     let norm : RMSNorm 512 := { weight := m.preTransformerNormWeight, eps := ⟨1e-5⟩ }
@@ -685,7 +697,7 @@ def decodeChunked {batch frames : UInt64}
     (leftContextSize : UInt64 := 25)
     : T #[batch, 1, frames * 1920] :=
   if frames == 0 then
-    reshape (torch.zeros #[batch, 1, 0]) #[batch, 1, frames * 1920]
+    reshape (torch.zeros #[batch, 1, 0] false codes.device) #[batch, 1, frames * 1920]
   else
     Id.run do
       let mut start : UInt64 := 0
@@ -705,6 +717,97 @@ def decodeChunked {batch frames : UInt64}
         start := start + curChunk
       let wavDyn : T #[] := nn.cat_dyn chunks 2
       reshape wavDyn #[batch, 1, frames * 1920]
+
+/-- Streaming decoder state for incremental 12Hz codec-frame ingestion. -/
+structure DecodeStreamState (batch : UInt64) where
+  codesDyn : T #[]
+  totalFrames : UInt64 := 0
+  emittedFrames : UInt64 := 0
+  chunkSize : UInt64 := 1
+  leftContextSize : UInt64 := 25
+
+/-- Initialize an empty incremental decoder state. -/
+def initDecodeStreamState {batch : UInt64}
+    (chunkSize : UInt64 := 1)
+    (leftContextSize : UInt64 := 25)
+    (device : Device := Device.CPU)
+    : DecodeStreamState batch :=
+  let emptyCodes0 : T #[batch, 16, 0] := torch.full_int #[batch, 16, 0] 0
+  let emptyCodes : T #[batch, 16, 0] := if emptyCodes0.device == device then emptyCodes0 else emptyCodes0.to device
+  {
+    codesDyn := nn.eraseShape emptyCodes
+    totalFrames := 0
+    emittedFrames := 0
+    chunkSize := if chunkSize == 0 then 1 else chunkSize
+    leftContextSize
+  }
+
+private def decodeOneStreamingChunk {batch : UInt64}
+    (m : SpeechTokenizer12HzDecoder)
+    (st : DecodeStreamState batch)
+    (force : Bool := false)
+    : DecodeStreamState batch × Option (T #[]) :=
+  let remaining := st.totalFrames - st.emittedFrames
+  if remaining == 0 then
+    (st, none)
+  else if !force && remaining < st.chunkSize then
+    (st, none)
+  else
+    let curChunk := if remaining < st.chunkSize then remaining else st.chunkSize
+    let start := st.emittedFrames
+    let context := if start < st.leftContextSize then start else st.leftContextSize
+    let chunkStart := start - context
+    let chunkFrames := context + curChunk
+    let allCodes : T #[batch, 16, st.totalFrames] := reshape st.codesDyn #[batch, 16, st.totalFrames]
+    let codesChunk : T #[batch, 16, chunkFrames] := data.slice allCodes 2 chunkStart chunkFrames
+    let wavChunk : T #[batch, 1, chunkFrames * 1920] := decode m codesChunk
+    let keepStart : UInt64 := context * 1920
+    let keepSamples : UInt64 := curChunk * 1920
+    let wavKeep : T #[batch, 1, keepSamples] := data.slice wavChunk 2 keepStart keepSamples
+    let st' := { st with emittedFrames := st.emittedFrames + curChunk }
+    (st', some (nn.eraseShape wavKeep))
+
+/-- Push new codec frames into decoder state and emit all ready waveform chunks.
+    `newCodes` has shape `[batch, 16, newFrames]`. -/
+def pushDecodeStream {batch newFrames : UInt64}
+    (m : SpeechTokenizer12HzDecoder)
+    (st : DecodeStreamState batch)
+    (newCodes : T #[batch, 16, newFrames])
+    : DecodeStreamState batch × Array (T #[]) :=
+  Id.run do
+    let curCodes : T #[batch, 16, st.totalFrames] := reshape st.codesDyn #[batch, 16, st.totalFrames]
+    let allCodes : T #[batch, 16, st.totalFrames + newFrames] := nn.cat curCodes newCodes 2
+    let mut st : DecodeStreamState batch := {
+      st with
+      codesDyn := nn.eraseShape allCodes
+      totalFrames := st.totalFrames + newFrames
+    }
+    let mut out : Array (T #[]) := #[]
+    let mut done := false
+    while !done do
+      let (stNext, chunk?) := decodeOneStreamingChunk m st false
+      st := stNext
+      match chunk? with
+      | some chunk => out := out.push chunk
+      | none => done := true
+    (st, out)
+
+/-- Flush remaining pending frames from a decode stream. -/
+def flushDecodeStream {batch : UInt64}
+    (m : SpeechTokenizer12HzDecoder)
+    (st : DecodeStreamState batch)
+    : DecodeStreamState batch × Array (T #[]) :=
+  Id.run do
+    let mut st := st
+    let mut out : Array (T #[]) := #[]
+    let mut done := false
+    while !done do
+      let (stNext, chunk?) := decodeOneStreamingChunk m st true
+      st := stNext
+      match chunk? with
+      | some chunk => out := out.push chunk
+      | none => done := true
+    (st, out)
 
 /-- Convenience decode for frame-major codec tensor `[frames, 16]`. -/
 def decodeFrameMajor {frames : UInt64}

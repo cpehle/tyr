@@ -44,12 +44,14 @@ structure Args where
   deviceMap : Option String := none
   speakerEmbeddingPath : Option String := none
   refAudioPath : Option String := none
-  speakerMelPath : String := "output/qwen3tts_ref_mel.safetensors"
-  speakerMelFramesPath : String := "output/qwen3tts_ref_mel.frames"
+  speakerMelPath : String := ""
+  speakerMelFramesPath : String := ""
   qwenRepo : String := "../Qwen3-TTS"
   speechTokenizerDir : Option String := none
   decodeViaPython : Bool := false
   streamingDecode : Bool := false
+  trueStreaming : Bool := false
+  streamChunkFrames : Nat := 4
   decodeChunkSize : Nat := 300
   decodeLeftContext : Nat := 25
   tokenIdsPath : String := "output/qwen3tts_text_ids.txt"
@@ -117,6 +119,10 @@ private partial def parseArgsLoop : List String → Args → Args
       parseArgsLoop rest { acc with decodeViaPython := true }
   | "--streaming-decode" :: rest, acc =>
       parseArgsLoop rest { acc with streamingDecode := true }
+  | "--true-streaming" :: rest, acc =>
+      parseArgsLoop rest { acc with trueStreaming := true }
+  | "--stream-chunk-frames" :: v :: rest, acc =>
+      parseArgsLoop rest { acc with streamChunkFrames := v.toNat?.getD acc.streamChunkFrames }
   | "--decode-chunk-size" :: v :: rest, acc =>
       parseArgsLoop rest { acc with decodeChunkSize := v.toNat?.getD acc.decodeChunkSize }
   | "--decode-left-context" :: v :: rest, acc =>
@@ -159,13 +165,15 @@ private def printUsage : IO Unit := do
   IO.println "  --device-map <v>              Optional HF device_map for speech tokenizer bridge"
   IO.println "  --speaker-embedding-path <p>  Optional speaker embedding tensor path ([enc_dim])"
   IO.println "  --ref-audio-path <path>       Optional reference audio to derive speaker embedding"
-  IO.println "  --speaker-mel-path <path>     Intermediate speaker mel safetensors path for --ref-audio-path"
-  IO.println "  --speaker-mel-frames-path <p> Intermediate mel frame-count file for --ref-audio-path"
+  IO.println "  --speaker-mel-path <path>     Optional debug dump: intermediate speaker mel safetensors"
+  IO.println "  --speaker-mel-frames-path <p> Optional debug dump: intermediate mel frame-count file"
   IO.println "  --token-ids-path <path>       Output token IDs file from Lean tokenizer"
   IO.println "  --qwen-repo <path>            Local Qwen3-TTS repo path (fallback import)"
   IO.println "  --speech-tokenizer-dir <path> Speech tokenizer dir (default: <model-dir>/speech_tokenizer)"
   IO.println "  --decode-via-python           Use legacy Python decode bridge instead of Lean decoder"
   IO.println "  --streaming-decode            Use chunked Lean decoder for streaming/long-form decode"
+  IO.println "  --true-streaming              Online frame-by-frame generation + incremental Lean decode"
+  IO.println "  --stream-chunk-frames <n>     Frame chunk size emitted by true streaming decoder (default: 4)"
   IO.println "  --decode-chunk-size <n>       Codec-frame chunk size for --streaming-decode (default: 300)"
   IO.println "  --decode-left-context <n>     Left context codec frames for chunked decode (default: 25)"
   IO.println "  --help                        Show this help"
@@ -197,6 +205,12 @@ private def formatCodesRows (flat : Array UInt64) (numCodeGroups : UInt64) : Str
         out := out ++ " "
       out := out ++ toString (flat[r * g + c]!)
     out := out ++ "\n"
+  out
+
+private def formatCodesMatrix (rows : Array (Array UInt64)) : String := Id.run do
+  let mut out := ""
+  for row in rows do
+    out := out ++ String.intercalate " " (row.toList.map toString) ++ "\n"
   out
 
 private def lowerAsciiString (s : String) : String :=
@@ -330,6 +344,16 @@ private def buildBridgeConfig (args : Args) : SpeechTokenizerBridgeConfig := {
   deviceMap := args.deviceMap
 }
 
+private def resolveRuntimeDevice : IO Device := do
+  let requested := (← IO.getEnv "TYR_DEVICE").map String.toLower
+  match requested with
+  | some "cpu" => pure Device.CPU
+  | some "cuda" => pure (Device.CUDA 0)
+  | some "mps" => pure Device.MPS
+  | some "auto" => getBestDevice
+  | some _ => getBestDevice
+  | none => getBestDevice
+
 def runEndToEnd (args : Args) : IO Unit := do
   let modelDir ← expandHome args.modelDir
   let codesPath ← expandHome args.codesPath
@@ -338,12 +362,22 @@ def runEndToEnd (args : Args) : IO Unit := do
   let tokenIdsPath ← expandHome args.tokenIdsPath
   let speakerMelPath ← expandHome args.speakerMelPath
   let speakerMelFramesPath ← expandHome args.speakerMelFramesPath
-  let bridgeCfg := buildBridgeConfig args
+  let targetDevice ← resolveRuntimeDevice
+  let bridgeCfgBase := buildBridgeConfig args
+  let bridgeCfg : SpeechTokenizerBridgeConfig :=
+    match bridgeCfgBase.deviceMap with
+    | some _ => bridgeCfgBase
+    | none =>
+        match targetDevice with
+        | Device.MPS => { bridgeCfgBase with deviceMap := some "mps" }
+        | Device.CUDA _ => { bridgeCfgBase with deviceMap := some "cuda" }
+        | _ => bridgeCfgBase
 
   IO.println "=== Qwen3-TTS End-to-End (Lean) ==="
   IO.println s!"Model dir: {modelDir}"
   IO.println s!"Prompt: {args.text}"
   IO.println s!"Language: {args.language}"
+  IO.println s!"Target device: {repr targetDevice}"
 
   -- Load runtime config from HF config.json so tensor shapes match real checkpoints.
   let cfg ← Qwen3TTSConfig.loadFromPretrainedDir modelDir
@@ -352,7 +386,7 @@ def runEndToEnd (args : Args) : IO Unit := do
   match args.encodeAudioPath with
   | some audioPath =>
       let audioPath ← expandHome audioPath
-      encodeAudioToCodes bridgeCfg modelDir audioPath encodeOutCodesPath
+      encodeAudioToCodes bridgeCfg modelDir audioPath encodeOutCodesPath targetDevice
       IO.println s!"Saved encoded audio codec IDs to {encodeOutCodesPath}"
       if args.encodeOnly then
         IO.println "Skipping TTS generation (--encode-only enabled)."
@@ -361,7 +395,7 @@ def runEndToEnd (args : Args) : IO Unit := do
       if args.encodeOnly then
         throw <| IO.userError "--encode-only requires --encode-audio-path"
 
-  let model ← Qwen3TTSForConditionalGeneration.loadSharded modelDir cfg
+  let model ← Qwen3TTSForConditionalGeneration.loadSharded modelDir cfg targetDevice
 
   let tok ← tokenizer.qwen3.loadTokenizer modelDir
   let assistantText := tokenizer.qwen3.ttsAssistantText args.text
@@ -405,54 +439,133 @@ def runEndToEnd (args : Args) : IO Unit := do
   IO.println s!"Built conditioned talker inputs, seq={talkerSeq}"
 
   let maxFrames : UInt64 := args.maxFrames.toUInt64
-  let out ← TalkerForConditionalGeneration.generateCodesWithLengths
-    cfg.talkerConfig model.talker talkerInputs maxFrames
-    2
-    args.temperature args.topK.toUInt64 args.topP
-    args.subtalkerTemperature args.subtalkerTopK.toUInt64 args.subtalkerTopP
-    args.repetitionPenalty args.suppressTail.toUInt64
-    (some ⟨1, ttsPadEmbed⟩) (some ttsPadEmbed)
-  let codeLen := out.lengths.getD 0 maxFrames
-
-  let codes3 : T #[1, maxFrames, cfg.talkerConfig.numCodeGroups] := data.slice out.codes 0 0 1
-  let codes2 : T #[maxFrames, cfg.talkerConfig.numCodeGroups] :=
-    reshape codes3 #[maxFrames, cfg.talkerConfig.numCodeGroups]
-  let trimmed : T #[codeLen, cfg.talkerConfig.numCodeGroups] := data.slice codes2 0 0 codeLen
-  let flat : T #[codeLen * cfg.talkerConfig.numCodeGroups] :=
-    reshape trimmed #[codeLen * cfg.talkerConfig.numCodeGroups]
-  let codeVals ← data.tensorToUInt64Array flat
-
-  ensureParentDir codesPath
-  let codesText := formatCodesRows codeVals cfg.talkerConfig.numCodeGroups
-  IO.FS.writeFile codesPath codesText
-  IO.println s!"Generated {codeLen} codec frames."
-  IO.println s!"Saved codec codes to {codesPath}"
-
-  if args.skipDecode then
-    IO.println "Skipping waveform decode (--skip-decode enabled)."
-  else
-    ensureParentDir wavPath
+  if args.trueStreaming then
     if args.decodeViaPython then
-      decodeCodesToWav bridgeCfg modelDir cfg.talkerConfig codesPath wavPath
-      IO.println s!"Saved waveform to {wavPath} (Python decode bridge)"
-    else
-      if cfg.talkerConfig.numCodeGroups != 16 then
-        throw <| IO.userError
-          s!"Lean speech-tokenizer decoder currently supports 16 code groups, got {cfg.talkerConfig.numCodeGroups}. Use --decode-via-python."
-      let speechTokenizerDir ←
-        match args.speechTokenizerDir with
-        | some d => expandHome d
-        | none => pure s!"{modelDir}/speech_tokenizer"
-      IO.println s!"Loading Lean speech-tokenizer decoder from {speechTokenizerDir}..."
-      let speechDecoder ← SpeechTokenizer12HzDecoder.loadFromDir speechTokenizerDir
-      let trimmed16 : T #[codeLen, 16] := reshape trimmed #[codeLen, 16]
-      if args.streamingDecode then
-        speechDecoder.decodeFrameMajorChunkedToWav
-          trimmed16 wavPath args.decodeChunkSize.toUInt64 args.decodeLeftContext.toUInt64
-        IO.println s!"Saved waveform to {wavPath} (Lean decoder, chunked streaming)"
+      throw <| IO.userError "--true-streaming currently requires Lean decode (remove --decode-via-python)."
+    if cfg.talkerConfig.numCodeGroups != 16 then
+      throw <| IO.userError
+        s!"true streaming currently supports 16 code groups, got {cfg.talkerConfig.numCodeGroups}."
+
+    ensureParentDir codesPath
+    let speechDecoder? ←
+      if args.skipDecode then
+        pure none
       else
-        speechDecoder.decodeFrameMajorToWav trimmed16 wavPath
-        IO.println s!"Saved waveform to {wavPath} (Lean decoder)"
+        let speechTokenizerDir ←
+          match args.speechTokenizerDir with
+          | some d => expandHome d
+          | none => pure s!"{modelDir}/speech_tokenizer"
+        IO.println s!"Loading Lean speech-tokenizer decoder from {speechTokenizerDir}..."
+        let dec ← SpeechTokenizer12HzDecoder.loadFromDir speechTokenizerDir targetDevice
+        ensureParentDir wavPath
+        data.wavBegin wavPath dec.outputSampleRate
+        pure (some dec)
+
+    let codeRowsRef ← IO.mkRef (#[] : Array (Array UInt64))
+    let decodeStateRef ←
+      match speechDecoder? with
+      | some _ =>
+          let st : SpeechTokenizer12HzDecoder.DecodeStreamState 1 :=
+            SpeechTokenizer12HzDecoder.initDecodeStreamState
+              args.streamChunkFrames.toUInt64 args.decodeLeftContext.toUInt64 targetDevice
+          IO.mkRef (some st : Option (SpeechTokenizer12HzDecoder.DecodeStreamState 1))
+      | none =>
+          IO.mkRef (none : Option (SpeechTokenizer12HzDecoder.DecodeStreamState 1))
+
+    let onFrame : UInt64 → T #[1, cfg.talkerConfig.numCodeGroups] → IO Unit := fun _ frame => do
+      let frameRow : T #[cfg.talkerConfig.numCodeGroups] := reshape frame #[cfg.talkerConfig.numCodeGroups]
+      let rowVals ← data.tensorToUInt64Array frameRow
+      let firstTok := rowVals.getD 0 cfg.talkerConfig.codecEosTokenId
+      if firstTok != cfg.talkerConfig.codecEosTokenId then
+        codeRowsRef.modify (fun rows => rows.push rowVals)
+        match speechDecoder? with
+        | some dec =>
+            match (← decodeStateRef.get) with
+            | some st =>
+                let frame3 : T #[1, 16, 1] := reshape frame #[1, 16, 1]
+                let (st', chunks) := dec.pushDecodeStream st frame3
+                decodeStateRef.set (some st')
+                for chunk in chunks do
+                  data.wavAppend chunk wavPath
+            | none => pure ()
+        | none => pure ()
+
+    let _lengths ← TalkerForConditionalGeneration.streamCodes
+      cfg.talkerConfig model.talker talkerInputs onFrame maxFrames
+      2
+      args.temperature args.topK.toUInt64 args.topP
+      args.subtalkerTemperature args.subtalkerTopK.toUInt64 args.subtalkerTopP
+      args.repetitionPenalty args.suppressTail.toUInt64
+      (some ⟨1, ttsPadEmbed⟩) (some ttsPadEmbed)
+
+    match speechDecoder? with
+    | some dec =>
+        match (← decodeStateRef.get) with
+        | some st =>
+            let (_stFinal, chunks) := dec.flushDecodeStream st
+            for chunk in chunks do
+              data.wavAppend chunk wavPath
+            data.wavFinalize wavPath
+            IO.println s!"Saved waveform to {wavPath} (Lean true streaming decode)"
+        | none => pure ()
+    | none =>
+        IO.println "Skipping waveform decode (--skip-decode enabled)."
+
+    let rows ← codeRowsRef.get
+    let codeLen := rows.size.toUInt64
+    let codesText := formatCodesMatrix rows
+    IO.FS.writeFile codesPath codesText
+    IO.println s!"Generated {codeLen} codec frames."
+    IO.println s!"Saved codec codes to {codesPath}"
+  else
+    let out ← TalkerForConditionalGeneration.generateCodesWithLengths
+      cfg.talkerConfig model.talker talkerInputs maxFrames
+      2
+      args.temperature args.topK.toUInt64 args.topP
+      args.subtalkerTemperature args.subtalkerTopK.toUInt64 args.subtalkerTopP
+      args.repetitionPenalty args.suppressTail.toUInt64
+      (some ⟨1, ttsPadEmbed⟩) (some ttsPadEmbed)
+    let codeLen := out.lengths.getD 0 maxFrames
+
+    let codes3 : T #[1, maxFrames, cfg.talkerConfig.numCodeGroups] := data.slice out.codes 0 0 1
+    let codes2 : T #[maxFrames, cfg.talkerConfig.numCodeGroups] :=
+      reshape codes3 #[maxFrames, cfg.talkerConfig.numCodeGroups]
+    let trimmed : T #[codeLen, cfg.talkerConfig.numCodeGroups] := data.slice codes2 0 0 codeLen
+    let flat : T #[codeLen * cfg.talkerConfig.numCodeGroups] :=
+      reshape trimmed #[codeLen * cfg.talkerConfig.numCodeGroups]
+    let codeVals ← data.tensorToUInt64Array flat
+
+    ensureParentDir codesPath
+    let codesText := formatCodesRows codeVals cfg.talkerConfig.numCodeGroups
+    IO.FS.writeFile codesPath codesText
+    IO.println s!"Generated {codeLen} codec frames."
+    IO.println s!"Saved codec codes to {codesPath}"
+
+    if args.skipDecode then
+      IO.println "Skipping waveform decode (--skip-decode enabled)."
+    else
+      ensureParentDir wavPath
+      if args.decodeViaPython then
+        decodeCodesToWav bridgeCfg modelDir cfg.talkerConfig codesPath wavPath
+        IO.println s!"Saved waveform to {wavPath} (Python decode bridge)"
+      else
+        if cfg.talkerConfig.numCodeGroups != 16 then
+          throw <| IO.userError
+            s!"Lean speech-tokenizer decoder currently supports 16 code groups, got {cfg.talkerConfig.numCodeGroups}. Use --decode-via-python."
+        let speechTokenizerDir ←
+          match args.speechTokenizerDir with
+          | some d => expandHome d
+          | none => pure s!"{modelDir}/speech_tokenizer"
+        IO.println s!"Loading Lean speech-tokenizer decoder from {speechTokenizerDir}..."
+        let speechDecoder ← SpeechTokenizer12HzDecoder.loadFromDir speechTokenizerDir targetDevice
+        let trimmed16 : T #[codeLen, 16] := reshape trimmed #[codeLen, 16]
+        if args.streamingDecode then
+          speechDecoder.decodeFrameMajorChunkedToWav
+            trimmed16 wavPath args.decodeChunkSize.toUInt64 args.decodeLeftContext.toUInt64
+          IO.println s!"Saved waveform to {wavPath} (Lean decoder, chunked streaming)"
+        else
+          speechDecoder.decodeFrameMajorToWav trimmed16 wavPath
+          IO.println s!"Saved waveform to {wavPath} (Lean decoder)"
 
 def _root_.main (rawArgs : List String) : IO UInt32 := do
   let args := parseArgs rawArgs
