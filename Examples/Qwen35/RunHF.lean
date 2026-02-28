@@ -48,7 +48,7 @@ private def printHelp : IO Unit := do
   IO.println "  --batch-size <n>             Prompts per decode batch (default: 1)"
   IO.println "  --max-new-tokens <n>         Number of tokens to generate"
   IO.println "  --stream                     Stream generated tokens per decode step"
-  IO.println "  --multimodal                 Load Qwen35ForConditionalGeneration"
+  IO.println "  --multimodal                 Force multimodal model load (auto-enabled by --image/--video)"
   IO.println "Examples:"
   IO.println "  lake exe Qwen35RunHF --source tiny-random/qwen3.5 --stream"
   IO.println "  lake exe Qwen35RunHF --source Qwen/Qwen3.5-4B --prompt \"Write one sentence about Lean.\""
@@ -312,6 +312,10 @@ private def runMultimodalBatches
 
 def runMain (argv : List String) : IO UInt32 := do
   let args ← parseArgs argv
+  let hasMedia := args.imagePath.isSome || args.videoPath.isSome
+  let useMultimodal := args.multimodal || hasMedia
+  if hasMedia && !args.multimodal then
+    IO.println "Info: enabling multimodal mode because --image/--video was provided."
   let modelDir ← hub.resolvePretrainedDir args.source {
     revision := args.revision
     cacheDir := args.cacheDir
@@ -322,7 +326,7 @@ def runMain (argv : List String) : IO UInt32 := do
   let tok ← tokenizer.qwen3.loadTokenizer modelDir
   let prompts ← loadPrompts args
 
-  if args.multimodal then
+  if useMultimodal then
     let cfg ← VLConfig.loadFromPretrainedDir modelDir {}
     let isSharded ← hub.detectWeightLayout modelDir
     let model ←

@@ -129,12 +129,13 @@ lake exe Qwen35RunHF --source tiny-random/qwen3.5 --prompt "Hello from Lean."
 # Official Qwen repo (large; requires enough VRAM/RAM)
 lake exe Qwen35RunHF --source Qwen/Qwen3.5-4B --prompt "Summarize dependent types."
 
-# Multimodal with Apple system media path (ImageIO/AVFoundation)
-lake exe Qwen35RunHF --source Qwen/Qwen3.5-4B --multimodal \
+# Multimodal with Apple system media path (ImageIO/AVFoundation).
+# Passing --image/--video auto-enables multimodal mode.
+lake exe Qwen35RunHF --source Qwen/Qwen3.5-4B \
   --image input.jpg --prompt "Describe this image."
 
 # Multimodal video with temporal downsampling
-lake exe Qwen35RunHF --source Qwen/Qwen3.5-4B --multimodal \
+lake exe Qwen35RunHF --source Qwen/Qwen3.5-4B \
   --video clip.mp4 --video-max-frames 64 --video-frame-stride 4 \
   --prompt "Summarize this clip."
 
@@ -150,10 +151,10 @@ Useful flags:
 - `--batch-size <n>` prompts per decode batch
 - `--max-new-tokens <n>` number of generated tokens
 - `--stream` stream tokens as they are decoded
-- `--multimodal` load `Qwen35ForConditionalGeneration`
+- `--multimodal` force `Qwen35ForConditionalGeneration` (auto-enabled by `--image/--video`)
 - `--image <path>` image input for multimodal prefix-feature injection (Apple-only media path)
 - `--video <path>` video input for multimodal prefix-feature injection (Apple-only media path)
-- `--video-max-frames <n>` cap decoded video frames for preprocessing cost
+- `--video-max-frames <n>` cap decoded video frames for preprocessing cost (streamed decode + patchify)
 - `--video-frame-stride <n>` keep every Nth decoded frame before patchification
 
 ## Qwen25OmniRunHF

@@ -94,17 +94,143 @@ static bool load_image_rgb_f32(
   return true;
 }
 
-static bool load_video_rgb_f32_frames(
+struct PatchGrid {
+  int h_eff = 0;
+  int w_eff = 0;
+  int y_off = 0;
+  int x_off = 0;
+  uint64_t patches_per_group = 0;
+  uint64_t patch_dim = 0;
+};
+
+static bool build_patch_grid(
+    int width,
+    int height,
+    uint64_t in_channels,
+    uint64_t patch_size,
+    uint64_t temporal_patch_size,
+    PatchGrid& grid,
+    std::string& err) {
+  if (in_channels != 3) {
+    err = "Apple media preprocessor currently supports in_channels=3 only";
+    return false;
+  }
+  if (patch_size == 0 || temporal_patch_size == 0) {
+    err = "patch_size and temporal_patch_size must be > 0";
+    return false;
+  }
+
+  grid.h_eff = (height / static_cast<int>(patch_size)) * static_cast<int>(patch_size);
+  grid.w_eff = (width / static_cast<int>(patch_size)) * static_cast<int>(patch_size);
+  if (grid.h_eff <= 0 || grid.w_eff <= 0) {
+    err = "Image/video dimensions are smaller than patch_size";
+    return false;
+  }
+
+  grid.y_off = (height - grid.h_eff) / 2;
+  grid.x_off = (width - grid.w_eff) / 2;
+  grid.patches_per_group =
+      static_cast<uint64_t>(grid.h_eff / static_cast<int>(patch_size)) *
+      static_cast<uint64_t>(grid.w_eff / static_cast<int>(patch_size));
+  grid.patch_dim = in_channels * temporal_patch_size * patch_size * patch_size;
+  return true;
+}
+
+static void append_patch_group(
+    const std::vector<const std::vector<float>*>& group_frames,
+    int width,
+    uint64_t in_channels,
+    uint64_t patch_size,
+    uint64_t temporal_patch_size,
+    const PatchGrid& grid,
+    std::vector<float>& out) {
+  const size_t group_floats =
+      static_cast<size_t>(grid.patches_per_group) * static_cast<size_t>(grid.patch_dim);
+  const size_t write_base = out.size();
+  out.resize(write_base + group_floats);
+  size_t write = write_base;
+
+  for (int py = 0; py < grid.h_eff / static_cast<int>(patch_size); ++py) {
+    for (int px = 0; px < grid.w_eff / static_cast<int>(patch_size); ++px) {
+      for (uint64_t c = 0; c < in_channels; ++c) {
+        for (uint64_t t = 0; t < temporal_patch_size; ++t) {
+          const auto& frame = *group_frames[static_cast<size_t>(t)];
+          for (uint64_t dy = 0; dy < patch_size; ++dy) {
+            for (uint64_t dx = 0; dx < patch_size; ++dx) {
+              int y = grid.y_off + py * static_cast<int>(patch_size) + static_cast<int>(dy);
+              int x = grid.x_off + px * static_cast<int>(patch_size) + static_cast<int>(dx);
+              size_t pix =
+                  (static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x)) * 3 +
+                  static_cast<size_t>(c);
+              out[write++] = frame[pix];
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+static bool patchify_rgb_frames(
+    const std::vector<std::vector<float>>& frames,
+    int width,
+    int height,
+    uint64_t in_channels,
+    uint64_t patch_size,
+    uint64_t temporal_patch_size,
+    std::vector<float>& out,
+    uint64_t& n_patches,
+    std::string& err) {
+  if (frames.empty()) {
+    err = "No frames available for patchify";
+    return false;
+  }
+
+  PatchGrid grid;
+  if (!build_patch_grid(width, height, in_channels, patch_size, temporal_patch_size, grid, err)) {
+    return false;
+  }
+
+  uint64_t groups =
+      (static_cast<uint64_t>(frames.size()) + temporal_patch_size - 1) / temporal_patch_size;
+  n_patches = groups * grid.patches_per_group;
+
+  out.clear();
+  out.reserve(static_cast<size_t>(n_patches) * static_cast<size_t>(grid.patch_dim));
+
+  for (uint64_t g = 0; g < groups; ++g) {
+    std::vector<const std::vector<float>*> group_frames;
+    group_frames.reserve(static_cast<size_t>(temporal_patch_size));
+    for (uint64_t t = 0; t < temporal_patch_size; ++t) {
+      uint64_t frame_idx = g * temporal_patch_size + t;
+      if (frame_idx >= frames.size()) {
+        frame_idx = static_cast<uint64_t>(frames.size() - 1);
+      }
+      group_frames.push_back(&frames[static_cast<size_t>(frame_idx)]);
+    }
+    append_patch_group(group_frames, width, in_channels, patch_size, temporal_patch_size, grid, out);
+  }
+
+  return true;
+}
+
+static bool load_video_patchified_streaming(
     const std::string& path,
+    uint64_t in_channels,
+    uint64_t patch_size,
+    uint64_t temporal_patch_size,
     uint64_t max_frames,
     uint64_t frame_stride,
-    int& width,
-    int& height,
-    std::vector<std::vector<float>>& frames,
+    std::vector<float>& patches,
+    uint64_t& n_patches,
     std::string& err) {
   @autoreleasepool {
     if (frame_stride == 0) {
       err = "frame_stride must be > 0";
+      return false;
+    }
+    if (temporal_patch_size == 0) {
+      err = "temporal_patch_size must be > 0";
       return false;
     }
 
@@ -150,10 +276,19 @@ static bool load_video_rgb_f32_frames(
       return false;
     }
 
-    frames.clear();
-    width = 0;
-    height = 0;
+    int width = 0;
+    int height = 0;
+    bool have_grid = false;
+    PatchGrid grid;
     uint64_t decoded_frames = 0;
+    uint64_t kept_frames = 0;
+    uint64_t groups = 0;
+    patches.clear();
+
+    std::vector<std::vector<float>> temporal_group;
+    temporal_group.reserve(static_cast<size_t>(temporal_patch_size));
+    std::vector<float> last_frame;
+
     while (reader.status == AVAssetReaderStatusReading) {
       CMSampleBufferRef sample = [output copyNextSampleBuffer];
       if (sample == nullptr) {
@@ -182,6 +317,7 @@ static bool load_video_rgb_f32_frames(
         CFRelease(sample);
         continue;
       }
+
       if (width == 0 && height == 0) {
         width = fw;
         height = fh;
@@ -195,7 +331,6 @@ static bool load_video_rgb_f32_frames(
 
       uint8_t* base = static_cast<uint8_t*>(CVPixelBufferGetBaseAddress(px));
       size_t bpr = CVPixelBufferGetBytesPerRow(px);
-
       std::vector<float> rgb(static_cast<size_t>(width) * static_cast<size_t>(height) * 3);
       for (int y = 0; y < height; ++y) {
         uint8_t* row = base + static_cast<size_t>(y) * bpr;
@@ -213,8 +348,29 @@ static bool load_video_rgb_f32_frames(
       CVPixelBufferUnlockBaseAddress(px, kCVPixelBufferLock_ReadOnly);
       CFRelease(sample);
 
-      frames.push_back(std::move(rgb));
-      if (max_frames > 0 && frames.size() >= max_frames) {
+      if (!have_grid) {
+        if (!build_patch_grid(width, height, in_channels, patch_size, temporal_patch_size, grid, err)) {
+          return false;
+        }
+        have_grid = true;
+      }
+
+      temporal_group.push_back(std::move(rgb));
+      last_frame = temporal_group.back();
+      ++kept_frames;
+
+      if (temporal_group.size() == static_cast<size_t>(temporal_patch_size)) {
+        std::vector<const std::vector<float>*> group_frames;
+        group_frames.reserve(static_cast<size_t>(temporal_patch_size));
+        for (const auto& fr : temporal_group) {
+          group_frames.push_back(&fr);
+        }
+        append_patch_group(group_frames, width, in_channels, patch_size, temporal_patch_size, grid, patches);
+        temporal_group.clear();
+        ++groups;
+      }
+
+      if (max_frames > 0 && kept_frames >= max_frames) {
         break;
       }
     }
@@ -224,85 +380,26 @@ static bool load_video_rgb_f32_frames(
       return false;
     }
 
-    if (frames.empty()) {
+    if (kept_frames == 0) {
       err = "No decodable frames found in video";
       return false;
     }
-  }
-  return true;
-}
 
-static bool patchify_rgb_frames(
-    const std::vector<std::vector<float>>& frames,
-    int width,
-    int height,
-    uint64_t in_channels,
-    uint64_t patch_size,
-    uint64_t temporal_patch_size,
-    std::vector<float>& out,
-    uint64_t& n_patches,
-    std::string& err) {
-  if (in_channels != 3) {
-    err = "Apple media preprocessor currently supports in_channels=3 only";
-    return false;
-  }
-  if (patch_size == 0 || temporal_patch_size == 0) {
-    err = "patch_size and temporal_patch_size must be > 0";
-    return false;
-  }
-  if (frames.empty()) {
-    err = "No frames available for patchify";
-    return false;
-  }
-
-  int h_eff = (height / static_cast<int>(patch_size)) * static_cast<int>(patch_size);
-  int w_eff = (width / static_cast<int>(patch_size)) * static_cast<int>(patch_size);
-  if (h_eff <= 0 || w_eff <= 0) {
-    err = "Image/video dimensions are smaller than patch_size";
-    return false;
-  }
-  int y_off = (height - h_eff) / 2;
-  int x_off = (width - w_eff) / 2;
-
-  uint64_t groups =
-      (static_cast<uint64_t>(frames.size()) + temporal_patch_size - 1) / temporal_patch_size;
-  uint64_t patches_per_group =
-      static_cast<uint64_t>(h_eff / static_cast<int>(patch_size)) *
-      static_cast<uint64_t>(w_eff / static_cast<int>(patch_size));
-  n_patches = groups * patches_per_group;
-
-  uint64_t patch_dim = in_channels * temporal_patch_size * patch_size * patch_size;
-  out.assign(static_cast<size_t>(n_patches) * static_cast<size_t>(patch_dim), 0.0f);
-
-  uint64_t patch_idx = 0;
-  for (uint64_t g = 0; g < groups; ++g) {
-    for (int py = 0; py < h_eff / static_cast<int>(patch_size); ++py) {
-      for (int px = 0; px < w_eff / static_cast<int>(patch_size); ++px) {
-        size_t base = static_cast<size_t>(patch_idx) * static_cast<size_t>(patch_dim);
-        size_t k = 0;
-        for (uint64_t c = 0; c < in_channels; ++c) {
-          for (uint64_t t = 0; t < temporal_patch_size; ++t) {
-            uint64_t frame_idx = g * temporal_patch_size + t;
-            if (frame_idx >= frames.size()) {
-              frame_idx = static_cast<uint64_t>(frames.size() - 1);
-            }
-            const auto& frame = frames[static_cast<size_t>(frame_idx)];
-            for (uint64_t dy = 0; dy < patch_size; ++dy) {
-              for (uint64_t dx = 0; dx < patch_size; ++dx) {
-                int y = y_off + py * static_cast<int>(patch_size) + static_cast<int>(dy);
-                int x = x_off + px * static_cast<int>(patch_size) + static_cast<int>(dx);
-                size_t pix = (static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x)) * 3 + static_cast<size_t>(c);
-                out[base + k] = frame[pix];
-                ++k;
-              }
-            }
-          }
-        }
-        ++patch_idx;
+    if (!temporal_group.empty()) {
+      while (temporal_group.size() < static_cast<size_t>(temporal_patch_size)) {
+        temporal_group.push_back(last_frame);
       }
+      std::vector<const std::vector<float>*> group_frames;
+      group_frames.reserve(static_cast<size_t>(temporal_patch_size));
+      for (const auto& fr : temporal_group) {
+        group_frames.push_back(&fr);
+      }
+      append_patch_group(group_frames, width, in_channels, patch_size, temporal_patch_size, grid, patches);
+      ++groups;
     }
-  }
 
+    n_patches = groups * grid.patches_per_group;
+  }
   return true;
 }
 
@@ -355,19 +452,12 @@ lean_object* lean_torch_media_load_video_patchified(
   const char* path_c = lean_string_cstr(path_obj);
   std::string path(path_c);
 
-  int width = 0;
-  int height = 0;
-  std::vector<std::vector<float>> frames;
-  std::string err;
-  if (!load_video_rgb_f32_frames(path, max_frames, frame_stride, width, height, frames, err)) {
-    return mk_io_error("loadVideoPatchified failed: " + err);
-  }
-
   std::vector<float> patches;
   uint64_t n_patches = 0;
-  if (!patchify_rgb_frames(
-        frames, width, height, in_channels, patch_size, temporal_patch_size,
-        patches, n_patches, err)) {
+  std::string err;
+  if (!load_video_patchified_streaming(
+        path, in_channels, patch_size, temporal_patch_size,
+        max_frames, frame_stride, patches, n_patches, err)) {
     return mk_io_error("loadVideoPatchified failed: " + err);
   }
 
