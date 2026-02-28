@@ -82,6 +82,63 @@ lake build FluxDemo
 
 **Output:** `output.ppm`
 
+## Qwen3TTSEndToEnd
+
+End-to-end Qwen3-TTS demo: Lean loads real talker/speaker weights, does Lean tokenization + generation, and uses thin Python bridge scripts only for speech-tokenizer/audio frontend tasks (decode/encode/mel prep).
+
+**Model directory layout (local HuggingFace export):**
+- `config.json`
+- sharded `.safetensors` + index for `talker.*` and (base models) `speaker_encoder.*`
+- `tokenizer.json` and `tokenizer_config.json`
+- `speech_tokenizer/` subdirectory
+
+```bash
+lake build Qwen3TTSEndToEnd
+lake exe Qwen3TTSEndToEnd \
+  --model-dir weights/qwen3-tts \
+  --text "Hello from Lean." \
+  --wav-path output/qwen3tts.wav
+```
+
+Useful flags:
+- `--skip-decode` to only emit codec tokens
+- `--codes-path <path>` output codec token file
+- `--decode-script scripts/qwen3tts_decode_codes.py` Python decoder bridge
+- `--encode-audio-path <wav>` + `--encode-only` for audio -> codec IDs bridge
+- `--ref-audio-path <wav>` to derive speaker embedding from reference audio
+- `--speaker-mel-path <path>` intermediate speaker mel safetensors file
+- `--encode-script scripts/qwen3tts_encode_audio.py` speech-tokenizer encoder bridge
+- `--speaker-mel-script scripts/qwen3tts_prepare_speaker_mel.py` mel extraction bridge
+- `--qwen-repo ../Qwen3-TTS` local repo fallback for importing `qwen_tts` if not installed as a package
+
+Bridge scripts are launched with `uv run python` by default (`--python uv`).
+
+## Qwen35RunHF
+
+Run Qwen3.5 text generation from either a local model directory or a Hugging Face repo ID. If you pass a repo ID, Tyr resolves a local HF snapshot if present, otherwise downloads `config.json` and model safetensors to cache.
+
+Supported collection coverage:
+- The loader path is wired for all models in `https://huggingface.co/collections/Qwen/qwen35` (dense/MoE, base, FP8 variants) via the same `Qwen35` config+weight resolution path.
+
+```bash
+lake build Qwen35RunHF
+
+# Small smoke-test model
+lake exe Qwen35RunHF --source tiny-random/qwen3.5 --prompt "Hello from Lean."
+
+# Official Qwen repo (large; requires enough VRAM/RAM)
+lake exe Qwen35RunHF --source Qwen/Qwen3.5-4B --prompt "Summarize dependent types."
+```
+
+Useful flags:
+- `--revision <rev>` HF branch/tag/commit (default: `main`)
+- `--cache-dir <path>` override model download cache directory
+- `--prompt-file <path>` one prompt per line (batched decode input)
+- `--batch-size <n>` prompts per decode batch
+- `--max-new-tokens <n>` number of generated tokens
+- `--stream` stream tokens as they are decoded
+- `--multimodal` load `Qwen35ForConditionalGeneration` and run text-only generation path
+
 ## BranchingFlows
 
 Combinatorial branching flow sampler -- a port of branching flow networks to Lean. Includes continuous, discrete, and mixed training demos. No external data needed.

@@ -219,6 +219,18 @@ lean_exe Qwen3TTSEndToEnd where
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
+/-- Offline Qwen3-ASR transcription demo (fully Lean pipeline). -/
+lean_exe Qwen3ASRTranscribe where
+  root := `Examples.Qwen3ASR.Transcribe
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
+/-- Qwen3.5 model loader/generation demo with HF repo-id resolution. -/
+lean_exe Qwen35RunHF where
+  root := `Examples.Qwen35.RunHF
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
 /-- Flux debug harness (saves intermediate tensors) -/
 lean_exe FluxDebug where
   root := `Examples.Flux.FluxDebug
