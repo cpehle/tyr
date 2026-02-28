@@ -187,13 +187,13 @@ private def scale3d {batch seq dim : UInt64}
   x * nn.expand s #[batch, seq, dim]
 
 private def clampWave {s : Shape} (x : T s) : T s :=
-  let minT : T s := torch.full s (-1.0)
-  let maxT : T s := torch.full s 1.0
+  let minT : T s := torch.full s (-1.0) false x.device
+  let maxT : T s := torch.full s 1.0 false x.device
   let x1 : T s := where_ (lt_scalar x (-1.0)) minT x
   where_ (gt x1 maxT) maxT x1
 
 private def clampMin1d {n : UInt64} (x : T #[n]) (minVal : Float) : T #[n] :=
-  let minT : T #[n] := torch.full #[n] minVal
+  let minT : T #[n] := torch.full #[n] minVal false x.device
   where_ (lt_scalar x minVal) minT x
 
 structure QuantizerCodebook where

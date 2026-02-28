@@ -96,6 +96,7 @@ SRCS := \
 MM_SRCS :=
 ifeq ($(UNAME_S),Darwin)
 MM_SRCS += apple_vl_processor.mm
+MM_SRCS += apple_audio_input.mm
 APPLE_FRAMEWORK_FLAGS := \
 	-framework Foundation \
 	-framework CoreFoundation \

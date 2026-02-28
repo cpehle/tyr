@@ -34,6 +34,7 @@ def packageLinkArgs : Array String :=
       "-framework", "CoreVideo",
       "-framework", "VideoToolbox",
       "-framework", "Accelerate",
+      "-framework", "AudioToolbox",
       "-Wl,-rpath,@loader_path/../../external/libtorch/lib",
       "-Wl,-rpath,/opt/homebrew/opt/libomp/lib",
       "-Wl,-rpath,/opt/homebrew/lib"
@@ -68,6 +69,7 @@ def commonLinkArgs : Array String :=
       "-framework", "CoreVideo",
       "-framework", "VideoToolbox",
       "-framework", "Accelerate",
+      "-framework", "AudioToolbox",
       "-Wl,-rpath,@executable_path/../../../external/libtorch/lib",
       "-Wl,-rpath,/opt/homebrew/opt/libomp/lib",
       "-Wl,-rpath,/opt/homebrew/lib"
@@ -217,6 +219,12 @@ lean_exe NanoChatPipeline where
 /-- NanoChat checkpoint-backed chat/inference executable. -/
 lean_exe NanoChatChat where
   root := `Examples.NanoChat.RunChat
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
+/-- Live microphone streaming Qwen3-ASR demo (macOS AudioToolbox input). -/
+lean_exe Qwen3ASRLiveMic where
+  root := `Examples.Qwen3ASR.LiveMic
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
