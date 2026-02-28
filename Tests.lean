@@ -24,6 +24,7 @@ import Tests.TestGPUKernels
 import Tests.TestNanoChatTokens
 import Tests.TestNanoChatTasks
 import Tests.TestQwen3ASR
+import Tests.TestSileroVAD
 import Tests.TestQwen3Model
 import Tests.TestQwen35Model
 import Tests.TestQwen35Multimodal
