@@ -1,0 +1,88 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
+
+TTS_MODEL_DIR="${QWEN3_TTS_MODEL_DIR:-weights/qwen3-tts-0.6b-base}"
+ASR_MODEL_DIR="${QWEN3_ASR_MODEL_DIR:-weights/qwen3-asr-0.6b}"
+REF_AUDIO_PATH="${QWEN3_TTS_REF_AUDIO:-MLKDream.wav}"
+OUT_DIR="${QWEN3_TTS_ASR_REGRESSION_OUT_DIR:-output/asr_regression}"
+WAV_PATH="$OUT_DIR/tts.wav"
+CODES_PATH="$OUT_DIR/tts.codes"
+ASR_OUT="$OUT_DIR/asr.txt"
+TYR_DEVICE="${TYR_DEVICE:-mps}"
+
+if [[ ! -d "$TTS_MODEL_DIR" ]]; then
+  echo "[qwen3tts-asr] skip: missing TTS model dir: $TTS_MODEL_DIR"
+  exit 0
+fi
+if [[ ! -d "$ASR_MODEL_DIR" ]]; then
+  echo "[qwen3tts-asr] skip: missing ASR model dir: $ASR_MODEL_DIR"
+  exit 0
+fi
+if [[ ! -f "$REF_AUDIO_PATH" ]]; then
+  echo "[qwen3tts-asr] skip: missing reference audio: $REF_AUDIO_PATH"
+  exit 0
+fi
+
+mkdir -p "$OUT_DIR"
+
+echo "[qwen3tts-asr] building executables"
+uv run lake build Qwen3TTSEndToEnd Qwen3ASRTranscribe >/dev/null
+
+echo "[qwen3tts-asr] generating audio"
+TYR_DEVICE="$TYR_DEVICE" uv run lake env ./.lake/build/bin/Qwen3TTSEndToEnd \
+  --model-dir "$TTS_MODEL_DIR" \
+  --text "Regression audio validation" \
+  --max-frames 40 \
+  --ref-audio-path "$REF_AUDIO_PATH" \
+  --codes-path "$CODES_PATH" \
+  --wav-path "$WAV_PATH" >/dev/null
+
+if [[ ! -f "$WAV_PATH" ]]; then
+  echo "[qwen3tts-asr] FAIL: wav not generated"
+  exit 1
+fi
+
+if command -v ffprobe >/dev/null 2>&1; then
+  ffprobe -v error -show_entries format=duration -show_entries stream=codec_name,sample_rate,channels -of default=noprint_wrappers=1 "$WAV_PATH"
+fi
+
+uv run python - "$WAV_PATH" <<'PY'
+import sys, wave, struct, math
+path = sys.argv[1]
+with wave.open(path, 'rb') as w:
+    n = w.getnframes()
+    ch = w.getnchannels()
+    sw = w.getsampwidth()
+    sr = w.getframerate()
+    data = w.readframes(n)
+if sw != 2:
+    print(f"[qwen3tts-asr] FAIL: expected 16-bit PCM, got sampwidth={sw}")
+    sys.exit(1)
+vals = struct.unpack('<' + 'h' * (len(data) // 2), data)
+if ch > 1:
+    vals = vals[::ch]
+rms = math.sqrt(sum(v * v for v in vals) / max(1, len(vals)))
+print(f"[qwen3tts-asr] wav stats: sr={sr} samples={len(vals)} rms={rms:.2f}")
+if rms < 20.0:
+    print("[qwen3tts-asr] FAIL: waveform energy too low")
+    sys.exit(1)
+PY
+
+echo "[qwen3tts-asr] transcribing generated audio"
+TYR_DEVICE="$TYR_DEVICE" uv run lake env ./.lake/build/bin/Qwen3ASRTranscribe \
+  --model-dir "$ASR_MODEL_DIR" \
+  --wav-path "$WAV_PATH" \
+  --max-new-tokens 64 > "$ASR_OUT"
+
+TRANSCRIPT="$(awk '/^TEXT_BEGIN$/{flag=1;next}/^TEXT_END$/{flag=0}flag{print}' "$ASR_OUT" | tr '\n' ' ' | sed 's/[[:space:]]\+/ /g; s/^ //; s/ $//')"
+if [[ -z "$TRANSCRIPT" ]]; then
+  echo "[qwen3tts-asr] FAIL: empty transcript"
+  cat "$ASR_OUT"
+  exit 1
+fi
+
+echo "[qwen3tts-asr] transcript: $TRANSCRIPT"
+echo "[qwen3tts-asr] PASS"
