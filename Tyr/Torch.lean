@@ -734,7 +734,7 @@ opaque loadImagePatchified
 
 /-- Apple-only video preprocessing to patchified tensor expected by Qwen3.5-VL.
     Returns shape-erased tensor with runtime shape `[nPatches, patchDim]`.
-    `maxFrames` bounds decoding work.
+    `maxFrames` bounds sampled frames and `frameStride` keeps every Nth decoded frame.
     Requires macOS system media frameworks at build/runtime. -/
 @[extern "lean_torch_media_load_video_patchified"]
 opaque loadVideoPatchified
@@ -743,6 +743,7 @@ opaque loadVideoPatchified
     (patchSize : UInt64)
     (temporalPatchSize : UInt64)
     (maxFrames : UInt64)
+    (frameStride : UInt64)
     : IO (T #[])
 
 /-- Resample mono waveform samples with libsoxr high-quality mode.

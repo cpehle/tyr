@@ -22,6 +22,7 @@ structure Args where
   imagePath : Option String := none
   videoPath : Option String := none
   videoMaxFrames : UInt64 := 64
+  videoFrameStride : UInt64 := 1
   batchSize : UInt64 := 1
   maxNewTokens : UInt64 := 32
   stream : Bool := false
@@ -43,6 +44,7 @@ private def printHelp : IO Unit := do
   IO.println "  --image <path>               Image file for multimodal generation (Apple-only)"
   IO.println "  --video <path>               Video file for multimodal generation (Apple-only)"
   IO.println "  --video-max-frames <n>       Max decoded video frames (default: 64)"
+  IO.println "  --video-frame-stride <n>     Keep every Nth decoded frame (default: 1)"
   IO.println "  --batch-size <n>             Prompts per decode batch (default: 1)"
   IO.println "  --max-new-tokens <n>         Number of tokens to generate"
   IO.println "  --stream                     Stream generated tokens per decode step"
@@ -71,6 +73,8 @@ private partial def parseArgsLoop (xs : List String) (acc : Args) : IO Args := d
       parseArgsLoop rest { acc with videoPath := some v }
   | "--video-max-frames" :: v :: rest =>
       parseArgsLoop rest { acc with videoMaxFrames := (← parseNatArg "--video-max-frames" v) }
+  | "--video-frame-stride" :: v :: rest =>
+      parseArgsLoop rest { acc with videoFrameStride := (← parseNatArg "--video-frame-stride" v) }
   | "--batch-size" :: v :: rest =>
       parseArgsLoop rest { acc with batchSize := (← parseNatArg "--batch-size" v) }
   | "--max-new-tokens" :: v :: rest =>
@@ -335,8 +339,8 @@ def runMain (argv : List String) : IO UInt32 := do
     let videoPatches? ←
       match args.videoPath with
       | some p =>
-        IO.println s!"Loading video patches from {p} (maxFrames={args.videoMaxFrames})..."
-        pure (some (← media.loadVideoPatches cfg p args.videoMaxFrames))
+        IO.println s!"Loading video patches from {p} (maxFrames={args.videoMaxFrames}, frameStride={args.videoFrameStride})..."
+        pure (some (← media.loadVideoPatches cfg p args.videoMaxFrames args.videoFrameStride))
       | none => pure none
 
     let imageFeatures? ←

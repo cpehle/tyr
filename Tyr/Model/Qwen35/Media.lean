@@ -34,7 +34,11 @@ def loadImagePatches (cfg : VLConfig) (path : String)
   parsePatchified (patchDim := VisionConfig.patchDim cfg.vision_config) dyn
 
 /-- Load and patchify one video file for `cfg` (Apple-only path). -/
-def loadVideoPatches (cfg : VLConfig) (path : String) (maxFrames : UInt64 := 64)
+def loadVideoPatches
+    (cfg : VLConfig)
+    (path : String)
+    (maxFrames : UInt64 := 64)
+    (frameStride : UInt64 := 1)
     : IO (Sigma (fun n => T #[n, VisionConfig.patchDim cfg.vision_config])) := do
   let dyn ← data.loadVideoPatchified
     path
@@ -42,7 +46,7 @@ def loadVideoPatches (cfg : VLConfig) (path : String) (maxFrames : UInt64 := 64)
     cfg.vision_config.patch_size
     cfg.vision_config.temporal_patch_size
     maxFrames
+    frameStride
   parsePatchified (patchDim := VisionConfig.patchDim cfg.vision_config) dyn
 
 end torch.qwen35.media
-

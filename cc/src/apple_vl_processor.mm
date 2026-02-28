@@ -97,11 +97,17 @@ static bool load_image_rgb_f32(
 static bool load_video_rgb_f32_frames(
     const std::string& path,
     uint64_t max_frames,
+    uint64_t frame_stride,
     int& width,
     int& height,
     std::vector<std::vector<float>>& frames,
     std::string& err) {
   @autoreleasepool {
+    if (frame_stride == 0) {
+      err = "frame_stride must be > 0";
+      return false;
+    }
+
     NSURL* url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:path.c_str()]];
     if (url == nil) {
       err = "Invalid video path URL";
@@ -147,10 +153,18 @@ static bool load_video_rgb_f32_frames(
     frames.clear();
     width = 0;
     height = 0;
+    uint64_t decoded_frames = 0;
     while (reader.status == AVAssetReaderStatusReading) {
       CMSampleBufferRef sample = [output copyNextSampleBuffer];
       if (sample == nullptr) {
         break;
+      }
+
+      bool keep_frame = (decoded_frames % frame_stride) == 0;
+      ++decoded_frames;
+      if (!keep_frame) {
+        CFRelease(sample);
+        continue;
       }
 
       CVImageBufferRef imgBuf = CMSampleBufferGetImageBuffer(sample);
@@ -336,6 +350,7 @@ lean_object* lean_torch_media_load_video_patchified(
     uint64_t patch_size,
     uint64_t temporal_patch_size,
     uint64_t max_frames,
+    uint64_t frame_stride,
     lean_object* /*w*/) {
   const char* path_c = lean_string_cstr(path_obj);
   std::string path(path_c);
@@ -344,7 +359,7 @@ lean_object* lean_torch_media_load_video_patchified(
   int height = 0;
   std::vector<std::vector<float>> frames;
   std::string err;
-  if (!load_video_rgb_f32_frames(path, max_frames, width, height, frames, err)) {
+  if (!load_video_rgb_f32_frames(path, max_frames, frame_stride, width, height, frames, err)) {
     return mk_io_error("loadVideoPatchified failed: " + err);
   }
 
@@ -386,6 +401,7 @@ lean_object* lean_torch_media_load_video_patchified(
     uint64_t /*patch_size*/,
     uint64_t /*temporal_patch_size*/,
     uint64_t /*max_frames*/,
+    uint64_t /*frame_stride*/,
     lean_object* /*w*/) {
   return lean_io_result_mk_error(lean_mk_io_user_error(
     lean_mk_string("Apple media path requires macOS build")));
@@ -394,4 +410,3 @@ lean_object* lean_torch_media_load_video_patchified(
 } // extern "C"
 
 #endif
-
