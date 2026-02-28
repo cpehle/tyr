@@ -24,6 +24,11 @@ import Tests.TestGPUKernels
 import Tests.TestNanoChatTokens
 import Tests.TestNanoChatTasks
 import Tests.TestQwen3ASR
+import Tests.TestQwen3Model
+import Tests.TestQwen35Model
+import Tests.TestQwen35Multimodal
+import Tests.TestQwen35Pretrained
+import Tests.TestSafeTensorsTypeProvider
 -- Note: `Tests.TestQwen3TTS` depends on in-progress Qwen3TTS weight-loading
 -- modules and is temporarily excluded from the default test runner.
 
