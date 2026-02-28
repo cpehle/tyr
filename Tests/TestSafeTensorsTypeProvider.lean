@@ -13,6 +13,7 @@ open torch
 safetensors_type_provider "Tests/fixtures/safetensors/single.safetensors" as SingleSafe
 safetensors_type_provider "Tests/fixtures/safetensors/sharded" as ShardedSafe
 safetensors_type_provider "Tests/fixtures/safetensors/indexed.safetensors" as IndexedSafe
+safetensors_type_provider "Tests/fixtures/safetensors/indexed_dir" as IndexedDirSafe
 
 @[test]
 def testSafeTensorsIntrospectionSingle : IO Unit := do
@@ -41,6 +42,23 @@ def testSafeTensorsIntrospectionSharded : IO Unit := do
     | throw <| IO.userError "expected tensor 'proj.bias'"
   LeanTest.assertEqual bias.sourceFile "part2.safetensors" "bias tensor should map to part2 shard"
   LeanTest.assertTrue (bias.shape == #[3]) "bias tensor shape should match header"
+
+@[test]
+def testSafeTensorsIntrospectionShardedIndexJson : IO Unit := do
+  let schema ← safetensors.introspect "Tests/fixtures/safetensors/indexed_dir"
+  LeanTest.assertEqual schema.sourceIsDirectory true "indexed sharded source should be a directory"
+  LeanTest.assertEqual schema.tensors.size 2 "weight_map should define exactly two tensors"
+
+  let some embed := schema.find? "embed.weight"
+    | throw <| IO.userError "expected tensor 'embed.weight'"
+  LeanTest.assertEqual embed.sourceFile "part1.safetensors" "embed tensor should map through index json"
+
+  let some bias := schema.find? "proj.bias"
+    | throw <| IO.userError "expected tensor 'proj.bias'"
+  LeanTest.assertEqual bias.sourceFile "part2.safetensors" "proj.bias tensor should map through index json"
+
+  let unmapped := schema.find? "linear.weight"
+  LeanTest.assertTrue unmapped.isNone "tensors from unmapped shard files should not be exposed"
 
 @[test]
 def testSafeTensorsTypeProviderSingle : IO Unit := do
@@ -88,3 +106,18 @@ def testSafeTensorsTypeProviderIndexedHierarchy : IO Unit := do
     "first indexed subtree should expose typed nested tensor"
   LeanTest.assertTrue (weights.layers[1]!.weight.runtimeShape == #[2])
     "second indexed subtree should expose typed nested tensor"
+
+@[test]
+def testSafeTensorsTypeProviderShardedIndexJson : IO Unit := do
+  LeanTest.assertEqual IndexedDirSafe.sourceIsDirectory true "provider should detect sharded index directory"
+  LeanTest.assertEqual IndexedDirSafe.tensorCount 2 "provider should expose only index-mapped tensors"
+  LeanTest.assertTrue (IndexedDirSafe.hasTensor "embed.weight")
+    "index-mapped tensor should exist"
+  LeanTest.assertTrue (!(IndexedDirSafe.hasTensor "linear.weight"))
+    "tensor from unmapped shard should not be generated"
+
+  let weights ← IndexedDirSafe.loadAll
+  LeanTest.assertTrue (weights.embed.weight.runtimeShape == #[2, 2])
+    "index-backed loadAll should load embed tensor from mapped shard"
+  LeanTest.assertTrue (weights.proj.bias.runtimeShape == #[3])
+    "index-backed loadAll should load proj bias tensor from mapped shard"

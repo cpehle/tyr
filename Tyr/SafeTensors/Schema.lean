@@ -4,6 +4,7 @@
   SafeTensors schema introspection for Lean:
   - parse tensor headers from `.safetensors` files
   - introspect single-file or sharded-directory layouts
+  - support HuggingFace `model.safetensors.index.json` when present
 -/
 import Tyr.Torch
 import Lean.Data.Json
@@ -46,6 +47,11 @@ private def getArr? (j : Json) : Option (Array Json) :=
 private def getStr? (j : Json) : Option String :=
   match j with
   | .str s => some s
+  | _ => none
+
+private def getObjPairs? (j : Json) : Option (List (String × Json)) :=
+  match j with
+  | .obj kvs => some kvs.toList
   | _ => none
 
 private def getNat? (j : Json) : Option Nat :=
@@ -151,6 +157,45 @@ private def parseSafeTensorFile (path sourceFile : String) : IO (Array TensorSch
   | .ok entries => pure entries
   | .error err => throw <| IO.userError s!"Invalid SafeTensors file '{path}': {err}"
 
+private def parseJsonFile (path : String) : IO Json := do
+  let contents ← IO.FS.readFile path
+  match Json.parse contents with
+  | .ok j => pure j
+  | .error err =>
+      throw <| IO.userError s!"Invalid JSON file '{path}': {err}"
+
+private def parseWeightMap (indexPath : String) : IO (Array (String × String)) := do
+  let root ← parseJsonFile indexPath
+  let weightMapJson ←
+    match getObjVal? root "weight_map" with
+    | some j => pure j
+    | none =>
+        throw <| IO.userError s!"Invalid index file '{indexPath}': missing 'weight_map'"
+  let pairs ←
+    match getObjPairs? weightMapJson with
+    | some kvs => pure kvs
+    | none =>
+        throw <| IO.userError
+          s!"Invalid index file '{indexPath}': 'weight_map' must be a JSON object"
+  if pairs.isEmpty then
+    throw <| IO.userError s!"Invalid index file '{indexPath}': 'weight_map' is empty"
+
+  let mut mappings : Array (String × String) := #[]
+  for (tensorName, shardJson) in pairs do
+    let shardFile ←
+      match getStr? shardJson with
+      | some shard =>
+          if shard.isEmpty then
+            throw <| IO.userError
+              s!"Invalid index file '{indexPath}': tensor '{tensorName}' maps to an empty shard filename"
+          else
+            pure shard
+      | none =>
+          throw <| IO.userError
+            s!"Invalid index file '{indexPath}': tensor '{tensorName}' has non-string shard filename"
+    mappings := mappings.push (tensorName, shardFile)
+  pure mappings
+
 private def listShardFiles (dir : System.FilePath) : IO (Array String) := do
   let entries ← dir.readDir
   let mut shardFiles : Array String := #[]
@@ -160,6 +205,16 @@ private def listShardFiles (dir : System.FilePath) : IO (Array String) := do
   if shardFiles.isEmpty then
     throw <| IO.userError s!"No '.safetensors' files found in directory '{dir}'"
   pure <| shardFiles.qsort (· < ·)
+
+private def pushUnique (xs : Array String) (x : String) : Array String :=
+  if xs.contains x then xs else xs.push x
+
+private def mapByTensorName (entries : Array TensorSchema) : Std.HashMap String TensorSchema :=
+  Id.run do
+    let mut out : Std.HashMap String TensorSchema := {}
+    for entry in entries do
+      out := out.insert entry.name entry
+    pure out
 
 private def ensureUniqueNames (tensors : Array TensorSchema) : IO Unit := do
   let mut seen : Std.HashMap String String := {}
@@ -183,12 +238,56 @@ def introspect (source : String) : IO Schema := do
     throw <| IO.userError s!"SafeTensors source does not exist: {source}"
 
   if ← sourcePath.isDir then
-    let shardFiles ← listShardFiles sourcePath
-    let mut tensors : Array TensorSchema := #[]
-    for shardFile in shardFiles do
-      let fullPath := (sourcePath / shardFile).toString
-      let shardEntries ← parseSafeTensorFile fullPath shardFile
-      tensors := tensors ++ shardEntries
+    let indexPath := sourcePath / "model.safetensors.index.json"
+    let tensors ←
+      if ← indexPath.pathExists then
+        let weightMap ← parseWeightMap indexPath.toString
+        let mut referencedShards : Array String := #[]
+        for (_, shardFile) in weightMap do
+          referencedShards := pushUnique referencedShards shardFile
+        let referencedShardList := referencedShards.qsort (· < ·)
+
+        let mut shardTensorMaps : Std.HashMap String (Std.HashMap String TensorSchema) := {}
+        for shardFile in referencedShardList do
+          let shardPath := sourcePath / shardFile
+          let shardPathRel : System.FilePath := ⟨shardFile⟩
+          if shardPathRel.extension != some "safetensors" then
+            throw <| IO.userError
+              s!"Invalid index file '{indexPath}': shard '{shardFile}' must use '.safetensors' extension"
+          if !(← shardPath.pathExists) then
+            throw <| IO.userError
+              s!"Invalid index file '{indexPath}': referenced shard does not exist: '{shardFile}'"
+          if ← shardPath.isDir then
+            throw <| IO.userError
+              s!"Invalid index file '{indexPath}': referenced shard is a directory: '{shardFile}'"
+          let entries ← parseSafeTensorFile shardPath.toString shardFile
+          shardTensorMaps := shardTensorMaps.insert shardFile (mapByTensorName entries)
+
+        let mut fromIndex : Array TensorSchema := #[]
+        for (tensorName, shardFile) in weightMap do
+          let shardMap ←
+            match shardTensorMaps.get? shardFile with
+            | some m => pure m
+            | none =>
+                throw <| IO.userError
+                  s!"Invalid index file '{indexPath}': shard '{shardFile}' was not loaded"
+          let entry ←
+            match shardMap.get? tensorName with
+            | some t => pure t
+            | none =>
+                throw <| IO.userError
+                  s!"Invalid index file '{indexPath}': tensor '{tensorName}' not found in shard '{shardFile}'"
+          fromIndex := fromIndex.push { entry with sourceFile := shardFile }
+        pure fromIndex
+      else
+        let shardFiles ← listShardFiles sourcePath
+        let mut fromShards : Array TensorSchema := #[]
+        for shardFile in shardFiles do
+          let fullPath := (sourcePath / shardFile).toString
+          let shardEntries ← parseSafeTensorFile fullPath shardFile
+          fromShards := fromShards ++ shardEntries
+        pure fromShards
+
     ensureUniqueNames tensors
     pure {
       source := source
