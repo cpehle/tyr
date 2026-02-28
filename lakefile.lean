@@ -22,7 +22,7 @@ def packageLinkArgs : Array String :=
       "-ltorch", "-ltorch_cpu", "-lc10",
       "-L/opt/homebrew/opt/libomp/lib", "-lomp",
       "-L/opt/homebrew/lib", "-larrow", "-lparquet",
-      "-Wl,-rpath,@loader_path/../../../external/libtorch/lib",
+      "-Wl,-rpath,@loader_path/../../external/libtorch/lib",
       "-Wl,-rpath,/opt/homebrew/opt/libomp/lib",
       "-Wl,-rpath,/opt/homebrew/lib"
     ]
@@ -107,16 +107,17 @@ def getOmpLibPath : IO FilePath := do
 extern_lib libtyr pkg := do
   let tyrCLib := pkg.dir / "cc" / "build" / "libTyrC.a"
 
-  -- Watch Makefile and key source files
-  -- Note: For full dependency tracking, we'd need to list all .cpp/.h files,
-  -- but Lake's API makes this complex. The Makefile handles internal deps.
-  let srcJob ← inputTextFile <| pkg.dir / "cc" / "Makefile"
+  -- Track Makefile plus C/CUDA sources/headers so Lake reruns `make` when FFI changes.
+  let makefileJob ← inputTextFile <| pkg.dir / "cc" / "Makefile"
+  let srcJob ← inputDir (pkg.dir / "cc" / "src") (text := true) fun p =>
+    p.toString.endsWith ".cpp" || p.toString.endsWith ".cu" || p.toString.endsWith ".h"
+  let depJob := makefileJob.mix srcJob
 
-  buildFileAfterDep tyrCLib srcJob fun _srcFile => do
+  buildFileAfterDep tyrCLib depJob fun _ => do
     let sysroot ← getLeanSysroot
     proc {
       cmd := "make"
-      args := #["-C", (pkg.dir / "cc").toString]
+      args := #["-C", (pkg.dir / "cc").toString, "lib"]
       env := #[("LEAN_HOME", sysroot.toString)]
     }
 

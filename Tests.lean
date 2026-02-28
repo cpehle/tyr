@@ -15,6 +15,7 @@ import Tests.TestMctxPolicies
 import Tests.TestMctxTree
 import Tests.TestMctx
 import Tests.TestMctxBatched
+import Tests.TestMctxDag
 import Tests.TestDiffEq
 import Tests.TestDiffEqAdjoint
 import Tests.TestDiffEqAdjointCore
