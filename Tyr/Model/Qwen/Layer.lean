@@ -64,6 +64,27 @@ def forward {batch seq hidden_size num_heads num_kv_heads head_dim intermediate_
   let x := layer.mlp.forward x
   residual + x
 
+/-- Incremental one-token transformer layer step with attention KV cache.
+    Input/output: `[batch, 1, hidden_size]`. -/
+def forwardStep {batch hidden_size num_heads num_kv_heads head_dim intermediate_size : UInt64}
+    (layer : QwenLayer hidden_size num_heads num_kv_heads head_dim intermediate_size)
+    (x : T #[batch, 1, hidden_size])
+    (cos : T #[1, head_dim / 2])
+    (sin : T #[1, head_dim / 2])
+    (cache : QwenAttention.KVCache batch num_kv_heads head_dim)
+    : T #[batch, 1, hidden_size] × QwenAttention.KVCache batch num_kv_heads head_dim :=
+  -- Pre-norm attention.
+  let residual1 := x
+  let x1 := layer.input_layernorm.forward3d x
+  let (attnOut, cache') := layer.self_attn.forwardStep x1 cos sin cache
+  let h1 := residual1 + attnOut
+
+  -- Pre-norm MLP.
+  let residual2 := h1
+  let h2 := layer.post_attention_layernorm.forward3d h1
+  let h3 := layer.mlp.forward h2
+  (residual2 + h3, cache')
+
 def forwardMasked {batch seq hidden_size num_heads num_kv_heads head_dim intermediate_size : UInt64}
     (layer : QwenLayer hidden_size num_heads num_kv_heads head_dim intermediate_size)
     (x : T #[batch, seq, hidden_size])

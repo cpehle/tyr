@@ -42,6 +42,9 @@ private def getOrFirst! [Inhabited α] (xs : Array α) (i : Nat) : α :=
 private def ensureAtLeastOne (n : Nat) : Nat :=
   if n == 0 then 1 else n
 
+private def optAtOr (vals : Option (Array α)) (idx : Nat) (fallback : α) : α :=
+  (vals >>= fun xs => xs[idx]?).getD fallback
+
 /-- Main talker decoder (text + codec embeddings -> hidden states). -/
 structure TalkerModel (cfg : TalkerConfig) where
   codecEmbedding : T #[cfg.vocabSize, cfg.hiddenSize]
@@ -272,6 +275,10 @@ structure FrameGenerationOutput (batch numCodeGroups hiddenSize : UInt64) where
   codes : T #[batch, numCodeGroups]
   summedEmbedding : T #[batch, 1, hiddenSize]
 
+structure CodePredictorRoPECache (cfg : TalkerConfig) where
+  cos : T #[cfg.numCodeGroups + 1, cfg.codePredictorConfig.headDim / 2]
+  sin : T #[cfg.numCodeGroups + 1, cfg.codePredictorConfig.headDim / 2]
+
 def init (cfg : TalkerConfig) : IO (TalkerForConditionalGeneration cfg) := do
   let model ← TalkerModel.init cfg
   let codePredictor ← TalkerCodePredictor.init cfg
@@ -368,6 +375,10 @@ private def generateFrameFromLastHidden {batch : UInt64} (cfg : TalkerConfig)
     (subtalkerTemperature : Float := 0.9)
     (subtalkerTopK : UInt64 := 50)
     (subtalkerTopP : Float := 1.0)
+    (subtalkerTemperaturesByGroup : Option (Array Float) := none)
+    (subtalkerTopKsByGroup : Option (Array UInt64) := none)
+    (subtalkerTopPsByGroup : Option (Array Float) := none)
+    (cpRoPECache : Option (CodePredictorRoPECache cfg) := none)
     : IO (FrameGenerationOutput batch cfg.numCodeGroups cfg.hiddenSize) := do
   let firstLogits3 := linear3d lastHidden m.codecHead
   let firstLogits0 : T #[batch, cfg.vocabSize] := reshape firstLogits3 #[batch, cfg.vocabSize]
@@ -385,29 +396,94 @@ private def generateFrameFromLastHidden {batch : UInt64} (cfg : TalkerConfig)
   let mut tokenCols : Array (T #[batch, 1]) := #[firstCode2d]
 
   -- Build autoregressive sub-talker context from (past hidden + codec embeddings).
+  -- Use static preallocated KV cache and step decoding instead of re-running
+  -- full-prefix forward for each residual group.
   let firstEmb : T #[batch, 1, cfg.hiddenSize] := nn.embedding firstCode2d m.model.codecEmbedding
   let mut summedEmb : T #[batch, 1, cfg.hiddenSize] := firstEmb
-  let mut cpEmbCols : Array (T #[batch, 1, cfg.hiddenSize]) := #[lastHidden, firstEmb]
-
   let residualGroups := cfg.numCodeGroups.toNat - 1
-  for g in [:residualGroups] do
-    let curLen : UInt64 := cpEmbCols.size.toUInt64
-    let cpDyn := nn.cat_impl cpEmbCols 1
-    let cpInputs : T #[batch, curLen, cfg.hiddenSize] := reshape cpDyn #[batch, curLen, cfg.hiddenSize]
+  if residualGroups > 0 then
+    let cpCfg := cfg.codePredictorConfig
+    if m.codePredictor.layers.size != cpCfg.numHiddenLayers.toNat then
+      throw <| IO.userError
+        s!"Code predictor layer/cache mismatch: model has {m.codePredictor.layers.size} layers but cfg.numHiddenLayers={cpCfg.numHiddenLayers}."
 
-    let cpHidden := TalkerCodePredictor.forwardHidden cfg m.codePredictor cpInputs none
-    let cpLogits3 := TalkerCodePredictor.logitsForGroup m.codePredictor g cpHidden
-    let cpLast := data.slice cpLogits3 1 (curLen - 1) 1
-    let cpLogits : T #[batch, cfg.codePredictorConfig.vocabSize] :=
-      reshape cpLast #[batch, cfg.codePredictorConfig.vocabSize]
+    let cpDevice := lastHidden.device
+    let cpMaxSeq : UInt64 := cfg.numCodeGroups + 1
+    let (cpCosAll, cpSinAll) : (T #[cpMaxSeq, cpCfg.headDim / 2] × T #[cpMaxSeq, cpCfg.headDim / 2]) :=
+      match cpRoPECache with
+      | some rope =>
+          let cos : T #[cpMaxSeq, cpCfg.headDim / 2] :=
+            if rope.cos.device == cpDevice then rope.cos else rope.cos.to cpDevice
+          let sin : T #[cpMaxSeq, cpCfg.headDim / 2] :=
+            if rope.sin.device == cpDevice then rope.sin else rope.sin.to cpDevice
+          (cos, sin)
+      | none =>
+          let (cpCosRaw, cpSinRaw) := rotary.computeFreqsPure cpMaxSeq cpCfg.headDim cpCfg.ropeTheta
+          let cpCosAll : T #[cpMaxSeq, cpCfg.headDim / 2] :=
+            if cpCosRaw.device == cpDevice then cpCosRaw else cpCosRaw.to cpDevice
+          let cpSinAll : T #[cpMaxSeq, cpCfg.headDim / 2] :=
+            if cpSinRaw.device == cpDevice then cpSinRaw else cpSinRaw.to cpDevice
+          (cpCosAll, cpSinAll)
 
-    let nextCode ← applySampling cpLogits subtalkerTemperature subtalkerTopK subtalkerTopP
-    let nextCode2d : T #[batch, 1] := reshape nextCode #[batch, 1]
-    tokenCols := tokenCols.push nextCode2d
+    let mut cpCachesInit : Array (qwen.QwenAttention.KVCache batch cpCfg.numKeyValueHeads cpCfg.headDim) := #[]
+    for _ in [:cpCfg.numHiddenLayers.toNat] do
+      cpCachesInit := cpCachesInit.push
+        (qwen.QwenAttention.initKVCache
+          cpMaxSeq
+          (batch := batch) (num_kv_heads := cpCfg.numKeyValueHeads) (head_dim := cpCfg.headDim)
+          cpDevice)
 
-    let nextEmb := TalkerCodePredictor.embedGroupTokens m.codePredictor g nextCode2d
-    cpEmbCols := cpEmbCols.push nextEmb
-    summedEmb := summedEmb + nextEmb
+    let cpStep :
+        T #[batch, 1, cfg.hiddenSize] →
+        UInt64 →
+        Array (qwen.QwenAttention.KVCache batch cpCfg.numKeyValueHeads cpCfg.headDim) →
+        IO (T #[batch, 1, cpCfg.hiddenSize] ×
+          Array (qwen.QwenAttention.KVCache batch cpCfg.numKeyValueHeads cpCfg.headDim)) :=
+      fun tokenEmbed pos caches => do
+        let xProj : T #[batch, 1, cpCfg.hiddenSize] := TalkerCodePredictor.projectInputs m.codePredictor tokenEmbed
+        let cos : T #[1, cpCfg.headDim / 2] := data.slice cpCosAll 0 pos 1
+        let sin : T #[1, cpCfg.headDim / 2] := data.slice cpSinAll 0 pos 1
+        let mut h : T #[batch, 1, cpCfg.hiddenSize] := xProj
+        let mut caches := caches
+        for i in [:m.codePredictor.layers.size] do
+          let layer : CodePredictorLayer cpCfg ←
+            match m.codePredictor.layers[i]? with
+            | some layer => pure layer
+            | none => throw <| IO.userError s!"missing code predictor layer at index {i}"
+          let cache : qwen.QwenAttention.KVCache batch cpCfg.numKeyValueHeads cpCfg.headDim ←
+            match caches[i]? with
+            | some cache => pure cache
+            | none => throw <| IO.userError s!"missing code predictor cache at index {i}"
+          let (h', cache') := qwen.QwenLayer.forwardStep layer h cos sin cache
+          h := h'
+          caches := caches.set! i cache'
+        pure (m.codePredictor.norm.forward3d h, caches)
+
+    let (_, cpCaches0) ← cpStep lastHidden 0 cpCachesInit
+    let (cpHidden0, cpCaches1) ← cpStep firstEmb 1 cpCaches0
+    let mut cpHiddenCur := cpHidden0
+    let mut cpCaches := cpCaches1
+    let mut cpPos : UInt64 := 2
+
+    for g in [:residualGroups] do
+      let cpLogits3 := TalkerCodePredictor.logitsForGroup m.codePredictor g cpHiddenCur
+      let cpLogits : T #[batch, cpCfg.vocabSize] := reshape cpLogits3 #[batch, cpCfg.vocabSize]
+
+      let gTemp : Float := optAtOr subtalkerTemperaturesByGroup g subtalkerTemperature
+      let gTopK : UInt64 := optAtOr subtalkerTopKsByGroup g subtalkerTopK
+      let gTopP : Float := optAtOr subtalkerTopPsByGroup g subtalkerTopP
+      let nextCode ← applySampling cpLogits gTemp gTopK gTopP
+      let nextCode2d : T #[batch, 1] := reshape nextCode #[batch, 1]
+      tokenCols := tokenCols.push nextCode2d
+
+      let nextEmb := TalkerCodePredictor.embedGroupTokens m.codePredictor g nextCode2d
+      summedEmb := summedEmb + nextEmb
+
+      if g + 1 < residualGroups then
+        let (cpHiddenNext, cpCachesNext) ← cpStep nextEmb cpPos cpCaches
+        cpHiddenCur := cpHiddenNext
+        cpCaches := cpCachesNext
+        cpPos := cpPos + 1
 
   let frameDyn := nn.cat_impl tokenCols 1
   pure {
@@ -431,6 +507,9 @@ def generateFrame {batch seq : UInt64} (cfg : TalkerConfig)
     (subtalkerTemperature : Float := 0.9)
     (subtalkerTopK : UInt64 := 50)
     (subtalkerTopP : Float := 1.0)
+    (subtalkerTemperaturesByGroup : Option (Array Float) := none)
+    (subtalkerTopKsByGroup : Option (Array UInt64) := none)
+    (subtalkerTopPsByGroup : Option (Array Float) := none)
     : IO (FrameGenerationOutput batch cfg.numCodeGroups cfg.hiddenSize) := do
   if cfg.numCodeGroups == 0 then
     return {
@@ -443,6 +522,9 @@ def generateFrame {batch seq : UInt64} (cfg : TalkerConfig)
   generateFrameFromLastHidden cfg m lastHidden historyFirstCodes allowEos
     temperature topK topP repetitionPenalty suppressTail
     subtalkerTemperature subtalkerTopK subtalkerTopP
+    subtalkerTemperaturesByGroup subtalkerTopKsByGroup subtalkerTopPsByGroup
+
+mutual
 
 /-- Autoregressively generate a fixed number of codec frames.
     Returns `[batch, maxFrames, numCodeGroups]`. -/
@@ -461,6 +543,9 @@ def generateCodesWithLengths {batch seq : UInt64} (cfg : TalkerConfig)
     (suppressTail : UInt64 := 1024)
     (trailingTextHidden : Option (Sigma fun trailingSeq => T #[batch, trailingSeq, cfg.hiddenSize]) := none)
     (ttsPadEmbed : Option (T #[batch, 1, cfg.hiddenSize]) := none)
+    (subtalkerTemperaturesByGroup : Option (Array Float) := none)
+    (subtalkerTopKsByGroup : Option (Array UInt64) := none)
+    (subtalkerTopPsByGroup : Option (Array Float) := none)
     : IO (CodeGenerationOutput batch maxFrames cfg.numCodeGroups) := do
   if maxFrames == 0 then
     return {
@@ -469,69 +554,27 @@ def generateCodesWithLengths {batch seq : UInt64} (cfg : TalkerConfig)
     }
 
   let padFrame : T #[batch, 1, cfg.numCodeGroups] :=
-    let x0 : T #[batch, 1, cfg.numCodeGroups] := torch.full_int #[batch, 1, cfg.numCodeGroups] (Int64.ofNat cfg.codecPadId.toNat)
+    let x0 : T #[batch, 1, cfg.numCodeGroups] :=
+      torch.full_int #[batch, 1, cfg.numCodeGroups] (Int64.ofNat cfg.codecPadId.toNat)
     if x0.device == talkerInputs.device then x0 else x0.to talkerInputs.device
-  let mut frames : Array (T #[batch, 1, cfg.numCodeGroups]) := #[]
-  let mut curInputsDyn : T #[] := reshape talkerInputs #[]
-  let mut curSeq : UInt64 := seq
-  let mut done : Array Bool := Array.replicate batch.toNat false
-  let mut lengths : Array UInt64 := Array.replicate batch.toNat maxFrames
-  let mut historyCols : Array (T #[batch, 1]) := #[]
-  let defaultPadEmbed : T #[batch, 1, cfg.hiddenSize] := torch.zeros #[batch, 1, cfg.hiddenSize] false talkerInputs.device
-  let padEmbed : T #[batch, 1, cfg.hiddenSize] := ttsPadEmbed.getD defaultPadEmbed
 
-  for step in [:maxFrames.toNat] do
-    let allDone := done.foldl (fun acc d => acc && d) true
-    if allDone then
-      break
-
-    let curInputs : T #[batch, curSeq, cfg.hiddenSize] := reshape curInputsDyn #[batch, curSeq, cfg.hiddenSize]
-    let historyOpt :=
-      if historyCols.isEmpty then
-        none
-      else
-        let histLen : UInt64 := historyCols.size.toUInt64
-        let histDyn := nn.cat_impl historyCols 1
-        let hist : T #[batch, histLen] := reshape histDyn #[batch, histLen]
-        some ⟨histLen, hist⟩
-    let allowEos := step.toUInt64 >= minNewTokens
-    let frameOut ← generateFrame cfg m curInputs none historyOpt
-      allowEos temperature topK topP repetitionPenalty suppressTail
-      subtalkerTemperature subtalkerTopK subtalkerTopP
-    let frame := frameOut.codes
+  let frameDynRef ← IO.mkRef (#[] : Array (T #[]))
+  let onFrame : UInt64 → T #[batch, cfg.numCodeGroups] → IO Unit := fun _ frame => do
     let frame3 : T #[batch, 1, cfg.numCodeGroups] := nn.unsqueeze frame 1
-    frames := frames.push frame3
+    frameDynRef.modify (fun xs => xs.push (nn.eraseShape frame3))
 
-    let firstCode : T #[batch, 1] := data.slice frame 1 0 1
-    historyCols := historyCols.push firstCode
-    let firstCode1d : T #[batch] := reshape firstCode #[batch]
-    let firstCodes ← data.tensorToUInt64Array firstCode1d
-    for i in [:batch.toNat] do
-      let isDone := done.getD i false
-      let tok := firstCodes.getD i cfg.codecEosTokenId
-      if !isDone && tok == cfg.codecEosTokenId then
-        done := done.set! i true
-        lengths := lengths.set! i step.toUInt64
+  let lengths ← streamCodes cfg m talkerInputs onFrame maxFrames minNewTokens
+    temperature topK topP
+    subtalkerTemperature subtalkerTopK subtalkerTopP
+    repetitionPenalty suppressTail
+    trailingTextHidden ttsPadEmbed
+    subtalkerTemperaturesByGroup subtalkerTopKsByGroup subtalkerTopPsByGroup
 
-    let trailingAdd : T #[batch, 1, cfg.hiddenSize] :=
-      match trailingTextHidden with
-      | some ⟨trailingSeq, trailing⟩ =>
-          if step.toUInt64 < trailingSeq then
-            data.slice trailing 1 step.toUInt64 1
-          else
-            padEmbed
-      | none => padEmbed
-    let nextEmb : T #[batch, 1, cfg.hiddenSize] := frameOut.summedEmbedding + trailingAdd
-    let nextInputs := nn.cat curInputs nextEmb 1
-    curInputsDyn := reshape nextInputs #[]
-    curSeq := curSeq + 1
-
-  for _ in [frames.size:maxFrames.toNat] do
-    frames := frames.push padFrame
-
-  let outDyn := nn.cat_impl frames 1
-  let codes : T #[batch, maxFrames, cfg.numCodeGroups] :=
-    reshape outDyn #[batch, maxFrames, cfg.numCodeGroups]
+  let mut framesDyn ← frameDynRef.get
+  for _ in [framesDyn.size:maxFrames.toNat] do
+    framesDyn := framesDyn.push (nn.eraseShape padFrame)
+  let outDyn : T #[] := nn.cat_dyn framesDyn 1
+  let codes : T #[batch, maxFrames, cfg.numCodeGroups] := reshape outDyn #[batch, maxFrames, cfg.numCodeGroups]
   pure { codes, lengths }
 
 /-- Stream codec frames one step at a time.
@@ -553,6 +596,9 @@ def streamCodes {batch seq : UInt64} (cfg : TalkerConfig)
     (suppressTail : UInt64 := 1024)
     (trailingTextHidden : Option (Sigma fun trailingSeq => T #[batch, trailingSeq, cfg.hiddenSize]) := none)
     (ttsPadEmbed : Option (T #[batch, 1, cfg.hiddenSize]) := none)
+    (subtalkerTemperaturesByGroup : Option (Array Float) := none)
+    (subtalkerTopKsByGroup : Option (Array UInt64) := none)
+    (subtalkerTopPsByGroup : Option (Array Float) := none)
     : IO (Array UInt64) :=
   autograd.no_grad do
     if maxFrames == 0 then
@@ -605,6 +651,12 @@ def streamCodes {batch seq : UInt64} (cfg : TalkerConfig)
     let mut historyCols : Array (T #[batch, 1]) := #[]
     let defaultPadEmbed : T #[batch, 1, cfg.hiddenSize] := torch.zeros #[batch, 1, cfg.hiddenSize] false cacheDevice
     let padEmbed : T #[batch, 1, cfg.hiddenSize] := ttsPadEmbed.getD defaultPadEmbed
+    let cpMaxSeq : UInt64 := cfg.numCodeGroups + 1
+    let (cpCosRaw, cpSinRaw) := rotary.computeFreqsPure cpMaxSeq cfg.codePredictorConfig.headDim cfg.codePredictorConfig.ropeTheta
+    let cpRoPE : CodePredictorRoPECache cfg := {
+      cos := if cpCosRaw.device == cacheDevice then cpCosRaw else cpCosRaw.to cacheDevice
+      sin := if cpSinRaw.device == cacheDevice then cpSinRaw else cpSinRaw.to cacheDevice
+    }
 
     for step in [:maxFrames.toNat] do
       let allDone := done.foldl (fun acc d => acc && d) true
@@ -623,6 +675,8 @@ def streamCodes {batch seq : UInt64} (cfg : TalkerConfig)
       let frameOut ← generateFrameFromLastHidden cfg m lastHidden historyOpt
         allowEos temperature topK topP repetitionPenalty suppressTail
         subtalkerTemperature subtalkerTopK subtalkerTopP
+        subtalkerTemperaturesByGroup subtalkerTopKsByGroup subtalkerTopPsByGroup
+        (some cpRoPE)
       let frame := frameOut.codes
       onFrame step.toUInt64 frame
 
@@ -666,6 +720,8 @@ def streamCodes {batch seq : UInt64} (cfg : TalkerConfig)
 
     pure lengths
 
+end
+
 /-- Autoregressively generate a fixed number of codec frames.
     Returns `[batch, maxFrames, numCodeGroups]`. -/
 def generateCodes {batch seq : UInt64} (cfg : TalkerConfig)
@@ -683,12 +739,16 @@ def generateCodes {batch seq : UInt64} (cfg : TalkerConfig)
     (suppressTail : UInt64 := 1024)
     (trailingTextHidden : Option (Sigma fun trailingSeq => T #[batch, trailingSeq, cfg.hiddenSize]) := none)
     (ttsPadEmbed : Option (T #[batch, 1, cfg.hiddenSize]) := none)
+    (subtalkerTemperaturesByGroup : Option (Array Float) := none)
+    (subtalkerTopKsByGroup : Option (Array UInt64) := none)
+    (subtalkerTopPsByGroup : Option (Array Float) := none)
     : IO (T #[batch, maxFrames, cfg.numCodeGroups]) := do
   let out ← generateCodesWithLengths cfg m talkerInputs maxFrames minNewTokens
     temperature topK topP
     subtalkerTemperature subtalkerTopK subtalkerTopP
     repetitionPenalty suppressTail
     trailingTextHidden ttsPadEmbed
+    subtalkerTemperaturesByGroup subtalkerTopKsByGroup subtalkerTopPsByGroup
   pure out.codes
 
 end TalkerForConditionalGeneration

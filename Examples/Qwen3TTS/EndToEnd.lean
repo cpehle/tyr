@@ -20,9 +20,12 @@ open tokenizer.qwen3
 structure Args where
   modelDir : String := "weights/qwen3-tts"
   text : String := "Hello from Lean Qwen3-TTS."
+  styleText : Option String := none
   maxTextLen : Nat := 512
   maxFrames : Nat := 256
   language : String := "Auto"
+  thinkMode : String := "auto"
+  seed : Option UInt64 := none
   temperature : Float := 0.9
   topK : Nat := 50
   topP : Float := 1.0
@@ -31,6 +34,9 @@ structure Args where
   subtalkerTemperature : Float := 0.9
   subtalkerTopK : Nat := 50
   subtalkerTopP : Float := 1.0
+  subtalkerTemperaturesByGroup : Option (Array Float) := none
+  subtalkerTopKsByGroup : Option (Array Nat) := none
+  subtalkerTopPsByGroup : Option (Array Float) := none
   encodeAudioPath : Option String := none
   encodeOutCodesPath : String := "output/qwen3tts_encoded_codes.txt"
   encodeOnly : Bool := false
@@ -70,15 +76,47 @@ private def parseFloatLit? (s : String) : Option Float :=
       | _, _ => none
   | _ => none
 
+private def parseFloatCsv? (s : String) : Option (Array Float) := Id.run do
+  let mut out : Array Float := #[]
+  for part in s.splitOn "," do
+    let tok := part.trimAscii.toString
+    if tok.isEmpty then
+      return none
+    match parseFloatLit? tok with
+    | some v => out := out.push v
+    | none => return none
+  if out.isEmpty then none else some out
+
+private def parseNatCsv? (s : String) : Option (Array Nat) := Id.run do
+  let mut out : Array Nat := #[]
+  for part in s.splitOn "," do
+    let tok := part.trimAscii.toString
+    if tok.isEmpty then
+      return none
+    match tok.toNat? with
+    | some v => out := out.push v
+    | none => return none
+  if out.isEmpty then none else some out
+
+private inductive ThinkMode where
+  | auto
+  | think
+  | noThink
+  deriving Repr, Inhabited, BEq
+
 private partial def parseArgsLoop : List String → Args → Args
   | [], acc => acc
   | "--model-dir" :: v :: rest, acc => parseArgsLoop rest { acc with modelDir := v }
   | "--text" :: v :: rest, acc => parseArgsLoop rest { acc with text := v }
+  | "--style-text" :: v :: rest, acc => parseArgsLoop rest { acc with styleText := some v }
   | "--max-text-len" :: v :: rest, acc =>
       parseArgsLoop rest { acc with maxTextLen := v.toNat?.getD acc.maxTextLen }
   | "--max-frames" :: v :: rest, acc =>
       parseArgsLoop rest { acc with maxFrames := v.toNat?.getD acc.maxFrames }
   | "--language" :: v :: rest, acc => parseArgsLoop rest { acc with language := v }
+  | "--think-mode" :: v :: rest, acc => parseArgsLoop rest { acc with thinkMode := v }
+  | "--seed" :: v :: rest, acc =>
+      parseArgsLoop rest { acc with seed := v.toNat?.map UInt64.ofNat }
   | "--temperature" :: v :: rest, acc =>
       parseArgsLoop rest { acc with temperature := (parseFloatLit? v).getD acc.temperature }
   | "--top-k" :: v :: rest, acc =>
@@ -95,6 +133,12 @@ private partial def parseArgsLoop : List String → Args → Args
       parseArgsLoop rest { acc with subtalkerTopK := v.toNat?.getD acc.subtalkerTopK }
   | "--subtalker-top-p" :: v :: rest, acc =>
       parseArgsLoop rest { acc with subtalkerTopP := (parseFloatLit? v).getD acc.subtalkerTopP }
+  | "--subtalker-temp-by-group" :: v :: rest, acc =>
+      parseArgsLoop rest { acc with subtalkerTemperaturesByGroup := parseFloatCsv? v }
+  | "--subtalker-top-k-by-group" :: v :: rest, acc =>
+      parseArgsLoop rest { acc with subtalkerTopKsByGroup := parseNatCsv? v }
+  | "--subtalker-top-p-by-group" :: v :: rest, acc =>
+      parseArgsLoop rest { acc with subtalkerTopPsByGroup := parseFloatCsv? v }
   | "--encode-audio-path" :: v :: rest, acc => parseArgsLoop rest { acc with encodeAudioPath := some v }
   | "--encode-out-codes-path" :: v :: rest, acc => parseArgsLoop rest { acc with encodeOutCodesPath := v }
   | "--encode-only" :: rest, acc => parseArgsLoop rest { acc with encodeOnly := true }
@@ -141,9 +185,12 @@ private def printUsage : IO Unit := do
   IO.println "Options:"
   IO.println "  --model-dir <path>            Qwen3-TTS model directory (contains config.json + sharded weights)"
   IO.println "  --text <prompt>               Text prompt"
+  IO.println "  --style-text <prompt>         Optional style prefix text prepended to prompt"
   IO.println "  --max-text-len <n>            Max tokenized prompt length (default: 512)"
   IO.println "  --max-frames <n>              Max generated codec frames (default: 256)"
   IO.println "  --language <name|Auto>        Language conditioning tag (default: Auto)"
+  IO.println "  --think-mode <auto|think|no-think>  Reasoning-mode codec prefill control (default: auto)"
+  IO.println "  --seed <u64>                  Deterministic RNG seed for sampling"
   IO.println "  --temperature <f>             Sampling temperature (default: 0.9)"
   IO.println "  --top-k <n>                   Top-k sampling (default: 50)"
   IO.println "  --top-p <f>                   Top-p sampling (default: 1.0)"
@@ -152,6 +199,9 @@ private def printUsage : IO Unit := do
   IO.println "  --subtalker-temperature <f>   Subtalker sampling temperature (default: 0.9)"
   IO.println "  --subtalker-top-k <n>         Subtalker top-k sampling (default: 50)"
   IO.println "  --subtalker-top-p <f>         Subtalker top-p sampling (default: 1.0)"
+  IO.println "  --subtalker-temp-by-group <csv>  Residual-group temperatures, e.g. 0.9,0.85,0.8"
+  IO.println "  --subtalker-top-k-by-group <csv> Residual-group top-k values, e.g. 50,40,30"
+  IO.println "  --subtalker-top-p-by-group <csv> Residual-group top-p values, e.g. 1.0,0.95,0.9"
   IO.println "  --encode-audio-path <path>    Encode audio to speech-tokenizer codec IDs"
   IO.println "  --encode-out-codes-path <p>   Output codec-ID file for --encode-audio-path"
   IO.println "  --encode-only                 Run audio->codes bridge and exit"
@@ -217,6 +267,14 @@ private def lowerAsciiString (s : String) : String :=
   String.ofList <| s.toList.map (fun c =>
     if c >= 'A' && c <= 'Z' then Char.ofNat (c.toNat + 32) else c)
 
+private def parseThinkMode (s : String) : ThinkMode :=
+  match lowerAsciiString s with
+  | "think" => .think
+  | "no-think" => .noThink
+  | "nothink" => .noThink
+  | "no_think" => .noThink
+  | _ => .auto
+
 private def lookupLanguageId? (cfg : Qwen3TTSConfig) (language : String) : Option UInt64 := Id.run do
   let q := lowerAsciiString language
   for (k, v) in cfg.talkerConfig.codecLanguageId do
@@ -249,6 +307,7 @@ private def buildTalkerInputsEquivalent
     (model : Qwen3TTSForConditionalGeneration cfg)
     (inputIds : Array UInt64)
     (languageId : Option UInt64)
+    (thinkMode : ThinkMode := .auto)
     (speakerEmbed : Option (T #[1, 1, cfg.talkerConfig.hiddenSize]) := none)
     : IO ((Sigma fun seq => T #[1, seq, cfg.talkerConfig.hiddenSize]) × T #[1, 1, cfg.talkerConfig.hiddenSize]) := do
   if inputIds.size < 8 then
@@ -275,18 +334,37 @@ private def buildTalkerInputsEquivalent
   let ttsPadEmbed : T #[1, 1, hidden] := data.slice ttsSpecialEmb 1 2 1
 
   let codecPrefillIds : Array UInt64 :=
-    match languageId with
-    | none =>
+    match thinkMode, languageId with
+    | .noThink, _ =>
         #[
           cfg.talkerConfig.codecNoThinkId,
           cfg.talkerConfig.codecThinkBosId,
           cfg.talkerConfig.codecThinkEosId
         ]
-    | some langId =>
+    | .think, some langId =>
         #[
           cfg.talkerConfig.codecThinkId,
           cfg.talkerConfig.codecThinkBosId,
           langId,
+          cfg.talkerConfig.codecThinkEosId
+        ]
+    | .think, none =>
+        #[
+          cfg.talkerConfig.codecThinkId,
+          cfg.talkerConfig.codecThinkBosId,
+          cfg.talkerConfig.codecThinkEosId
+        ]
+    | .auto, some langId =>
+        #[
+          cfg.talkerConfig.codecThinkId,
+          cfg.talkerConfig.codecThinkBosId,
+          langId,
+          cfg.talkerConfig.codecThinkEosId
+        ]
+    | .auto, none =>
+        #[
+          cfg.talkerConfig.codecNoThinkId,
+          cfg.talkerConfig.codecThinkBosId,
           cfg.talkerConfig.codecThinkEosId
         ]
   let codecPrefillLen : UInt64 := codecPrefillIds.size.toUInt64
@@ -378,6 +456,15 @@ def runEndToEnd (args : Args) : IO Unit := do
   IO.println s!"Prompt: {args.text}"
   IO.println s!"Language: {args.language}"
   IO.println s!"Target device: {repr targetDevice}"
+  let thinkMode := parseThinkMode args.thinkMode
+  let subtalkerTopKsByGroup : Option (Array UInt64) :=
+    args.subtalkerTopKsByGroup.map (fun xs => xs.map Nat.toUInt64)
+  match args.seed with
+  | some seed =>
+      torch.manualSeed seed
+      IO.println s!"Sampling seed: {seed}"
+  | none =>
+      pure ()
 
   -- Load runtime config from HF config.json so tensor shapes match real checkpoints.
   let cfg ← Qwen3TTSConfig.loadFromPretrainedDir modelDir
@@ -398,7 +485,17 @@ def runEndToEnd (args : Args) : IO Unit := do
   let model ← Qwen3TTSForConditionalGeneration.loadSharded modelDir cfg targetDevice
 
   let tok ← tokenizer.qwen3.loadTokenizer modelDir
-  let assistantText := tokenizer.qwen3.ttsAssistantText args.text
+  let baseText :=
+    match args.styleText with
+    | some style =>
+        let style := style.trimAscii.toString
+        if style.isEmpty then
+          args.text
+        else
+          s!"{style}\n{args.text}"
+    | none =>
+        args.text
+  let assistantText := tokenizer.qwen3.ttsAssistantText baseText
   let rawTokenIds := (tokenizer.qwen3.encodeText tok assistantText).map (fun t => t.toUInt64)
   let tokenIds :=
     if rawTokenIds.size > args.maxTextLen then
@@ -435,7 +532,7 @@ def runEndToEnd (args : Args) : IO Unit := do
     | none, none =>
         pure none
   let ((⟨talkerSeq, talkerInputs⟩), ttsPadEmbed) ←
-    buildTalkerInputsEquivalent cfg model tokenIds languageId speakerEmbed
+    buildTalkerInputsEquivalent cfg model tokenIds languageId thinkMode speakerEmbed
   IO.println s!"Built conditioned talker inputs, seq={talkerSeq}"
 
   let maxFrames : UInt64 := args.maxFrames.toUInt64
@@ -497,6 +594,7 @@ def runEndToEnd (args : Args) : IO Unit := do
       args.subtalkerTemperature args.subtalkerTopK.toUInt64 args.subtalkerTopP
       args.repetitionPenalty args.suppressTail.toUInt64
       (some ⟨1, ttsPadEmbed⟩) (some ttsPadEmbed)
+      args.subtalkerTemperaturesByGroup subtalkerTopKsByGroup args.subtalkerTopPsByGroup
 
     match speechDecoder? with
     | some dec =>
@@ -525,6 +623,7 @@ def runEndToEnd (args : Args) : IO Unit := do
       args.subtalkerTemperature args.subtalkerTopK.toUInt64 args.subtalkerTopP
       args.repetitionPenalty args.suppressTail.toUInt64
       (some ⟨1, ttsPadEmbed⟩) (some ttsPadEmbed)
+      args.subtalkerTemperaturesByGroup subtalkerTopKsByGroup args.subtalkerTopPsByGroup
     let codeLen := out.lengths.getD 0 maxFrames
 
     let codes3 : T #[1, maxFrames, cfg.talkerConfig.numCodeGroups] := data.slice out.codes 0 0 1
