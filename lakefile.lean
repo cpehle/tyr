@@ -22,6 +22,18 @@ def packageLinkArgs : Array String :=
       "-ltorch", "-ltorch_cpu", "-lc10",
       "-L/opt/homebrew/opt/libomp/lib", "-lomp",
       "-L/opt/homebrew/lib", "-larrow", "-lparquet", "-lsoxr",
+      "-F/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/System/Library/Frameworks",
+      "-F/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks",
+      "-Wl,-syslibroot,/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+      "-framework", "Foundation",
+      "-framework", "CoreFoundation",
+      "-framework", "CoreGraphics",
+      "-framework", "ImageIO",
+      "-framework", "AVFoundation",
+      "-framework", "CoreMedia",
+      "-framework", "CoreVideo",
+      "-framework", "VideoToolbox",
+      "-framework", "Accelerate",
       "-Wl,-rpath,@loader_path/../../external/libtorch/lib",
       "-Wl,-rpath,/opt/homebrew/opt/libomp/lib",
       "-Wl,-rpath,/opt/homebrew/lib"
@@ -44,6 +56,18 @@ def commonLinkArgs : Array String :=
       "-ltorch", "-ltorch_cpu", "-lc10",
       "-L/opt/homebrew/opt/libomp/lib", "-lomp",
       "-L/opt/homebrew/lib", "-larrow", "-lparquet", "-lsoxr",
+      "-F/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/System/Library/Frameworks",
+      "-F/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks",
+      "-Wl,-syslibroot,/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
+      "-framework", "Foundation",
+      "-framework", "CoreFoundation",
+      "-framework", "CoreGraphics",
+      "-framework", "ImageIO",
+      "-framework", "AVFoundation",
+      "-framework", "CoreMedia",
+      "-framework", "CoreVideo",
+      "-framework", "VideoToolbox",
+      "-framework", "Accelerate",
       "-Wl,-rpath,@executable_path/../../../external/libtorch/lib",
       "-Wl,-rpath,/opt/homebrew/opt/libomp/lib",
       "-Wl,-rpath,/opt/homebrew/lib"
@@ -110,7 +134,8 @@ extern_lib libtyr pkg := do
   -- Track Makefile plus C/CUDA sources/headers so Lake reruns `make` when FFI changes.
   let makefileJob ← inputTextFile <| pkg.dir / "cc" / "Makefile"
   let srcJob ← inputDir (pkg.dir / "cc" / "src") (text := true) fun p =>
-    p.toString.endsWith ".cpp" || p.toString.endsWith ".cu" || p.toString.endsWith ".h"
+    p.toString.endsWith ".cpp" || p.toString.endsWith ".mm" ||
+      p.toString.endsWith ".cu" || p.toString.endsWith ".h"
   let depJob := makefileJob.mix srcJob
 
   buildFileAfterDep tyrCLib depJob fun _ => do

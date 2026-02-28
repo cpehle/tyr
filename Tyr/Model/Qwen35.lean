@@ -10,5 +10,6 @@ import Tyr.Model.Qwen35.Weights
 import Tyr.Model.Qwen35.VLConfig
 import Tyr.Model.Qwen35.VLConfigIO
 import Tyr.Model.Qwen35.Multimodal
+import Tyr.Model.Qwen35.Media
 import Tyr.Model.Qwen35.VLWeights
 import Tyr.Model.Qwen35.Pretrained

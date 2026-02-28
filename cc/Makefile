@@ -93,6 +93,22 @@ SRCS := \
 	tyr_polar.cpp\
 	tyr_parquet.cpp\
 	tyr_execution.cpp
+MM_SRCS :=
+ifeq ($(UNAME_S),Darwin)
+MM_SRCS += apple_vl_processor.mm
+APPLE_FRAMEWORK_FLAGS := \
+	-framework Foundation \
+	-framework CoreFoundation \
+	-framework CoreGraphics \
+	-framework ImageIO \
+	-framework AVFoundation \
+	-framework CoreMedia \
+	-framework CoreVideo \
+	-framework VideoToolbox \
+	-framework Accelerate
+else
+APPLE_FRAMEWORK_FLAGS :=
+endif
 CU_SRCS := $(wildcard $(SRC_DIR)/generated/*.cu)
 
 LIB_NAME := TyrC
@@ -104,8 +120,9 @@ DYLIB := lib${LIB_NAME}.so
 endif
 
 CPP_OBJ_FILES := $(addprefix $(OUT_DIR)/,$(SRCS:.cpp=.o))
+MM_OBJ_FILES := $(addprefix $(OUT_DIR)/,$(MM_SRCS:.mm=.o))
 CU_OBJ_FILES := $(patsubst $(SRC_DIR)/%.cu,$(OUT_DIR)/%.o,$(CU_SRCS))
-OBJ_FILES := $(CPP_OBJ_FILES) $(CU_OBJ_FILES)
+OBJ_FILES := $(CPP_OBJ_FILES) $(MM_OBJ_FILES) $(CU_OBJ_FILES)
 HDR_FILES := $(addprefix $(HDR_DIR)/,$(HDRS))
 
 # Lean runtime library
@@ -117,7 +134,8 @@ DYLIB_LINK_FLAGS := -L$(LEAN_LIB) -lleanshared \
 	-L$(ARROW_LIBPATH) -larrow -lparquet -lsoxr \
 	-Wl,-rpath,$(LEAN_LIB) \
 	-Wl,-rpath,$(abspath $(TORCH_LIBPATH)) \
-	-Wl,-rpath,$(ARROW_LIBPATH)
+	-Wl,-rpath,$(ARROW_LIBPATH) \
+	$(APPLE_FRAMEWORK_FLAGS)
 
 # Build Rules
 
@@ -139,6 +157,9 @@ $(OUT_DIR)/$(DYLIB) : $(OBJ_FILES) | $(OUT_DIR)
 
 $(OUT_DIR)/%.o : $(SRC_DIR)/%.cpp $(HDR_FILES) | $(OUT_DIR)
 	$(CXX) --std=c++17 -o $@ -c $< -I$(HDR_DIR) -I$(LEAN_INCLUDE) $(TORCH_INC_FLAGS) $(XLA_INC_FLAGS) $(ARROW_INC_FLAGS) $(EXTRA_CXX_FLAGS) -fPIC -rdynamic
+
+$(OUT_DIR)/%.o : $(SRC_DIR)/%.mm $(HDR_FILES) | $(OUT_DIR)
+	$(CXX) -x objective-c++ --std=c++17 -o $@ -c $< -I$(HDR_DIR) -I$(LEAN_INCLUDE) $(TORCH_INC_FLAGS) $(XLA_INC_FLAGS) $(ARROW_INC_FLAGS) $(EXTRA_CXX_FLAGS) -fPIC -fobjc-arc
 
 $(OUT_DIR)/%.o : $(SRC_DIR)/%.cu $(HDR_FILES) | $(OUT_DIR)
 	@mkdir -p $(dir $@)

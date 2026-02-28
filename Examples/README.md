@@ -128,6 +128,14 @@ lake exe Qwen35RunHF --source tiny-random/qwen3.5 --prompt "Hello from Lean."
 
 # Official Qwen repo (large; requires enough VRAM/RAM)
 lake exe Qwen35RunHF --source Qwen/Qwen3.5-4B --prompt "Summarize dependent types."
+
+# Multimodal with Apple system media path (ImageIO/AVFoundation)
+lake exe Qwen35RunHF --source Qwen/Qwen3.5-4B --multimodal \
+  --image input.jpg --prompt "Describe this image."
+
+# Batched prompts + streaming
+lake exe Qwen35RunHF --source tiny-random/qwen3.5 --prompt-file prompts.txt \
+  --batch-size 4 --stream
 ```
 
 Useful flags:
@@ -137,7 +145,10 @@ Useful flags:
 - `--batch-size <n>` prompts per decode batch
 - `--max-new-tokens <n>` number of generated tokens
 - `--stream` stream tokens as they are decoded
-- `--multimodal` load `Qwen35ForConditionalGeneration` and run text-only generation path
+- `--multimodal` load `Qwen35ForConditionalGeneration`
+- `--image <path>` image input for multimodal prefix-feature injection (Apple-only media path)
+- `--video <path>` video input for multimodal prefix-feature injection (Apple-only media path)
+- `--video-max-frames <n>` cap decoded video frames for preprocessing cost
 
 ## BranchingFlows
 

@@ -721,6 +721,30 @@ opaque fromInt64Array (arr : @& Array Int64) : T #[]
 @[extern "lean_torch_from_float_array"]
 opaque fromFloatArray (arr : @& Array Float) : T #[]
 
+/-- Apple-only image preprocessing to patchified tensor expected by Qwen3.5-VL.
+    Returns shape-erased tensor with runtime shape `[nPatches, patchDim]`.
+    Requires macOS system media frameworks at build/runtime. -/
+@[extern "lean_torch_media_load_image_patchified"]
+opaque loadImagePatchified
+    (path : @& String)
+    (inChannels : UInt64)
+    (patchSize : UInt64)
+    (temporalPatchSize : UInt64)
+    : IO (T #[])
+
+/-- Apple-only video preprocessing to patchified tensor expected by Qwen3.5-VL.
+    Returns shape-erased tensor with runtime shape `[nPatches, patchDim]`.
+    `maxFrames` bounds decoding work.
+    Requires macOS system media frameworks at build/runtime. -/
+@[extern "lean_torch_media_load_video_patchified"]
+opaque loadVideoPatchified
+    (path : @& String)
+    (inChannels : UInt64)
+    (patchSize : UInt64)
+    (temporalPatchSize : UInt64)
+    (maxFrames : UInt64)
+    : IO (T #[])
+
 /-- Resample mono waveform samples with libsoxr high-quality mode.
     Mirrors librosa default `res_type=\"soxr_hq\"` behavior for 1D audio. -/
 @[extern "lean_torch_resample_soxr_hq"]

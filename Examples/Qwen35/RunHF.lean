@@ -5,6 +5,7 @@
   HuggingFace repo id.
 -/
 import Tyr.Model.Qwen35
+import Tyr.Model.Qwen35.Media
 import Tyr.Tokenizer.Qwen3
 
 open torch
@@ -18,6 +19,9 @@ structure Args where
   cacheDir : String := "~/.cache/huggingface/tyr-models"
   prompt : String := "Give a concise definition of a dependent type."
   promptFile : Option String := none
+  imagePath : Option String := none
+  videoPath : Option String := none
+  videoMaxFrames : UInt64 := 64
   batchSize : UInt64 := 1
   maxNewTokens : UInt64 := 32
   stream : Bool := false
@@ -36,10 +40,13 @@ private def printHelp : IO Unit := do
   IO.println "  --cache-dir <path>           Local cache for downloaded files"
   IO.println "  --prompt <text>              Prompt text"
   IO.println "  --prompt-file <path>         One prompt per non-empty line"
+  IO.println "  --image <path>               Image file for multimodal generation (Apple-only)"
+  IO.println "  --video <path>               Video file for multimodal generation (Apple-only)"
+  IO.println "  --video-max-frames <n>       Max decoded video frames (default: 64)"
   IO.println "  --batch-size <n>             Prompts per decode batch (default: 1)"
   IO.println "  --max-new-tokens <n>         Number of tokens to generate"
   IO.println "  --stream                     Stream generated tokens per decode step"
-  IO.println "  --multimodal                 Load Qwen35ForConditionalGeneration (text-only decode path)"
+  IO.println "  --multimodal                 Load Qwen35ForConditionalGeneration"
   IO.println "Examples:"
   IO.println "  lake exe Qwen35RunHF --source tiny-random/qwen3.5 --stream"
   IO.println "  lake exe Qwen35RunHF --source Qwen/Qwen3.5-4B --prompt \"Write one sentence about Lean.\""
@@ -58,6 +65,12 @@ private partial def parseArgsLoop (xs : List String) (acc : Args) : IO Args := d
       parseArgsLoop rest { acc with prompt := v }
   | "--prompt-file" :: v :: rest =>
       parseArgsLoop rest { acc with promptFile := some v }
+  | "--image" :: v :: rest =>
+      parseArgsLoop rest { acc with imagePath := some v }
+  | "--video" :: v :: rest =>
+      parseArgsLoop rest { acc with videoPath := some v }
+  | "--video-max-frames" :: v :: rest =>
+      parseArgsLoop rest { acc with videoMaxFrames := (← parseNatArg "--video-max-frames" v) }
   | "--batch-size" :: v :: rest =>
       parseArgsLoop rest { acc with batchSize := (← parseNatArg "--batch-size" v) }
   | "--max-new-tokens" :: v :: rest =>
@@ -98,14 +111,38 @@ private def encodePromptToIds
   let text := tokenizer.qwen3.chatTemplate prompt
   (tokenizer.qwen3.encodeText tok text).map (fun t => t.toUInt64)
 
-private def buildBatchInput
+private def visionPrefixIds (cfg : VLConfig) (imageTokenCount videoTokenCount : UInt64) : Array UInt64 :=
+  Id.run do
+    let mut out : Array UInt64 := #[]
+    if imageTokenCount > 0 then
+      out := out.push cfg.vision_start_token_id
+      for _ in [:imageTokenCount.toNat] do
+        out := out.push cfg.image_token_id
+      out := out.push cfg.vision_end_token_id
+    if videoTokenCount > 0 then
+      out := out.push cfg.vision_start_token_id
+      for _ in [:videoTokenCount.toNat] do
+        out := out.push cfg.video_token_id
+      out := out.push cfg.vision_end_token_id
+    out
+
+private def encodePromptToIdsMultimodal
+    (tok : tokenizer.qwen3.QwenTokenizer)
+    (cfg : VLConfig)
+    (imageTokenCount videoTokenCount : UInt64)
+    (prompt : String)
+    : Array UInt64 :=
+  (visionPrefixIds cfg imageTokenCount videoTokenCount) ++ (encodePromptToIds tok prompt)
+
+private def buildBatchInputWithEncoder
     (tok : tokenizer.qwen3.QwenTokenizer)
     (prompts : Array String)
+    (encode : String → Array UInt64)
     : IO (Sigma (fun batch => Sigma (fun seq => T #[batch, seq] × Array Nat))) := do
-  let encoded := prompts.map (encodePromptToIds tok)
+  let encoded := prompts.map encode
   let batch := encoded.size.toUInt64
   if batch == 0 then
-    throw <| IO.userError "buildBatchInput requires at least one prompt"
+    throw <| IO.userError "buildBatchInputWithEncoder requires at least one prompt"
 
   let maxLenNat := encoded.foldl (fun m ids => Nat.max m ids.size) 0
   if maxLenNat == 0 then
@@ -199,7 +236,8 @@ private def runTextBatches
   while start < prompts.size do
     let stop := Nat.min prompts.size (start + chunkSize)
     let chunk := prompts.extract start stop
-    let ⟨_batch, ⟨_seq, (inputIds, promptLens)⟩⟩ ← buildBatchInput tok chunk
+    let ⟨_batch, ⟨_seq, (inputIds, promptLens)⟩⟩ ←
+      buildBatchInputWithEncoder tok chunk (encodePromptToIds tok)
 
     let ⟨_outSeq, outIds⟩ ←
       if args.stream then
@@ -225,6 +263,10 @@ private def runMultimodalBatches
     (model : Qwen35ForConditionalGeneration cfg)
     (args : Args)
     (prompts : Array String)
+    (imageTokenCount : UInt64)
+    (videoTokenCount : UInt64)
+    (imageFeatures : Option (Sigma (fun n => T #[n, cfg.vision_config.out_hidden_size])))
+    (videoFeatures : Option (Sigma (fun n => T #[n, cfg.vision_config.out_hidden_size])))
     : IO Unit := do
   let chunkSize := Nat.max 1 args.batchSize.toNat
   let eos := eosFromCfg cfg.text_config
@@ -233,7 +275,9 @@ private def runMultimodalBatches
   while start < prompts.size do
     let stop := Nat.min prompts.size (start + chunkSize)
     let chunk := prompts.extract start stop
-    let ⟨_batch, ⟨_seq, (inputIds, promptLens)⟩⟩ ← buildBatchInput tok chunk
+    let enc := encodePromptToIdsMultimodal tok cfg imageTokenCount videoTokenCount
+    let ⟨_batch, ⟨_seq, (inputIds, promptLens)⟩⟩ ←
+      buildBatchInputWithEncoder tok chunk enc
 
     let ⟨_outSeq, outIds⟩ ←
       if args.stream then
@@ -244,8 +288,8 @@ private def runMultimodalBatches
           args.maxNewTokens
           .greedy
           eos
-          none
-          none
+          imageFeatures
+          videoFeatures
       else
         model.generate
           cfg
@@ -253,8 +297,8 @@ private def runMultimodalBatches
           args.maxNewTokens
           .greedy
           eos
-          none
-          none
+          imageFeatures
+          videoFeatures
 
     if args.stream && chunk.size == 1 then
       IO.println ""
@@ -282,7 +326,50 @@ def runMain (argv : List String) : IO UInt32 := do
         Qwen35ForConditionalGeneration.loadSharded modelDir cfg
       else
         Qwen35ForConditionalGeneration.load s!"{modelDir}/model.safetensors" cfg
-    runMultimodalBatches tok cfg model args prompts
+    let imagePatches? ←
+      match args.imagePath with
+      | some p =>
+        IO.println s!"Loading image patches from {p}..."
+        pure (some (← media.loadImagePatches cfg p))
+      | none => pure none
+    let videoPatches? ←
+      match args.videoPath with
+      | some p =>
+        IO.println s!"Loading video patches from {p} (maxFrames={args.videoMaxFrames})..."
+        pure (some (← media.loadVideoPatches cfg p args.videoMaxFrames))
+      | none => pure none
+
+    let imageFeatures? ←
+      match imagePatches? with
+      | some ⟨nPatches, patches⟩ =>
+        let feats ← model.getImageFeatures cfg patches
+        let nTok := VisionConfig.mergedTokenCount cfg.vision_config nPatches
+        pure (some ⟨nTok, feats⟩)
+      | none => pure none
+    let videoFeatures? ←
+      match videoPatches? with
+      | some ⟨nPatches, patches⟩ =>
+        let feats ← model.getVideoFeatures cfg patches
+        let nTok := VisionConfig.mergedTokenCount cfg.vision_config nPatches
+        pure (some ⟨nTok, feats⟩)
+      | none => pure none
+
+    let imageTokenCount :=
+      match imageFeatures? with
+      | some ⟨n, _⟩ => n
+      | none => 0
+    let videoTokenCount :=
+      match videoFeatures? with
+      | some ⟨n, _⟩ => n
+      | none => 0
+
+    if imageTokenCount == 0 && videoTokenCount == 0 then
+      IO.println "Warning: --multimodal enabled but no --image/--video provided; running text-only path."
+
+    runMultimodalBatches
+      tok cfg model args prompts
+      imageTokenCount videoTokenCount
+      imageFeatures? videoFeatures?
   else
     let cfg ← Config.loadFromPretrainedDir modelDir Config.qwen35_9B
     let isSharded ← hub.detectWeightLayout modelDir
