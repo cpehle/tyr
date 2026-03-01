@@ -148,7 +148,7 @@ lean_binary(
 
 lean_binary(
     name = "TestDataLoader",
-    srcs = ["Tests/TestDataLoader.lean"],
+    srcs = ["Tests/RunTestDataLoader.lean"],
     deps = [":Tests"],
     cc_deps = ["//cc:TyrC"],
 )

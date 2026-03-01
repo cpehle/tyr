@@ -269,7 +269,7 @@ lean_exe TestDiffusion where
 
 /-- DataLoader test executable -/
 lean_exe TestDataLoader where
-  root := `Tests.TestDataLoader
+  root := `Tests.RunTestDataLoader
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 

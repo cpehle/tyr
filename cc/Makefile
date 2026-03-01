@@ -47,6 +47,8 @@ RMPATH := rm -rf
 AR := ar
 CXX := c++
 NVCC ?= nvcc
+CXX_STD ?= c++20
+CXX_STD_FLAG := --std=$(CXX_STD)
 EXTRA_CXX_FLAGS := -fPIC -O3 -Wall -Wno-sign-compare \
 		 -Wno-unused-parameter -Wno-missing-field-initializers -Wno-comment
 NVCCFLAGS := -std=c++20 -O3 --use_fast_math --expt-extended-lambda --expt-relaxed-constexpr
@@ -157,10 +159,10 @@ $(OUT_DIR)/$(DYLIB) : $(OBJ_FILES) | $(OUT_DIR)
 	$(CXX) -shared -o $@ $^ $(DYLIB_LINK_FLAGS)
 
 $(OUT_DIR)/%.o : $(SRC_DIR)/%.cpp $(HDR_FILES) | $(OUT_DIR)
-	$(CXX) --std=c++17 -o $@ -c $< -I$(HDR_DIR) -I$(LEAN_INCLUDE) $(TORCH_INC_FLAGS) $(XLA_INC_FLAGS) $(ARROW_INC_FLAGS) $(EXTRA_CXX_FLAGS) -fPIC -rdynamic
+	$(CXX) $(CXX_STD_FLAG) -o $@ -c $< -I$(HDR_DIR) -I$(LEAN_INCLUDE) $(TORCH_INC_FLAGS) $(XLA_INC_FLAGS) $(ARROW_INC_FLAGS) $(EXTRA_CXX_FLAGS) -fPIC -rdynamic
 
 $(OUT_DIR)/%.o : $(SRC_DIR)/%.mm $(HDR_FILES) | $(OUT_DIR)
-	$(CXX) -x objective-c++ --std=c++17 -o $@ -c $< -I$(HDR_DIR) -I$(LEAN_INCLUDE) $(TORCH_INC_FLAGS) $(XLA_INC_FLAGS) $(ARROW_INC_FLAGS) $(EXTRA_CXX_FLAGS) -fPIC -fobjc-arc
+	$(CXX) -x objective-c++ $(CXX_STD_FLAG) -o $@ -c $< -I$(HDR_DIR) -I$(LEAN_INCLUDE) $(TORCH_INC_FLAGS) $(XLA_INC_FLAGS) $(ARROW_INC_FLAGS) $(EXTRA_CXX_FLAGS) -fPIC -fobjc-arc
 
 $(OUT_DIR)/%.o : $(SRC_DIR)/%.cu $(HDR_FILES) | $(OUT_DIR)
 	@mkdir -p $(dir $@)
