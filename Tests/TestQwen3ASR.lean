@@ -129,10 +129,11 @@ private def writeDeterministicWavFixture
 private def skipWavFrontendRegressionTest (testName : String) : IO Bool := do
   let ci := (← IO.getEnv "CI")
     |>.map (fun v =>
-      let norm := v.trimAscii.toLower
+      let norm := (v.trimAscii.toString).toLower
       norm == "true" || norm == "1")
     |>.getD false
-  let skip := System.Platform.isOSX || (System.Platform.isLinux && ci)
+  let isLinux := !(System.Platform.isOSX || System.Platform.isWindows)
+  let skip := System.Platform.isOSX || (isLinux && ci)
   if skip then
     let whereLabel := if System.Platform.isOSX then "macOS runner" else "Linux CI runner"
     IO.println s!"[skip] {testName}: WAV frontend regression on {whereLabel} (tracked separately)"
