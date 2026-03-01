@@ -11,6 +11,7 @@ out/
 .ninja_log
 .DS_Store
 checkpoints/
+dummy_path.ckpt/
 .pipeline_checkpoint.json
 weights/
 output/
