@@ -119,8 +119,10 @@ LIB_NAME := TyrC
 LIB := lib${LIB_NAME}.a
 ifeq ($(UNAME_S),Darwin)
 DYLIB := lib${LIB_NAME}.dylib
+SHARED_FLAG := -dynamiclib
 else
 DYLIB := lib${LIB_NAME}.so
+SHARED_FLAG := -shared
 endif
 
 CPP_OBJ_FILES := $(addprefix $(OUT_DIR)/,$(SRCS:.cpp=.o))
@@ -157,7 +159,7 @@ $(OUT_DIR)/$(LIB) : $(OBJ_FILES) | $(OUT_DIR)
 	${AR} rcs $@ $^
 
 $(OUT_DIR)/$(DYLIB) : $(OBJ_FILES) | $(OUT_DIR)
-	$(CXX) -shared -o $@ $^ $(DYLIB_LINK_FLAGS)
+	$(CXX) $(SHARED_FLAG) -o $@ $^ $(DYLIB_LINK_FLAGS)
 
 $(OUT_DIR)/%.o : $(SRC_DIR)/%.cpp $(HDR_FILES) | $(OUT_DIR)
 	$(CXX) $(CXX_STD_FLAG) -o $@ -c $< -I$(HDR_DIR) -I$(LEAN_INCLUDE) $(TORCH_INC_FLAGS) $(XLA_INC_FLAGS) $(ARROW_INC_FLAGS) $(EXTRA_CXX_FLAGS) -fPIC -rdynamic
