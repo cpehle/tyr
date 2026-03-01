@@ -78,7 +78,7 @@ jobs:
           test -f "${cfg}"
           grep -F "set(PACKAGE_VERSION \"${LIBTORCH_VERSION}\")" "${cfg}"
 
-      - name: Build test runner
+      - name: Build required test runners
         run: |
           if [ "${{ runner.os }}" = "Linux" ]; then
             lean_prefix="$(lean --print-prefix)"
@@ -89,7 +89,24 @@ jobs:
             export LIBRARY_PATH="${multiarch_dir}:${gomp_dir}:/usr/lib:${LIBRARY_PATH:-}"
             export LD_LIBRARY_PATH="${lean_prefix}/lib:${lean_prefix}/lib/glibc:${multiarch_dir}:${gomp_dir}:/usr/lib:${LD_LIBRARY_PATH:-}"
           fi
-          lake build test_runner
+          lake build test_runner test_runner_experimental
+
+      - name: Typecheck required example surfaces
+        run: |
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            lean_prefix="$(lean --print-prefix)"
+            multiarch_dir="/usr/lib/$(gcc -print-multiarch)"
+            gomp_dir="$(dirname "$(gcc -print-file-name=libgomp.so)")"
+            export LEAN_CC="$PWD/scripts/lean_cc_wrapper.sh"
+            export LEAN_CC_GCC="/usr/bin/gcc"
+            export LIBRARY_PATH="${multiarch_dir}:${gomp_dir}:/usr/lib:${LIBRARY_PATH:-}"
+            export LD_LIBRARY_PATH="${lean_prefix}/lib:${lean_prefix}/lib/glibc:${multiarch_dir}:${gomp_dir}:/usr/lib:${LD_LIBRARY_PATH:-}"
+          fi
+          lake build Examples
+          # Key example files that are not covered by `Examples.lean`.
+          lake env lean Examples/NanoChat/Generator/TypedState.lean
+          lake env lean Examples/BranchingFlows/BranchingFlowsDemo.lean
+          lake env lean Examples/NanoProof/RLTrain.lean
 
       - name: Run tests
         run: |
@@ -106,12 +123,29 @@ jobs:
           fi
           lake env ./.lake/build/bin/test_runner --fail-fast
 
+      - name: Run experimental tests
+        run: |
+          lean_prefix="$(lean --print-prefix)"
+          LEAN_LIB="${lean_prefix}/lib/lean"
+          if [ "${{ runner.os }}" = "macOS" ]; then
+            export DYLD_LIBRARY_PATH="$PWD/external/libtorch/lib:/opt/homebrew/opt/libomp/lib:$LEAN_LIB"
+          else
+            multiarch_dir="/usr/lib/$(gcc -print-multiarch)"
+            gomp_dir="$(dirname "$(gcc -print-file-name=libgomp.so)")"
+            export LEAN_CC="$PWD/scripts/lean_cc_wrapper.sh"
+            export LEAN_CC_GCC="/usr/bin/gcc"
+            export LD_LIBRARY_PATH="$PWD/external/libtorch/lib:${lean_prefix}/lib:${lean_prefix}/lib/glibc:${multiarch_dir}:${gomp_dir}:/usr/lib:$LEAN_LIB"
+          fi
+          lake env ./.lake/build/bin/test_runner_experimental
+
       - name: Optional Qwen3-TTS parity regression
         if: runner.os == 'macOS'
+        continue-on-error: true
         run: ./scripts/qwen3tts_parity_regression.sh
 
       - name: Optional Qwen3-TTS ASR audio regression
         if: runner.os == 'macOS'
+        continue-on-error: true
         run: ./scripts/qwen3tts_asr_regression.sh
 
   lint:
@@ -119,11 +153,43 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check commit subject format
+        run: |
+          set -euo pipefail
+          zero40="0000000000000000000000000000000000000000"
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+            head="${{ github.event.pull_request.head.sha }}"
+          else
+            base="${{ github.event.before }}"
+            head="${{ github.sha }}"
+          fi
+          if [ -z "${base}" ] || [ "${base}" = "${zero40}" ]; then
+            echo "No base SHA available; validating full ancestry of ${head}"
+            mapfile -t commits < <(git rev-list --reverse "${head}")
+          else
+            echo "Validating commits in ${base}..${head}"
+            mapfile -t commits < <(git rev-list --reverse "${base}..${head}")
+          fi
+          if [ "${#commits[@]}" -eq 0 ]; then
+            echo "No commits to validate."
+            exit 0
+          fi
+          for commit in "${commits[@]}"; do
+            ./scripts/check-commit-messages.sh "${commit}^!"
+          done
 
       - name: Check for TODO/FIXME comments
         run: |
           echo "Checking for TODO/FIXME comments..."
-          rg -n "TODO|FIXME" Tyr/ -g "*.lean" || echo "No TODO/FIXME found"
+          if rg -n "(--|/-).*\\b(TODO|FIXME)\\b" Tyr/ Examples/ Tests/ -g "*.lean"; then
+            echo "Found TODO/FIXME comments in Lean sources"
+          else
+            echo "No TODO/FIXME found"
+          fi
 
       - name: Check Lake/Bazel target parity
         run: ./scripts/check_target_parity.sh
@@ -131,4 +197,8 @@ jobs:
       - name: Check for sorry
         run: |
           echo "Checking for sorry (incomplete proofs)..."
-          rg -n "sorry" Tyr/ -g "*.lean" || echo "No sorry found"
+          if rg -n "\\bsorry\\b" Tyr/ Examples/ Tests/ -g "*.lean" -g "!Tyr/Tokenizer/SpecialTokens.lean"; then
+            echo "Found sorry in Lean sources"
+          else
+            echo "No sorry found"
+          fi
