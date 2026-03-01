@@ -12,21 +12,33 @@ namespace torch.qwen3
 private def reqGradFalse {s : Shape} (t : T s) : T s :=
   autograd.set_requires_grad (toFloat' t) false
 
-private def tryLoadTensorSharded (modelDir : String) (name : String) (s : Shape)
+private def isMissingTensorError (msg : String) (name : String) : Bool :=
+  (msg.contains name) &&
+  ((msg.contains "not found") || (msg.contains "missing") || (msg.contains "No tensor"))
+
+private def tryLoadOptionalTensorSharded (modelDir : String) (name : String) (s : Shape)
     : IO (Option (T s)) := do
   try
     let t ← safetensors.loadTensorSharded modelDir name s
     pure (some t)
-  catch _ =>
-    pure none
+  catch e =>
+    let msg := toString e
+    if isMissingTensorError msg name then
+      pure none
+    else
+      throw e
 
-private def tryLoadTensor (path : String) (name : String) (s : Shape)
+private def tryLoadOptionalTensor (path : String) (name : String) (s : Shape)
     : IO (Option (T s)) := do
   try
     let t ← safetensors.loadTensor path name s
     pure (some t)
-  catch _ =>
-    pure none
+  catch e =>
+    let msg := toString e
+    if isMissingTensorError msg name then
+      pure none
+    else
+      throw e
 
 namespace Qwen3ForCausalLM
 
@@ -37,13 +49,13 @@ def loadSharded (modelDir : String) (cfg : Config := Config.qwen3_4B)
   IO.println s!"Loading Qwen3ForCausalLM from {modelDir}..."
   let model ← qwen.loadQwen3ModelSharded modelDir cfg false
 
-  let lmHeadOpt ← tryLoadTensorSharded modelDir "lm_head.weight" #[cfg.vocab_size, cfg.hidden_size]
+  let lmHeadOpt ← tryLoadOptionalTensorSharded modelDir "lm_head.weight" #[cfg.vocab_size, cfg.hidden_size]
   let (lmHead, tieWordEmbeddings) ←
     match lmHeadOpt with
     | some w => pure (reqGradFalse w, false)
     | none => do
       IO.println "  lm_head.weight not found; using tied embeddings."
-      pure (reqGradFalse model.embed_tokens, true)
+      pure (model.embed_tokens, true)
 
   IO.println "Loaded Qwen3ForCausalLM weights."
   pure { model, lmHead, tieWordEmbeddings }
@@ -55,13 +67,13 @@ def load (path : String) (cfg : Config := Config.qwen3_4B)
   IO.println s!"Loading Qwen3ForCausalLM from {path}..."
   let model ← qwen.loadQwen3Model path cfg
 
-  let lmHeadOpt ← tryLoadTensor path "lm_head.weight" #[cfg.vocab_size, cfg.hidden_size]
+  let lmHeadOpt ← tryLoadOptionalTensor path "lm_head.weight" #[cfg.vocab_size, cfg.hidden_size]
   let (lmHead, tieWordEmbeddings) ←
     match lmHeadOpt with
     | some w => pure (reqGradFalse w, false)
     | none => do
       IO.println "  lm_head.weight not found; using tied embeddings."
-      pure (reqGradFalse model.embed_tokens, true)
+      pure (model.embed_tokens, true)
 
   IO.println "Loaded Qwen3ForCausalLM weights."
   pure { model, lmHead, tieWordEmbeddings }

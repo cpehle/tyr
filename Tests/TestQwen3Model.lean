@@ -60,3 +60,45 @@ def testQwen3ConfigLoad : IO Unit := do
   LeanTest.assertEqual cfg.hidden_size 48 "hidden_size should load from json"
   LeanTest.assertEqual cfg.num_attention_heads 6 "num_attention_heads should load from json"
   LeanTest.assertEqual cfg.head_dim 8 "head_dim should default to hidden_size / num_attention_heads"
+
+@[test]
+def testQwen3ConfigLoadRejectsInvalidInvariants : IO Unit := do
+  let path := "/tmp/qwen3_config_invalid_test.json"
+  let json :=
+    "{\"vocab_size\":128,\"hidden_size\":49,\"intermediate_size\":96," ++
+    "\"num_hidden_layers\":3,\"num_attention_heads\":6,\"num_key_value_heads\":2}"
+  IO.FS.writeFile path json
+  let threw ←
+    try
+      let _ ← Config.loadFromFile path
+      pure false
+    catch _ =>
+      pure true
+  LeanTest.assertTrue threw "config loader should reject invalid hidden/heads divisibility"
+
+@[test]
+def testQwen3GreedyUncachedEmptyPromptThrows : IO Unit := do
+  let model ← Qwen3ForCausalLM.init tinyCfg
+  let ids : T #[1, 0] := reshape (data.fromInt64Array #[]) #[1, 0]
+  let threw ←
+    try
+      let _ ← model.generateGreedyUncached ids 1 #[]
+      pure false
+    catch _ =>
+      pure true
+  LeanTest.assertTrue threw "generateGreedyUncached should reject empty prompt"
+
+@[test]
+def testQwen3GreedyZeroNewTokensIdentity : IO Unit := do
+  let model ← Qwen3ForCausalLM.init tinyCfg
+  let ids : T #[1, 3] := reshape (data.fromInt64Array #[4, 5, 6]) #[1, 3]
+  let ⟨seqCached, outCached⟩ ← model.generateGreedy ids 0 #[]
+  let ⟨seqUncached, outUncached⟩ ← model.generateGreedyUncached ids 0 #[]
+  LeanTest.assertEqual seqCached 3 "cached generation with maxNewTokens=0 should preserve prompt length"
+  LeanTest.assertEqual seqUncached 3 "uncached generation with maxNewTokens=0 should preserve prompt length"
+  let flatCached : T #[seqCached] := reshape outCached #[seqCached]
+  let flatUncached : T #[seqUncached] := reshape outUncached #[seqUncached]
+  let gotCached ← data.tensorToUInt64Array flatCached
+  let gotUncached ← data.tensorToUInt64Array flatUncached
+  LeanTest.assertEqual gotCached #[4, 5, 6] "cached generation should return identity sequence when no new tokens requested"
+  LeanTest.assertEqual gotUncached #[4, 5, 6] "uncached generation should return identity sequence when no new tokens requested"

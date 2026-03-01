@@ -63,12 +63,38 @@ private def parseConfig (j : Json) (d : Config := Config.qwen3_4B) : Config :=
     max_position_embeddings := getNatFieldD j "max_position_embeddings" d.max_position_embeddings
   }
 
+private def validateConfig (cfg : Config) : IO Unit := do
+  if cfg.vocab_size == 0 then
+    throw <| IO.userError "Invalid Qwen3 config: vocab_size must be > 0"
+  if cfg.hidden_size == 0 then
+    throw <| IO.userError "Invalid Qwen3 config: hidden_size must be > 0"
+  if cfg.intermediate_size == 0 then
+    throw <| IO.userError "Invalid Qwen3 config: intermediate_size must be > 0"
+  if cfg.num_hidden_layers == 0 then
+    throw <| IO.userError "Invalid Qwen3 config: num_hidden_layers must be > 0"
+  if cfg.num_attention_heads == 0 then
+    throw <| IO.userError "Invalid Qwen3 config: num_attention_heads must be > 0"
+  if cfg.num_key_value_heads == 0 then
+    throw <| IO.userError "Invalid Qwen3 config: num_key_value_heads must be > 0"
+  if cfg.hidden_size % cfg.num_attention_heads != 0 then
+    throw <| IO.userError
+      s!"Invalid Qwen3 config: hidden_size ({cfg.hidden_size}) must be divisible by num_attention_heads ({cfg.num_attention_heads})"
+  if cfg.num_attention_heads % cfg.num_key_value_heads != 0 then
+    throw <| IO.userError
+      s!"Invalid Qwen3 config: num_attention_heads ({cfg.num_attention_heads}) must be divisible by num_key_value_heads ({cfg.num_key_value_heads})"
+  if cfg.head_dim == 0 then
+    throw <| IO.userError "Invalid Qwen3 config: head_dim must be > 0"
+  if cfg.max_position_embeddings == 0 then
+    throw <| IO.userError "Invalid Qwen3 config: max_position_embeddings must be > 0"
+
 namespace Config
 
 /-- Load Qwen3 config from a HuggingFace-style `config.json` file. -/
 def loadFromFile (path : String) (defaults : Config := Config.qwen3_4B) : IO Config := do
   let root ← parseJsonFile path
-  pure (parseConfig root defaults)
+  let cfg := parseConfig root defaults
+  validateConfig cfg
+  pure cfg
 
 /-- Load Qwen3 config from a model directory containing `config.json`. -/
 def loadFromPretrainedDir (modelDir : String) (defaults : Config := Config.qwen3_4B) : IO Config :=

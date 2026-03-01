@@ -119,14 +119,24 @@ private def initLayerKVCaches {batch : UInt64}
       (head_dim := cfg.head_dim)
       device)
 
-private def decodeStepFromEmbedWithCache {batch : UInt64}
+private def precomputeDecodeRotary {maxLen : UInt64}
+    (_m : Qwen3ForCausalLM cfg)
+    (device : Device)
+    : T #[maxLen, cfg.head_dim / 2] × T #[maxLen, cfg.head_dim / 2] :=
+  rotary.computeFreqsOnDevicePure
+    maxLen
+    cfg.head_dim
+    cfg.rope_theta
+    device
+
+private def decodeStepFromEmbedWithCache {batch maxLen : UInt64}
     (m : Qwen3ForCausalLM cfg)
+    (cosAll : T #[maxLen, cfg.head_dim / 2])
+    (sinAll : T #[maxLen, cfg.head_dim / 2])
     (tokenEmbed : T #[batch, 1, cfg.hidden_size])
     (position : UInt64)
     (caches : Array (LayerKVCache cfg batch))
     : IO (T #[batch, cfg.vocab_size] × Array (LayerKVCache cfg batch)) := do
-  let freqLen := position + 1
-  let (cosAll, sinAll) := rotary.computeFreqsPure freqLen cfg.head_dim cfg.rope_theta
   let cos : T #[1, cfg.head_dim / 2] := data.slice cosAll 0 position 1
   let sin : T #[1, cfg.head_dim / 2] := data.slice sinAll 0 position 1
 
@@ -151,8 +161,10 @@ private def decodeStepFromEmbedWithCache {batch : UInt64}
   let logits2 : T #[batch, cfg.vocab_size] := reshape logits3 #[batch, cfg.vocab_size]
   pure (logits2, nextCaches)
 
-private partial def prefillCachesFromEmbeds {batch seq : UInt64}
+private partial def prefillCachesFromEmbeds {batch seq maxLen : UInt64}
     (m : Qwen3ForCausalLM cfg)
+    (cosAll : T #[maxLen, cfg.head_dim / 2])
+    (sinAll : T #[maxLen, cfg.head_dim / 2])
     (inputsEmbeds : T #[batch, seq, cfg.hidden_size])
     (caches : Array (LayerKVCache cfg batch))
     (position : Nat)
@@ -162,11 +174,13 @@ private partial def prefillCachesFromEmbeds {batch seq : UInt64}
     pure (lastLogits, caches)
   else
     let tok : T #[batch, 1, cfg.hidden_size] := data.slice inputsEmbeds 1 position.toUInt64 1
-    let (logits, caches') ← decodeStepFromEmbedWithCache m tok position.toUInt64 caches
-    prefillCachesFromEmbeds m inputsEmbeds caches' (position + 1) logits
+    let (logits, caches') ← decodeStepFromEmbedWithCache m cosAll sinAll tok position.toUInt64 caches
+    prefillCachesFromEmbeds m cosAll sinAll inputsEmbeds caches' (position + 1) logits
 
-private partial def greedyLoopCached {batch : UInt64}
+private partial def greedyLoopCached {batch maxLen : UInt64}
     (m : Qwen3ForCausalLM cfg)
+    (cosAll : T #[maxLen, cfg.head_dim / 2])
+    (sinAll : T #[maxLen, cfg.head_dim / 2])
     (eosTokenIds : Array UInt64)
     (remaining : Nat)
     (caches : Array (LayerKVCache cfg batch))
@@ -187,8 +201,8 @@ private partial def greedyLoopCached {batch : UInt64}
     return ⟨curSeq + 1, appended⟩
   else
     let nextEmb : T #[batch, 1, cfg.hidden_size] := m.embedTokens nextCol
-    let (nextLogits, caches') ← decodeStepFromEmbedWithCache m nextEmb curSeq caches
-    greedyLoopCached m eosTokenIds (remaining - 1) caches' nextLogits appended
+    let (nextLogits, caches') ← decodeStepFromEmbedWithCache m cosAll sinAll nextEmb curSeq caches
+    greedyLoopCached m cosAll sinAll eosTokenIds (remaining - 1) caches' nextLogits appended
 
 private partial def greedyLoopUncached {batch : UInt64}
     (m : Qwen3ForCausalLM cfg)
@@ -233,12 +247,13 @@ def generateGreedy {batch seq : UInt64}
   let inputsEmbeds := m.embedTokens inputIds
   let cacheDevice := inputsEmbeds.device
   let cacheMaxLen : UInt64 := seq + maxNewTokens
+  let (cosAll, sinAll) := precomputeDecodeRotary (maxLen := cacheMaxLen) m cacheDevice
   let caches0 := initLayerKVCaches m cacheMaxLen cacheDevice
   let tok0 : T #[batch, 1, cfg.hidden_size] := data.slice inputsEmbeds 1 0 1
-  let (logits0, caches1) ← decodeStepFromEmbedWithCache m tok0 0 caches0
+  let (logits0, caches1) ← decodeStepFromEmbedWithCache m cosAll sinAll tok0 0 caches0
   let (lastLogits, cachesPrefill) ←
-    prefillCachesFromEmbeds m inputsEmbeds caches1 1 logits0
-  greedyLoopCached m eosTokenIds maxNewTokens.toNat cachesPrefill lastLogits inputIds
+    prefillCachesFromEmbeds m cosAll sinAll inputsEmbeds caches1 1 logits0
+  greedyLoopCached m cosAll sinAll eosTokenIds maxNewTokens.toNat cachesPrefill lastLogits inputIds
 
 /-- Reference greedy generation by full re-forward on each decode step. -/
 def generateGreedyUncached {batch seq : UInt64}
@@ -247,6 +262,10 @@ def generateGreedyUncached {batch seq : UInt64}
     (maxNewTokens : UInt64 := 512)
     (eosTokenIds : Array UInt64 := #[])
     : IO (Sigma (fun outSeq => T #[batch, outSeq])) := do
+  if seq == 0 then
+    throw <| IO.userError "generateGreedy requires non-empty prompt sequence"
+  if maxNewTokens == 0 then
+    return ⟨seq, inputIds⟩
   greedyLoopUncached m eosTokenIds maxNewTokens.toNat inputIds
 
 end Qwen3ForCausalLM
