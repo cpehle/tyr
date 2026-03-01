@@ -3,7 +3,13 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIBTORCH_VERSION="${LIBTORCH_VERSION:-2.9.1}"
+OS="$(uname -s)"
 ARCH="$(uname -m)"
+
+if [[ "${OS}" != "Darwin" ]]; then
+  echo "dependencies_macos.sh supports macOS only (detected: ${OS})" >&2
+  exit 1
+fi
 
 case "${ARCH}" in
   arm64|aarch64)
@@ -22,12 +28,21 @@ LIBTORCH_URL="https://download.pytorch.org/libtorch/cpu/${LIBTORCH_ARCHIVE}"
 
 mkdir -p "${ROOT_DIR}/external"
 cd "${ROOT_DIR}/external"
-rm -rf libtorch
+tmp_dir="$(mktemp -d)"
+cleanup() {
+  rm -rf "${tmp_dir}"
+}
+trap cleanup EXIT
 
 echo "Downloading ${LIBTORCH_URL}"
-curl --fail --location --retry 5 --retry-all-errors --show-error -o libtorch.zip "${LIBTORCH_URL}"
-unzip -tq libtorch.zip
-unzip -q libtorch.zip
-rm -f libtorch.zip
+curl --fail --location --retry 5 --retry-all-errors --show-error -o "${tmp_dir}/libtorch.zip" "${LIBTORCH_URL}"
+unzip -tq "${tmp_dir}/libtorch.zip"
+unzip -q "${tmp_dir}/libtorch.zip" -d "${tmp_dir}"
+if [[ ! -d "${tmp_dir}/libtorch" ]]; then
+  echo "Downloaded archive did not contain expected libtorch directory" >&2
+  exit 1
+fi
+rm -rf libtorch
+mv "${tmp_dir}/libtorch" ./libtorch
 
 echo "Installed LibTorch ${LIBTORCH_VERSION} to ${ROOT_DIR}/external/libtorch"

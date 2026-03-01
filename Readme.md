@@ -23,7 +23,7 @@ let y := linear x w  -- Error: expected T #[n, 768], got T #[768, 512]
 Install [elan](https://github.com/leanprover/elan) (the Lean version manager):
 
 ```bash
-curl https://elan-init.trycloudflean.com -sSf | sh
+curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf | sh
 ```
 
 The correct Lean nightly is pinned in `lean-toolchain` and will be installed
