@@ -35,6 +35,9 @@ Status legend:
 - [x] `M12` WAV writing paths now reject RIFF-overflow payload sizes (>4GiB) before corruption.
 - [x] `M13` Qwen3ASR tests no longer rely on gitignored fixture WAV paths.
 - [x] `M15` CI commit-subject lint no longer truncates first-push checks to `~50`.
+- [x] `M14` Optional Qwen3TTS regressions now use explicit CI gates with skip/fail semantics (no success masking via `continue-on-error`).
+- [x] `F02` Qwen3TTS regression coverage expanded with instruct-path, zero-frame, and explicit error-path tests.
+- [x] `F01` `lean_args` migration evaluated and deferred for now (see `dev/f01_lean_args_evaluation.md`).
 - [x] `L01` TODO/FIXME and `sorry` lint scope expanded beyond `Tyr/` to include `Examples/` and `Tests/`.
 - [x] `L02` Lake/Bazel parity checker now reports drift in both directions.
 
@@ -51,9 +54,6 @@ Status legend:
   Refs: `scripts/check_target_parity.sh:28`, `lakefile.lean:226`, `lakefile.lean:232`, `lakefile.lean:256`, `lakefile.lean:262`, `lakefile.lean:268`, `lakefile.lean:274`, `BUILD.bazel:217`
 - [ ] `M08` Build config uses hard-coded linker/SDK paths that reduce portability across hosts/toolchains.
   Refs: `lakefile.lean:7`, `lakefile.lean:23`, `lakefile.lean:25`, `lakefile.lean:27`, `lakefile.lean:47`, `lakefile.lean:58`
-- [ ] `M14` Optional regression steps in CI are effectively false-green (`continue-on-error` and skip-if-missing semantics).
-  Refs: `.github/workflows/ci.yml:109`, `.github/workflows/ci.yml:111`, `.github/workflows/ci.yml:114`, `scripts/qwen3tts_parity_regression.sh:22`, `scripts/qwen3tts_asr_regression.sh:16`
-
 ### Low
 
 
@@ -116,8 +116,8 @@ Status legend:
 
 ### Feature Backlog
 
-- [ ] `F01` Evaluate switching CLI parsing to `lean_args`: <https://github.com/cpehle/lean_args>
-- [ ] `F02` Expand Qwen3TTS regression test coverage beyond current suite.
+- [x] `F01` Evaluate switching CLI parsing to `lean_args`: deferred this pass; see `dev/f01_lean_args_evaluation.md`.
+- [x] `F02` Expand Qwen3TTS regression test coverage beyond current suite.
 
 ### Historical Completed Items
 
