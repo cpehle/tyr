@@ -146,7 +146,8 @@ def deserialize (bytes : ByteArray) : Option BPETokenizer := do
   -- Read merges
   let mut merges := Array.mkEmpty numMerges.toNat
   let mut mergeLookup : Std.HashMap (TokenId × TokenId) TokenId := {}
-  for _ in [:numMerges.toNat] do
+  let mut mergePriority : Std.HashMap (TokenId × TokenId) Nat := {}
+  for idx in [:numMerges.toNat] do
     let left ← readU32 bytes offset
     let right ← readU32 bytes (offset + 4)
     let result ← readU32 bytes (offset + 8)
@@ -154,6 +155,8 @@ def deserialize (bytes : ByteArray) : Option BPETokenizer := do
     let rule := { left := left, right := right, result := result : MergeRule }
     merges := merges.push rule
     mergeLookup := mergeLookup.insert (left, right) result
+    if !mergePriority.contains (left, right) then
+      mergePriority := mergePriority.insert (left, right) idx
 
   -- Read special tokens
   let mut specialTokens : Std.HashMap String TokenId := {}
@@ -178,6 +181,7 @@ def deserialize (bytes : ByteArray) : Option BPETokenizer := do
     bytesToId := bytesToId
     merges := merges
     mergeLookup := mergeLookup
+    mergePriority := mergePriority
     specialTokens := specialTokens
     idToSpecial := idToSpecial
   }
@@ -213,6 +217,7 @@ def createBase : BPETokenizer := Id.run do
     bytesToId := bytesToId
     merges := #[]
     mergeLookup := {}
+    mergePriority := {}
     specialTokens := {}
     idToSpecial := {}
   }

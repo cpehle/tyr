@@ -29,6 +29,8 @@ structure BPETokenizer where
   merges : Array MergeRule
   /-- (left, right) → result for fast merge lookup -/
   mergeLookup : Std.HashMap (TokenId × TokenId) TokenId
+  /-- (left, right) → merge priority/rank (lower is better) -/
+  mergePriority : Std.HashMap (TokenId × TokenId) Nat
   /-- Special token string → ID -/
   specialTokens : Std.HashMap String TokenId
   /-- Token ID → special token string (for decoding) -/
@@ -48,6 +50,7 @@ def BPETokenizer.empty : BPETokenizer :=
   , bytesToId := {}
   , merges := #[]
   , mergeLookup := {}
+  , mergePriority := {}
   , specialTokens := {}
   , idToSpecial := {}
   }

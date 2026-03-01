@@ -82,36 +82,27 @@ def bytesToBaseTokens (tok : BPETokenizer) (bytes : ByteArray) : Array TokenId :
 def findBestMerge (tok : BPETokenizer) (tokens : Array TokenId) : Option (Nat × MergeRule) := Id.run do
   if tokens.size < 2 then return none
 
-  let mut bestIdx : Option Nat := none
-  let mut bestPriority : Nat := tok.merges.size  -- Lower is better
+  let mut best : Option (Nat × Nat) := none
 
   -- Check each adjacent pair
   for i in [:tokens.size - 1] do
     let left := tokens[i]!
     let right := tokens[i + 1]!
-    -- Look up merge
-    match tok.mergeLookup.get? (left, right) with
-    | some _ =>
-      -- Find priority (index in merge list)
-      -- This is O(n) which could be optimized with a priority lookup table
-      for priority in [:tok.merges.size] do
-        let rule := tok.merges[priority]!
-        if rule.left == left && rule.right == right then
-          if priority < bestPriority then
-            bestPriority := priority
-            bestIdx := some i
-          break
+    match tok.mergePriority.get? (left, right) with
+    | some priority =>
+      match best with
+      | none => best := some (i, priority)
+      | some (_, bestPriority) =>
+        if priority < bestPriority then
+          best := some (i, priority)
     | none => pure ()
 
-  match bestIdx with
+  match best with
+  | some (idx, priority) =>
+    match tok.merges[priority]? with
+    | some rule => return some (idx, rule)
+    | none => return none
   | none => return none
-  | some idx =>
-    let left := tokens[idx]!
-    let right := tokens[idx + 1]!
-    for rule in tok.merges do
-      if rule.left == left && rule.right == right then
-        return some (idx, rule)
-    return none
 
 /-- Apply a single BPE merge at a given position -/
 def applyMerge (tokens : Array TokenId) (idx : Nat) (mergeResult : TokenId) : Array TokenId := Id.run do

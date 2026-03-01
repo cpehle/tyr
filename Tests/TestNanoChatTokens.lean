@@ -39,6 +39,57 @@ def testEncodeWithSpecialsLongestMatch : IO Unit := do
   LeanTest.assertEqual (tokenizer.decode tok ids) "<|assistant_start|>"
 
 @[test]
+def testFindBestMergeUsesPriorityMap : IO Unit := do
+  let base := initBaseTokenizer #[]
+  let a : TokenId := 97
+  let b : TokenId := 98
+  let c : TokenId := 99
+  let bcId : TokenId := base.vocabSize
+  let abId : TokenId := base.vocabSize + 1
+  let ruleBC : MergeRule := { left := b, right := c, result := bcId }
+  let ruleAB : MergeRule := { left := a, right := b, result := abId }
+
+  let byteBC := ByteArray.mk #[(98 : UInt8), (99 : UInt8)]
+  let byteAB := ByteArray.mk #[(97 : UInt8), (98 : UInt8)]
+  let idToBytes := (base.idToBytes.push byteBC).push byteAB
+  let bytesToId := (base.bytesToId.insert byteBC bcId).insert byteAB abId
+  let mergeLookup : Std.HashMap (TokenId × TokenId) TokenId :=
+    (({} : Std.HashMap (TokenId × TokenId) TokenId).insert (b, c) bcId).insert (a, b) abId
+  let mergePriority : Std.HashMap (TokenId × TokenId) Nat :=
+    (({} : Std.HashMap (TokenId × TokenId) Nat).insert (b, c) 0).insert (a, b) 1
+
+  let tok : BPETokenizer := {
+    base with
+    vocabSize := base.vocabSize + 2
+    idToBytes := idToBytes
+    bytesToId := bytesToId
+    merges := #[ruleBC, ruleAB]
+    mergeLookup := mergeLookup
+    mergePriority := mergePriority
+  }
+
+  match findBestMerge tok #[a, b, c] with
+  | some (idx, rule) =>
+    LeanTest.assertEqual idx 1
+    LeanTest.assertEqual rule.left ruleBC.left
+    LeanTest.assertEqual rule.right ruleBC.right
+    LeanTest.assertEqual rule.result ruleBC.result
+  | none =>
+    LeanTest.fail "Expected findBestMerge to select the ranked merge"
+
+  LeanTest.assertEqual (encodeWord tok "abc") #[a, bcId]
+
+  let serialized <-
+    match serialize tok with
+    | .ok bytes => pure bytes
+    | .error err => LeanTest.fail s!"Expected serialize to succeed: {err}"
+  let roundTripped <-
+    match deserialize serialized with
+    | some decoded => pure decoded
+    | none => LeanTest.fail "Expected deserialize to succeed after serialize"
+  LeanTest.assertEqual (encodeWord roundTripped "abc") #[a, bcId]
+
+@[test]
 def testRenderConversationMasking : IO Unit := do
   let chatTokens : ChatTokens := {
     bos := 100

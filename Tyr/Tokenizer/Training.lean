@@ -111,6 +111,7 @@ def initBaseTokenizer (specialTokens : Array String) : BPETokenizer := Id.run do
     bytesToId := bytesToId
     merges := #[]
     mergeLookup := {}
+    mergePriority := {}
     specialTokens := {}
     idToSpecial := {}
   }
@@ -182,6 +183,10 @@ def bpeMergeStep (tok : BPETokenizer) (docs : Array (Array TokenId))
   let newBytes := leftBytes ++ rightBytes
 
   -- Update tokenizer
+  let mergePriority :=
+    match tok.mergePriority.get? (left, right) with
+    | some _ => tok.mergePriority
+    | none => tok.mergePriority.insert (left, right) tok.merges.size
   let newTok : BPETokenizer := {
     tok with
     vocabSize := tok.vocabSize + 1
@@ -189,6 +194,7 @@ def bpeMergeStep (tok : BPETokenizer) (docs : Array (Array TokenId))
     bytesToId := tok.bytesToId.insert newBytes newId
     merges := tok.merges.push { left, right, result := newId }
     mergeLookup := tok.mergeLookup.insert (left, right) newId
+    mergePriority := mergePriority
   }
 
   -- Replace pair in all documents
