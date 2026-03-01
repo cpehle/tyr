@@ -156,10 +156,34 @@ private def defaultHFHubDir : IO String := do
 private def hfRepoDirName (repoId : String) : String :=
   s!"models--{repoId.replace "/" "--"}"
 
-private def hasWeightFiles (dir : String) : IO Bool := do
+private def hasCompleteWeightFiles (dir : String) : IO Bool := do
   let sharded := s!"{dir}/model.safetensors.index.json"
   let single := s!"{dir}/model.safetensors"
-  pure ((← fileExists sharded) || (← fileExists single))
+  if ← fileExists sharded then
+    try
+      let shardFiles ← shardFilesFromIndexFile sharded
+      if shardFiles.isEmpty then
+        pure false
+      else
+        let mut allPresent := true
+        for shard in shardFiles do
+          if !(← fileExists s!"{dir}/{shard}") then
+            allPresent := false
+        pure allPresent
+    catch _ =>
+      pure false
+  else
+    fileExists single
+
+private def hasTokenizerFiles (dir : String) : IO Bool := do
+  let tokJson := s!"{dir}/tokenizer.json"
+  let tokCfg := s!"{dir}/tokenizer_config.json"
+  let vocab := s!"{dir}/vocab.json"
+  let merges := s!"{dir}/merges.txt"
+  pure <| (← fileExists tokJson) || ((← fileExists tokCfg) && (← fileExists vocab) && (← fileExists merges))
+
+private def hasPreprocessorFiles (dir : String) : IO Bool := do
+  fileExists s!"{dir}/preprocessor_config.json"
 
 /-- Try resolving a repo id against existing HuggingFace cache snapshots. -/
 def findCachedSnapshot? (repoId : String) (revision : String := "main") : IO (Option String) := do
@@ -189,7 +213,7 @@ def findCachedSnapshot? (repoId : String) (revision : String := "main") : IO (Op
 
   for c in candidates do
     let cStr := c.toString
-    if (← fileExists s!"{cStr}/config.json") && (← hasWeightFiles cStr) then
+    if (← fileExists s!"{cStr}/config.json") && (← hasCompleteWeightFiles cStr) then
       return some cStr
   pure none
 
@@ -208,7 +232,11 @@ private def ensureModelWeights (repoId revision modelDir : String) : IO Unit := 
   let indexPath := s!"{modelDir}/model.safetensors.index.json"
   let singlePath := s!"{modelDir}/model.safetensors"
 
-  if (← fileExists indexPath) || (← fileExists singlePath) then
+  if ← fileExists indexPath then
+    let shardFiles ← shardFilesFromIndexFile indexPath
+    for shard in shardFiles do
+      ensureRemoteFile repoId revision shard s!"{modelDir}/{shard}"
+  else if ← fileExists singlePath then
     pure ()
   else
     let gotIndex ← tryRemoteFile repoId revision "model.safetensors.index.json" indexPath
@@ -228,7 +256,19 @@ def resolvePretrainedDir (source : String) (opts : DownloadOptions := {}) : IO S
     return sourceExpanded
 
   if let some snap ← findCachedSnapshot? source opts.revision then
-    return snap
+    let hasTok ←
+      if opts.includeTokenizer then
+        hasTokenizerFiles snap
+      else
+        pure true
+    let hasPre ←
+      if opts.includePreprocessor then
+        hasPreprocessorFiles snap
+      else
+        pure true
+    if hasTok && hasPre then
+      ensureModelWeights source opts.revision snap
+      return snap
 
   let modelDir ← modelDirForRepo opts.cacheDir source opts.revision
   IO.FS.createDirAll ⟨modelDir⟩

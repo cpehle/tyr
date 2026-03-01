@@ -59,6 +59,36 @@ private def maskRowCounts {batch seq : UInt64} (attentionMask : T #[batch, seq])
 private def allInSet (xs : Array UInt64) (allow : Array UInt64) : Bool :=
   xs.all (fun x => allow.contains x)
 
+private def updateFinished
+    (finished : Array Bool)
+    (nextVals : Array UInt64)
+    (eosTokenIds : Array UInt64)
+    : Array Bool :=
+  Id.run do
+    let mut out : Array Bool := Array.mkEmpty nextVals.size
+    for i in [:nextVals.size] do
+      let was := finished.getD i false
+      let now := eosTokenIds.contains (nextVals.getD i 0)
+      out := out.push (was || now)
+    out
+
+private def applyFinishedEos
+    (nextVals : Array UInt64)
+    (finished : Array Bool)
+    (eosTokenIds : Array UInt64)
+    : Array UInt64 :=
+  if eosTokenIds.isEmpty then
+    nextVals
+  else
+    let eosTok := eosTokenIds.getD 0 0
+    Id.run do
+      let mut out : Array UInt64 := Array.mkEmpty nextVals.size
+      for i in [:nextVals.size] do
+        let wasFinished := finished.getD i false
+        let v := if wasFinished then eosTok else nextVals.getD i eosTok
+        out := out.push v
+      out
+
 private def clipTo (x hi : UInt64) : UInt64 :=
   if hi == 0 then 0 else if x < hi then x else hi - 1
 
@@ -262,10 +292,15 @@ private def featureLengthsFromFeatureMask (cfg : ThinkerConfig) {batch featureSe
   let featureLensRaw ← data.tensorToUInt64Array featureLensTensor
   pure <| featureLensRaw.map (fun l => if l <= featureSeq then l else featureSeq)
 
+private def getPlaceholderMask2d (cfg : ThinkerConfig) {batch seq : UInt64}
+    (inputIds : T #[batch, seq])
+    : T #[batch, seq] :=
+  eq_scalar inputIds (Int64.ofNat cfg.audioTokenId.toNat)
+
 private def getPlaceholderMask (cfg : ThinkerConfig) {batch seq : UInt64}
     (inputIds : T #[batch, seq])
     : T #[batch, seq, cfg.textConfig.hiddenSize] :=
-  let mask2d : T #[batch, seq] := eq_scalar inputIds (Int64.ofNat cfg.audioTokenId.toNat)
+  let mask2d := getPlaceholderMask2d cfg inputIds
   nn.expand (reshape mask2d #[batch, seq, 1]) #[batch, seq, cfg.textConfig.hiddenSize]
 
 private def audioValidMaskFromFeatureMask (cfg : ThinkerConfig) {batch featureSeq audioSeq : UInt64}
@@ -295,16 +330,47 @@ private def buildInputsEmbeds {batch seq frames : UInt64}
   | none => pure inputsEmbeds0
   | some feats =>
     let audioSeq := AudioEncoderConfig.framesAfterConv3 cfg.audioConfig frames
-    let (_audioAttnMask, audioFeaturesRaw) ←
+    let placeholderMask2d := getPlaceholderMask2d cfg inputIds
+    let placeholderLensTensor : T #[batch] := nn.sumDim (data.toLong placeholderMask2d) 1 false
+    let placeholderLens ← data.tensorToUInt64Array placeholderLensTensor
+    let (audioLensOpt, _audioAttnMask, audioFeaturesRaw) ←
       match featureAttentionMask with
       | some fm =>
         let featureLens ← featureLengthsFromFeatureMask cfg fm
+        let audioLens := AudioEncoderConfig.featExtractOutputLengths featureLens
         let m2d ← audioAttentionMaskFromFeatureMask cfg (audioSeq := audioSeq) fm
         let raw := encodeAudioVarLen m feats featureLens
-        pure (some m2d, raw)
+        pure (some audioLens, some m2d, raw)
       | none =>
         let raw := encodeAudio m feats none
-        pure (none, raw)
+        pure (none, none, raw)
+
+    let expectedAudioLens :=
+      match audioLensOpt with
+      | some xs => xs
+      | none => Array.replicate batch.toNat audioSeq
+    let expectedRows := batch.toNat
+    if expectedAudioLens.size != expectedRows then
+      throw <| IO.userError
+        s!"audio expected-length row mismatch: expected {expectedRows}, got {expectedAudioLens.size}"
+    if placeholderLens.size != expectedRows then
+      throw <| IO.userError
+        s!"audio placeholder row mismatch: expected {expectedRows}, got {placeholderLens.size}"
+    for i in [:expectedRows] do
+      let got := placeholderLens[i]!
+      let expected := expectedAudioLens[i]!
+      if got = expected then
+        pure ()
+      else if got = 0 && expected > 0 then
+        throw <| IO.userError
+          s!"audio placeholder mismatch at batch {i}: expected {expected}, got 0 (silent audio-drop)"
+      else if got < expected then
+        throw <| IO.userError
+          s!"audio placeholder mismatch at batch {i}: expected {expected}, got {got} (too few placeholders)"
+      else
+        throw <| IO.userError
+          s!"audio placeholder mismatch at batch {i}: expected {expected}, got {got} (too many placeholders)"
+
     let audioFeatures := projectAudio m audioFeaturesRaw
     let source ←
       match featureAttentionMask with
@@ -435,6 +501,7 @@ private partial def greedyLoopCached {batch maxLen : UInt64}
     (cosAll : T #[maxLen, cfg.textConfig.headDim / 2])
     (sinAll : T #[maxLen, cfg.textConfig.headDim / 2])
     (eosTokenIds : Array UInt64)
+    (finished : Array Bool)
     (remaining : Nat)
     (caches : Array (LayerKVCache cfg batch))
     (lastLogits : T #[batch, ThinkerLmVocabSize cfg])
@@ -444,19 +511,25 @@ private partial def greedyLoopCached {batch maxLen : UInt64}
   if remaining == 0 then
     return ⟨curSeq, curIds⟩
 
-  let nextTok : T #[batch] := nn.argmax lastLogits 1
-  let nextVals ← data.tensorToUInt64Array nextTok
+  let nextTokRaw : T #[batch] := nn.argmax lastLogits 1
+  let nextValsRaw ← data.tensorToUInt64Array nextTokRaw
+  let finished' := updateFinished finished nextValsRaw eosTokenIds
+  let nextVals := applyFinishedEos nextValsRaw finished eosTokenIds
+  let nextTok : T #[batch] :=
+    reshape
+      (data.fromInt64Array (nextVals.map (Int64.ofNat ∘ UInt64.toNat)))
+      #[batch]
   let nextCol : T #[batch, 1] := reshape nextTok #[batch, 1]
   let appended : T #[batch, curSeq + 1] := nn.cat curIds nextCol 1
 
-  let stop := eosTokenIds.size > 0 && allInSet nextVals eosTokenIds
+  let stop := eosTokenIds.size > 0 && finished'.all (fun x => x)
   if stop then
     return ⟨curSeq + 1, appended⟩
   else
     let nextEmb : T #[batch, 1, cfg.textConfig.hiddenSize] := m.embedText nextCol
     let (nextLogits, caches') ←
       decodeStepFromEmbedWithCache m cosAll sinAll nextEmb curSeq caches
-    greedyLoopCached m cosAll sinAll eosTokenIds (remaining - 1) caches' nextLogits appended
+    greedyLoopCached m cosAll sinAll eosTokenIds finished' (remaining - 1) caches' nextLogits appended
 
 /-- Lean analogue of `prepare_inputs_for_generation` behavior for audio features:
     only feed audio on the first generation step (`cachePosition == 0`). -/
@@ -520,6 +593,7 @@ private partial def greedyLoopUncached {batch frames : UInt64}
     (inputFeatures : Option (T #[batch, cfg.audioConfig.numMelBins, frames]))
     (featureAttentionMask : Option (T #[batch, frames]))
     (eosTokenIds : Array UInt64)
+    (finished : Array Bool)
     (remaining : Nat)
     {curSeq : UInt64}
     (curIds : T #[batch, curSeq])
@@ -534,17 +608,23 @@ private partial def greedyLoopUncached {batch frames : UInt64}
   let last3 : T #[batch, 1, ThinkerLmVocabSize cfg] :=
     reshape (data.slice logits 1 lastPos 1) #[batch, 1, ThinkerLmVocabSize cfg]
   let last2 : T #[batch, ThinkerLmVocabSize cfg] := reshape last3 #[batch, ThinkerLmVocabSize cfg]
-  let nextTok : T #[batch] := nn.argmax last2 1
-  let nextVals ← data.tensorToUInt64Array nextTok
+  let nextTokRaw : T #[batch] := nn.argmax last2 1
+  let nextValsRaw ← data.tensorToUInt64Array nextTokRaw
+  let finished' := updateFinished finished nextValsRaw eosTokenIds
+  let nextVals := applyFinishedEos nextValsRaw finished eosTokenIds
+  let nextTok : T #[batch] :=
+    reshape
+      (data.fromInt64Array (nextVals.map (Int64.ofNat ∘ UInt64.toNat)))
+      #[batch]
 
   let nextCol : T #[batch, 1] := reshape nextTok #[batch, 1]
   let appended : T #[batch, curSeq + 1] := nn.cat curIds nextCol 1
 
-  let stop := eosTokenIds.size > 0 && allInSet nextVals eosTokenIds
+  let stop := eosTokenIds.size > 0 && finished'.all (fun x => x)
   if stop then
     return ⟨curSeq + 1, appended⟩
   else
-    greedyLoopUncached m inputFeatures featureAttentionMask eosTokenIds (remaining - 1) appended
+    greedyLoopUncached m inputFeatures featureAttentionMask eosTokenIds finished' (remaining - 1) appended
 
 /-- Compatibility path mirroring the previous full re-forward greedy loop.
     Useful for parity checks against the cached generation path. -/
@@ -556,7 +636,12 @@ def generateGreedyUncached {batch seq frames : UInt64}
     (maxNewTokens : UInt64 := 512)
     (eosTokenIds : Array UInt64 := defaultEosTokenIds)
     : IO (Sigma (fun outSeq => T #[batch, outSeq])) := do
-  greedyLoopUncached m inputFeatures featureAttentionMask eosTokenIds maxNewTokens.toNat inputIds
+  if seq == 0 then
+    throw <| IO.userError "generateGreedy requires non-empty prompt sequence"
+  if maxNewTokens == 0 then
+    return ⟨seq, inputIds⟩
+  let finished0 := Array.replicate batch.toNat false
+  greedyLoopUncached m inputFeatures featureAttentionMask eosTokenIds finished0 maxNewTokens.toNat inputIds
 
 /-- Greedy generation utility (Lean-only, no vLLM dependency).
     Returns generated full sequence `[prompt || new_tokens]` with dynamic output length. -/
@@ -582,7 +667,8 @@ def generateGreedy {batch seq frames : UInt64}
   let (logits0, caches1) ← decodeStepFromEmbedWithCache m cosAll sinAll tok0 0 caches0
   let (lastLogits, cachesPrefill) ←
     prefillCachesFromEmbeds m cosAll sinAll inputsEmbeds caches1 1 logits0
-  greedyLoopCached m cosAll sinAll eosTokenIds maxNewTokens.toNat cachesPrefill lastLogits inputIds
+  let finished0 := Array.replicate batch.toNat false
+  greedyLoopCached m cosAll sinAll eosTokenIds finished0 maxNewTokens.toNat cachesPrefill lastLogits inputIds
 
 def forwardFromMel {batch frames textSeq : UInt64}
     (m : Qwen3ASRThinkerForConditionalGeneration cfg)
