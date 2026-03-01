@@ -79,7 +79,38 @@ structure TypedRowState (phase : GenerationPhase) where
   generatedCount : Nat
   /-- Phase-specific data -/
   phaseData : PhaseData phase
-  deriving Inhabited
+
+instance : Inhabited (TypedRowState .normal) where
+  default := {
+    tokens := #[]
+    forcedTokens := #[]
+    generatedCount := 0
+    phaseData := .normal
+  }
+
+instance : Inhabited (TypedRowState .forcing) where
+  default := {
+    tokens := #[]
+    forcedTokens := #[]
+    generatedCount := 0
+    phaseData := .forcing
+  }
+
+instance : Inhabited (TypedRowState .completed) where
+  default := {
+    tokens := #[]
+    forcedTokens := #[]
+    generatedCount := 0
+    phaseData := .completed
+  }
+
+instance {tool : String} : Inhabited (TypedRowState (.inToolBlock tool)) where
+  default := {
+    tokens := #[]
+    forcedTokens := #[]
+    generatedCount := 0
+    phaseData := .inToolBlock #[]
+  }
 
 /-! ## State Construction -/
 
@@ -245,19 +276,19 @@ structure BoxedRowState where
   ops : RowStateOps
   -- We also need to store update functions for transitions
   /-- Append token and get new boxed state -/
-  appendTokenFn : TokenId → BoxedRowState
+  appendTokenFn : TokenId -> BoxedRowState
   /-- Enter tool block (if in normal phase) -/
-  enterToolBlockFn : String → Option BoxedRowState
+  enterToolBlockFn : String -> Option BoxedRowState
   /-- Accumulate tool token (if in tool block) -/
-  accumulateToolTokenFn : TokenId → Option BoxedRowState
+  accumulateToolTokenFn : TokenId -> Option BoxedRowState
   /-- Exit tool block with result (if in tool block) -/
-  exitToolBlockFn : Array TokenId → Option BoxedRowState
+  exitToolBlockFn : Array TokenId -> Option BoxedRowState
   /-- Pop forced token (if in forcing phase) -/
-  popForcedTokenFn : Option (Option TokenId × BoxedRowState)
+  popForcedTokenFn : Option (Prod (Option TokenId) BoxedRowState)
   /-- Mark complete (if in normal phase) -/
   markCompleteFn : Option BoxedRowState
 
-/-- Forward accessors -/
+/- Forward accessors -/
 namespace BoxedRowState
 
 def phase (s : BoxedRowState) : GenerationPhase := s.ops.phase
@@ -283,7 +314,7 @@ def accumulateToolToken (s : BoxedRowState) (token : TokenId) : Option BoxedRowS
 def exitToolBlock (s : BoxedRowState) (resultTokens : Array TokenId) : Option BoxedRowState :=
   s.exitToolBlockFn resultTokens
 
-def popForcedToken (s : BoxedRowState) : Option (Option TokenId × BoxedRowState) :=
+def popForcedToken (s : BoxedRowState) : Option (Prod (Option TokenId) BoxedRowState) :=
   s.popForcedTokenFn
 
 def markComplete (s : BoxedRowState) : Option BoxedRowState :=
@@ -291,78 +322,77 @@ def markComplete (s : BoxedRowState) : Option BoxedRowState :=
 
 end BoxedRowState
 
--- Forward declaration for mutual recursion
-partial def boxNormal (state : TypedRowState .normal) : BoxedRowState
-partial def boxInToolBlock {tool : String} (state : TypedRowState (.inToolBlock tool)) : BoxedRowState
-partial def boxForcing (state : TypedRowState .forcing) : BoxedRowState
-partial def boxCompleted (state : TypedRowState .completed) : BoxedRowState
+mutual
+  /-- Box a normal phase state -/
+  unsafe def boxNormal (state : TypedRowState .normal) : BoxedRowState := {
+    ops := RowStateOps.ofTyped state
+    appendTokenFn := fun tok =>
+      boxNormal (state.appendToken tok (h := by
+        intro hEq
+        cases hEq))
+    enterToolBlockFn := fun tool => some (boxInToolBlock (state.enterToolBlock tool))
+    accumulateToolTokenFn := fun _ => none  -- Not in tool block
+    exitToolBlockFn := fun _ => none  -- Not in tool block
+    popForcedTokenFn := none  -- Not forcing
+    markCompleteFn := some (boxCompleted state.markComplete)
+  }
 
-/-- Box a normal phase state -/
-partial def boxNormal (state : TypedRowState .normal) : BoxedRowState := {
-  ops := RowStateOps.ofTyped state
-  appendTokenFn := fun tok => boxNormal (state.appendToken tok)
-  enterToolBlockFn := fun tool => some (boxInToolBlock (state.enterToolBlock tool))
-  accumulateToolTokenFn := fun _ => none  -- Not in tool block
-  exitToolBlockFn := fun _ => none  -- Not in tool block
-  popForcedTokenFn := none  -- Not forcing
-  markCompleteFn := some (boxCompleted state.markComplete)
-}
+  /-- Box an in-tool-block phase state -/
+  unsafe def boxInToolBlock {tool : String} (state : TypedRowState (.inToolBlock tool)) : BoxedRowState := {
+    ops := RowStateOps.ofTyped state
+    appendTokenFn := fun tok =>
+      let state' := state.accumulateToolToken tok
+      let state'' : TypedRowState (.inToolBlock tool) := {
+        tokens := state'.tokens.push tok
+        forcedTokens := state'.forcedTokens
+        generatedCount := state'.generatedCount + 1
+        phaseData := state'.phaseData
+      }
+      boxInToolBlock state''
+    enterToolBlockFn := fun _ => none  -- Already in tool block
+    accumulateToolTokenFn := fun tok => some (boxInToolBlock (state.accumulateToolToken tok))
+    exitToolBlockFn := fun resultTokens => some (boxForcing (state.exitToolBlock resultTokens))
+    popForcedTokenFn := none  -- Not forcing
+    markCompleteFn := none  -- Can't complete from tool block
+  }
 
-/-- Box an in-tool-block phase state -/
-partial def boxInToolBlock {tool : String} (state : TypedRowState (.inToolBlock tool)) : BoxedRowState := {
-  ops := RowStateOps.ofTyped state
-  appendTokenFn := fun tok =>
-    let state' := state.accumulateToolToken tok
-    let state'' : TypedRowState (.inToolBlock tool) := {
-      tokens := state'.tokens.push tok
-      forcedTokens := state'.forcedTokens
-      generatedCount := state'.generatedCount + 1
-      phaseData := state'.phaseData
-    }
-    boxInToolBlock state''
-  enterToolBlockFn := fun _ => none  -- Already in tool block
-  accumulateToolTokenFn := fun tok => some (boxInToolBlock (state.accumulateToolToken tok))
-  exitToolBlockFn := fun resultTokens => some (boxForcing (state.exitToolBlock resultTokens))
-  popForcedTokenFn := none  -- Not forcing
-  markCompleteFn := none  -- Can't complete from tool block
-}
+  /-- Box a forcing phase state -/
+  unsafe def boxForcing (state : TypedRowState .forcing) : BoxedRowState := {
+    ops := RowStateOps.ofTyped state
+    appendTokenFn := fun tok =>
+      -- In forcing, append just updates the tokens array
+      let state' : TypedRowState .forcing := {
+        tokens := state.tokens.push tok
+        forcedTokens := state.forcedTokens
+        generatedCount := state.generatedCount + 1
+        phaseData := .forcing
+      }
+      boxForcing state'
+    enterToolBlockFn := fun _ => none  -- Must finish forcing first
+    accumulateToolTokenFn := fun _ => none  -- Not in tool block
+    exitToolBlockFn := fun _ => none  -- Not in tool block
+    popForcedTokenFn :=
+      let (tokOpt, nextState) := state.popForcedToken
+      match nextState with
+      | .inl normalState => some (tokOpt, boxNormal normalState)
+      | .inr forcingState => some (tokOpt, boxForcing forcingState)
+    markCompleteFn := none  -- Can't complete while forcing
+  }
 
-/-- Box a forcing phase state -/
-partial def boxForcing (state : TypedRowState .forcing) : BoxedRowState := {
-  ops := RowStateOps.ofTyped state
-  appendTokenFn := fun tok =>
-    -- In forcing, append just updates the tokens array
-    let state' : TypedRowState .forcing := {
-      tokens := state.tokens.push tok
-      forcedTokens := state.forcedTokens
-      generatedCount := state.generatedCount + 1
-      phaseData := .forcing
-    }
-    boxForcing state'
-  enterToolBlockFn := fun _ => none  -- Must finish forcing first
-  accumulateToolTokenFn := fun _ => none  -- Not in tool block
-  exitToolBlockFn := fun _ => none  -- Not in tool block
-  popForcedTokenFn :=
-    let (tokOpt, nextState) := state.popForcedToken
-    match nextState with
-    | .inl normalState => some (tokOpt, boxNormal normalState)
-    | .inr forcingState => some (tokOpt, boxForcing forcingState)
-  markCompleteFn := none  -- Can't complete while forcing
-}
-
-/-- Box a completed phase state -/
-partial def boxCompleted (state : TypedRowState .completed) : BoxedRowState := {
-  ops := RowStateOps.ofTyped state
-  appendTokenFn := fun _ => boxCompleted state  -- No-op when completed
-  enterToolBlockFn := fun _ => none
-  accumulateToolTokenFn := fun _ => none
-  exitToolBlockFn := fun _ => none
-  popForcedTokenFn := none
-  markCompleteFn := none  -- Already completed
-}
+  /-- Box a completed phase state -/
+  unsafe def boxCompleted (state : TypedRowState .completed) : BoxedRowState := {
+    ops := RowStateOps.ofTyped state
+    appendTokenFn := fun _ => boxCompleted state  -- No-op when completed
+    enterToolBlockFn := fun _ => none
+    accumulateToolTokenFn := fun _ => none
+    exitToolBlockFn := fun _ => none
+    popForcedTokenFn := none
+    markCompleteFn := none  -- Already completed
+  }
+end
 
 /-- Box any typed state -/
-def boxTypedState {phase : GenerationPhase} (state : TypedRowState phase) : BoxedRowState :=
+unsafe def boxTypedState {phase : GenerationPhase} (state : TypedRowState phase) : BoxedRowState :=
   match phase with
   | .normal => boxNormal state
   | .inToolBlock tool => boxInToolBlock (tool := tool) state
@@ -370,16 +400,13 @@ def boxTypedState {phase : GenerationPhase} (state : TypedRowState phase) : Boxe
   | .completed => boxCompleted state
 
 /-- Create boxed state from prompt tokens -/
-def BoxedRowState.initial (promptTokens : Array TokenId) : BoxedRowState :=
+unsafe def BoxedRowState.initial (promptTokens : Array TokenId) : BoxedRowState :=
   boxNormal (TypedRowState.initial promptTokens)
-
-instance : Inhabited BoxedRowState where
-  default := BoxedRowState.initial #[]
 
 /-! ## Conversion to/from Untyped State -/
 
 /-- Convert untyped RowState to BoxedRowState -/
-def fromRowState (state : RowState) : BoxedRowState :=
+unsafe def fromRowState (state : RowState) : BoxedRowState :=
   if state.completed then
     boxCompleted {
       tokens := state.tokens
@@ -429,10 +456,15 @@ structure TypedBatchState where
   rows : Array BoxedRowState
   /-- Total tokens generated across all rows -/
   totalGenerated : Nat
-  deriving Inhabited
+
+instance : Inhabited TypedBatchState where
+  default := {
+    rows := #[]
+    totalGenerated := 0
+  }
 
 /-- Create batch state from prompts -/
-def TypedBatchState.fromPrompts (prompts : Array (Array TokenId)) : TypedBatchState := {
+unsafe def TypedBatchState.fromPrompts (prompts : Array (Array TokenId)) : TypedBatchState := {
   rows := prompts.map BoxedRowState.initial
   totalGenerated := 0
 }

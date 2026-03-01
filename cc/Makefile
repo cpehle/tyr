@@ -93,6 +93,7 @@ SRCS := \
 	tyr.cpp\
 	tyr_distributed.cpp\
 	tyr_polar.cpp\
+	tyr_media_stub.cpp\
 	tyr_parquet.cpp\
 	tyr_execution.cpp
 MM_SRCS :=
