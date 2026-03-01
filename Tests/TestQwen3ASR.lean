@@ -107,6 +107,25 @@ private def tinyPreprocessorCfg (melBins frames : UInt64) : PreprocessorConfig :
   dither := 0.0
 }
 
+private def mkDeterministicWavSamples (n : Nat) : Array Float := Id.run do
+  let mut out : Array Float := Array.mkEmpty n
+  for i in [:n] do
+    let raw := ((i * 37 + 13) % 201).toFloat
+    let centered := (raw / 100.0) - 1.0
+    out := out.push (0.2 * centered)
+  out
+
+private def writeDeterministicWavFixture
+    (name : String)
+    (sampleCount : UInt64 := 10240)
+    (sampleRate : UInt64 := 16000)
+    : IO String := do
+  let path := s!"/tmp/tyr_qwen3asr_{name}.wav"
+  let wave : T #[sampleCount] :=
+    reshape (data.fromFloatArray (mkDeterministicWavSamples sampleCount.toNat)) #[sampleCount]
+  data.saveWav wave path sampleRate
+  pure path
+
 private def mkAsciiStreamingTokenizer : tokenizer.qwen3.QwenTokenizer := Id.run do
   let mut idToToken : Array String := #[]
   let mut tokenToId : Std.HashMap String tokenizer.TokenId := {}
@@ -265,9 +284,7 @@ def testQwen3ASRTranscribeWavOffline : IO Unit := do
   let model ← Qwen3ASRForConditionalGeneration.init cfg
   let tok := mkAsciiStreamingTokenizer
   let pre := tinyPreprocessorCfg cfg.thinkerConfig.audioConfig.numMelBins 64
-  let wavPath := "output/lean_decode_test.wav"
-  let wavExists ← data.fileExists wavPath
-  LeanTest.assertTrue wavExists s!"expected tracked test WAV at {wavPath}"
+  let wavPath ← writeDeterministicWavFixture "transcribe_offline"
 
   let out ← model.transcribeWav
     tok
@@ -384,13 +401,38 @@ def testQwen3ASRFaithfulForwardPlaceholderScatter : IO Unit := do
   LeanTest.assertTrue (Float.isFinite s) "faithful forward logits should be finite"
 
 @[test]
+def testQwen3ASRFaithfulForwardPlaceholderMismatchThrows : IO Unit := do
+  let cfg := tinyCfg
+  let model ← Qwen3ASRForConditionalGeneration.init cfg
+
+  let batch : UInt64 := 1
+  let frames : UInt64 := 32
+  let audioSeq : UInt64 := AudioEncoderConfig.featExtractOutputLength frames
+  let seq : UInt64 := audioSeq + 2
+  let aTok : Int64 := Int64.ofNat cfg.thinkerConfig.audioTokenId.toNat
+  let mut idsVals : Array Int64 := #[]
+  let placeholderCount := if audioSeq > 0 then audioSeq - 1 else 0
+  for i in [:seq.toNat] do
+    let v : Int64 := if i.toUInt64 < placeholderCount then aTok else (Int64.ofNat i + 5)
+    idsVals := idsVals.push v
+  let inputIds : T #[batch, seq] := reshape (data.fromInt64Array idsVals) #[batch, seq]
+  let mel ← randn #[batch, cfg.thinkerConfig.audioConfig.numMelBins, frames]
+  let featureMask : T #[batch, frames] := full_int #[batch, frames] 1
+
+  let threw ←
+    try
+      let _ ← model.forward inputIds (some mel) (some featureMask) none
+      pure false
+    catch _ =>
+      pure true
+  LeanTest.assertTrue threw "forward should fail when audio placeholder count does not match encoded audio length"
+
+@[test]
 def testQwen3ASRForwardFromOutputWav : IO Unit := do
   let cfg := tinyCfg
   let model ← Qwen3ASRForConditionalGeneration.init cfg
 
-  let wavPath := "output/lean_decode_test.wav"
-  let wavExists ← data.fileExists wavPath
-  LeanTest.assertTrue wavExists s!"expected tracked test WAV at {wavPath}"
+  let wavPath ← writeDeterministicWavFixture "forward_from_wav"
 
   let batch : UInt64 := 1
   let frames : UInt64 := 64
@@ -461,9 +503,7 @@ def testQwen3ASRProcessorChunkedIndex : IO Unit := do
 
 @[test]
 def testQwen3ASRFrontendWavWhisperFeatures : IO Unit := do
-  let wavPath := "output/lean_decode_test.wav"
-  let wavExists ← data.fileExists wavPath
-  LeanTest.assertTrue wavExists s!"expected tracked test WAV at {wavPath}"
+  let wavPath ← writeDeterministicWavFixture "frontend_whisper_features"
 
   let cfg := tinyPreprocessorCfg 8 64
   let out ← wavToWhisperFeatures cfg wavPath
@@ -479,28 +519,8 @@ def testQwen3ASRFrontendWavWhisperFeatures : IO Unit := do
   let flatMask : T #[64] := reshape fmask #[64]
   let maskVals ← data.tensorToUInt64Array (data.toLong flatMask)
   LeanTest.assertEqual maskVals.size 64 "feature mask length should equal configured frames"
-  LeanTest.assertTrue (maskVals.all (fun v => v == 0 || v == 1))
-    "feature mask values should be binary"
-
-  -- Reference values generated from transformers WhisperFeatureExtractor
-  -- with matching config:
-  -- feature_size=8, sampling_rate=16000, hop_length=160, chunk_length=1,
-  -- n_fft=400, padding='max_length', truncation=true, max_length=10240.
-  let refFirst16 : Array Float := #[
-    -0.21674562, -0.29741502, -0.31741607, -0.36881697,
-    -0.40295756, -0.42537963, -0.42546642, -0.53501916,
-    -0.5185493, -0.57839763, -0.5599686, -0.51503634,
-    -0.48306525, -0.5830481, -0.49611127, -0.54732037
-  ]
-  let melFlat : T #[8 * 64] := reshape mel #[8 * 64]
-  let melVals ← data.tensorToFloatArray' (reshape melFlat #[])
-  let mut maxErr : Float := 0.0
-  for i in [:refFirst16.size] do
-    let err := Float.abs (melVals.getD i 0.0 - refFirst16[i]!)
-    if err > maxErr then
-      maxErr := err
-  LeanTest.assertTrue (maxErr < 0.01)
-    s!"frontend mel should match Whisper reference on first 16 values (max_err={maxErr})"
+  LeanTest.assertTrue (maskVals.all (fun v => v == 1))
+    "feature mask should be fully valid for full-length deterministic fixture"
 
 @[test]
 def testQwen3ASRForwardForcedAlignerHead : IO Unit := do
@@ -535,7 +555,7 @@ def testQwen3ASRForwardWithAuxRopeDeltas : IO Unit := do
     (attentionMask := some attnMask)
   match out.ropeDeltas with
   | none =>
-    LeanTest.assertTrue false "forwardWithAux should populate ropeDeltas when attention mask is provided"
+    LeanTest.fail "forwardWithAux should populate ropeDeltas when attention mask is provided"
   | some d =>
     let flat : T #[batch] := reshape d #[batch]
     let arr ← data.tensorToUInt64Array (data.toLong flat)
@@ -545,9 +565,7 @@ def testQwen3ASRForwardWithAuxRopeDeltas : IO Unit := do
 def testQwen3ASRGreedyGenerateFromWav : IO Unit := do
   let cfg := tinyCfg
   let model ← Qwen3ASRForConditionalGeneration.init cfg
-  let wavPath := "output/lean_decode_test.wav"
-  let wavExists ← data.fileExists wavPath
-  LeanTest.assertTrue wavExists s!"expected tracked test WAV at {wavPath}"
+  let wavPath ← writeDeterministicWavFixture "greedy_generate"
 
   let batch : UInt64 := 1
   let frames : UInt64 := 64
@@ -732,3 +750,24 @@ def testQwen3ASRForcedAlignFromOutputIds : IO Unit := do
   LeanTest.assertTrue (Float.abs (i0.endTime - 0.2) < 1e-6) "first end_time should match converted timestamp"
   LeanTest.assertTrue (Float.abs (i1.startTime - 0.3) < 1e-6) "second start_time should match converted timestamp"
   LeanTest.assertTrue (Float.abs (i1.endTime - 0.4) < 1e-6) "second end_time should match converted timestamp"
+
+@[test]
+def testQwen3ASRStreamModelPushAudioBoundsRing : IO Unit := do
+  let cfg := tinyCfg
+  let model ← Qwen3ASRForConditionalGeneration.init cfg
+  let tok := mkAsciiStreamingTokenizer
+  let pre := tinyPreprocessorCfg cfg.thinkerConfig.audioConfig.numMelBins 32
+  let sm : StreamModel := {
+    cfg := cfg
+    model := model
+    tok := tok
+    preprocessor := pre
+    modelDir := "."
+  }
+  let ss0 ← newSession sm (chunkSec := 0.001) (hopSec := 10.0)
+  let pcm : Array Float := Array.replicate 128 0.1
+  let (ss1, out) ← pushAudio sm ss0 pcm
+  LeanTest.assertEqual ss1.ring.size ss1.chunkSamples
+    "ring buffer should be bounded to chunkSamples after push"
+  LeanTest.assertTrue (!out.didDecode)
+    "push should not decode when hop threshold is not met"

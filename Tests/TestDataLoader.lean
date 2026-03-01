@@ -14,35 +14,51 @@ import LeanTest
 open torch
 open torch.DataLoader
 
+private def shakespeareTrainPath : String := "data/shakespeare_char/train.bin"
+private def nanochatFixtureDir : String := "data/nanochat"
+
+private def skipMissingFixture (testName path : String) : IO Unit := do
+  IO.println s!"[skip] {testName}: missing fixture {path}"
+
+private def requireFixture (testName path : String) : IO Bool := do
+  let fixtureExists ← data.fileExists path
+  if fixtureExists then
+    pure true
+  else
+    skipMissingFixture testName path
+    pure false
+
+private def requireNanochatFixtures (testName : String) : IO Bool := do
+  let dirPath : System.FilePath := ⟨nanochatFixtureDir⟩
+  let dirExists ← dirPath.pathExists
+  if !dirExists then
+    skipMissingFixture testName nanochatFixtureDir
+    return false
+  let trainPath := s!"{nanochatFixtureDir}/fineweb_train_1m.bin"
+  let valPath := s!"{nanochatFixtureDir}/fineweb_val_1m.bin"
+  let trainExists ← data.fileExists trainPath
+  let valExists ← data.fileExists valPath
+  if !trainExists then
+    skipMissingFixture testName trainPath
+  if !valExists then
+    skipMissingFixture testName valPath
+  return trainExists && valExists
+
 @[test]
 def testSequentialLoader : IO Unit := do
-  let trainPath := "data/shakespeare_char/train.bin"
-
-  -- Check if data exists
-  let fileExists ← data.fileExists trainPath
-  if !fileExists then
-    LeanTest.assertFalse false
+  if !(← requireFixture "testSequentialLoader" shakespeareTrainPath) then
     return
 
   -- Load the data
-  let ⟨n, _loader⟩ ← SequentialLoader.fromFile trainPath
-
-  -- Verify we got reasonable data
-  if n < 1000 then
-    LeanTest.fail "Expected at least 1000 tokens"
-    return
-
-  LeanTest.assertTrue true
+  let ⟨n, _loader⟩ ← SequentialLoader.fromFile shakespeareTrainPath
+  LeanTest.assertTrue (n >= 1000) s!"Expected at least 1000 tokens, got {n}"
 
 @[test]
 def testRandomBatchSampling : IO Unit := do
-  let trainPath := "data/shakespeare_char/train.bin"
-
-  let fileExists ← data.fileExists trainPath
-  if !fileExists then
+  if !(← requireFixture "testRandomBatchSampling" shakespeareTrainPath) then
     return
 
-  let ⟨_, loader⟩ ← SequentialLoader.fromFile trainPath
+  let ⟨_, loader⟩ ← SequentialLoader.fromFile shakespeareTrainPath
 
   -- Sample a random batch with explicit types
   let batchSize : UInt64 := 4
@@ -61,12 +77,10 @@ def testRandomBatchSampling : IO Unit := do
 
 @[test]
 def testBosFinderInit : IO Unit := do
-  let trainPath := "data/shakespeare_char/train.bin"
-  let fileExists ← data.fileExists trainPath
-  if !fileExists then
+  if !(← requireFixture "testBosFinderInit" shakespeareTrainPath) then
     return
 
-  let ⟨_, loader⟩ ← SequentialLoader.fromFile trainPath
+  let ⟨_, loader⟩ ← SequentialLoader.fromFile shakespeareTrainPath
 
   -- Use newline (token 0 in Shakespeare vocab) as BOS equivalent
   let bosToken : UInt64 := 0
@@ -76,13 +90,10 @@ def testBosFinderInit : IO Unit := do
 
 @[test]
 def testSequentialBatchIterator : IO Unit := do
-  let trainPath := "data/shakespeare_char/train.bin"
-
-  let fileExists ← data.fileExists trainPath
-  if !fileExists then
+  if !(← requireFixture "testSequentialBatchIterator" shakespeareTrainPath) then
     return
 
-  let ⟨_, loader⟩ ← SequentialLoader.fromFile trainPath
+  let ⟨_, loader⟩ ← SequentialLoader.fromFile shakespeareTrainPath
 
   let batchSize : UInt64 := 4
   let seqLen : UInt64 := 32
@@ -104,13 +115,10 @@ def testSequentialBatchIterator : IO Unit := do
 
 @[test]
 def testEpochReset : IO Unit := do
-  let trainPath := "data/shakespeare_char/train.bin"
-
-  let fileExists ← data.fileExists trainPath
-  if !fileExists then
+  if !(← requireFixture "testEpochReset" shakespeareTrainPath) then
     return
 
-  let ⟨_, loader⟩ ← SequentialLoader.fromFile trainPath
+  let ⟨_, loader⟩ ← SequentialLoader.fromFile shakespeareTrainPath
 
   -- Use large batch to quickly exhaust data
   let batchSize : UInt64 := 100
@@ -132,45 +140,30 @@ def testEpochReset : IO Unit := do
       batchCount := batchCount + 1
     currentIter := nextIter
 
-  if !sawEpochEnd then
-    LeanTest.fail "Did not see epoch end (data might be very large)"
-  else
-    if currentIter.epoch != 1 then
-      LeanTest.fail "Expected epoch 1 after reset"
-    else
-      LeanTest.assertTrue true
+  LeanTest.assertTrue sawEpochEnd "Did not see epoch end (data might be very large)"
+  LeanTest.assertEqual currentIter.epoch 1 "Expected epoch 1 after reset"
 
 @[test]
 def testDocumentAwareLoader : IO Unit := do
-  let trainPath := "data/shakespeare_char/train.bin"
-
-  let fileExists ← data.fileExists trainPath
-  if !fileExists then
+  if !(← requireFixture "testDocumentAwareLoader" shakespeareTrainPath) then
     return
 
   -- Load shard (single process, so shard 0 of 1)
-  let ⟨_, shard⟩ ← DataShard.loadFromFile trainPath 0 1 0  -- bosToken = 0 (newline)
+  let ⟨_, shard⟩ ← DataShard.loadFromFile shakespeareTrainPath 0 1 0  -- bosToken = 0 (newline)
 
   -- Test batch extraction
   let batchSize : UInt64 := 4
   let seqLen : UInt64 := 32
 
   let (maybeBatch, _) ← shard.bosFinder.getBatch shard.tokens batchSize seqLen
-  match maybeBatch with
-  | none =>
-    LeanTest.fail "Could not get batch"
-  | some _ =>
-    LeanTest.assertTrue true
+  LeanTest.assertTrue maybeBatch.isSome "Could not get batch"
 
 @[test]
 def testShuffleDeterminism : IO Unit := do
-  let trainPath := "data/shakespeare_char/train.bin"
-
-  let fileExists ← data.fileExists trainPath
-  if !fileExists then
+  if !(← requireFixture "testShuffleDeterminism" shakespeareTrainPath) then
     return
 
-  let ⟨_, loader⟩ ← SequentialLoader.fromFile trainPath
+  let ⟨_, loader⟩ ← SequentialLoader.fromFile shakespeareTrainPath
   let finder ← BOSFinder.init loader.tokens 0  -- Use newline as BOS
 
   -- Shuffle with same seed twice
@@ -182,25 +175,11 @@ def testShuffleDeterminism : IO Unit := do
   let match1 := shuffled1.bosPositions.toList.take 10
   let match2 := shuffled2.bosPositions.toList.take 10
 
-  if match1 == match2 then
-    LeanTest.assertTrue true
-  else
-    LeanTest.fail "Shuffle not deterministic!"
-
-private def nanochatFixtureDir : String := "data/nanochat"
-
-private def hasNanochatFixtures : IO Bool := do
-  let dirPath : System.FilePath := ⟨nanochatFixtureDir⟩
-  let dirExists ← dirPath.pathExists
-  if !dirExists then
-    return false
-  let trainExists ← data.fileExists s!"{nanochatFixtureDir}/fineweb_train_1m.bin"
-  let valExists ← data.fileExists s!"{nanochatFixtureDir}/fineweb_val_1m.bin"
-  return trainExists && valExists
+  LeanTest.assertEqual match1 match2 "Shuffle not deterministic!"
 
 @[test]
 def testResolveShardPathsDirectoryAndPrefix : IO Unit := do
-  if !(← hasNanochatFixtures) then
+  if !(← requireNanochatFixtures "testResolveShardPathsDirectoryAndPrefix") then
     return
 
   let trainFromDir ← resolveShardPaths nanochatFixtureDir .train
@@ -219,7 +198,7 @@ def testResolveShardPathsDirectoryAndPrefix : IO Unit := do
 
 @[test]
 def testDistributedGeneratorRotatesAcrossTrainShards : IO Unit := do
-  if !(← hasNanochatFixtures) then
+  if !(← requireNanochatFixtures "testDistributedGeneratorRotatesAcrossTrainShards") then
     return
 
   let cfg : Config := {
