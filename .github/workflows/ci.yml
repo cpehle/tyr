@@ -102,7 +102,7 @@ jobs:
             export LIBRARY_PATH="${multiarch_dir}:${gomp_dir}:/usr/lib:${LIBRARY_PATH:-}"
             export LD_LIBRARY_PATH="$PWD/external/libtorch/lib:${lean_prefix}/lib:${lean_prefix}/lib/glibc:${multiarch_dir}:${gomp_dir}:/usr/lib:${LD_LIBRARY_PATH:-}"
           fi
-          lake build Examples
+          lake -R build Examples
           # Key example files that are not covered by `Examples.lean`.
           lake env lean Examples/NanoChat/Generator/TypedState.lean
           lake env lean Examples/BranchingFlows/BranchingFlowsDemo.lean

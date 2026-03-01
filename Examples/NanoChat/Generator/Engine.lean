@@ -202,7 +202,7 @@ def processTokenTyped (engine : Engine) (state : BoxedRowState) (token : TokenId
     Same as `generate` but uses `TypedBatchState` with compile-time
     phase checking. This version demonstrates how the typed state machine
     integrates with the generation loop. -/
-def generateTyped (engine : Engine) (batch vocabSize : UInt64)
+unsafe def generateTyped (engine : Engine) (batch vocabSize : UInt64)
     (promptTokens : Array (Array TokenId))
     (runModel : Array TokenId → IO (T #[batch, vocabSize]))
     (decode : Array TokenId → String)
@@ -230,19 +230,21 @@ def generateTyped (engine : Engine) (batch vocabSize : UInt64)
 
     -- Process each token with typed state machine
     for i in [:batchSize] do
-      let row := batchState.rows[i]!
-      if !row.isCompleted then
-        -- Handle forced tokens first (from tool output injection)
-        let (tokenToProcess, newRow) :=
-          if row.isForcing then
-            match row.popForcedToken with
-            | some (some forcedTok, nextState) => (forcedTok, nextState)
-            | _ => (sampledTokens[i]!, row)
-          else
-            (sampledTokens[i]!, row)
+      match batchState.rows[i]?, sampledTokens[i]? with
+      | some row, some sampledTok =>
+        if !row.isCompleted then
+          -- Handle forced tokens first (from tool output injection)
+          let (tokenToProcess, newRow) :=
+            if row.isForcing then
+              match row.popForcedToken with
+              | some (some forcedTok, nextState) => (forcedTok, nextState)
+              | _ => (sampledTok, row)
+            else
+              (sampledTok, row)
 
-        let processedRow ← processTokenTyped engine newRow tokenToProcess decode encode
-        batchState := batchState.updateRow i processedRow
+          let processedRow ← processTokenTyped engine newRow tokenToProcess decode encode
+          batchState := batchState.updateRow i processedRow
+      | _, _ => pure ()
 
   -- Return generated sequences
   return batchState.rows.map (·.tokens)
