@@ -138,15 +138,63 @@ jobs:
           fi
           lake env ./.lake/build/bin/test_runner_experimental
 
-      - name: Optional Qwen3-TTS parity regression
+      - name: Evaluate Qwen3-TTS parity regression gate
         if: runner.os == 'macOS'
-        continue-on-error: true
+        id: qwen3tts-parity-gate
+        run: |
+          set +e
+          ./scripts/qwen3tts_parity_regression.sh --check-prereqs
+          status=$?
+          set -e
+          case "$status" in
+            0)
+              echo "status=ready" >> "$GITHUB_OUTPUT"
+              ;;
+            2)
+              echo "status=skip" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "[qwen3tts-parity] FAIL: prerequisite check exited with status $status"
+              exit "$status"
+              ;;
+          esac
+
+      - name: Run Qwen3-TTS parity regression
+        if: runner.os == 'macOS' && steps.qwen3tts-parity-gate.outputs.status == 'ready'
         run: ./scripts/qwen3tts_parity_regression.sh
 
-      - name: Optional Qwen3-TTS ASR audio regression
+      - name: Record Qwen3-TTS parity regression skip
+        if: runner.os == 'macOS' && steps.qwen3tts-parity-gate.outputs.status == 'skip'
+        run: echo "[qwen3tts-parity] skipped due to missing optional prerequisites"
+
+      - name: Evaluate Qwen3-TTS ASR regression gate
         if: runner.os == 'macOS'
-        continue-on-error: true
+        id: qwen3tts-asr-gate
+        run: |
+          set +e
+          ./scripts/qwen3tts_asr_regression.sh --check-prereqs
+          status=$?
+          set -e
+          case "$status" in
+            0)
+              echo "status=ready" >> "$GITHUB_OUTPUT"
+              ;;
+            2)
+              echo "status=skip" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "[qwen3tts-asr] FAIL: prerequisite check exited with status $status"
+              exit "$status"
+              ;;
+          esac
+
+      - name: Run Qwen3-TTS ASR audio regression
+        if: runner.os == 'macOS' && steps.qwen3tts-asr-gate.outputs.status == 'ready'
         run: ./scripts/qwen3tts_asr_regression.sh
+
+      - name: Record Qwen3-TTS ASR regression skip
+        if: runner.os == 'macOS' && steps.qwen3tts-asr-gate.outputs.status == 'skip'
+        run: echo "[qwen3tts-asr] skipped due to missing optional prerequisites"
 
   lint:
     runs-on: ubuntu-latest

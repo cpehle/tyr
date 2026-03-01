@@ -1,6 +1,27 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SKIP_EXIT_CODE=2
+CHECK_ONLY=false
+
+usage() {
+  cat <<'USAGE'
+Usage: scripts/qwen3tts_asr_regression.sh [--check-prereqs]
+
+  --check-prereqs  Validate prerequisites and exit.
+                   Exit codes: 0=ready, 2=skip.
+USAGE
+}
+
+if [[ "${1:-}" == "--check-prereqs" ]]; then
+  CHECK_ONLY=true
+  shift
+fi
+if [[ "$#" -ne 0 ]]; then
+  usage
+  exit 64
+fi
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
@@ -13,16 +34,34 @@ CODES_PATH="$OUT_DIR/tts.codes"
 ASR_OUT="$OUT_DIR/asr.txt"
 TYR_DEVICE="${TYR_DEVICE:-mps}"
 
-if [[ ! -d "$TTS_MODEL_DIR" ]]; then
-  echo "[qwen3tts-asr] skip: missing TTS model dir: $TTS_MODEL_DIR"
-  exit 0
+check_prereqs() {
+  local missing=0
+
+  if [[ ! -d "$TTS_MODEL_DIR" ]]; then
+    echo "[qwen3tts-asr] SKIP: missing TTS model dir: $TTS_MODEL_DIR"
+    missing=1
+  fi
+  if [[ ! -d "$ASR_MODEL_DIR" ]]; then
+    echo "[qwen3tts-asr] SKIP: missing ASR model dir: $ASR_MODEL_DIR"
+    missing=1
+  fi
+  if [[ ! -f "$REF_AUDIO_PATH" ]]; then
+    echo "[qwen3tts-asr] SKIP: missing reference audio: $REF_AUDIO_PATH"
+    missing=1
+  fi
+
+  if [[ "$missing" -ne 0 ]]; then
+    return 1
+  fi
+  return 0
+}
+
+if ! check_prereqs; then
+  exit "$SKIP_EXIT_CODE"
 fi
-if [[ ! -d "$ASR_MODEL_DIR" ]]; then
-  echo "[qwen3tts-asr] skip: missing ASR model dir: $ASR_MODEL_DIR"
-  exit 0
-fi
-if [[ ! -f "$REF_AUDIO_PATH" ]]; then
-  echo "[qwen3tts-asr] skip: missing reference audio: $REF_AUDIO_PATH"
+
+if [[ "$CHECK_ONLY" == "true" ]]; then
+  echo "[qwen3tts-asr] prerequisite check: ready"
   exit 0
 fi
 

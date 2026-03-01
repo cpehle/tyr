@@ -1,6 +1,27 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SKIP_EXIT_CODE=2
+CHECK_ONLY=false
+
+usage() {
+  cat <<'USAGE'
+Usage: scripts/qwen3tts_parity_regression.sh [--check-prereqs]
+
+  --check-prereqs  Validate prerequisites and exit.
+                   Exit codes: 0=ready, 2=skip.
+USAGE
+}
+
+if [[ "${1:-}" == "--check-prereqs" ]]; then
+  CHECK_ONLY=true
+  shift
+fi
+if [[ "$#" -ne 0 ]]; then
+  usage
+  exit 64
+fi
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
@@ -19,20 +40,38 @@ PY_CODES="$OUT_DIR/python.codes"
 TYR_DEVICE="${TYR_DEVICE:-mps}"
 DEVICE_MAP="${QWEN3_TTS_DEVICE_MAP:-mps}"
 
-if [[ ! -d "$MODEL_DIR" ]]; then
-  echo "[qwen3tts-parity] skip: model dir not found: $MODEL_DIR"
-  exit 0
+check_prereqs() {
+  local missing=0
+
+  if [[ ! -d "$MODEL_DIR" ]]; then
+    echo "[qwen3tts-parity] SKIP: model dir not found: $MODEL_DIR"
+    missing=1
+  fi
+  if [[ ! -f "$AUDIO_PATH" ]]; then
+    echo "[qwen3tts-parity] SKIP: audio file not found: $AUDIO_PATH"
+    missing=1
+  fi
+  if [[ ! -d "$QWEN_REPO" ]]; then
+    echo "[qwen3tts-parity] SKIP: qwen repo not found: $QWEN_REPO"
+    missing=1
+  fi
+  if [[ ! -f scripts/qwen3tts_encode_audio.py ]]; then
+    echo "[qwen3tts-parity] SKIP: missing scripts/qwen3tts_encode_audio.py"
+    missing=1
+  fi
+
+  if [[ "$missing" -ne 0 ]]; then
+    return 1
+  fi
+  return 0
+}
+
+if ! check_prereqs; then
+  exit "$SKIP_EXIT_CODE"
 fi
-if [[ ! -f "$AUDIO_PATH" ]]; then
-  echo "[qwen3tts-parity] skip: audio file not found: $AUDIO_PATH"
-  exit 0
-fi
-if [[ ! -d "$QWEN_REPO" ]]; then
-  echo "[qwen3tts-parity] skip: qwen repo not found: $QWEN_REPO"
-  exit 0
-fi
-if [[ ! -f scripts/qwen3tts_encode_audio.py ]]; then
-  echo "[qwen3tts-parity] skip: missing scripts/qwen3tts_encode_audio.py"
+
+if [[ "$CHECK_ONLY" == "true" ]]; then
+  echo "[qwen3tts-parity] prerequisite check: ready"
   exit 0
 fi
 
