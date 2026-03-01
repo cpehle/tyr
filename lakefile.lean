@@ -15,26 +15,65 @@ def linuxSystemLinkDirs : Array String :=
     "-L/usr/lib"
   ]
 
+/-- Return `none` for blank strings after trimming whitespace. -/
+def nonEmptyTrimmed? (s : String) : Option String :=
+  let trimmed := s.trimAscii.toString
+  if trimmed.isEmpty then none else some trimmed
+
+/-- Resolve the macOS SDK root from env or `xcrun` without hard-coded Xcode/CLT paths. -/
+def macOSSDKRoot? : Option String := run_io do
+  let envSdk? ← do
+    match (← IO.getEnv "TYR_MACOS_SDKROOT") with
+    | some p => pure (some p)
+    | none => IO.getEnv "SDKROOT"
+  match envSdk?.bind nonEmptyTrimmed? with
+  | some p => pure (some p)
+  | none =>
+    try
+      let out ← IO.Process.output {
+        cmd := "xcrun"
+        args := #["--sdk", "macosx", "--show-sdk-path"]
+      }
+      if out.exitCode == 0 then
+        pure (nonEmptyTrimmed? out.stdout)
+      else
+        pure none
+    catch _ =>
+      pure none
+
+/-- Optional macOS SDK search flags when an SDK root can be discovered. -/
+def macOSSDKLinkArgs : Array String :=
+  match macOSSDKRoot? with
+  | some sdk =>
+    #[
+      s!"-F{sdk}/System/Library/Frameworks",
+      s!"-Wl,-syslibroot,{sdk}"
+    ]
+  | none => #[]
+
+/-- Apple system frameworks used by the C++ bridge/runtime on macOS. -/
+def macOSFrameworkArgs : Array String :=
+  #[
+    "-framework", "Foundation",
+    "-framework", "CoreFoundation",
+    "-framework", "CoreGraphics",
+    "-framework", "ImageIO",
+    "-framework", "AVFoundation",
+    "-framework", "CoreMedia",
+    "-framework", "CoreVideo",
+    "-framework", "VideoToolbox",
+    "-framework", "Accelerate",
+    "-framework", "AudioToolbox"
+  ]
+
 def packageLinkArgs : Array String :=
   if System.Platform.isOSX then
     #[
       "-Lexternal/libtorch/lib",
       "-ltorch", "-ltorch_cpu", "-lc10",
       "-L/opt/homebrew/opt/libomp/lib", "-lomp",
-      "-L/opt/homebrew/lib", "-larrow", "-lparquet", "-lsoxr",
-      "-F/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/System/Library/Frameworks",
-      "-F/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks",
-      "-Wl,-syslibroot,/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
-      "-framework", "Foundation",
-      "-framework", "CoreFoundation",
-      "-framework", "CoreGraphics",
-      "-framework", "ImageIO",
-      "-framework", "AVFoundation",
-      "-framework", "CoreMedia",
-      "-framework", "CoreVideo",
-      "-framework", "VideoToolbox",
-      "-framework", "Accelerate",
-      "-framework", "AudioToolbox",
+      "-L/opt/homebrew/lib", "-larrow", "-lparquet", "-lsoxr"
+    ] ++ macOSSDKLinkArgs ++ macOSFrameworkArgs ++ #[
       "-Wl,-rpath,@loader_path/../../external/libtorch/lib",
       "-Wl,-rpath,/opt/homebrew/opt/libomp/lib",
       "-Wl,-rpath,/opt/homebrew/lib"
@@ -56,20 +95,8 @@ def commonLinkArgs : Array String :=
       "-Lexternal/libtorch/lib",
       "-ltorch", "-ltorch_cpu", "-lc10",
       "-L/opt/homebrew/opt/libomp/lib", "-lomp",
-      "-L/opt/homebrew/lib", "-larrow", "-lparquet", "-lsoxr",
-      "-F/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk/System/Library/Frameworks",
-      "-F/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk/System/Library/Frameworks",
-      "-Wl,-syslibroot,/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk",
-      "-framework", "Foundation",
-      "-framework", "CoreFoundation",
-      "-framework", "CoreGraphics",
-      "-framework", "ImageIO",
-      "-framework", "AVFoundation",
-      "-framework", "CoreMedia",
-      "-framework", "CoreVideo",
-      "-framework", "VideoToolbox",
-      "-framework", "Accelerate",
-      "-framework", "AudioToolbox",
+      "-L/opt/homebrew/lib", "-larrow", "-lparquet", "-lsoxr"
+    ] ++ macOSSDKLinkArgs ++ macOSFrameworkArgs ++ #[
       "-Wl,-rpath,@executable_path/../../../external/libtorch/lib",
       "-Wl,-rpath,/opt/homebrew/opt/libomp/lib",
       "-Wl,-rpath,/opt/homebrew/lib"
