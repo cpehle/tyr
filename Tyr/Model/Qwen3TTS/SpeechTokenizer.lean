@@ -700,6 +700,7 @@ def decodeChunked {batch frames : UInt64}
     reshape (torch.zeros #[batch, 1, 0] false codes.device) #[batch, 1, frames * 1920]
   else
     Id.run do
+      let chunkSize := if chunkSize == 0 then 1 else chunkSize
       let mut start : UInt64 := 0
       let mut chunks : Array (T #[]) := #[]
       while start < frames do
