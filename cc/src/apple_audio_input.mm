@@ -5,6 +5,7 @@
 #include <thread>
 #include <chrono>
 #include <string>
+#include <atomic>
 
 #ifdef __APPLE__
 #include <AudioToolbox/AudioToolbox.h>
@@ -12,11 +13,13 @@
 namespace {
 
 std::mutex g_audio_mu;
+std::mutex g_lifecycle_mu;
 std::deque<float> g_audio_fifo;
 AudioQueueRef g_input_queue = nullptr;
-bool g_running = false;
-uint64_t g_target_rate = 16000;
-uint64_t g_target_channels = 1;
+std::atomic<AudioQueueRef> g_active_queue{nullptr};
+std::atomic<bool> g_running{false};
+std::atomic<uint64_t> g_target_rate{16000};
+std::atomic<uint64_t> g_target_channels{1};
 
 static lean_object* mk_io_error(const std::string& msg) {
   return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string(msg.c_str())));
@@ -37,24 +40,35 @@ static void input_callback(
       g_audio_fifo.push_back(p[i]);
     }
     // Keep ~30s cap to avoid unbounded growth.
-    const size_t cap = static_cast<size_t>(g_target_rate * g_target_channels * 30);
+    const uint64_t rate = g_target_rate.load(std::memory_order_relaxed);
+    const uint64_t channels = g_target_channels.load(std::memory_order_relaxed);
+    const size_t cap = static_cast<size_t>(rate * channels * 30);
     while (g_audio_fifo.size() > cap) {
       g_audio_fifo.pop_front();
     }
   }
 
-  if (g_running) {
+  if (g_running.load(std::memory_order_acquire) &&
+      g_active_queue.load(std::memory_order_acquire) == inAQ) {
     AudioQueueEnqueueBuffer(inAQ, inBuffer, 0, nullptr);
   }
 }
 
-static void stop_queue() {
-  if (g_input_queue != nullptr) {
-    g_running = false;
-    AudioQueueStop(g_input_queue, true);
-    AudioQueueDispose(g_input_queue, true);
-    g_input_queue = nullptr;
+static void stop_queue_locked() {
+  g_running.store(false, std::memory_order_release);
+  g_active_queue.store(nullptr, std::memory_order_release);
+
+  AudioQueueRef queue = g_input_queue;
+  g_input_queue = nullptr;
+  if (queue != nullptr) {
+    AudioQueueStop(queue, true);
+    AudioQueueDispose(queue, true);
   }
+}
+
+static void stop_queue() {
+  std::lock_guard<std::mutex> lifecycle_lock(g_lifecycle_mu);
+  stop_queue_locked();
 }
 
 } // namespace
@@ -70,14 +84,15 @@ lean_object* lean_tyr_audio_input_start(
     return mk_io_error("audio_input_start: sample_rate/channels must be > 0");
   }
 
-  stop_queue();
+  std::lock_guard<std::mutex> lifecycle_lock(g_lifecycle_mu);
+  stop_queue_locked();
   {
     std::lock_guard<std::mutex> lock(g_audio_mu);
     g_audio_fifo.clear();
   }
 
-  g_target_rate = sample_rate;
-  g_target_channels = channels;
+  g_target_rate.store(sample_rate, std::memory_order_relaxed);
+  g_target_channels.store(channels, std::memory_order_relaxed);
 
   AudioStreamBasicDescription fmt{};
   fmt.mSampleRate = static_cast<Float64>(sample_rate);
@@ -89,6 +104,7 @@ lean_object* lean_tyr_audio_input_start(
   fmt.mBytesPerFrame = fmt.mChannelsPerFrame * sizeof(float);
   fmt.mBytesPerPacket = fmt.mFramesPerPacket * fmt.mBytesPerFrame;
 
+  AudioQueueRef queue = nullptr;
   OSStatus st = AudioQueueNewInput(
       &fmt,
       input_callback,
@@ -96,9 +112,8 @@ lean_object* lean_tyr_audio_input_start(
       nullptr,
       kCFRunLoopCommonModes,
       0,
-      &g_input_queue);
-  if (st != noErr || g_input_queue == nullptr) {
-    g_input_queue = nullptr;
+      &queue);
+  if (st != noErr || queue == nullptr) {
     return mk_io_error("audio_input_start: AudioQueueNewInput failed");
   }
 
@@ -109,26 +124,29 @@ lean_object* lean_tyr_audio_input_start(
 
   for (int i = 0; i < 3; ++i) {
     AudioQueueBufferRef buf = nullptr;
-    st = AudioQueueAllocateBuffer(g_input_queue, bytes, &buf);
+    st = AudioQueueAllocateBuffer(queue, bytes, &buf);
     if (st != noErr || buf == nullptr) {
-      stop_queue();
+      AudioQueueDispose(queue, true);
       return mk_io_error("audio_input_start: AudioQueueAllocateBuffer failed");
     }
     buf->mAudioDataByteSize = bytes;
-    st = AudioQueueEnqueueBuffer(g_input_queue, buf, 0, nullptr);
+    st = AudioQueueEnqueueBuffer(queue, buf, 0, nullptr);
     if (st != noErr) {
-      stop_queue();
+      AudioQueueDispose(queue, true);
       return mk_io_error("audio_input_start: AudioQueueEnqueueBuffer failed");
     }
   }
 
-  st = AudioQueueStart(g_input_queue, nullptr);
+  g_input_queue = queue;
+  g_active_queue.store(queue, std::memory_order_release);
+  g_running.store(true, std::memory_order_release);
+
+  st = AudioQueueStart(queue, nullptr);
   if (st != noErr) {
-    stop_queue();
+    stop_queue_locked();
     return mk_io_error("audio_input_start: AudioQueueStart failed (check microphone permission)");
   }
 
-  g_running = true;
   return lean_io_result_mk_ok(lean_box(0));
 }
 
@@ -144,7 +162,7 @@ lean_object* lean_tyr_audio_input_read(
   while (true) {
     {
       std::lock_guard<std::mutex> lock(g_audio_mu);
-      if (!g_audio_fifo.empty() || !g_running) break;
+      if (!g_audio_fifo.empty() || !g_running.load(std::memory_order_acquire)) break;
     }
     if (block_ms == 0 || std::chrono::steady_clock::now() >= deadline) break;
     std::this_thread::sleep_for(std::chrono::milliseconds(5));
