@@ -55,20 +55,47 @@ def readU16 (bytes : ByteArray) (offset : Nat) : Option UInt16 :=
     let b1 := bytes[offset + 1]!
     some (b0.toUInt16 ||| (b1.toUInt16 <<< 8))
 
+private def natToU16? (n : Nat) : Option UInt16 :=
+  if n <= 65535 then
+    some (UInt16.ofNat n)
+  else
+    none
+
+private def natToU32? (n : Nat) : Option UInt32 :=
+  if n <= 4294967295 then
+    some (UInt32.ofNat n)
+  else
+    none
+
+private def expectSome {α : Type} (v : Option α) (msg : String) : Except String α :=
+  match v with
+  | some x => .ok x
+  | none => .error msg
+
 /-- Serialize a tokenizer to bytes -/
-def serialize (tok : BPETokenizer) : ByteArray := Id.run do
+def serialize (tok : BPETokenizer) : Except String ByteArray := do
+  let vocabEntries := max tok.vocabSize.toNat tok.idToBytes.size
+  let vocabSize ← expectSome (natToU32? vocabEntries)
+    s!"vocab size {vocabEntries} exceeds UInt32 range"
+  let numMerges ← expectSome (natToU32? tok.merges.size)
+    s!"merge count {tok.merges.size} exceeds UInt32 range"
+  let numSpecial ← expectSome (natToU32? tok.specialTokens.size)
+    s!"special-token count {tok.specialTokens.size} exceeds UInt32 range"
   let mut result := magic
 
   -- Header
   result := result ++ writeU32 formatVersion
-  result := result ++ writeU32 tok.vocabSize
-  result := result ++ writeU32 tok.merges.size.toUInt32
-  result := result ++ writeU32 tok.specialTokens.size.toUInt32
+  result := result ++ writeU32 vocabSize
+  result := result ++ writeU32 numMerges
+  result := result ++ writeU32 numSpecial
 
   -- Vocabulary
-  for bytes in tok.idToBytes do
-    result := result ++ writeU16 bytes.size.toUInt16
-    result := result ++ bytes
+  for i in [:vocabEntries] do
+    let tokenBytes := tok.idToBytes[i]?.getD ByteArray.empty
+    let len ← expectSome (natToU16? tokenBytes.size)
+      s!"token byte length {tokenBytes.size} exceeds UInt16 range for token id {i}"
+    result := result ++ writeU16 len
+    result := result ++ tokenBytes
 
   -- Merges
   for merge in tok.merges do
@@ -79,7 +106,9 @@ def serialize (tok : BPETokenizer) : ByteArray := Id.run do
   -- Special tokens (iterate through the HashMap)
   for (str, id) in tok.specialTokens.toList do
     let strBytes := str.toUTF8
-    result := result ++ writeU16 strBytes.size.toUInt16
+    let len ← expectSome (natToU16? strBytes.size)
+      s!"special token '{str}' has UTF-8 length {strBytes.size}, exceeds UInt16 range"
+    result := result ++ writeU16 len
     result := result ++ strBytes
     result := result ++ writeU32 id
 
@@ -134,12 +163,14 @@ def deserialize (bytes : ByteArray) : Option BPETokenizer := do
     offset := offset + 2
     if offset + len.toNat > bytes.size then failure
     let strBytes := bytes.extract offset (offset + len.toNat)
-    let str := String.fromUTF8! strBytes
+    let str ← String.fromUTF8? strBytes
     offset := offset + len.toNat
     let id ← readU32 bytes offset
     offset := offset + 4
     specialTokens := specialTokens.insert str id
     idToSpecial := idToSpecial.insert id str
+
+  if offset != bytes.size then failure
 
   return {
     vocabSize := vocabSize
@@ -153,8 +184,10 @@ def deserialize (bytes : ByteArray) : Option BPETokenizer := do
 
 /-- Save tokenizer to file -/
 def save (tok : BPETokenizer) (path : String) : IO Unit := do
-  let bytes := serialize tok
-  IO.FS.writeBinFile path bytes
+  match serialize tok with
+  | .ok bytes => IO.FS.writeBinFile path bytes
+  | .error err =>
+    throw (IO.userError s!"Failed to serialize tokenizer: {err}")
 
 /-- Load tokenizer from file -/
 def load (path : String) : IO BPETokenizer := do
@@ -185,6 +218,7 @@ def createBase : BPETokenizer := Id.run do
   }
 
   -- Add special tokens
-  addSpecialTokens tok allSpecialTokens 256
+  let withSpecials := addSpecialTokens tok allSpecialTokens 256
+  { withSpecials with vocabSize := withSpecials.idToBytes.size.toUInt32 }
 
 end tokenizer
