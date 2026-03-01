@@ -24,6 +24,9 @@ Status legend:
 - [x] `H06` SafeTensors loader now validates metadata/data bounds and rejects malformed/truncated inputs explicitly.
 - [x] `H07` High-risk torch FFI IO entrypoints now catch `c10::Error`/`std::exception` and return Lean IO errors.
 - [x] `M01` Tokenizer deserialize no longer panics on malformed UTF-8.
+- [x] `M02` Batched generation in `Qwen3`/`Qwen35` now stops per row and keeps finished rows pinned to EOS.
+- [x] `M03` Decode loops no longer perform per-token host sync (`tensorToUInt64Array`) for EOS stopping checks.
+- [x] `M04` `Qwen35` decode now precomputes rotary frequencies once per generation window.
 - [x] `M05` Sampling now enforces `temperature > 0`.
 - [~] `M07` Parity checker is now bidirectional; concrete Lake/Bazel target drift remains to be reconciled.
 - [x] `M09` Script env-var expansions are hardened for `set -u`.
@@ -42,12 +45,6 @@ Status legend:
 
 ### Medium
 
-- [ ] `M02` Batched generation in `Qwen3`/`Qwen35` still uses all-rows EOS stopping semantics; finished rows continue decoding.
-  Refs: `Tyr/Model/Qwen3/Model.lean:27`, `Tyr/Model/Qwen3/Model.lean:199`, `Tyr/Model/Qwen35/Model.lean:31`, `Tyr/Model/Qwen35/Model.lean:1107`
-- [ ] `M03` Per-token host synchronization in decode loops (`tensorToUInt64Array`) is a major perf drag, especially on GPU.
-  Refs: `Tyr/Model/Qwen3/Model.lean:195`, `Tyr/Model/Qwen3/Model.lean:225`, `Tyr/Model/Qwen35/Model.lean:1103`, `Tyr/Model/Qwen35/Model.lean:1135`
-- [ ] `M04` `Qwen35` decode path recomputes rotary frequencies each token (`O(T^2)` style overhead).
-  Refs: `Tyr/Model/Qwen35/Model.lean:1018`, `Tyr/Model/Qwen35/Model.lean:1019`, `Tyr/Model/Qwen35/Model.lean:1020`
 - [ ] `M06` Tokenizer BPE merge search is algorithmically expensive due repeated linear scans across merges.
   Refs: `Tyr/Tokenizer/Encode.lean:89`, `Tyr/Tokenizer/Encode.lean:97`, `Tyr/Tokenizer/Encode.lean:111`, `Tyr/Tokenizer/Encode.lean:140`
 - [ ] `M07` Lake/Bazel target drift still exists after checker hardening; reconcile listed target mismatches.
@@ -90,6 +87,12 @@ Status legend:
   Refs: `cc/src/tyr.cpp`
 - [x] `M01` Tokenizer deserialize now uses `String.fromUTF8?` and fails cleanly instead of panicking.
   Refs: `Tyr/Tokenizer/IO.lean`
+- [x] `M02` Batched decode in `Qwen3` and `Qwen35` now tracks EOS per row and holds finished rows at EOS.
+  Refs: `Tyr/Model/Qwen3/Model.lean`, `Tyr/Model/Qwen35/Model.lean`, `Tests/TestQwen3Model.lean`, `Tests/TestQwen35Model.lean`
+- [x] `M03` `Qwen3` and `Qwen35` decode loops now keep EOS stop logic on-device without per-step host token sync.
+  Refs: `Tyr/Model/Qwen3/Model.lean`, `Tyr/Model/Qwen35/Model.lean`, `Tests/TestQwen3Model.lean`, `Tests/TestQwen35Model.lean`
+- [x] `M04` `Qwen35` decode path now precomputes rotary tables for the full generation window.
+  Refs: `Tyr/Model/Qwen35/Model.lean`, `Tests/TestQwen35Model.lean`
 - [x] `M05` Sampling now validates `temperature > 0`, with safe penalty fallback for invalid repetition-penalty values.
   Refs: `Tyr/Model/Qwen35/Model.lean`, `Tyr/Model/Qwen3TTS/Talker.lean`
 - [x] `M09` Script env-var expansion now avoids unset-variable failures under `set -u`.
