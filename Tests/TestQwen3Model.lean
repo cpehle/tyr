@@ -18,6 +18,13 @@ private def tinyCfg : Config := {
   max_position_embeddings := 128
 }
 
+private def flattenIds {batch seq : UInt64} (ids : T #[batch, seq]) : IO (Array UInt64) := do
+  let flat : T #[batch * seq] := reshape (data.toLong ids) #[batch * seq]
+  data.tensorToUInt64Array flat
+
+private def rowToken (vals : Array UInt64) (seq : UInt64) (row col : Nat) : UInt64 :=
+  vals.getD (row * seq.toNat + col) 0
+
 @[test]
 def testQwen3InitAndForward : IO Unit := do
   let model ← Qwen3ForCausalLM.init tinyCfg
@@ -102,3 +109,58 @@ def testQwen3GreedyZeroNewTokensIdentity : IO Unit := do
   let gotUncached ← data.tensorToUInt64Array flatUncached
   LeanTest.assertEqual gotCached #[4, 5, 6] "cached generation should return identity sequence when no new tokens requested"
   LeanTest.assertEqual gotUncached #[4, 5, 6] "uncached generation should return identity sequence when no new tokens requested"
+
+@[test]
+def testQwen3BatchedEosIsRowAware : IO Unit := do
+  let model ← Qwen3ForCausalLM.init tinyCfg
+  let promptRows : Array (Array Int64) := #[
+    #[1, 2, 3],
+    #[3, 2, 1],
+    #[4, 5, 6],
+    #[6, 5, 4],
+    #[7, 8, 9],
+    #[9, 8, 7]
+  ]
+
+  let mut selected : Option (T #[2, 3] × UInt64) := none
+  for i in [:promptRows.size] do
+    if selected.isNone then
+      for j in [:promptRows.size] do
+        if selected.isNone then
+          let row0 := promptRows.getD i #[1, 2, 3]
+          let row1 := promptRows.getD j #[3, 2, 1]
+          let ids : T #[2, 3] := reshape (data.fromInt64Array (row0 ++ row1)) #[2, 3]
+          let ⟨seqBase, outBase⟩ ← model.generateGreedy ids 2 #[]
+          let baseVals ← flattenIds outBase
+          let row0Step1 := rowToken baseVals seqBase 0 3
+          let row0Step2 := rowToken baseVals seqBase 0 4
+          let row1Step1 := rowToken baseVals seqBase 1 3
+          if row0Step1 != row1Step1 && row0Step2 != row0Step1 then
+            selected := some (ids, row0Step1)
+
+  match selected with
+  | none =>
+    LeanTest.assertTrue false
+      "failed to find a deterministic prompt pair for batched row-aware EOS validation"
+  | some (ids, eosTok) =>
+    let ⟨seqCached, outCached⟩ ← model.generateGreedy ids 4 #[eosTok]
+    let ⟨seqUncached, outUncached⟩ ← model.generateGreedyUncached ids 4 #[eosTok]
+    LeanTest.assertEqual seqCached seqUncached
+      "cached and uncached EOS-aware decode should stop at same sequence length"
+
+    let cachedVals ← flattenIds outCached
+    let uncachedVals ← flattenIds outUncached
+    LeanTest.assertEqual cachedVals uncachedVals
+      "cached and uncached EOS-aware decode should match token-by-token"
+
+    let row0First := rowToken cachedVals seqCached 0 3
+    let row1First := rowToken cachedVals seqCached 1 3
+    LeanTest.assertEqual row0First eosTok
+      "row 0 should emit EOS at its finishing step"
+    LeanTest.assertTrue (row1First != eosTok)
+      "row 1 should still be active when row 0 first reaches EOS"
+
+    for t in [3:seqCached.toNat] do
+      let tok := rowToken cachedVals seqCached 0 t
+      LeanTest.assertEqual tok eosTok
+        "once finished, a row should stay on EOS for subsequent decode steps"
