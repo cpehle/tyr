@@ -37,6 +37,7 @@
 #include <memory>
 #include <string>
 #include <mutex>
+#include <limits>
 #include <unordered_map>
 
 // Forward declarations from tyr.cpp
@@ -134,6 +135,12 @@ lean_object* lean_torch_dist_init_process_group(
     try {
         std::string backend(lean_string_cstr(backend_obj));
         std::string master_addr(lean_string_cstr(master_addr_obj));
+
+        if (master_port > static_cast<uint64_t>(std::numeric_limits<uint16_t>::max())) {
+            return lean_io_result_mk_error(lean_mk_io_user_error(
+                lean_mk_string(("Invalid master_port: " + std::to_string(master_port) +
+                    " is out of range [0, 65535]").c_str())));
+        }
 
         g_rank = static_cast<int>(rank);
         g_world_size = static_cast<int>(world_size);

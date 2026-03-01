@@ -55,6 +55,7 @@
 
 #include <iostream>
 #include <fstream>
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <limits>
@@ -2397,12 +2398,24 @@ lean_object* lean_torch_save_ppm(
 
 // Save mono waveform as 16-bit PCM WAV.
 // Tensor is flattened in row-major order and clamped to [-1, 1].
-static void write_wav_header(std::ostream& file, uint32_t sample_rate, uint32_t data_size) {
+static constexpr uint64_t kWavHeaderSizeBytes = 44ULL;
+static constexpr uint64_t kWavRiffChunkOverheadBytes = 36ULL;
+static constexpr uint64_t kWavMaxDataSizeBytes =
+  static_cast<uint64_t>(std::numeric_limits<uint32_t>::max()) - kWavRiffChunkOverheadBytes;
+
+static bool wav_data_size_fits_riff(uint64_t data_size) {
+  return data_size <= kWavMaxDataSizeBytes;
+}
+
+static bool write_wav_header(std::ostream& file, uint32_t sample_rate, uint64_t data_size64) {
+  if (!wav_data_size_fits_riff(data_size64)) return false;
+
+  const uint32_t data_size = static_cast<uint32_t>(data_size64);
   const uint32_t channels = 1;
   const uint32_t bits_per_sample = 16;
   const uint32_t byte_rate = sample_rate * channels * (bits_per_sample / 8);
   const uint16_t block_align = static_cast<uint16_t>(channels * (bits_per_sample / 8));
-  const uint32_t riff_chunk_size = 36 + data_size;
+  const uint32_t riff_chunk_size = static_cast<uint32_t>(kWavRiffChunkOverheadBytes + data_size64);
 
   file.write("RIFF", 4);
   file.write(reinterpret_cast<const char*>(&riff_chunk_size), 4);
@@ -2420,10 +2433,15 @@ static void write_wav_header(std::ostream& file, uint32_t sample_rate, uint32_t 
   file.write(reinterpret_cast<const char*>(&bits_per_sample), 2);
   file.write("data", 4);
   file.write(reinterpret_cast<const char*>(&data_size), 4);
+  return file.good();
 }
 
-static bool patch_wav_sizes(std::fstream& file, uint32_t data_size) {
-  uint32_t riff_chunk_size = 36 + data_size;
+static bool patch_wav_sizes(std::fstream& file, uint64_t data_size64) {
+  if (!wav_data_size_fits_riff(data_size64)) return false;
+
+  const uint32_t data_size = static_cast<uint32_t>(data_size64);
+  const uint32_t riff_chunk_size = static_cast<uint32_t>(kWavRiffChunkOverheadBytes + data_size64);
+  file.clear();
   file.seekp(4, std::ios::beg);
   if (!file.good()) return false;
   file.write(reinterpret_cast<const char*>(&riff_chunk_size), 4);
@@ -2450,7 +2468,11 @@ lean_object* lean_torch_save_wav(
         lean_mk_string("Cannot save WAV: empty tensor")));
     }
 
-    uint32_t data_size = static_cast<uint32_t>(n_samples * 2);
+    const uint64_t data_size64 = static_cast<uint64_t>(n_samples) * sizeof(int16_t);
+    if (!wav_data_size_fits_riff(data_size64)) {
+      return lean_io_result_mk_error(lean_mk_io_user_error(
+        lean_mk_string("Cannot save WAV: data size exceeds RIFF 32-bit limit (~4GiB)")));
+    }
 
     std::ofstream file(path, std::ios::binary);
     if (!file.is_open()) {
@@ -2458,7 +2480,10 @@ lean_object* lean_torch_save_wav(
         lean_mk_string(("Failed to open file for writing: " + std::string(path)).c_str())));
     }
 
-    write_wav_header(file, static_cast<uint32_t>(sample_rate), data_size);
+    if (!write_wav_header(file, static_cast<uint32_t>(sample_rate), data_size64)) {
+      return lean_io_result_mk_error(lean_mk_io_user_error(
+        lean_mk_string("Failed to write WAV header")));
+    }
 
     const float* ptr = wav.data_ptr<float>();
     for (int64_t i = 0; i < n_samples; ++i) {
@@ -2489,7 +2514,10 @@ lean_object* lean_torch_wav_begin(
       return lean_io_result_mk_error(lean_mk_io_user_error(
         lean_mk_string(("Failed to open WAV for writing: " + std::string(path)).c_str())));
     }
-    write_wav_header(file, static_cast<uint32_t>(sample_rate), 0);
+    if (!write_wav_header(file, static_cast<uint32_t>(sample_rate), 0)) {
+      return lean_io_result_mk_error(lean_mk_io_user_error(
+        lean_mk_string("Failed to write WAV stream header")));
+    }
     file.close();
     return lean_io_result_mk_ok(lean_box(0));
   } catch (const std::exception& e) {
@@ -2520,6 +2548,24 @@ lean_object* lean_torch_wav_append(
         lean_mk_string(("Failed to open WAV stream (call wavBegin first): " + std::string(path)).c_str())));
     }
 
+    file.seekg(0, std::ios::end);
+    std::streampos file_size = file.tellg();
+    if (file_size == std::streampos(-1) ||
+        file_size < static_cast<std::streampos>(kWavHeaderSizeBytes)) {
+      return lean_io_result_mk_error(lean_mk_io_user_error(
+        lean_mk_string("WAV stream is invalid (too small for header)")));
+    }
+
+    const uint64_t existing_data_bytes64 = static_cast<uint64_t>(file_size) - kWavHeaderSizeBytes;
+    const uint64_t append_bytes64 = static_cast<uint64_t>(n_samples) * sizeof(int16_t);
+    if (!wav_data_size_fits_riff(existing_data_bytes64) ||
+        append_bytes64 > kWavMaxDataSizeBytes ||
+        existing_data_bytes64 > (kWavMaxDataSizeBytes - append_bytes64)) {
+      return lean_io_result_mk_error(lean_mk_io_user_error(
+        lean_mk_string("WAV stream exceeds RIFF 32-bit data size limit (~4GiB)")));
+    }
+
+    file.clear();
     file.seekp(0, std::ios::end);
     const float* ptr = wav.data_ptr<float>();
     for (int64_t i = 0; i < n_samples; ++i) {
@@ -2530,17 +2576,13 @@ lean_object* lean_torch_wav_append(
       file.write(reinterpret_cast<const char*>(&pcm), sizeof(int16_t));
     }
 
-    std::streampos end_pos = file.tellp();
-    if (end_pos < static_cast<std::streampos>(44)) {
+    if (!file.good()) {
       return lean_io_result_mk_error(lean_mk_io_user_error(
-        lean_mk_string("WAV stream is invalid (too small for header)")));
+        lean_mk_string("Failed while appending WAV stream data")));
     }
-    uint64_t data_bytes64 = static_cast<uint64_t>(end_pos) - 44ULL;
-    if (data_bytes64 > 0xFFFFFFFFULL) {
-      return lean_io_result_mk_error(lean_mk_io_user_error(
-        lean_mk_string("WAV stream exceeds 4GiB size limit")));
-    }
-    if (!patch_wav_sizes(file, static_cast<uint32_t>(data_bytes64))) {
+
+    const uint64_t data_bytes64 = existing_data_bytes64 + append_bytes64;
+    if (!patch_wav_sizes(file, data_bytes64)) {
       return lean_io_result_mk_error(lean_mk_io_user_error(
         lean_mk_string("Failed to patch WAV header sizes")));
     }
@@ -2566,16 +2608,17 @@ lean_object* lean_torch_wav_finalize(
     }
     file.seekg(0, std::ios::end);
     std::streampos file_size = file.tellg();
-    if (file_size < static_cast<std::streampos>(44)) {
+    if (file_size == std::streampos(-1) ||
+        file_size < static_cast<std::streampos>(kWavHeaderSizeBytes)) {
       return lean_io_result_mk_error(lean_mk_io_user_error(
         lean_mk_string("WAV file is invalid (too small for header)")));
     }
-    uint64_t data_bytes64 = static_cast<uint64_t>(file_size) - 44ULL;
-    if (data_bytes64 > 0xFFFFFFFFULL) {
+    uint64_t data_bytes64 = static_cast<uint64_t>(file_size) - kWavHeaderSizeBytes;
+    if (!wav_data_size_fits_riff(data_bytes64)) {
       return lean_io_result_mk_error(lean_mk_io_user_error(
-        lean_mk_string("WAV file exceeds 4GiB size limit")));
+        lean_mk_string("WAV file exceeds RIFF 32-bit data size limit (~4GiB)")));
     }
-    if (!patch_wav_sizes(file, static_cast<uint32_t>(data_bytes64))) {
+    if (!patch_wav_sizes(file, data_bytes64)) {
       return lean_io_result_mk_error(lean_mk_io_user_error(
         lean_mk_string("Failed to finalize WAV header sizes")));
     }
@@ -4072,9 +4115,20 @@ lean_object* lean_torch_topk_filter(
   if (k == 0) {
     return fromTorchTensor(logits_.clone());
   }
+  if (logits_.dim() == 0) {
+    return fromTorchTensor(logits_.clone());
+  }
+  auto vocab_size = logits_.size(-1);
+  if (vocab_size <= 0) {
+    return fromTorchTensor(logits_.clone());
+  }
+  auto k_eff = std::min<int64_t>(static_cast<int64_t>(k), vocab_size);
+  if (k_eff <= 0) {
+    return fromTorchTensor(logits_.clone());
+  }
 
   // Get top-k values along last dimension
-  auto [topk_values, topk_indices] = logits_.topk(k, -1, true, true);
+  auto [topk_values, topk_indices] = logits_.topk(k_eff, -1, true, true);
 
   // Get the minimum value in top-k (threshold)
   auto threshold = std::get<0>(topk_values.min(-1, true));
@@ -4170,6 +4224,7 @@ lean_object* lean_torch_qr_reduced(
   auto Q = std::get<0>(result_tuple);
   auto R = std::get<1>(result_tuple);
 
+#ifndef NDEBUG
   // Debug: verify Q is orthogonal
   auto QtQ = torch::mm(Q.t(), Q);
   auto I = torch::eye(Q.size(1), Q.options());
@@ -4178,6 +4233,7 @@ lean_object* lean_torch_qr_reduced(
     std::cerr << "WARNING: QR produced non-orthogonal Q! Max diff from I: " << diff << std::endl;
     std::cerr << "A shape: " << A.sizes() << ", Q shape: " << Q.sizes() << std::endl;
   }
+#endif
 
   lean_object* result = lean_alloc_ctor(0, 2, 0);
   lean_ctor_set(result, 0, fromTorchTensor(Q));
@@ -4212,8 +4268,15 @@ lean_object* lean_torch_matrix_log(
   // Reconstruct: log(A) = V @ diag(log_L) @ V^{-1}
   auto V_inv = torch::linalg_inv(V);
   auto result = torch::matmul(torch::matmul(V, torch::diag_embed(log_L)), V_inv);
-  // Return real part (assuming input is real and result should be real)
-  return fromTorchTensor(torch::real(result));
+  auto imag_abs_max = torch::imag(result).abs().max().item<double>();
+  auto real_result = torch::real(result);
+  if (imag_abs_max > 1e-6) {
+    std::cerr << "WARNING: matrix_log produced non-negligible imaginary component (max="
+              << imag_abs_max << "); returning NaN tensor." << std::endl;
+    auto nan_result = torch::full_like(real_result, std::numeric_limits<double>::quiet_NaN());
+    return fromTorchTensor(nan_result);
+  }
+  return fromTorchTensor(real_result);
 }
 
 // Matrix inverse for square matrices: inv(A)
