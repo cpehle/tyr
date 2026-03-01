@@ -31,7 +31,7 @@ jobs:
 
       - name: Install system dependencies (macOS)
         if: runner.os == 'macOS'
-        run: brew install libomp apache-arrow
+        run: brew install libomp apache-arrow soxr
 
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
@@ -44,7 +44,7 @@ jobs:
           sudo apt-get install -y -V "./${arrow_repo_pkg}"
           rm -f "${arrow_repo_pkg}"
           sudo apt-get update
-          sudo apt-get install -y libomp-dev libarrow-dev libparquet-dev unzip
+          sudo apt-get install -y libomp-dev libarrow-dev libparquet-dev libsoxr-dev unzip
 
       - name: Cache LibTorch
         id: cache-libtorch
