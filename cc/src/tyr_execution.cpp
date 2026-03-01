@@ -20,6 +20,7 @@
 #include <poll.h>
 
 #include <cstdlib>
+#include <cerrno>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -139,6 +140,15 @@ static void set_resource_limits(uint64_t memory_limit) {
     setrlimit(RLIMIT_NPROC, &nproc_limit);
 }
 
+// Wait for child process and retry automatically if interrupted by a signal.
+static pid_t waitpid_retry_eintr(pid_t pid, int* status, int options) {
+    pid_t result;
+    do {
+        result = waitpid(pid, status, options);
+    } while (result < 0 && errno == EINTR);
+    return result;
+}
+
 // ============================================================================
 // Main Execution Function
 // ============================================================================
@@ -203,7 +213,10 @@ static lean_object* exec_sandboxed_impl(const std::string& command,
     // Wait for child with timeout
     std::string stdout_str, stderr_str;
     int status = 0;
+    bool child_reaped = false;
     bool timed_out = false;
+    bool wait_failed = false;
+    int wait_error = 0;
 
     // Poll for output and child completion
     while (true) {
@@ -215,17 +228,26 @@ static lean_object* exec_sandboxed_impl(const std::string& command,
             // Timeout - kill child
             kill(pid, SIGKILL);
             timed_out = true;
-            waitpid(pid, &status, 0);
+            pid_t wait_result = waitpid_retry_eintr(pid, &status, 0);
+            if (wait_result > 0) {
+                child_reaped = true;
+            } else if (wait_result < 0) {
+                wait_failed = true;
+                wait_error = errno;
+            }
             break;
         }
 
         // Check if child has exited
-        int result = waitpid(pid, &status, WNOHANG);
+        pid_t result = waitpid_retry_eintr(pid, &status, WNOHANG);
         if (result > 0) {
             // Child exited
+            child_reaped = true;
             break;
         } else if (result < 0) {
             // Error
+            wait_failed = true;
+            wait_error = errno;
             break;
         }
 
@@ -241,6 +263,17 @@ static lean_object* exec_sandboxed_impl(const std::string& command,
 
         // Small sleep to avoid busy waiting
         usleep(1000);  // 1ms
+    }
+
+    // If waitpid failed, ensure the child is not left running.
+    if (wait_failed && !child_reaped) {
+        kill(pid, SIGKILL);
+        pid_t reap_result = waitpid_retry_eintr(pid, &status, 0);
+        if (reap_result > 0) {
+            child_reaped = true;
+        } else if (reap_result < 0 && wait_error == 0) {
+            wait_error = errno;
+        }
     }
 
     // Read any remaining output
@@ -264,7 +297,19 @@ static lean_object* exec_sandboxed_impl(const std::string& command,
     ExitStatus exit_status;
     int32_t exit_code = 0;
 
-    if (timed_out) {
+    if (wait_failed || !child_reaped) {
+        exit_status = EXIT_ERROR;
+        exit_code = (wait_error > 0) ? -wait_error : -1;
+        if (!stderr_str.empty() && stderr_str.back() != '\n') {
+            stderr_str.push_back('\n');
+        }
+        if (wait_error > 0) {
+            stderr_str += "waitpid failed: ";
+            stderr_str += std::strerror(wait_error);
+        } else {
+            stderr_str += "waitpid failed: child status unavailable";
+        }
+    } else if (timed_out) {
         exit_status = EXIT_TIMEOUT;
         exit_code = -1;
     } else if (WIFEXITED(status)) {
