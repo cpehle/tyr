@@ -90,7 +90,7 @@ jobs:
             export LIBRARY_PATH="${multiarch_dir}:${gomp_dir}:/usr/lib:${LIBRARY_PATH:-}"
             export LD_LIBRARY_PATH="$PWD/external/libtorch/lib:${lean_prefix}/lib:${lean_prefix}/lib/glibc:${multiarch_dir}:${gomp_dir}:/usr/lib:${LD_LIBRARY_PATH:-}"
           fi
-          lake build test_runner test_runner_experimental
+          lake -R build test_runner test_runner_experimental
 
       - name: Typecheck required example surfaces
         run: |
@@ -122,7 +122,7 @@ jobs:
             export LEAN_CC_GCC="/usr/bin/gcc"
             export LD_LIBRARY_PATH="$PWD/external/libtorch/lib:${lean_prefix}/lib:${lean_prefix}/lib/glibc:${multiarch_dir}:${gomp_dir}:/usr/lib:$LEAN_LIB"
           fi
-          lake env ./.lake/build/bin/test_runner --fail-fast
+          lake -R env ./.lake/build/bin/test_runner --fail-fast
 
       - name: Run experimental tests
         run: |
@@ -137,7 +137,7 @@ jobs:
             export LEAN_CC_GCC="/usr/bin/gcc"
             export LD_LIBRARY_PATH="$PWD/external/libtorch/lib:${lean_prefix}/lib:${lean_prefix}/lib/glibc:${multiarch_dir}:${gomp_dir}:/usr/lib:$LEAN_LIB"
           fi
-          lake env ./.lake/build/bin/test_runner_experimental
+          lake -R env ./.lake/build/bin/test_runner_experimental
 
       - name: Evaluate Qwen3-TTS parity regression gate
         if: runner.os == 'macOS'
