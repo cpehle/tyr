@@ -31,7 +31,7 @@ jobs:
 
       - name: Install system dependencies (macOS)
         if: runner.os == 'macOS'
-        run: brew install libomp apache-arrow soxr
+        run: brew install libomp apache-arrow libsoxr
 
       - name: Install system dependencies (Linux)
         if: runner.os == 'Linux'
@@ -87,7 +87,7 @@ jobs:
             export LEAN_CC="$PWD/scripts/lean_cc_wrapper.sh"
             export LEAN_CC_GCC="/usr/bin/gcc"
             export LIBRARY_PATH="${multiarch_dir}:${gomp_dir}:/usr/lib:${LIBRARY_PATH:-}"
-            export LD_LIBRARY_PATH="${lean_prefix}/lib:${lean_prefix}/lib/glibc:${multiarch_dir}:${gomp_dir}:/usr/lib:${LD_LIBRARY_PATH:-}"
+            export LD_LIBRARY_PATH="$PWD/external/libtorch/lib:${lean_prefix}/lib:${lean_prefix}/lib/glibc:${multiarch_dir}:${gomp_dir}:/usr/lib:${LD_LIBRARY_PATH:-}"
           fi
           lake build test_runner test_runner_experimental
 
@@ -100,7 +100,7 @@ jobs:
             export LEAN_CC="$PWD/scripts/lean_cc_wrapper.sh"
             export LEAN_CC_GCC="/usr/bin/gcc"
             export LIBRARY_PATH="${multiarch_dir}:${gomp_dir}:/usr/lib:${LIBRARY_PATH:-}"
-            export LD_LIBRARY_PATH="${lean_prefix}/lib:${lean_prefix}/lib/glibc:${multiarch_dir}:${gomp_dir}:/usr/lib:${LD_LIBRARY_PATH:-}"
+            export LD_LIBRARY_PATH="$PWD/external/libtorch/lib:${lean_prefix}/lib:${lean_prefix}/lib/glibc:${multiarch_dir}:${gomp_dir}:/usr/lib:${LD_LIBRARY_PATH:-}"
           fi
           lake build Examples
           # Key example files that are not covered by `Examples.lean`.
