@@ -246,6 +246,36 @@ lean_exe TestDataLoader where
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
+/-- Differential equation baseline test executable. -/
+lean_exe TestDiffEq where
+  root := `Tests.TestDiffEq
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
+/-- Adjoint differential equation test executable. -/
+lean_exe TestDiffEqAdjoint where
+  root := `Tests.TestDiffEqAdjoint
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
+/-- Core adjoint differential equation test executable. -/
+lean_exe TestDiffEqAdjointCore where
+  root := `Tests.TestDiffEqAdjointCore
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
+/-- GPU DSL regression test executable. -/
+lean_exe TestGPUDSL where
+  root := `Tests.TestGPUDSL
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
+/-- GPU kernel fixture test executable. -/
+lean_exe TestGPUKernels where
+  root := `Tests.TestGPUKernels
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
 /-- Flux image generation demo -/
 lean_exe FluxDemo where
   root := `Examples.Flux.FluxDemo

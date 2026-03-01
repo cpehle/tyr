@@ -82,6 +82,48 @@ lean_binary(
     cc_deps = ["//cc:TyrC"],
 )
 
+lean_binary(
+    name = "Qwen3ASRLiveMic",
+    srcs = ["Examples/Qwen3ASR/LiveMic.lean"],
+    deps = [":Examples"],
+    cc_deps = ["//cc:TyrC"],
+)
+
+lean_binary(
+    name = "Qwen3ASRLiveMicTrueStream",
+    srcs = ["Examples/Qwen3ASR/LiveMicTrueStream.lean"],
+    deps = [":Examples"],
+    cc_deps = ["//cc:TyrC"],
+)
+
+lean_binary(
+    name = "Qwen3ASRTranscribe",
+    srcs = ["Examples/Qwen3ASR/Transcribe.lean"],
+    deps = [":Examples"],
+    cc_deps = ["//cc:TyrC"],
+)
+
+lean_binary(
+    name = "Qwen35RunHF",
+    srcs = ["Examples/Qwen35/RunHF.lean"],
+    deps = [":Examples"],
+    cc_deps = ["//cc:TyrC"],
+)
+
+lean_binary(
+    name = "Qwen25OmniRunHF",
+    srcs = ["Examples/Qwen25Omni/RunHF.lean"],
+    deps = [":Examples"],
+    cc_deps = ["//cc:TyrC"],
+)
+
+lean_binary(
+    name = "Qwen3TTSEndToEnd",
+    srcs = ["Examples/Qwen3TTS/EndToEnd.lean"],
+    deps = [":Examples"],
+    cc_deps = ["//cc:TyrC"],
+)
+
 # Test executable
 lean_binary(
     name = "test_runner",
