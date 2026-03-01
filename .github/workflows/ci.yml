@@ -10,6 +10,7 @@ jobs:
   build-and-test:
     env:
       LIBTORCH_VERSION: 2.9.1
+      MACOSX_DEPLOYMENT_TARGET: 14.0
     strategy:
       fail-fast: false
       matrix:
@@ -104,9 +105,9 @@ jobs:
           fi
           lake -R build Examples
           # Key example files that are not covered by `Examples.lean`.
-          lake env lean Examples/NanoChat/Generator/TypedState.lean
-          lake env lean Examples/BranchingFlows/BranchingFlowsDemo.lean
-          lake env lean Examples/NanoProof/RLTrain.lean
+          lake -R env lean Examples/NanoChat/Generator/TypedState.lean
+          lake -R env lean Examples/BranchingFlows/BranchingFlowsDemo.lean
+          lake -R env lean Examples/NanoProof/RLTrain.lean
 
       - name: Run tests
         run: |
