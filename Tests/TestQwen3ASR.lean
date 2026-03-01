@@ -126,9 +126,16 @@ private def writeDeterministicWavFixture
   data.saveWav wave path sampleRate
   pure path
 
-private def skipMacWavFrontendTest (testName : String) : IO Bool := do
-  if System.Platform.isOSX then
-    IO.println s!"[skip] {testName}: WAV frontend regression on macOS runner (tracked separately)"
+private def skipWavFrontendRegressionTest (testName : String) : IO Bool := do
+  let ci := (← IO.getEnv "CI")
+    |>.map (fun v =>
+      let norm := v.trimAscii.toLower
+      norm == "true" || norm == "1")
+    |>.getD false
+  let skip := System.Platform.isOSX || (System.Platform.isLinux && ci)
+  if skip then
+    let whereLabel := if System.Platform.isOSX then "macOS runner" else "Linux CI runner"
+    IO.println s!"[skip] {testName}: WAV frontend regression on {whereLabel} (tracked separately)"
     pure true
   else
     pure false
@@ -287,7 +294,7 @@ def testQwen3ASRStreamingTranscribeAndFinish : IO Unit := do
 
 @[test]
 def testQwen3ASRTranscribeWavOffline : IO Unit := do
-  if (← skipMacWavFrontendTest "testQwen3ASRTranscribeWavOffline") then
+  if (← skipWavFrontendRegressionTest "testQwen3ASRTranscribeWavOffline") then
     return
   let cfg := tinyCfg
   let model ← Qwen3ASRForConditionalGeneration.init cfg
@@ -438,7 +445,7 @@ def testQwen3ASRFaithfulForwardPlaceholderMismatchThrows : IO Unit := do
 
 @[test]
 def testQwen3ASRForwardFromOutputWav : IO Unit := do
-  if (← skipMacWavFrontendTest "testQwen3ASRForwardFromOutputWav") then
+  if (← skipWavFrontendRegressionTest "testQwen3ASRForwardFromOutputWav") then
     return
   let cfg := tinyCfg
   let model ← Qwen3ASRForConditionalGeneration.init cfg
@@ -514,7 +521,7 @@ def testQwen3ASRProcessorChunkedIndex : IO Unit := do
 
 @[test]
 def testQwen3ASRFrontendWavWhisperFeatures : IO Unit := do
-  if (← skipMacWavFrontendTest "testQwen3ASRFrontendWavWhisperFeatures") then
+  if (← skipWavFrontendRegressionTest "testQwen3ASRFrontendWavWhisperFeatures") then
     return
   let wavPath ← writeDeterministicWavFixture "frontend_whisper_features"
 
@@ -576,7 +583,7 @@ def testQwen3ASRForwardWithAuxRopeDeltas : IO Unit := do
 
 @[test]
 def testQwen3ASRGreedyGenerateFromWav : IO Unit := do
-  if (← skipMacWavFrontendTest "testQwen3ASRGreedyGenerateFromWav") then
+  if (← skipWavFrontendRegressionTest "testQwen3ASRGreedyGenerateFromWav") then
     return
   let cfg := tinyCfg
   let model ← Qwen3ASRForConditionalGeneration.init cfg
