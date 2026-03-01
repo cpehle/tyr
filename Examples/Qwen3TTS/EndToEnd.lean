@@ -179,6 +179,63 @@ private partial def parseArgsLoop : List String → Args → Args
 private def parseArgs (raw : List String) : Args :=
   parseArgsLoop raw {}
 
+private def takesValueFlag (flag : String) : Bool :=
+  #[
+    "--model-dir", "--text", "--style-text", "--max-text-len", "--max-frames",
+    "--language", "--think-mode", "--seed", "--temperature", "--top-k", "--top-p",
+    "--repetition-penalty", "--suppress-tail", "--subtalker-temperature",
+    "--subtalker-top-k", "--subtalker-top-p", "--subtalker-temp-by-group",
+    "--subtalker-top-k-by-group", "--subtalker-top-p-by-group", "--encode-audio-path",
+    "--encode-out-codes-path", "--codes-path", "--wav-path", "--python",
+    "--decode-script", "--encode-script", "--speaker-mel-script", "--device-map",
+    "--speaker-embedding-path", "--ref-audio-path", "--speaker-mel-path",
+    "--speaker-mel-frames-path", "--qwen-repo", "--speech-tokenizer-dir",
+    "--stream-chunk-frames", "--decode-chunk-size", "--decode-left-context",
+    "--token-ids-path"
+  ].contains flag
+
+private def switchFlag (flag : String) : Bool :=
+  #[
+    "--encode-only", "--decode-via-python", "--streaming-decode",
+    "--true-streaming", "--skip-decode", "--help"
+  ].contains flag
+
+private def validateFlagValue (flag : String) (value : String) : Except String Unit := do
+  if #["--max-text-len", "--max-frames", "--top-k", "--suppress-tail", "--subtalker-top-k",
+        "--stream-chunk-frames", "--decode-chunk-size", "--decode-left-context"].contains flag then
+    if value.toNat?.isNone then
+      throw s!"Invalid numeric value for {flag}: {value}"
+  if #["--temperature", "--top-p", "--repetition-penalty", "--subtalker-temperature",
+        "--subtalker-top-p"].contains flag then
+    if (parseFloatLit? value).isNone then
+      throw s!"Invalid float value for {flag}: {value}"
+  if flag == "--seed" then
+    if value.toNat?.isNone then
+      throw s!"Invalid numeric value for {flag}: {value}"
+  if #["--subtalker-temp-by-group", "--subtalker-top-p-by-group"].contains flag then
+    if (parseFloatCsv? value).isNone then
+      throw s!"Invalid CSV float value for {flag}: {value}"
+  if flag == "--subtalker-top-k-by-group" then
+    if (parseNatCsv? value).isNone then
+      throw s!"Invalid CSV integer value for {flag}: {value}"
+
+private partial def validateRawArgs : List String → Except String Unit
+  | [] => .ok ()
+  | flag :: rest =>
+    if takesValueFlag flag then
+      match rest with
+      | [] => .error s!"Missing value for option: {flag}"
+      | value :: tail =>
+        match validateFlagValue flag value with
+        | .ok _ => validateRawArgs tail
+        | .error e => .error e
+    else if switchFlag flag then
+      validateRawArgs rest
+    else if flag.startsWith "--" then
+      .error s!"Unknown option: {flag}"
+    else
+      .error s!"Unexpected positional argument: {flag}"
+
 private def printUsage : IO Unit := do
   IO.println "Usage: lake exe Qwen3TTSEndToEnd [options]"
   IO.println ""
@@ -469,6 +526,22 @@ def runEndToEnd (args : Args) : IO Unit := do
   -- Load runtime config from HF config.json so tensor shapes match real checkpoints.
   let cfg ← Qwen3TTSConfig.loadFromPretrainedDir modelDir
   IO.println s!"Model type: {cfg.ttsModelType}, talker hidden={cfg.talkerConfig.hiddenSize}, code groups={cfg.talkerConfig.numCodeGroups}"
+  let vocabTopKMax := cfg.talkerConfig.codePredictorConfig.vocabSize.toNat
+  if args.topK > vocabTopKMax then
+    throw <| IO.userError
+      s!"--top-k ({args.topK}) exceeds talker vocab size ({vocabTopKMax})"
+  if args.subtalkerTopK > vocabTopKMax then
+    throw <| IO.userError
+      s!"--subtalker-top-k ({args.subtalkerTopK}) exceeds talker vocab size ({vocabTopKMax})"
+  match args.subtalkerTopKsByGroup with
+  | some ks =>
+      for i in [:ks.size] do
+        let k := ks.getD i 0
+        if k > vocabTopKMax then
+          throw <| IO.userError
+            s!"--subtalker-top-k-by-group[{i}] ({k}) exceeds talker vocab size ({vocabTopKMax})"
+  | none =>
+      pure ()
 
   match args.encodeAudioPath with
   | some audioPath =>
@@ -646,6 +719,11 @@ def runEndToEnd (args : Args) : IO Unit := do
           IO.println s!"Saved waveform to {wavPath} (Lean decoder)"
 
 def _root_.main (rawArgs : List String) : IO UInt32 := do
+  match validateRawArgs rawArgs with
+  | .error err =>
+    throw <| IO.userError err
+  | .ok _ =>
+    pure ()
   let args := parseArgs rawArgs
   if args.help then
     printUsage
