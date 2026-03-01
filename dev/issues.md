@@ -28,7 +28,9 @@ Status legend:
 - [x] `M03` Decode loops no longer perform per-token host sync (`tensorToUInt64Array`) for EOS stopping checks.
 - [x] `M04` `Qwen35` decode now precomputes rotary frequencies once per generation window.
 - [x] `M05` Sampling now enforces `temperature > 0`.
-- [~] `M07` Parity checker is now bidirectional; concrete Lake/Bazel target drift remains to be reconciled.
+- [x] `M06` Tokenizer BPE merge selection now uses precomputed merge priorities instead of repeated linear merge-list scans.
+- [x] `M07` Lake/Bazel executable target drift is reconciled; parity check is bidirectional and currently clean.
+- [x] `M08` Build config now avoids hard-coded macOS SDK/framework paths by resolving SDK roots dynamically.
 - [x] `M09` Script env-var expansions are hardened for `set -u`.
 - [x] `M10` GPU scripts now use portable CPU-count fallback instead of `nproc`-only.
 - [x] `M11` Distributed init now rejects out-of-range `master_port` instead of truncating to `UInt16`.
@@ -48,12 +50,6 @@ Status legend:
 
 ### Medium
 
-- [ ] `M06` Tokenizer BPE merge search is algorithmically expensive due repeated linear scans across merges.
-  Refs: `Tyr/Tokenizer/Encode.lean:89`, `Tyr/Tokenizer/Encode.lean:97`, `Tyr/Tokenizer/Encode.lean:111`, `Tyr/Tokenizer/Encode.lean:140`
-- [ ] `M07` Lake/Bazel target drift still exists after checker hardening; reconcile listed target mismatches.
-  Refs: `scripts/check_target_parity.sh:28`, `lakefile.lean:226`, `lakefile.lean:232`, `lakefile.lean:256`, `lakefile.lean:262`, `lakefile.lean:268`, `lakefile.lean:274`, `BUILD.bazel:217`
-- [ ] `M08` Build config uses hard-coded linker/SDK paths that reduce portability across hosts/toolchains.
-  Refs: `lakefile.lean:7`, `lakefile.lean:23`, `lakefile.lean:25`, `lakefile.lean:27`, `lakefile.lean:47`, `lakefile.lean:58`
 ### Low
 
 
@@ -95,6 +91,12 @@ Status legend:
   Refs: `Tyr/Model/Qwen35/Model.lean`, `Tests/TestQwen35Model.lean`
 - [x] `M05` Sampling now validates `temperature > 0`, with safe penalty fallback for invalid repetition-penalty values.
   Refs: `Tyr/Model/Qwen35/Model.lean`, `Tyr/Model/Qwen3TTS/Talker.lean`
+- [x] `M06` Tokenizer BPE best-merge selection now uses merge-priority lookup maps, removing repeated full merge-list scans.
+  Refs: `Tyr/Tokenizer/Types.lean`, `Tyr/Tokenizer/Encode.lean`, `Tyr/Tokenizer/Training.lean`, `Tyr/Tokenizer/IO.lean`, `Tests/TestNanoChatTokens.lean`
+- [x] `M07` Lake/Bazel executable targets are reconciled so parity checks pass without drift.
+  Refs: `BUILD.bazel`, `lakefile.lean`, `scripts/check_target_parity.sh`
+- [x] `M08` macOS linker/SDK settings now use dynamic SDK resolution instead of hard-coded CLT/Xcode paths.
+  Refs: `lakefile.lean`
 - [x] `M09` Script env-var expansion now avoids unset-variable failures under `set -u`.
   Refs: `scripts/nanochat/run_pipeline_torchrun.sh`, `scripts/nanochat/run_train_torchrun.sh`, `scripts/nanochat/test_distributed_resume.sh`, `scripts/gpu/run_e2e_kernel.sh`, `scripts/gpu/bench_mha_h100_train.sh`
 - [x] `M10` GPU scripts now use portable CPU-count detection (`nproc` / `getconf` / `sysctl` fallback).
