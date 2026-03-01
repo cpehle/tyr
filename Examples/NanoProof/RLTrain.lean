@@ -10,6 +10,28 @@ import Examples.GPT.Train
 
 namespace rltrain
 
+/-
+  Placeholder NanoProof types while the full prover/MCTS stack is being rebuilt.
+  This keeps the RL training example typecheckable in CI.
+-/
+abbrev ProofState := String
+abbrev Action := Nat
+
+structure MCTSConfig where
+  maxSimulations : Nat := 128
+  deriving Repr, Inhabited
+
+structure SearchConfig where
+  maxDepth : Nat := 64
+  deriving Repr, Inhabited
+
+structure Node where
+  state : ProofState
+  action : Option Action := none
+  children : Array Node := #[]
+  visitCount : Nat := 0
+  deriving Repr
+
 /-- Training transition: (state, action, value) -/
 structure Transition where
   state : ProofState

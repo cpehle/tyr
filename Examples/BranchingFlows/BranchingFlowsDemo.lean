@@ -1,4 +1,4 @@
-/-!
+/-
   Examples/BranchingFlows/BranchingFlowsDemo.lean
 
   Minimal, deterministic demo for the Lean BranchingFlows port.
