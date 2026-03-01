@@ -19,6 +19,10 @@ Status legend:
 - [x] `H12` DataLoader tests now avoid vacuous pass patterns and emit explicit fixture-skip reasons.
 - [x] `H13` Required CI now includes `TestsExperimental` and `TestQwen3TTS`.
 - [x] `H14` Pre-push commit-subject validation now scopes to pushed ref updates and target remote tracking refs.
+- [x] `H03` Apple audio input lifecycle/callback shared state now uses synchronized teardown and atomic guards.
+- [x] `H05` High-frequency torch FFI paths now release owned Lean arguments consistently.
+- [x] `H06` SafeTensors loader now validates metadata/data bounds and rejects malformed/truncated inputs explicitly.
+- [x] `H07` High-risk torch FFI IO entrypoints now catch `c10::Error`/`std::exception` and return Lean IO errors.
 - [x] `M01` Tokenizer deserialize no longer panics on malformed UTF-8.
 - [x] `M05` Sampling now enforces `temperature > 0`.
 - [~] `M07` Parity checker is now bidirectional; concrete Lake/Bazel target drift remains to be reconciled.
@@ -35,14 +39,6 @@ Status legend:
 
 ### High
 
-- [ ] `H03` Audio capture runtime has race-prone shared state (`g_running`/queue lifecycle), risking UB/corruption.
-  Refs: `cc/src/apple_audio_input.mm:17`, `cc/src/apple_audio_input.mm:46`, `cc/src/apple_audio_input.mm:53`, `cc/src/apple_audio_input.mm:131`
-- [ ] `H05` Multiple FFI entrypoints appear to leak owned `lean_obj_arg` values due missing `lean_dec`/borrow mismatch in hot paths.
-  Refs: `cc/src/tyr.cpp:779`, `cc/src/tyr.cpp:780`, `cc/src/tyr.cpp:781`, `cc/src/tyr.cpp:866`, `cc/src/tyr.cpp:879`, `cc/src/tyr.cpp:901`, `cc/src/tyr.cpp:3663`
-- [ ] `H06` SafeTensors loader path can accept malformed/truncated inputs and silently decode wrong dtype/data.
-  Refs: `cc/src/tyr.cpp:2651`, `cc/src/tyr.cpp:2895`, `cc/src/tyr.cpp:2905`, `cc/src/tyr.cpp:2948`, `cc/src/tyr.cpp:2958`, `cc/src/tyr.cpp:2962`
-- [ ] `H07` Many `extern "C"` FFI entrypoints lack exception boundaries; uncaught `c10::Error` can terminate process.
-  Refs: `cc/src/tyr.cpp:3406`, `cc/src/tyr.cpp:3918`, `cc/src/tyr.cpp:3928`
 
 ### Medium
 
@@ -84,6 +80,14 @@ Status legend:
   Refs: `.github/workflows/ci.yml`, `Tests.lean`
 - [x] `H14` Pre-push hook now validates unpushed commits per pushed ref update and target remote scope.
   Refs: `.githooks/pre-push`
+- [x] `H03` Apple audio input now synchronizes queue lifecycle and callback state to avoid race-prone teardown/re-enqueue behavior.
+  Refs: `cc/src/apple_audio_input.mm`
+- [x] `H05` Torch FFI ownership fixes now add missing `lean_dec` calls in hot paths and sharded loader plumbing.
+  Refs: `cc/src/tyr.cpp`
+- [x] `H06` SafeTensors loader now enforces strict metadata parsing, dtype validation, offset/size checks, and truncation detection.
+  Refs: `cc/src/tyr.cpp`
+- [x] `H07` High-risk `extern "C"` IO entrypoints now guard `c10::Error` and `std::exception` to prevent process termination.
+  Refs: `cc/src/tyr.cpp`
 - [x] `M01` Tokenizer deserialize now uses `String.fromUTF8?` and fails cleanly instead of panicking.
   Refs: `Tyr/Tokenizer/IO.lean`
 - [x] `M05` Sampling now validates `temperature > 0`, with safe penalty fallback for invalid repetition-penalty values.
