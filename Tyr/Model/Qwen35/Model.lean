@@ -28,8 +28,31 @@ private def initWeight (shape : Shape) (fanIn : UInt64) : IO (T shape) := do
 private def initBias (shape : Shape) : T shape :=
   autograd.set_requires_grad (torch.zeros shape) true
 
-private def allInSet (xs : Array UInt64) (allow : Array UInt64) : Bool :=
-  xs.all (fun x => allow.contains x)
+private def logicalOr {s : Shape} (a b : T s) : T s :=
+  logical_not (logical_and (logical_not a) (logical_not b))
+
+private def falseMask {n : UInt64} (device : Device) : T #[n] :=
+  let zeros : T #[n] := (full_int #[n] 0).to device
+  eq_scalar zeros 1
+
+private def tokenInSet {n : UInt64}
+    (tokens : T #[n])
+    (values : Array UInt64)
+    : T #[n] :=
+  Id.run do
+    let mut mask := falseMask (n := n) tokens.device
+    for value in values do
+      let hit : T #[n] := eq_scalar tokens (Int64.ofNat value.toNat)
+      mask := logicalOr mask hit
+    return mask
+
+private def applyFinishedEos {n : UInt64}
+    (tokens : T #[n])
+    (finished : T #[n])
+    (eosToken : UInt64)
+    : T #[n] :=
+  let eos : T #[n] := (full_int #[n] (Int64.ofNat eosToken.toNat)).to tokens.device
+  where_ finished eos tokens
 
 private def softplus {s : Shape} (x : T s) : T s :=
   nn.log (add_scalar (nn.exp x) 1.0)
@@ -1008,15 +1031,25 @@ def forward {batch seq : UInt64}
   let embeds := m.embedTokens inputIds
   m.forwardEmbeds cfg embeds attnMask
 
-private def decodeStepFromEmbedWithCache {batch : UInt64}
+private def precomputeDecodeRotary {maxLen : UInt64}
+    (cfg : Config)
+    (device : Device)
+    : T #[maxLen, Config.rotaryHalfDim cfg] × T #[maxLen, Config.rotaryHalfDim cfg] :=
+  rotary.computeFreqsOnDevicePure
+    maxLen
+    (Config.rotaryDim cfg)
+    cfg.rope_theta
+    device
+
+private def decodeStepFromEmbedWithCache {batch maxLen : UInt64}
     (cfg : Config)
     (m : Qwen35ForCausalLM cfg)
+    (cosAll : T #[maxLen, Config.rotaryHalfDim cfg])
+    (sinAll : T #[maxLen, Config.rotaryHalfDim cfg])
     (tokenEmbed : T #[batch, 1, cfg.hidden_size])
     (position : UInt64)
     (cache : HybridCache cfg batch)
     : IO (T #[batch, cfg.vocab_size] × HybridCache cfg batch) := do
-  let freqLen := position + 1
-  let (cosAll, sinAll) := rotary.computeFreqsPure freqLen (Config.rotaryDim cfg) cfg.rope_theta
   let cos : T #[1, Config.rotaryHalfDim cfg] := data.slice cosAll 0 position 1
   let sin : T #[1, Config.rotaryHalfDim cfg] := data.slice sinAll 0 position 1
 
@@ -1037,9 +1070,11 @@ private def decodeStepFromEmbedWithCache {batch : UInt64}
   let logits2 : T #[batch, cfg.vocab_size] := reshape logits3 #[batch, cfg.vocab_size]
   pure (logits2, cache')
 
-private partial def prefillCachesFromEmbeds {batch seq : UInt64}
+private partial def prefillCachesFromEmbeds {batch seq maxLen : UInt64}
     (cfg : Config)
     (m : Qwen35ForCausalLM cfg)
+    (cosAll : T #[maxLen, Config.rotaryHalfDim cfg])
+    (sinAll : T #[maxLen, Config.rotaryHalfDim cfg])
     (inputsEmbeds : T #[batch, seq, cfg.hidden_size])
     (cache : HybridCache cfg batch)
     (position : Nat)
@@ -1049,8 +1084,8 @@ private partial def prefillCachesFromEmbeds {batch seq : UInt64}
     pure (lastLogits, cache)
   else
     let tok : T #[batch, 1, cfg.hidden_size] := data.slice inputsEmbeds 1 position.toUInt64 1
-    let (logits, cache') ← decodeStepFromEmbedWithCache cfg m tok position.toUInt64 cache
-    prefillCachesFromEmbeds cfg m inputsEmbeds cache' (position + 1) logits
+    let (logits, cache') ← decodeStepFromEmbedWithCache cfg m cosAll sinAll tok position.toUInt64 cache
+    prefillCachesFromEmbeds cfg m cosAll sinAll inputsEmbeds cache' (position + 1) logits
 
 inductive SamplingStrategy where
   | greedy
@@ -1082,11 +1117,14 @@ private def sampleFromLogits {batch vocab : UInt64}
     let sampled ← nn.multinomial probs 1 false
     pure (reshape (nn.squeezeDim sampled (-1)) #[batch])
 
-private partial def decodeLoopCached {batch : UInt64}
+private partial def decodeLoopCached {batch maxLen : UInt64}
     (cfg : Config)
     (m : Qwen35ForCausalLM cfg)
+    (cosAll : T #[maxLen, Config.rotaryHalfDim cfg])
+    (sinAll : T #[maxLen, Config.rotaryHalfDim cfg])
     (strategy : SamplingStrategy)
     (eosTokenIds : Array UInt64)
+    (finished : T #[batch])
     (remaining : Nat)
     (cache : HybridCache cfg batch)
     (lastLogits : T #[batch, cfg.vocab_size])
@@ -1098,27 +1136,43 @@ private partial def decodeLoopCached {batch : UInt64}
   if remaining == 0 then
     return ⟨curSeq, curIds⟩
 
-  let nextTok ← sampleFromLogits lastLogits strategy
+  let nextTokRaw ← sampleFromLogits lastLogits strategy
+  let finished' : T #[batch] :=
+    if eosTokenIds.isEmpty then
+      finished
+    else
+      logicalOr finished (tokenInSet nextTokRaw eosTokenIds)
+  let nextTok : T #[batch] :=
+    if eosTokenIds.isEmpty then
+      nextTokRaw
+    else
+      applyFinishedEos nextTokRaw finished (eosTokenIds.getD 0 0)
+
   match onStep with
   | some cb => cb generatedSoFar nextTok
   | none => pure ()
-  let nextVals ← data.tensorToUInt64Array nextTok
+
   let nextCol : T #[batch, 1] := reshape nextTok #[batch, 1]
   let appended : T #[batch, curSeq + 1] := nn.cat curIds nextCol 1
 
-  let stop := eosTokenIds.size > 0 && allInSet nextVals eosTokenIds
+  let stop :=
+    if eosTokenIds.isEmpty then
+      false
+    else
+      !(any (logical_not finished'))
   if stop then
     return ⟨curSeq + 1, appended⟩
   else
     let nextEmb : T #[batch, 1, cfg.hidden_size] := m.embedTokens nextCol
-    let (nextLogits, cache') ← decodeStepFromEmbedWithCache cfg m nextEmb curSeq cache
-    decodeLoopCached cfg m strategy eosTokenIds (remaining - 1) cache' nextLogits onStep (generatedSoFar + 1) appended
+    let (nextLogits, cache') ← decodeStepFromEmbedWithCache cfg m cosAll sinAll nextEmb curSeq cache
+    decodeLoopCached cfg m cosAll sinAll strategy eosTokenIds finished' (remaining - 1) cache' nextLogits onStep (generatedSoFar + 1) appended
 
 private partial def decodeLoopUncached {batch : UInt64}
     (cfg : Config)
     (m : Qwen35ForCausalLM cfg)
     (strategy : SamplingStrategy)
     (eosTokenIds : Array UInt64)
+    (finished : T #[batch])
     (remaining : Nat)
     {curSeq : UInt64}
     (curIds : T #[batch, curSeq])
@@ -1133,16 +1187,30 @@ private partial def decodeLoopUncached {batch : UInt64}
   let last3 : T #[batch, 1, cfg.vocab_size] := reshape (data.slice logits 1 lastPos 1) #[batch, 1, cfg.vocab_size]
   let last2 : T #[batch, cfg.vocab_size] := reshape last3 #[batch, cfg.vocab_size]
 
-  let nextTok ← sampleFromLogits last2 strategy
-  let nextVals ← data.tensorToUInt64Array nextTok
+  let nextTokRaw ← sampleFromLogits last2 strategy
+  let finished' : T #[batch] :=
+    if eosTokenIds.isEmpty then
+      finished
+    else
+      logicalOr finished (tokenInSet nextTokRaw eosTokenIds)
+  let nextTok : T #[batch] :=
+    if eosTokenIds.isEmpty then
+      nextTokRaw
+    else
+      applyFinishedEos nextTokRaw finished (eosTokenIds.getD 0 0)
+
   let nextCol : T #[batch, 1] := reshape nextTok #[batch, 1]
   let appended : T #[batch, curSeq + 1] := nn.cat curIds nextCol 1
 
-  let stop := eosTokenIds.size > 0 && allInSet nextVals eosTokenIds
+  let stop :=
+    if eosTokenIds.isEmpty then
+      false
+    else
+      !(any (logical_not finished'))
   if stop then
     return ⟨curSeq + 1, appended⟩
   else
-    decodeLoopUncached cfg m strategy eosTokenIds (remaining - 1) appended
+    decodeLoopUncached cfg m strategy eosTokenIds finished' (remaining - 1) appended
 
 /-- Generic generation entry point (cached decode). -/
 private def generateFromEmbedsCore {batch seq : UInt64}
@@ -1162,13 +1230,15 @@ private def generateFromEmbedsCore {batch seq : UInt64}
 
   let cacheDevice := inputsEmbeds.device
   let cacheMaxLen : UInt64 := seq + maxNewTokens
+  let (cosAll, sinAll) := precomputeDecodeRotary (maxLen := cacheMaxLen) cfg cacheDevice
   let cache0 := m.model.initCache cfg cacheMaxLen cacheDevice
 
   let tok0 : T #[batch, 1, cfg.hidden_size] := data.slice inputsEmbeds 1 0 1
-  let (logits0, cache1) ← decodeStepFromEmbedWithCache cfg m tok0 0 cache0
-  let (lastLogits, cachePrefill) ← prefillCachesFromEmbeds cfg m inputsEmbeds cache1 1 logits0
+  let (logits0, cache1) ← decodeStepFromEmbedWithCache cfg m cosAll sinAll tok0 0 cache0
+  let (lastLogits, cachePrefill) ← prefillCachesFromEmbeds cfg m cosAll sinAll inputsEmbeds cache1 1 logits0
+  let finished0 : T #[batch] := falseMask (n := batch) cacheDevice
 
-  decodeLoopCached cfg m strategy eosTokenIds maxNewTokens.toNat cachePrefill lastLogits onStep 0 inputIds
+  decodeLoopCached cfg m cosAll sinAll strategy eosTokenIds finished0 maxNewTokens.toNat cachePrefill lastLogits onStep 0 inputIds
 
 /-- Cached generation from explicit input embeddings.
     Useful for multimodal wrappers that inject vision features into token embeddings. -/
@@ -1230,7 +1300,8 @@ def generateUncached {batch seq : UInt64}
     (strategy : SamplingStrategy := .greedy)
     (eosTokenIds : Array UInt64 := #[])
     : IO (Sigma (fun outSeq => T #[batch, outSeq])) := do
-  decodeLoopUncached cfg m strategy eosTokenIds maxNewTokens.toNat inputIds
+  let finished0 : T #[batch] := falseMask (n := batch) inputIds.device
+  decodeLoopUncached cfg m strategy eosTokenIds finished0 maxNewTokens.toNat inputIds
 
 /-- Convenience wrapper for greedy generation. -/
 def generateGreedy {batch seq : UInt64}
