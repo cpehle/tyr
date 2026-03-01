@@ -248,6 +248,9 @@ private def chunkSizeSamplesFromSec (chunkSizeSec : Float) : Nat :=
   let rounded := ((chunkSizeSec * sampleRate16k) + 0.5).toUInt64.toNat
   if rounded == 0 then 1 else rounded
 
+private def tailSlice (xs : Array Float) (n : Nat) : Array Float :=
+  if xs.size <= n then xs else xs.extract (xs.size - n) xs.size
+
 /-- Initialize streaming state (single stream, 16k PCM). -/
 def initStreamingState
     (supportedLanguages : Array String)
@@ -406,7 +409,9 @@ def decodeStreamingChunkWithModel
     (maxNewTokens : UInt64 := 512)
     (eosTokenIds : Array UInt64 := defaultEosTokenIds)
     : IO String := do
-  let frontendOut ← waveformToWhisperFeatures preprocessor audio16k
+  let targetSamples := (PreprocessorConfig.expectedSampleCount preprocessor).toNat
+  let audioWindow := tailSlice audio16k targetSamples
+  let frontendOut ← waveformToWhisperFeatures preprocessor audioWindow
   let validFramesTensor : T #[1] := nn.sumDim (data.toLong frontendOut.featureAttentionMask) 1 false
   let validFramesArr ← data.tensorToUInt64Array validFramesTensor
   let validFrames := validFramesArr.getD 0 0
@@ -469,7 +474,9 @@ def streamingTranscribeWithModel
     : IO ASRStreamingState := do
   let decodeFn : StreamingDecodeFn := fun prompt audio =>
     decodeStreamingChunkWithModel model tok preprocessor prompt audio maxNewTokens eosTokenIds
-  streamingTranscribe tok decodeFn pcm16k state
+  let st ← streamingTranscribe tok decodeFn pcm16k state
+  let keepSamples := (PreprocessorConfig.expectedSampleCount preprocessor).toNat
+  pure { st with audioAccum := tailSlice st.audioAccum keepSamples }
 
 /-- Model-backed streaming finish step (flush tail audio). -/
 def finishStreamingTranscribeWithModel
@@ -483,7 +490,9 @@ def finishStreamingTranscribeWithModel
     : IO ASRStreamingState := do
   let decodeFn : StreamingDecodeFn := fun prompt audio =>
     decodeStreamingChunkWithModel model tok preprocessor prompt audio maxNewTokens eosTokenIds
-  finishStreamingTranscribe tok decodeFn state
+  let st ← finishStreamingTranscribe tok decodeFn state
+  let keepSamples := (PreprocessorConfig.expectedSampleCount preprocessor).toNat
+  pure { st with audioAccum := tailSlice st.audioAccum keepSamples }
 
 namespace Qwen3ASRForConditionalGeneration
 

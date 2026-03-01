@@ -117,7 +117,7 @@ def pushAudio
     (pcm16k : Array Float)
     (maxNewTokens : UInt64 := 128)
     : IO (StreamSession × StreamStepOutput) := do
-  let ring := s.ring ++ pcm16k
+  let ring := tailSlice (s.ring ++ pcm16k) s.chunkSamples
   let since := s.sinceLastDecode + pcm16k.size
   let mut s' := { s with ring := ring, sinceLastDecode := since }
   let vadSignal : Tyr.Text.VADSignal ←

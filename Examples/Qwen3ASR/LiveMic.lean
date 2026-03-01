@@ -24,18 +24,22 @@ private def parseNatArg (name : String) (v : String) : IO UInt64 :=
   | some n => pure n.toUInt64
   | none => throw <| IO.userError s!"Invalid {name}: {v}"
 
+private def parseFloatLit? (s : String) : Option Float :=
+  match s.splitOn "." with
+  | [whole] =>
+      whole.toNat?.map (·.toFloat)
+  | [whole, frac] =>
+      match whole.toNat?, frac.toNat? with
+      | some w, some f =>
+          let denom : Float := (Nat.pow 10 frac.length).toFloat
+          some (w.toFloat + f.toFloat / denom)
+      | _, _ => none
+  | _ => none
+
 private def parseFloatArg (name : String) (v : String) : IO Float :=
-  if v.contains '.' then
-    let parts := v.splitOn "."
-    let intPart := parts.getD 0 "" |>.toNat?.getD 0
-    let fracStr := parts.getD 1 ""
-    let fracPart := fracStr.toNat?.getD 0
-    let fracLen := fracStr.length
-    pure <| intPart.toFloat + fracPart.toFloat / (10.0 ^ fracLen.toFloat)
-  else
-    match v.toNat? with
-    | some n => pure n.toFloat
-    | none => throw <| IO.userError s!"Invalid {name}: {v}"
+  match parseFloatLit? v with
+  | some x => pure x
+  | none => throw <| IO.userError s!"Invalid {name}: {v}"
 
 private partial def parseArgsLoop (xs : List String) (acc : Args) : IO Args := do
   match xs with
