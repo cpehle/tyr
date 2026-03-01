@@ -300,6 +300,8 @@ private def applySampling {batch vocab : UInt64}
     (topK : UInt64)
     (topP : Float)
     : IO (T #[batch]) := do
+  if temperature <= 0.0 then
+    throw <| IO.userError s!"sampling requires temperature > 0, got {temperature}"
   let scaled :=
     if temperature == 1.0 then logits
     else mul_scalar logits (1.0 / temperature)
@@ -351,7 +353,7 @@ private def applyRepetitionPenalty {batch vocab histLen : UInt64}
     (history : T #[batch, histLen])
     (penalty : Float)
     : T #[batch, vocab] :=
-  if histLen == 0 || penalty == 1.0 then
+  if histLen == 0 || penalty == 1.0 || penalty <= 0.0 then
     logits
   else
     let gathered : T #[batch, histLen] := torch.gather logits (-1) history

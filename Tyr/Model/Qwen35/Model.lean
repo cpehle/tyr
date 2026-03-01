@@ -1067,6 +1067,8 @@ private def sampleFromLogits {batch vocab : UInt64}
   | .greedy =>
     pure (nn.argmax logits 1)
   | .multinomial temperature topK topP =>
+    if temperature <= 0.0 then
+      throw <| IO.userError s!"multinomial sampling requires temperature > 0, got {temperature}"
     let scaled :=
       if temperature == 1.0 then logits
       else mul_scalar logits (1.0 / temperature)
