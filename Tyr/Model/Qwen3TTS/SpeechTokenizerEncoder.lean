@@ -23,6 +23,10 @@ import Tyr.Model.Qwen3TTS.SpeechTokenizer
 
 namespace torch.qwen3tts
 
+private def requireTrue (ok : Bool) (msg : String) : IO Unit := do
+  unless ok do
+    throw (IO.userError msg)
+
 private def freeze {s : Shape} (t : T s) : T s :=
   autograd.set_requires_grad (toFloat' t) false
 
@@ -205,6 +209,29 @@ private def loadEncodeRVQ
     codebooks := codebooks.push cb
   pure { inputProj, codebooks }
 
+/-- Validation for Lean encoder support of tokenizer v2/12Hz family.
+    Allows variable quantizer counts while keeping architecture constants fixed. -/
+private def validateEncoderVariantSupported (cfg : SpeechTokenizer12HzConfig) : IO Unit := do
+  let d := cfg.decoder
+  requireTrue (d.codebookSize == 2048) s!"Unsupported speech tokenizer codebook_size={d.codebookSize} (expected 2048)"
+  requireTrue (d.codebookDim == 512) s!"Unsupported speech tokenizer codebook_dim={d.codebookDim} (expected 512)"
+  requireTrue (d.latentDim == 1024) s!"Unsupported speech tokenizer latent_dim={d.latentDim} (expected 1024)"
+  requireTrue (d.hiddenSize == 512) s!"Unsupported speech tokenizer hidden_size={d.hiddenSize} (expected 512)"
+  requireTrue (d.intermediateSize == 1024) s!"Unsupported speech tokenizer intermediate_size={d.intermediateSize} (expected 1024)"
+  requireTrue (d.headDim == 64) s!"Unsupported speech tokenizer head_dim={d.headDim} (expected 64)"
+  requireTrue (d.numAttentionHeads == 8) s!"Unsupported speech tokenizer num_attention_heads={d.numAttentionHeads} (expected 8)"
+  requireTrue (d.numKeyValueHeads == 8) s!"Unsupported speech tokenizer num_key_value_heads={d.numKeyValueHeads} (expected 8)"
+  requireTrue (d.numHiddenLayers == 8) s!"Unsupported speech tokenizer num_hidden_layers={d.numHiddenLayers} (expected 8)"
+  requireTrue (d.slidingWindow == 250) s!"Unsupported speech tokenizer sliding_window={d.slidingWindow} (expected 250)"
+  requireTrue (d.upsampleRates == #[8, 5, 4, 3]) s!"Unsupported speech tokenizer upsample_rates={d.upsampleRates} (expected #[8,5,4,3])"
+  requireTrue (d.upsamplingRatios == #[2, 2]) s!"Unsupported speech tokenizer upsampling_ratios={d.upsamplingRatios} (expected #[2,2])"
+  requireTrue (d.decoderDim == 1536) s!"Unsupported speech tokenizer decoder_dim={d.decoderDim} (expected 1536)"
+  requireTrue (cfg.decodeUpsampleRate == 1920) s!"Unsupported decode_upsample_rate={cfg.decodeUpsampleRate} (expected 1920)"
+  requireTrue (d.numQuantizers >= 1) s!"Unsupported speech tokenizer num_quantizers={d.numQuantizers} (must be >= 1)"
+  requireTrue (d.numSemanticQuantizers >= 1) s!"Unsupported speech tokenizer num_semantic_quantizers={d.numSemanticQuantizers} (must be >= 1)"
+  requireTrue (d.numSemanticQuantizers < d.numQuantizers)
+    s!"Unsupported tokenizer quantizer split: semantic={d.numSemanticQuantizers}, total={d.numQuantizers} (need semantic < total)"
+
 /-- Load 12Hz speech-tokenizer encoder weights from `speech_tokenizer` directory. -/
 def loadFromDir (speechTokenizerDir : String) (device : Device := Device.CPU) : IO SpeechTokenizer12HzEncoder := do
   let cfg ← SpeechTokenizer12HzConfig.loadFromFile s!"{speechTokenizerDir}/config.json"
@@ -268,6 +295,81 @@ def loadFromDir (speechTokenizerDir : String) (device : Device := Device.CPU) : 
     encodeDownsampleRate := 1920
   }
   pure (TensorStruct.map (fun t => t.to device) enc)
+
+/-- Load 12Hz-family speech-tokenizer encoder weights while allowing
+    tokenizer variants with different quantizer counts. -/
+def loadFromDirFlexible (speechTokenizerDir : String) (device : Device := Device.CPU) : IO SpeechTokenizer12HzEncoder := do
+  let cfg ← SpeechTokenizer12HzConfig.loadFromFile s!"{speechTokenizerDir}/config.json"
+  validateEncoderVariantSupported cfg
+
+  let weightsPath := s!"{speechTokenizerDir}/model.safetensors"
+  let semanticLayers : Nat := cfg.decoder.numSemanticQuantizers.toNat
+  let acousticLayers : Nat := (cfg.decoder.numQuantizers - cfg.decoder.numSemanticQuantizers).toNat
+
+  let conv0Weight ← loadFrozen weightsPath "encoder.encoder.layers.0.conv.weight" #[64, 1, 7]
+  let conv0Bias ← loadFrozen weightsPath "encoder.encoder.layers.0.conv.bias" #[64]
+  let res1 ← loadResBlock weightsPath "encoder.encoder.layers.1.block" 64 32
+  let down1Weight ← loadFrozen weightsPath "encoder.encoder.layers.3.conv.weight" #[128, 64, 8]
+  let down1Bias ← loadFrozen weightsPath "encoder.encoder.layers.3.conv.bias" #[128]
+
+  let res2 ← loadResBlock weightsPath "encoder.encoder.layers.4.block" 128 64
+  let down2Weight ← loadFrozen weightsPath "encoder.encoder.layers.6.conv.weight" #[256, 128, 10]
+  let down2Bias ← loadFrozen weightsPath "encoder.encoder.layers.6.conv.bias" #[256]
+
+  let res3 ← loadResBlock weightsPath "encoder.encoder.layers.7.block" 256 128
+  let down3Weight ← loadFrozen weightsPath "encoder.encoder.layers.9.conv.weight" #[512, 256, 12]
+  let down3Bias ← loadFrozen weightsPath "encoder.encoder.layers.9.conv.bias" #[512]
+
+  let res4 ← loadResBlock weightsPath "encoder.encoder.layers.10.block" 512 256
+  let down4Weight ← loadFrozen weightsPath "encoder.encoder.layers.12.conv.weight" #[1024, 512, 16]
+  let down4Bias ← loadFrozen weightsPath "encoder.encoder.layers.12.conv.bias" #[1024]
+
+  let finalConvWeight ← loadFrozen weightsPath "encoder.encoder.layers.14.conv.weight" #[512, 1024, 3]
+  let finalConvBias ← loadFrozen weightsPath "encoder.encoder.layers.14.conv.bias" #[512]
+
+  let mut transformerLayers : Array EncoderTransformerLayer := #[]
+  for i in [:8] do
+    let layer ← loadTransformerLayer weightsPath i
+    transformerLayers := transformerLayers.push layer
+
+  let downsampleWeight ← loadFrozen weightsPath "encoder.downsample.conv.weight" #[512, 512, 4]
+  let semanticRVQ ← loadEncodeRVQ weightsPath "encoder.quantizer.semantic_residual_vector_quantizer" semanticLayers
+  let acousticRVQ ← loadEncodeRVQ weightsPath "encoder.quantizer.acoustic_residual_vector_quantizer" acousticLayers
+
+  let enc : SpeechTokenizer12HzEncoder := {
+    conv0Weight
+    conv0Bias
+    res1
+    down1Weight
+    down1Bias
+    res2
+    down2Weight
+    down2Bias
+    res3
+    down3Weight
+    down3Bias
+    res4
+    down4Weight
+    down4Bias
+    finalConvWeight
+    finalConvBias
+    transformerLayers
+    downsampleWeight
+    semanticRVQ
+    acousticRVQ
+    inputSampleRate := cfg.outputSampleRate
+    encodeDownsampleRate := cfg.decodeUpsampleRate
+  }
+  pure (TensorStruct.map (fun t => t.to device) enc)
+
+def numSemanticCodeGroups (m : SpeechTokenizer12HzEncoder) : UInt64 :=
+  m.semanticRVQ.codebooks.size.toUInt64
+
+def numAcousticCodeGroups (m : SpeechTokenizer12HzEncoder) : UInt64 :=
+  m.acousticRVQ.codebooks.size.toUInt64
+
+def numCodeGroups (m : SpeechTokenizer12HzEncoder) : UInt64 :=
+  numSemanticCodeGroups m + numAcousticCodeGroups m
 
 private def causalConvConstant {batch inC outC inLen outLen kernel : UInt64}
     (x : T #[batch, inC, inLen])
@@ -464,6 +566,64 @@ def encodeWithRoPEOffset {batch samples : UInt64}
   let codes : T #[16, batch, t5] := nn.cat semanticCodes acousticCodes 0
   reshape (nn.transpose codes 0 1) #[batch, 16, t5]
 
+/-- Encode waveform `[batch,1,samples]` to tokenizer-configured codec IDs
+    `[batch,codeGroups,encodedFrames(samples)]`.
+    `ropeStartPos` is in the pre-downsample transformer timeline (stride 960 samples). -/
+def encodeWithRoPEOffsetDynamic {batch samples : UInt64}
+    (m : SpeechTokenizer12HzEncoder)
+    (audio : T #[batch, 1, samples])
+    (ropeStartPos : UInt64 := 0)
+    : Sigma (fun codeGroups => T #[batch, codeGroups, encodedFrames samples]) :=
+  let t1 := framesAfterDown1 samples
+  let t2 := framesAfterDown2 samples
+  let t3 := framesAfterDown3 samples
+  let t4 := framesAfterDown4 samples
+  let t5 := encodedFrames samples
+
+  let h0 : T #[batch, 64, samples] := causalConvConstant audio m.conv0Weight (some m.conv0Bias) 1 1
+  let h1 : T #[batch, 64, samples] := forwardResBlock m.res1 h0
+
+  let h2In : T #[batch, 64, samples] := nn.elu h1
+  let h2 : T #[batch, 128, t1] := causalConvConstant h2In m.down1Weight (some m.down1Bias) 4 1
+  let h3 : T #[batch, 128, t1] := forwardResBlock m.res2 h2
+
+  let h4In : T #[batch, 128, t1] := nn.elu h3
+  let h4 : T #[batch, 256, t2] := causalConvConstant h4In m.down2Weight (some m.down2Bias) 5 1
+  let h5 : T #[batch, 256, t2] := forwardResBlock m.res3 h4
+
+  let h6In : T #[batch, 256, t2] := nn.elu h5
+  let h6 : T #[batch, 512, t3] := causalConvConstant h6In m.down3Weight (some m.down3Bias) 6 1
+  let h7 : T #[batch, 512, t3] := forwardResBlock m.res4 h6
+
+  let h8In : T #[batch, 512, t3] := nn.elu h7
+  let h8 : T #[batch, 1024, t4] := causalConvConstant h8In m.down4Weight (some m.down4Bias) 8 1
+  let h9In : T #[batch, 1024, t4] := nn.elu h8
+  let h9 : T #[batch, 512, t4] := causalConvConstant h9In m.finalConvWeight (some m.finalConvBias) 1 1
+
+  let x0 : T #[batch, t4, 512] := reshape (nn.transpose h9 1 2) #[batch, t4, 512]
+  let ropeTotal : UInt64 := ropeStartPos + t4
+  let (cosAll, sinAll) := rotary.computeFreqsPure ropeTotal 64 10000.0
+  let cosAll : T #[ropeTotal, 32] :=
+    if cosAll.device == x0.device then cosAll else cosAll.to x0.device
+  let sinAll : T #[ropeTotal, 32] :=
+    if sinAll.device == x0.device then sinAll else sinAll.to x0.device
+  let cos : T #[t4, 32] := data.slice cosAll 0 ropeStartPos t4
+  let sin : T #[t4, 32] := data.slice sinAll 0 ropeStartPos t4
+  let x1 := m.transformerLayers.foldl (fun h layer => forwardTransformerLayer layer h cos sin) x0
+  let x2 : T #[batch, 512, t4] := reshape (nn.transpose x1 1 2) #[batch, 512, t4]
+
+  let x3 : T #[batch, 512, t5] := causalConvReplicate x2 m.downsampleWeight none 2 1
+
+  let semLayers : Nat := m.semanticRVQ.codebooks.size
+  let acLayers : Nat := m.acousticRVQ.codebooks.size
+  let semK : UInt64 := semLayers.toUInt64
+  let acK : UInt64 := acLayers.toUInt64
+  let semanticCodes : T #[semK, batch, t5] := rvqEncode (k := semK) m.semanticRVQ x3 semLayers
+  let acousticCodes : T #[acK, batch, t5] := rvqEncode (k := acK) m.acousticRVQ x3 acLayers
+  let codes : T #[semK + acK, batch, t5] := nn.cat semanticCodes acousticCodes 0
+  let out : T #[batch, semK + acK, t5] := reshape (nn.transpose codes 0 1) #[batch, semK + acK, t5]
+  ⟨semK + acK, out⟩
+
 /-- Encode waveform `[batch,1,samples]` with zero RoPE offset. -/
 def encode {batch samples : UInt64}
     (m : SpeechTokenizer12HzEncoder)
@@ -481,6 +641,20 @@ def encodeMonoFrameMajorWithRoPEOffset {samples : UInt64}
   let codes : T #[1, 16, encodedFrames samples] := encodeWithRoPEOffset m x0 ropeStartPos
   let c0 : T #[1, encodedFrames samples, 16] := reshape (nn.transpose codes 1 2) #[1, encodedFrames samples, 16]
   reshape c0 #[encodedFrames samples, 16]
+
+/-- Convenience encode for mono waveform `[samples]` into frame-major
+    `[frames,codeGroups]` with tokenizer-configured code-group count.
+    RoPE offset is in the pre-downsample transformer timeline. -/
+def encodeMonoFrameMajorWithRoPEOffsetDynamic {samples : UInt64}
+    (m : SpeechTokenizer12HzEncoder)
+    (audio : T #[samples])
+    (ropeStartPos : UInt64 := 0)
+    : Sigma (fun codeGroups => T #[encodedFrames samples, codeGroups]) :=
+  let x0 : T #[1, 1, samples] := reshape audio #[1, 1, samples]
+  let ⟨codeGroups, codes⟩ := encodeWithRoPEOffsetDynamic m x0 ropeStartPos
+  let c0 : T #[1, encodedFrames samples, codeGroups] :=
+    reshape (nn.transpose codes 1 2) #[1, encodedFrames samples, codeGroups]
+  ⟨codeGroups, reshape c0 #[encodedFrames samples, codeGroups]⟩
 
 /-- Convenience encode for mono waveform `[samples]` into frame-major `[frames,16]`. -/
 def encodeMonoFrameMajor {samples : UInt64}
@@ -542,6 +716,48 @@ def pushEncodeStream
       history := nextHist
   }
   return (st', valsKeep)
+
+/-- Encode one streaming chunk and emit flat codec IDs (`rows * codeGroups` values). -/
+def pushEncodeStreamDynamic
+    (m : SpeechTokenizer12HzEncoder)
+    (st : EncodeStreamState)
+    (newSamples : Array Float)
+    : IO (EncodeStreamState × UInt64 × Array UInt64) := do
+  if newSamples.isEmpty then
+    return (st, numCodeGroups m, #[])
+
+  let ctxStart : Nat := st.offsetSamples - st.history.size
+  let chunk := st.history ++ newSamples
+  let chunkSamplesU64 : UInt64 := chunk.size.toUInt64
+  let audioChunk0 : T #[chunkSamplesU64] := reshape (data.fromFloatArray chunk) #[chunkSamplesU64]
+  let audioChunk : T #[chunkSamplesU64] :=
+    if audioChunk0.device == m.conv0Weight.device then audioChunk0 else audioChunk0.to m.conv0Weight.device
+  let framesChunk : UInt64 := encodedFrames chunkSamplesU64
+  let ropeStartPos : UInt64 := framesBeforeFinalDownsample ctxStart.toUInt64
+  let ⟨codeGroups, codesChunk⟩ := encodeMonoFrameMajorWithRoPEOffsetDynamic m audioChunk ropeStartPos
+  let flatChunk : T #[framesChunk * codeGroups] := reshape codesChunk #[framesChunk * codeGroups]
+  let valsChunk ← data.tensorToUInt64Array flatChunk
+
+  let groupsNat : Nat := codeGroups.toNat
+  let dropRows : Nat := (encodedFrames st.history.size.toUInt64).toNat
+  let keepRows : Nat := (encodedFrames newSamples.size.toUInt64).toNat
+  let startIdx : Nat := dropRows * groupsNat
+  let endIdx : Nat := Nat.min valsChunk.size ((dropRows + keepRows) * groupsNat)
+  let valsKeep := valsChunk.extract startIdx endIdx
+
+  let nextOffset := st.offsetSamples + newSamples.size
+  let histStart :=
+    if chunk.size > st.leftContextSamples then
+      chunk.size - st.leftContextSamples
+    else
+      0
+  let nextHist := chunk.extract histStart chunk.size
+  let st' : EncodeStreamState := {
+    st with
+      offsetSamples := nextOffset
+      history := nextHist
+  }
+  return (st', codeGroups, valsKeep)
 
 end SpeechTokenizer12HzEncoder
 

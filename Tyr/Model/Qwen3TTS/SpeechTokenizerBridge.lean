@@ -3,7 +3,7 @@
 
   Qwen3-TTS speech-tokenizer integration helpers:
   - decode codec IDs -> waveform (legacy Python bridge path)
-  - encode waveform -> codec IDs (Lean 12Hz path with Python fallback)
+  - encode waveform -> codec IDs (Lean 12Hz-family path)
   - prepare speaker mel from reference audio (Lean-native)
 
   Design intent:
@@ -264,36 +264,6 @@ def decodeCodesToWav
     | none => baseArgs
   runBridgeCommand bridge.pythonExe args "Speech tokenizer decode failed"
 
-private def supportsLean12HzSpeechTokenizer (speechTokenizerDir : String) : IO Bool := do
-  try
-    let cfg ← SpeechTokenizer12HzConfig.loadFromFile s!"{speechTokenizerDir}/config.json"
-    SpeechTokenizer12HzConfig.validateSupported cfg
-    pure true
-  catch _ =>
-    pure false
-
-private def encodeAudioToCodesViaPython
-    (bridge : SpeechTokenizerBridgeConfig)
-    (speechTokenizerDir : String)
-    (audioPath codesPath : String)
-    : IO Unit := do
-  let encodeScript ← expandHome bridge.encodeScript
-  let qwenRepo ← expandHome bridge.qwenRepo
-  let baseArgs :=
-    pythonPrefix bridge.pythonExe ++
-      #[
-        encodeScript,
-        "--speech-tokenizer-dir", speechTokenizerDir,
-        "--audio", audioPath,
-        "--output-codes", codesPath,
-        "--qwen3-tts-repo", qwenRepo
-      ]
-  let args :=
-    match bridge.deviceMap with
-    | some dm => baseArgs ++ #["--device-map", dm]
-    | none => baseArgs
-  runBridgeCommand bridge.pythonExe args "Speech tokenizer encode failed"
-
 /-- Encode an audio input into codec ID rows using the speech tokenizer bridge. -/
 def encodeAudioToCodes
     (bridge : SpeechTokenizerBridgeConfig)
@@ -305,13 +275,7 @@ def encodeAudioToCodes
   let audioPath ← expandHome audioPath
   let codesPath ← expandHome codesPath
   ensureParentDir codesPath
-  let supportsLean ← supportsLean12HzSpeechTokenizer speechTokenizerDir
-  if !supportsLean then
-    IO.println
-      s!"Speech tokenizer at {speechTokenizerDir} is not Lean 12Hz-compatible; using Python encode bridge."
-    encodeAudioToCodesViaPython bridge speechTokenizerDir audioPath codesPath
-    return
-  let encoder ← SpeechTokenizer12HzEncoder.loadFromDir speechTokenizerDir device
+  let encoder ← SpeechTokenizer12HzEncoder.loadFromDirFlexible speechTokenizerDir device
   let wave ← loadResampledMonoWav audioPath encoder.inputSampleRate
   if wave.isEmpty then
     throw <| IO.userError s!"Audio encode input is empty: {audioPath}"
@@ -324,10 +288,10 @@ def encodeAudioToCodes
     let audio : T #[samples] :=
       if audio0.device == encoder.conv0Weight.device then audio0 else audio0.to encoder.conv0Weight.device
     let frames : UInt64 := encodedFrames samples
-    let codes : T #[frames, 16] := encoder.encodeMonoFrameMajor audio
-    let flat : T #[frames * 16] := reshape codes #[frames * 16]
+    let ⟨groups, codes⟩ := encoder.encodeMonoFrameMajorWithRoPEOffsetDynamic audio
+    let flat : T #[frames * groups] := reshape codes #[frames * groups]
     let vals ← data.tensorToUInt64Array flat
-    IO.FS.writeFile codesPath (formatCodesRows vals 16)
+    IO.FS.writeFile codesPath (formatCodesRows vals groups)
   else
     let expectedRows : Nat := (encodedFrames samples).toNat
     IO.FS.withFile codesPath .write fun h => do
@@ -335,17 +299,26 @@ def encodeAudioToCodes
         SpeechTokenizer12HzEncoder.initEncodeStreamState chunkSamples leftContextSamples
       let mut off : Nat := 0
       let mut rowsWritten : Nat := 0
+      let mut groups? : Option UInt64 := none
       while _h : off < wave.size && rowsWritten < expectedRows do
         let remaining := wave.size - off
         let takeN := Nat.min chunkSamples remaining
         let inputChunk := wave.extract off (off + takeN)
-        let (st', valsKeep) ← SpeechTokenizer12HzEncoder.pushEncodeStream encoder st inputChunk
+        let (st', groups, valsKeep) ← SpeechTokenizer12HzEncoder.pushEncodeStreamDynamic encoder st inputChunk
         st := st'
-        let availRows := valsKeep.size / 16
+        match groups? with
+        | some g0 =>
+            if g0 != groups then
+              throw <| IO.userError
+                s!"Inconsistent encoder code-group count across chunks ({g0} vs {groups})."
+        | none =>
+            groups? := some groups
+        let groupsNat : Nat := groups.toNat
+        let availRows := valsKeep.size / groupsNat
         let rowsToWrite := Nat.min availRows (expectedRows - rowsWritten)
         if rowsToWrite > 0 then
-          let writeVals := valsKeep.extract 0 (rowsToWrite * 16)
-          h.putStr (formatCodesRows writeVals 16)
+          let writeVals := valsKeep.extract 0 (rowsToWrite * groupsNat)
+          h.putStr (formatCodesRows writeVals groups)
           rowsWritten := rowsWritten + rowsToWrite
         off := off + takeN
 
