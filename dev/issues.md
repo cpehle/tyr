@@ -1,6 +1,6 @@
 # Tyr Code Review Tracker
 
-Last updated: 2026-03-01
+Last updated: 2026-03-02
 Scope: broad static review across `Tyr/`, `cc/src/`, `Examples/`, `Tests/`, CI/workflows, hooks, and scripts.
 
 Status legend:
@@ -42,6 +42,8 @@ Status legend:
 - [x] `F01` `lean_args` migration evaluated and deferred for now (see `dev/f01_lean_args_evaluation.md`).
 - [x] `L01` TODO/FIXME and `sorry` lint scope expanded beyond `Tyr/` to include `Examples/` and `Tests/`.
 - [x] `L02` Lake/Bazel parity checker now reports drift in both directions.
+- [x] `H15` Qwen3TTS decode no longer hard-fails on non-16 code groups; decode now auto-falls back to Python bridge in both offline and true-streaming paths.
+- [x] `H16` Qwen3TTS speech-tokenizer variant support now falls back to Python encode when tokenizer config is not Lean 12Hz-compatible.
 
 ## Open Issues
 
@@ -49,8 +51,16 @@ Status legend:
 
 
 ### Medium
+- [ ] `M16` Add higher-level Qwen3TTS mode API parity (`custom_voice`, `voice_design`, `voice_clone`) on top of current generic prompt-conditioning path.
+  Refs: `Examples/Qwen3TTS/EndToEnd.lean`, `Tyr/Model/Qwen3TTS/Model.lean`
+- [ ] `M17` Improve language parity for `Auto`/dialect handling to match upstream behavior (currently mostly token gating without dialect override logic).
+  Refs: `Examples/Qwen3TTS/EndToEnd.lean`
 
 ### Low
+- [ ] `L03` Expose direct speaker-name selection in CLI from loaded speaker maps.
+  Refs: `Tyr/Model/Qwen3TTS/Config.lean`, `Examples/Qwen3TTS/EndToEnd.lean`
+- [ ] `L04` Extend public demo/streaming entrypoints to ergonomic multi-sample batching (core tensors support batch, demo is mostly single-sample).
+  Refs: `Examples/Qwen3TTS/EndToEnd.lean`, `Tyr/Model/Qwen3TTS/Streaming.lean`
 
 
 ## Completed (This Pass)
@@ -113,6 +123,10 @@ Status legend:
   Refs: `.github/workflows/ci.yml`
 - [x] `L02` Parity checker now reports both `Lake -> Bazel` and `Bazel -> Lake` mismatches.
   Refs: `scripts/check_target_parity.sh`
+- [x] `H15` Qwen3TTS decode now supports non-16 talker code-group models via automatic Python-bridge fallback, including true-streaming post-decode fallback when Lean decode is unavailable.
+  Refs: `Examples/Qwen3TTS/EndToEnd.lean`, `Tyr/Model/Qwen3TTS/Streaming.lean`
+- [x] `H16` Qwen3TTS audio encode now auto-detects unsupported tokenizer variants and falls back to Python tokenizer encode instead of failing Lean 12Hz validation.
+  Refs: `Tyr/Model/Qwen3TTS/SpeechTokenizerBridge.lean`
 
 ## Imported From `qwen_review_issues_2026-02-28`
 

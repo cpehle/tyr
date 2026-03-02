@@ -264,7 +264,7 @@ private def printUsage : IO Unit := do
   IO.println "  --encode-only                 Run audio->codes bridge and exit"
   IO.println "  --codes-path <path>           Output codec-token text file"
   IO.println "  --wav-path <path>             Output wav path"
-  IO.println "  --skip-decode                 Skip Python decode step (codes only)"
+  IO.println "  --skip-decode                 Skip waveform decode (codes only)"
   IO.println "  --python <exe>                Python launcher (default: uv; uses `uv run python`)"
   IO.println "  --decode-script <path>        Codec decode bridge script path"
   IO.println "  --encode-script <path>        Codec encode bridge script path"
@@ -277,9 +277,9 @@ private def printUsage : IO Unit := do
   IO.println "  --token-ids-path <path>       Output token IDs file from Lean tokenizer"
   IO.println "  --qwen-repo <path>            Local Qwen3-TTS repo path (fallback import)"
   IO.println "  --speech-tokenizer-dir <path> Speech tokenizer dir (default: <model-dir>/speech_tokenizer)"
-  IO.println "  --decode-via-python           Use legacy Python decode bridge instead of Lean decoder"
-  IO.println "  --streaming-decode            Use chunked Lean decoder for streaming/long-form decode"
-  IO.println "  --true-streaming              Online frame-by-frame generation + incremental Lean decode"
+  IO.println "  --decode-via-python           Force Python decode bridge (auto-used for non-16 code groups)"
+  IO.println "  --streaming-decode            Use chunked Lean decoder for long-form decode (12Hz/16-group only)"
+  IO.println "  --true-streaming              Online frame-by-frame generation (Lean decode when compatible)"
   IO.println "  --stream-chunk-frames <n>     Frame chunk size emitted by true streaming decoder (default: 4)"
   IO.println "  --decode-chunk-size <n>       Codec-frame chunk size for --streaming-decode (default: 300)"
   IO.println "  --decode-left-context <n>     Left context codec frames for chunked decode (default: 25)"
@@ -610,26 +610,39 @@ def runEndToEnd (args : Args) : IO Unit := do
 
   let maxFrames : UInt64 := args.maxFrames.toUInt64
   if args.trueStreaming then
-    if args.decodeViaPython then
-      throw <| IO.userError "--true-streaming currently requires Lean decode (remove --decode-via-python)."
-    if cfg.talkerConfig.numCodeGroups != 16 then
-      throw <| IO.userError
-        s!"true streaming currently supports 16 code groups, got {cfg.talkerConfig.numCodeGroups}."
+    let canUseLeanStreamingDecode : Bool :=
+      !args.skipDecode && !args.decodeViaPython && cfg.talkerConfig.numCodeGroups == 16
+    let mut usePythonDecodeAfterStream : Bool := !args.skipDecode && !canUseLeanStreamingDecode
 
     ensureParentDir codesPath
     let speechDecoder? ←
-      if args.skipDecode then
-        pure none
+      if canUseLeanStreamingDecode then
+        try
+          let speechTokenizerDir ←
+            match args.speechTokenizerDir with
+            | some d => expandHome d
+            | none => pure s!"{modelDir}/speech_tokenizer"
+          IO.println s!"Loading Lean speech-tokenizer decoder from {speechTokenizerDir}..."
+          let dec ← SpeechTokenizer12HzDecoder.loadFromDir speechTokenizerDir targetDevice
+          ensureParentDir wavPath
+          data.wavBegin wavPath dec.outputSampleRate
+          pure (some dec)
+        catch e =>
+          usePythonDecodeAfterStream := !args.skipDecode
+          IO.println
+            s!"Lean true-streaming decode unavailable ({e.toString}); falling back to Python decode bridge after generation."
+          pure none
       else
-        let speechTokenizerDir ←
-          match args.speechTokenizerDir with
-          | some d => expandHome d
-          | none => pure s!"{modelDir}/speech_tokenizer"
-        IO.println s!"Loading Lean speech-tokenizer decoder from {speechTokenizerDir}..."
-        let dec ← SpeechTokenizer12HzDecoder.loadFromDir speechTokenizerDir targetDevice
-        ensureParentDir wavPath
-        data.wavBegin wavPath dec.outputSampleRate
-        pure (some dec)
+        pure none
+
+    if usePythonDecodeAfterStream then
+      if args.decodeViaPython then
+        IO.println "Using Python decode bridge for true streaming (--decode-via-python)."
+      else if cfg.talkerConfig.numCodeGroups != 16 then
+        IO.println
+          s!"Lean true-streaming decode supports 16 code groups; got {cfg.talkerConfig.numCodeGroups}. Falling back to Python decode bridge after generation."
+      else
+        pure ()
 
     let callbacks : Qwen3TTSForConditionalGeneration.StreamingCallbacks := {
       onAudioChunk := fun chunk => data.wavAppend chunk wavPath
@@ -656,17 +669,21 @@ def runEndToEnd (args : Args) : IO Unit := do
     }
     let streamOut ←
       model.streamFromTalkerInputs talkerInputs streamOpts speechDecoder? callbacks
-    if speechDecoder?.isSome then
-      data.wavFinalize wavPath
-      IO.println s!"Saved waveform to {wavPath} (Lean true streaming decode)"
-    else
-      IO.println "Skipping waveform decode (--skip-decode enabled)."
 
     let codeLen := streamOut.codeRows.size.toUInt64
     let codesText := formatCodesMatrix streamOut.codeRows
     IO.FS.writeFile codesPath codesText
     IO.println s!"Generated {codeLen} codec frames."
     IO.println s!"Saved codec codes to {codesPath}"
+
+    if speechDecoder?.isSome then
+      data.wavFinalize wavPath
+      IO.println s!"Saved waveform to {wavPath} (Lean true streaming decode)"
+    else if usePythonDecodeAfterStream then
+      decodeCodesToWav bridgeCfg modelDir cfg.talkerConfig codesPath wavPath
+      IO.println s!"Saved waveform to {wavPath} (Python decode bridge after true streaming)"
+    else
+      IO.println "Skipping waveform decode (--skip-decode enabled)."
   else
     let out ← TalkerForConditionalGeneration.generateCodesWithLengths
       cfg.talkerConfig model.talker talkerInputs maxFrames
@@ -696,27 +713,33 @@ def runEndToEnd (args : Args) : IO Unit := do
       IO.println "Skipping waveform decode (--skip-decode enabled)."
     else
       ensureParentDir wavPath
-      if args.decodeViaPython then
+      if args.decodeViaPython || cfg.talkerConfig.numCodeGroups != 16 then
+        if !args.decodeViaPython && cfg.talkerConfig.numCodeGroups != 16 then
+          IO.println
+            s!"Lean speech-tokenizer decoder supports 16 code groups; got {cfg.talkerConfig.numCodeGroups}. Falling back to Python decode bridge."
         decodeCodesToWav bridgeCfg modelDir cfg.talkerConfig codesPath wavPath
         IO.println s!"Saved waveform to {wavPath} (Python decode bridge)"
       else
-        if cfg.talkerConfig.numCodeGroups != 16 then
-          throw <| IO.userError
-            s!"Lean speech-tokenizer decoder currently supports 16 code groups, got {cfg.talkerConfig.numCodeGroups}. Use --decode-via-python."
-        let speechTokenizerDir ←
-          match args.speechTokenizerDir with
-          | some d => expandHome d
-          | none => pure s!"{modelDir}/speech_tokenizer"
-        IO.println s!"Loading Lean speech-tokenizer decoder from {speechTokenizerDir}..."
-        let speechDecoder ← SpeechTokenizer12HzDecoder.loadFromDir speechTokenizerDir targetDevice
-        let trimmed16 : T #[codeLen, 16] := reshape trimmed #[codeLen, 16]
-        if args.streamingDecode then
-          speechDecoder.decodeFrameMajorChunkedToWav
-            trimmed16 wavPath args.decodeChunkSize.toUInt64 args.decodeLeftContext.toUInt64
-          IO.println s!"Saved waveform to {wavPath} (Lean decoder, chunked streaming)"
-        else
-          speechDecoder.decodeFrameMajorToWav trimmed16 wavPath
-          IO.println s!"Saved waveform to {wavPath} (Lean decoder)"
+        try
+          let speechTokenizerDir ←
+            match args.speechTokenizerDir with
+            | some d => expandHome d
+            | none => pure s!"{modelDir}/speech_tokenizer"
+          IO.println s!"Loading Lean speech-tokenizer decoder from {speechTokenizerDir}..."
+          let speechDecoder ← SpeechTokenizer12HzDecoder.loadFromDir speechTokenizerDir targetDevice
+          let trimmed16 : T #[codeLen, 16] := reshape trimmed #[codeLen, 16]
+          if args.streamingDecode then
+            speechDecoder.decodeFrameMajorChunkedToWav
+              trimmed16 wavPath args.decodeChunkSize.toUInt64 args.decodeLeftContext.toUInt64
+            IO.println s!"Saved waveform to {wavPath} (Lean decoder, chunked streaming)"
+          else
+            speechDecoder.decodeFrameMajorToWav trimmed16 wavPath
+            IO.println s!"Saved waveform to {wavPath} (Lean decoder)"
+        catch e =>
+          IO.println
+            s!"Lean speech-tokenizer decode unavailable ({e.toString}); falling back to Python decode bridge."
+          decodeCodesToWav bridgeCfg modelDir cfg.talkerConfig codesPath wavPath
+          IO.println s!"Saved waveform to {wavPath} (Python decode bridge)"
 
 def _root_.main (rawArgs : List String) : IO UInt32 := do
   match validateRawArgs rawArgs with

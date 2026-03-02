@@ -3,7 +3,7 @@
 
   Qwen3-TTS speech-tokenizer integration helpers:
   - decode codec IDs -> waveform (legacy Python bridge path)
-  - encode waveform -> codec IDs (Lean-native)
+  - encode waveform -> codec IDs (Lean 12Hz path with Python fallback)
   - prepare speaker mel from reference audio (Lean-native)
 
   Design intent:
@@ -264,6 +264,36 @@ def decodeCodesToWav
     | none => baseArgs
   runBridgeCommand bridge.pythonExe args "Speech tokenizer decode failed"
 
+private def supportsLean12HzSpeechTokenizer (speechTokenizerDir : String) : IO Bool := do
+  try
+    let cfg ← SpeechTokenizer12HzConfig.loadFromFile s!"{speechTokenizerDir}/config.json"
+    SpeechTokenizer12HzConfig.validateSupported cfg
+    pure true
+  catch _ =>
+    pure false
+
+private def encodeAudioToCodesViaPython
+    (bridge : SpeechTokenizerBridgeConfig)
+    (speechTokenizerDir : String)
+    (audioPath codesPath : String)
+    : IO Unit := do
+  let encodeScript ← expandHome bridge.encodeScript
+  let qwenRepo ← expandHome bridge.qwenRepo
+  let baseArgs :=
+    pythonPrefix bridge.pythonExe ++
+      #[
+        encodeScript,
+        "--speech-tokenizer-dir", speechTokenizerDir,
+        "--audio", audioPath,
+        "--output-codes", codesPath,
+        "--qwen3-tts-repo", qwenRepo
+      ]
+  let args :=
+    match bridge.deviceMap with
+    | some dm => baseArgs ++ #["--device-map", dm]
+    | none => baseArgs
+  runBridgeCommand bridge.pythonExe args "Speech tokenizer encode failed"
+
 /-- Encode an audio input into codec ID rows using the speech tokenizer bridge. -/
 def encodeAudioToCodes
     (bridge : SpeechTokenizerBridgeConfig)
@@ -275,6 +305,12 @@ def encodeAudioToCodes
   let audioPath ← expandHome audioPath
   let codesPath ← expandHome codesPath
   ensureParentDir codesPath
+  let supportsLean ← supportsLean12HzSpeechTokenizer speechTokenizerDir
+  if !supportsLean then
+    IO.println
+      s!"Speech tokenizer at {speechTokenizerDir} is not Lean 12Hz-compatible; using Python encode bridge."
+    encodeAudioToCodesViaPython bridge speechTokenizerDir audioPath codesPath
+    return
   let encoder ← SpeechTokenizer12HzEncoder.loadFromDir speechTokenizerDir device
   let wave ← loadResampledMonoWav audioPath encoder.inputSampleRate
   if wave.isEmpty then

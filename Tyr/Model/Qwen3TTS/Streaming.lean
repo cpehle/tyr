@@ -48,8 +48,8 @@ structure StreamingResult where
     in-process streaming decode.
 
     When `speechDecoder?` is provided, code rows are decoded incrementally and
-    emitted through `callbacks.onAudioChunk`. Decoder currently expects 16 code
-    groups (upstream 12Hz tokenizer). -/
+    emitted through `callbacks.onAudioChunk` if the talker uses 16 code groups
+    (upstream 12Hz tokenizer). -/
 def streamFromTalkerInputs {seq : UInt64}
     (m : Qwen3TTSForConditionalGeneration cfg)
     (talkerInputs : T #[1, seq, cfg.talkerConfig.hiddenSize])
@@ -57,21 +57,23 @@ def streamFromTalkerInputs {seq : UInt64}
     (speechDecoder? : Option SpeechTokenizer12HzDecoder := none)
     (callbacks : StreamingCallbacks := {})
     : IO StreamingResult := do
-  if speechDecoder?.isSome && cfg.talkerConfig.numCodeGroups != 16 then
-    throw <| IO.userError
-      s!"Streaming decode currently supports 16 code groups, got {cfg.talkerConfig.numCodeGroups}."
+  let canStreamDecode : Bool :=
+    speechDecoder?.isSome && cfg.talkerConfig.numCodeGroups == 16
 
   let codeRowsRef ← IO.mkRef (#[] : Array (Array UInt64))
   let decodeStateRef? ←
-    match speechDecoder? with
-    | some dec =>
+    if canStreamDecode then
+      match speechDecoder? with
+      | some dec =>
         let st : SpeechTokenizer12HzDecoder.DecodeStreamState 1 :=
           SpeechTokenizer12HzDecoder.initDecodeStreamState
             opts.decodeChunkSize opts.decodeLeftContext dec.preConvWeight.device
         let stRef ← IO.mkRef st
         pure (some stRef)
-    | none =>
+      | none =>
         pure none
+    else
+      pure none
 
   let onFrame : UInt64 → T #[1, cfg.talkerConfig.numCodeGroups] → IO Unit := fun step frame => do
     let frameRow : T #[cfg.talkerConfig.numCodeGroups] := reshape frame #[cfg.talkerConfig.numCodeGroups]
