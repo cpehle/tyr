@@ -44,6 +44,7 @@ Status legend:
 - [x] `L02` Lake/Bazel parity checker now reports drift in both directions.
 - [x] `H15` Qwen3TTS decode no longer hard-fails on non-16 code groups; decode now auto-falls back to Python bridge in both offline and true-streaming paths.
 - [x] `H16` Qwen3TTS speech-tokenizer variant support now runs Lean-native for 12Hz-family tokenizer configs with dynamic code-group counts (no Python encode fallback).
+- [x] `H17` Qwen3TTS encode now supports separate Lean-native 25Hz tokenizer architecture via dedicated encoder module and bridge-time model-type dispatch.
 
 ## Open Issues
 
@@ -127,6 +128,8 @@ Status legend:
   Refs: `Examples/Qwen3TTS/EndToEnd.lean`, `Tyr/Model/Qwen3TTS/Streaming.lean`
 - [x] `H16` Qwen3TTS audio encode now supports 12Hz-family tokenizer variants natively in Lean by loading dynamic semantic/acoustic quantizer counts.
   Refs: `Tyr/Model/Qwen3TTS/SpeechTokenizerBridge.lean`, `Tyr/Model/Qwen3TTS/SpeechTokenizerEncoder.lean`
+- [x] `H17` Qwen3TTS audio encode now supports tokenizer `model_type="qwen3_tts_tokenizer_25hz"` through a separate Lean-native encoder architecture (Whisper frontend + 25Hz transformer/VQ path) with bridge dispatch.
+  Refs: `Tyr/Model/Qwen3TTS/SpeechTokenizer25HzEncoder.lean`, `Tyr/Model/Qwen3TTS/SpeechTokenizerBridge.lean`, `Tyr/Model/Qwen3TTS.lean`
 
 ## Imported From `qwen_review_issues_2026-02-28`
 

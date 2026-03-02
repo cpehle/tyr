@@ -11,6 +11,7 @@
 -/
 import Tyr.Model.Qwen3TTS.Model
 import Tyr.Model.Qwen3TTS.SpeechTokenizerEncoder
+import Tyr.Model.Qwen3TTS.SpeechTokenizer25HzEncoder
 import Tyr.Model.Qwen3ASR.Frontend
 
 namespace torch.qwen3tts
@@ -60,6 +61,11 @@ private def resolveSpeechTokenizerDir (bridge : SpeechTokenizerBridgeConfig) (mo
   match bridge.speechTokenizerDir with
   | some d => expandHome d
   | none => pure s!"{modelDir}/speech_tokenizer"
+
+private def isTokenizer25Hz (speechTokenizerDir : String) : IO Bool := do
+  let cfgPath := s!"{speechTokenizerDir}/config.json"
+  let cfgText ← IO.FS.readFile cfgPath
+  pure (cfgText.contains "\"qwen3_tts_tokenizer_25hz\"")
 
 private def fmax (a b : Float) : Float := if a > b then a else b
 private def fmin (a b : Float) : Float := if a < b then a else b
@@ -275,52 +281,60 @@ def encodeAudioToCodes
   let audioPath ← expandHome audioPath
   let codesPath ← expandHome codesPath
   ensureParentDir codesPath
-  let encoder ← SpeechTokenizer12HzEncoder.loadFromDirFlexible speechTokenizerDir device
-  let wave ← loadResampledMonoWav audioPath encoder.inputSampleRate
-  if wave.isEmpty then
-    throw <| IO.userError s!"Audio encode input is empty: {audioPath}"
-  let samples : UInt64 := wave.size.toUInt64
-  -- Keep long-form encode numerically stable by processing in bounded chunks.
-  let chunkSamples : Nat := (encoder.inputSampleRate * 10).toNat
-  let leftContextSamples : Nat := (encoder.inputSampleRate * 12).toNat
-  if wave.size <= chunkSamples then
-    let audio0 : T #[samples] := reshape (data.fromFloatArray wave) #[samples]
-    let audio : T #[samples] :=
-      if audio0.device == encoder.conv0Weight.device then audio0 else audio0.to encoder.conv0Weight.device
-    let frames : UInt64 := encodedFrames samples
-    let ⟨groups, codes⟩ := encoder.encodeMonoFrameMajorWithRoPEOffsetDynamic audio
-    let flat : T #[frames * groups] := reshape codes #[frames * groups]
-    let vals ← data.tensorToUInt64Array flat
+  if (← isTokenizer25Hz speechTokenizerDir) then
+    let encoder25 ← SpeechTokenizer25HzEncoder.loadFromDir speechTokenizerDir device
+    let wave ← loadResampledMonoWav audioPath encoder25.inputSampleRate
+    if wave.isEmpty then
+      throw <| IO.userError s!"Audio encode input is empty: {audioPath}"
+    let (groups, vals) ← encoder25.encodeWaveToCodes wave
     IO.FS.writeFile codesPath (formatCodesRows vals groups)
   else
-    let expectedRows : Nat := (encodedFrames samples).toNat
-    IO.FS.withFile codesPath .write fun h => do
-      let mut st :=
-        SpeechTokenizer12HzEncoder.initEncodeStreamState chunkSamples leftContextSamples
-      let mut off : Nat := 0
-      let mut rowsWritten : Nat := 0
-      let mut groups? : Option UInt64 := none
-      while _h : off < wave.size && rowsWritten < expectedRows do
-        let remaining := wave.size - off
-        let takeN := Nat.min chunkSamples remaining
-        let inputChunk := wave.extract off (off + takeN)
-        let (st', groups, valsKeep) ← SpeechTokenizer12HzEncoder.pushEncodeStreamDynamic encoder st inputChunk
-        st := st'
-        match groups? with
-        | some g0 =>
-            if g0 != groups then
-              throw <| IO.userError
-                s!"Inconsistent encoder code-group count across chunks ({g0} vs {groups})."
-        | none =>
-            groups? := some groups
-        let groupsNat : Nat := groups.toNat
-        let availRows := valsKeep.size / groupsNat
-        let rowsToWrite := Nat.min availRows (expectedRows - rowsWritten)
-        if rowsToWrite > 0 then
-          let writeVals := valsKeep.extract 0 (rowsToWrite * groupsNat)
-          h.putStr (formatCodesRows writeVals groups)
-          rowsWritten := rowsWritten + rowsToWrite
-        off := off + takeN
+    let encoder ← SpeechTokenizer12HzEncoder.loadFromDirFlexible speechTokenizerDir device
+    let wave ← loadResampledMonoWav audioPath encoder.inputSampleRate
+    if wave.isEmpty then
+      throw <| IO.userError s!"Audio encode input is empty: {audioPath}"
+    let samples : UInt64 := wave.size.toUInt64
+    -- Keep long-form encode numerically stable by processing in bounded chunks.
+    let chunkSamples : Nat := (encoder.inputSampleRate * 10).toNat
+    let leftContextSamples : Nat := (encoder.inputSampleRate * 12).toNat
+    if wave.size <= chunkSamples then
+      let audio0 : T #[samples] := reshape (data.fromFloatArray wave) #[samples]
+      let audio : T #[samples] :=
+        if audio0.device == encoder.conv0Weight.device then audio0 else audio0.to encoder.conv0Weight.device
+      let frames : UInt64 := encodedFrames samples
+      let ⟨groups, codes⟩ := encoder.encodeMonoFrameMajorWithRoPEOffsetDynamic audio
+      let flat : T #[frames * groups] := reshape codes #[frames * groups]
+      let vals ← data.tensorToUInt64Array flat
+      IO.FS.writeFile codesPath (formatCodesRows vals groups)
+    else
+      let expectedRows : Nat := (encodedFrames samples).toNat
+      IO.FS.withFile codesPath .write fun h => do
+        let mut st :=
+          SpeechTokenizer12HzEncoder.initEncodeStreamState chunkSamples leftContextSamples
+        let mut off : Nat := 0
+        let mut rowsWritten : Nat := 0
+        let mut groups? : Option UInt64 := none
+        while _h : off < wave.size && rowsWritten < expectedRows do
+          let remaining := wave.size - off
+          let takeN := Nat.min chunkSamples remaining
+          let inputChunk := wave.extract off (off + takeN)
+          let (st', groups, valsKeep) ← SpeechTokenizer12HzEncoder.pushEncodeStreamDynamic encoder st inputChunk
+          st := st'
+          match groups? with
+          | some g0 =>
+              if g0 != groups then
+                throw <| IO.userError
+                  s!"Inconsistent encoder code-group count across chunks ({g0} vs {groups})."
+          | none =>
+              groups? := some groups
+          let groupsNat : Nat := groups.toNat
+          let availRows := valsKeep.size / groupsNat
+          let rowsToWrite := Nat.min availRows (expectedRows - rowsWritten)
+          if rowsToWrite > 0 then
+            let writeVals := valsKeep.extract 0 (rowsToWrite * groupsNat)
+            h.putStr (formatCodesRows writeVals groups)
+            rowsWritten := rowsWritten + rowsToWrite
+          off := off + takeN
 
 /-- Build speaker-encoder mel tensor from reference audio with upstream mel settings.
     Output tensor is stored as SafeTensors with key `mel` and shape `[1, frames, mel_dim]`. -/
