@@ -22,8 +22,11 @@ private def sampleRate16k : Float := 16000.0
 structure ASRStreamingState where
   unfixedChunkNum : Nat := 2
   unfixedTokenNum : Nat := 5
+  promptMaxTokens : Nat := 96
   chunkSizeSec : Float := 2.0
   chunkSizeSamples : Nat := 32000
+  stepSizeSec : Float := 0.5
+  stepSizeSamples : Nat := 8000
 
   chunkId : Nat := 0
   buffer : Array Float := #[]
@@ -258,10 +261,13 @@ def initStreamingState
     (language : Option String := none)
     (unfixedChunkNum : Nat := 2)
     (unfixedTokenNum : Nat := 5)
+    (promptMaxTokens : Nat := 96)
     (chunkSizeSec : Float := 2.0)
+    (stepSizeSec : Float := 0.5)
     : IO ASRStreamingState := do
-  if chunkSizeSec <= 0.0 then
-    throw <| IO.userError s!"chunk_size_sec must be > 0, got: {chunkSizeSec}"
+  if chunkSizeSec <= 0.0 || stepSizeSec <= 0.0 then
+    throw <| IO.userError
+      s!"chunk_size_sec and step_size_sec must be > 0, got: {chunkSizeSec}, {stepSizeSec}"
 
   let forceLanguage ←
     match language with
@@ -279,12 +285,16 @@ def initStreamingState
           | .ok _ => pure (some ln)
 
   let chunkSizeSamples := chunkSizeSamplesFromSec chunkSizeSec
+  let stepSizeSamples := chunkSizeSamplesFromSec stepSizeSec
   let promptRaw := buildTextPrompt context forceLanguage
   pure {
     unfixedChunkNum
     unfixedTokenNum
+    promptMaxTokens
     chunkSizeSec
     chunkSizeSamples
+    stepSizeSec
+    stepSizeSamples
     chunkId := 0
     buffer := #[]
     audioAccum := #[]
@@ -303,6 +313,7 @@ private def rollbackPrefixForChunk
     (tok : tokenizer.qwen3.QwenTokenizer)
     (rawDecoded : String)
     (unfixedTokenNum : Nat)
+    (promptMaxTokens : Nat)
     : String := Id.run do
   let curIds := tokenizer.qwen3.encodeText tok rawDecoded
   let mut k := unfixedTokenNum
@@ -310,9 +321,16 @@ private def rollbackPrefixForChunk
   let mut done := false
   while !done do
     let endIdx := if curIds.size > k then curIds.size - k else 0
+    let startIdx :=
+      if promptMaxTokens == 0 then
+        0
+      else if endIdx > promptMaxTokens then
+        endIdx - promptMaxTokens
+      else
+        0
     pref :=
-      if endIdx > 0 then
-        tokenizer.qwen3.decodeText tok (curIds.extract 0 endIdx)
+      if endIdx > startIdx then
+        tokenizer.qwen3.decodeText tok (curIds.extract startIdx endIdx)
       else
         ""
     if !containsReplacementChar pref then
@@ -328,35 +346,45 @@ private def rollbackPrefixForFinish
     (tok : tokenizer.qwen3.QwenTokenizer)
     (rawDecoded : String)
     (unfixedTokenNum : Nat)
+    (promptMaxTokens : Nat)
     : String :=
   let curIds := tokenizer.qwen3.encodeText tok rawDecoded
   let endIdxRaw := Nat.max 1 (curIds.size - unfixedTokenNum)
   let endIdx := Nat.min endIdxRaw curIds.size
-  tokenizer.qwen3.decodeText tok (curIds.extract 0 endIdx)
+  let startIdx :=
+    if promptMaxTokens == 0 then
+      0
+    else if endIdx > promptMaxTokens then
+      endIdx - promptMaxTokens
+    else
+      0
+  tokenizer.qwen3.decodeText tok (curIds.extract startIdx endIdx)
 
 /-- Streaming decode step:
-    append new PCM samples, consume full chunks, update state each decode. -/
+    append new PCM samples, consume fixed `step` chunks, and decode over a
+    rolling `chunk` audio window. -/
 def streamingTranscribe
     (tok : tokenizer.qwen3.QwenTokenizer)
     (decodeFn : StreamingDecodeFn)
     (pcm16k : Array Float)
     (state : ASRStreamingState)
     : IO ASRStreamingState := do
-  if state.chunkSizeSamples == 0 then
+  if state.chunkSizeSamples == 0 || state.stepSizeSamples == 0 then
     throw <| IO.userError "streaming state has invalid chunk_size_samples=0"
 
   let mut st := { state with buffer := state.buffer ++ pcm16k }
 
-  while st.buffer.size >= st.chunkSizeSamples do
-    let chunk := st.buffer.extract 0 st.chunkSizeSamples
-    let rest := st.buffer.extract st.chunkSizeSamples st.buffer.size
-    st := { st with buffer := rest, audioAccum := st.audioAccum ++ chunk }
+  while st.buffer.size >= st.stepSizeSamples do
+    let stepChunk := st.buffer.extract 0 st.stepSizeSamples
+    let rest := st.buffer.extract st.stepSizeSamples st.buffer.size
+    let audioAccum := tailSlice (st.audioAccum ++ stepChunk) st.chunkSizeSamples
+    st := { st with buffer := rest, audioAccum := audioAccum }
 
     let pref :=
       if st.chunkId < st.unfixedChunkNum then
         ""
       else
-        rollbackPrefixForChunk tok st.rawDecoded st.unfixedTokenNum
+        rollbackPrefixForChunk tok st.rawDecoded st.unfixedTokenNum st.promptMaxTokens
     let prompt := st.promptRaw ++ pref
     let genText ← decodeFn prompt st.audioAccum
     let rawDecoded := if pref.isEmpty then genText else pref ++ genText
@@ -380,12 +408,13 @@ def finishStreamingTranscribe
     pure state
   else
     let tail := state.buffer
-    let mut st := { state with buffer := #[], audioAccum := state.audioAccum ++ tail }
+    let audioAccum := tailSlice (state.audioAccum ++ tail) state.chunkSizeSamples
+    let mut st := { state with buffer := #[], audioAccum := audioAccum }
     let pref :=
       if st.chunkId < st.unfixedChunkNum then
         ""
       else
-        rollbackPrefixForFinish tok st.rawDecoded st.unfixedTokenNum
+        rollbackPrefixForFinish tok st.rawDecoded st.unfixedTokenNum st.promptMaxTokens
     let prompt := st.promptRaw ++ pref
     let genText ← decodeFn prompt st.audioAccum
     let rawDecoded := if pref.isEmpty then genText else pref ++ genText
@@ -409,57 +438,70 @@ def decodeStreamingChunkWithModel
     (maxNewTokens : UInt64 := 512)
     (eosTokenIds : Array UInt64 := defaultEosTokenIds)
     : IO String := do
-  let targetSamples := (PreprocessorConfig.expectedSampleCount preprocessor).toNat
-  let audioWindow := tailSlice audio16k targetSamples
-  let frontendOut ← waveformToWhisperFeatures preprocessor audioWindow
-  let validFramesTensor : T #[1] := nn.sumDim (data.toLong frontendOut.featureAttentionMask) 1 false
-  let validFramesArr ← data.tensorToUInt64Array validFramesTensor
-  let validFrames := validFramesArr.getD 0 0
-  let audioLenRaw := AudioEncoderConfig.featExtractOutputLength validFrames
-  let audioLenCap :=
-    AudioEncoderConfig.framesAfterConv3
-      cfg.thinkerConfig.audioConfig
-      (PreprocessorConfig.expectedFrames preprocessor)
-  let audioLen := if audioLenRaw <= audioLenCap then audioLenRaw else audioLenCap
-
-  let processor : Qwen3ASRProcessor := {}
-  let promptExpanded ←
-    match processor.replaceMultimodalSpecialTokens #[prompt] #[audioLen] with
-    | .ok xs => pure (xs.getD 0 prompt)
-    | .error e => throw <| IO.userError e
-
-  let promptIds := tokenizer.qwen3.encodeText tok promptExpanded
-  let idsVals : Array Int64 := promptIds.map (fun id => Int64.ofNat id.toNat)
-
-  let seq : UInt64 := idsVals.size.toUInt64
-  if seq == 0 then
-    throw <| IO.userError "decodeStreamingChunkWithModel produced empty prompt/input sequence"
-  let dev := model.thinker.textModel.embed_tokens.device
-  let inputIdsCpu : T #[1, seq] := reshape (data.fromInt64Array idsVals) #[1, seq]
-  let inputIds : T #[1, seq] := inputIdsCpu.to dev
-  let inputFeaturesDev : T #[1, preprocessor.featureSize, PreprocessorConfig.expectedFrames preprocessor] :=
-    frontendOut.inputFeatures.to dev
-  let featureAttentionMaskDev : T #[1, PreprocessorConfig.expectedFrames preprocessor] :=
-    frontendOut.featureAttentionMask.to dev
-  let generated ←
-    model.generateGreedy
-      inputIds
-      (inputFeatures := some inputFeaturesDev)
-      (featureAttentionMask := some featureAttentionMaskDev)
-      (maxNewTokens := maxNewTokens)
-      (eosTokenIds := eosTokenIds)
-
-  let outSeq := generated.1
-  let outIds := generated.2
-  if outSeq <= seq then
+  if audio16k.isEmpty then
     pure ""
   else
-    let newSeq := outSeq - seq
-    let newOnly : T #[1, newSeq] := data.slice outIds 1 seq newSeq
-    let flat : T #[newSeq] := reshape newOnly #[newSeq]
-    let idsU64 ← data.tensorToUInt64Array flat
-    let ids := idsU64.map (fun x => x.toUInt32)
-    pure (tokenizer.qwen3.decodeText tok ids)
+    let maxSec :=
+      (PreprocessorConfig.expectedSampleCount preprocessor).toFloat / sampleRate16k
+    let frontendPack ←
+      waveformToWhisperFeaturesDynamic
+        preprocessor
+        audio16k
+        (minSeconds := 0.05)
+        (maxSeconds := some maxSec)
+    let frames := frontendPack.1
+    let frontendOut := frontendPack.2
+    let validFramesTensor : T #[1] := nn.sumDim (data.toLong frontendOut.featureAttentionMask) 1 false
+    let validFramesArr ← data.tensorToUInt64Array validFramesTensor
+    let validFrames := validFramesArr.getD 0 0
+    let audioLenRaw := AudioEncoderConfig.featExtractOutputLength validFrames
+    let audioLenCap :=
+      AudioEncoderConfig.framesAfterConv3
+        cfg.thinkerConfig.audioConfig
+        frames
+    let audioLen := if audioLenRaw <= audioLenCap then audioLenRaw else audioLenCap
+
+    let processor : Qwen3ASRProcessor := {}
+    let promptIds ←
+      match processor.encodeWithExpandedAudioTokenIds
+        tok
+        prompt
+        #[audioLen]
+        cfg.thinkerConfig.audioTokenId.toUInt32 with
+      | .ok ids => pure ids
+      | .error e => throw <| IO.userError e
+
+    let idsVals : Array Int64 := promptIds.map (fun id => Int64.ofNat id.toNat)
+
+    let seq : UInt64 := idsVals.size.toUInt64
+    if seq == 0 then
+      throw <| IO.userError "decodeStreamingChunkWithModel produced empty prompt/input sequence"
+    let dev := model.thinker.textModel.embed_tokens.device
+    let inputIdsCpu : T #[1, seq] := reshape (data.fromInt64Array idsVals) #[1, seq]
+    let inputIds : T #[1, seq] := inputIdsCpu.to dev
+    let inputFeaturesDev : T #[1, preprocessor.featureSize, frames] :=
+      frontendOut.inputFeatures.to dev
+    let featureAttentionMaskDev : T #[1, frames] :=
+      frontendOut.featureAttentionMask.to dev
+    let generated ←
+      model.generateGreedy
+        inputIds
+        (inputFeatures := some inputFeaturesDev)
+        (featureAttentionMask := some featureAttentionMaskDev)
+        (maxNewTokens := maxNewTokens)
+        (eosTokenIds := eosTokenIds)
+
+    let outSeq := generated.1
+    let outIds := generated.2
+    if outSeq <= seq then
+      pure ""
+    else
+      let newSeq := outSeq - seq
+      let newOnly : T #[1, newSeq] := data.slice outIds 1 seq newSeq
+      let flat : T #[newSeq] := reshape newOnly #[newSeq]
+      let idsU64 ← data.tensorToUInt64Array flat
+      let ids := idsU64.map (fun x => x.toUInt32)
+      pure (tokenizer.qwen3.decodeText tok ids)
 
 /-- Model-backed streaming decode step (no Python/vLLM bridge). -/
 def streamingTranscribeWithModel
@@ -474,9 +516,7 @@ def streamingTranscribeWithModel
     : IO ASRStreamingState := do
   let decodeFn : StreamingDecodeFn := fun prompt audio =>
     decodeStreamingChunkWithModel model tok preprocessor prompt audio maxNewTokens eosTokenIds
-  let st ← streamingTranscribe tok decodeFn pcm16k state
-  let keepSamples := (PreprocessorConfig.expectedSampleCount preprocessor).toNat
-  pure { st with audioAccum := tailSlice st.audioAccum keepSamples }
+  streamingTranscribe tok decodeFn pcm16k state
 
 /-- Model-backed streaming finish step (flush tail audio). -/
 def finishStreamingTranscribeWithModel
@@ -490,9 +530,7 @@ def finishStreamingTranscribeWithModel
     : IO ASRStreamingState := do
   let decodeFn : StreamingDecodeFn := fun prompt audio =>
     decodeStreamingChunkWithModel model tok preprocessor prompt audio maxNewTokens eosTokenIds
-  let st ← finishStreamingTranscribe tok decodeFn state
-  let keepSamples := (PreprocessorConfig.expectedSampleCount preprocessor).toNat
-  pure { st with audioAccum := tailSlice st.audioAccum keepSamples }
+  finishStreamingTranscribe tok decodeFn state
 
 namespace Qwen3ASRForConditionalGeneration
 
@@ -503,10 +541,12 @@ def initStreamingState
     (language : Option String := none)
     (unfixedChunkNum : Nat := 2)
     (unfixedTokenNum : Nat := 5)
+    (promptMaxTokens : Nat := 96)
     (chunkSizeSec : Float := 2.0)
+    (stepSizeSec : Float := 0.5)
     : IO ASRStreamingState :=
   torch.qwen3asr.initStreamingState
-    m.supportLanguages context language unfixedChunkNum unfixedTokenNum chunkSizeSec
+    m.supportLanguages context language unfixedChunkNum unfixedTokenNum promptMaxTokens chunkSizeSec stepSizeSec
 
 /-- Method-style streaming step with Lean model backend. -/
 def streamingTranscribe

@@ -347,7 +347,7 @@ private def buildInputsEmbeds {batch seq frames : UInt64}
 
     let expectedAudioLens :=
       match audioLensOpt with
-      | some xs => xs
+      | some xs => xs.map (fun l => if l <= audioSeq then l else audioSeq)
       | none => Array.replicate batch.toNat audioSeq
     let expectedRows := batch.toNat
     if expectedAudioLens.size != expectedRows then
@@ -515,10 +515,11 @@ private partial def greedyLoopCached {batch maxLen : UInt64}
   let nextValsRaw ← data.tensorToUInt64Array nextTokRaw
   let finished' := updateFinished finished nextValsRaw eosTokenIds
   let nextVals := applyFinishedEos nextValsRaw finished eosTokenIds
-  let nextTok : T #[batch] :=
+  let nextTokCpu : T #[batch] :=
     reshape
       (data.fromInt64Array (nextVals.map (Int64.ofNat ∘ UInt64.toNat)))
       #[batch]
+  let nextTok : T #[batch] := nextTokCpu.to curIds.device
   let nextCol : T #[batch, 1] := reshape nextTok #[batch, 1]
   let appended : T #[batch, curSeq + 1] := nn.cat curIds nextCol 1
 
@@ -612,10 +613,11 @@ private partial def greedyLoopUncached {batch frames : UInt64}
   let nextValsRaw ← data.tensorToUInt64Array nextTokRaw
   let finished' := updateFinished finished nextValsRaw eosTokenIds
   let nextVals := applyFinishedEos nextValsRaw finished eosTokenIds
-  let nextTok : T #[batch] :=
+  let nextTokCpu : T #[batch] :=
     reshape
       (data.fromInt64Array (nextVals.map (Int64.ofNat ∘ UInt64.toNat)))
       #[batch]
+  let nextTok : T #[batch] := nextTokCpu.to curIds.device
 
   let nextCol : T #[batch, 1] := reshape nextTok #[batch, 1]
   let appended : T #[batch, curSeq + 1] := nn.cat curIds nextCol 1

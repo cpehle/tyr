@@ -1,7 +1,7 @@
 import Tyr.Model.Qwen3ASR.ConfigIO
 import Tyr.Model.Qwen3ASR.Pretrained
 import Tyr.Model.Qwen3ASR.Weights
-import Tyr.Model.Qwen3ASR.Transcribe
+import Tyr.Model.Qwen3ASR.Streaming
 import Tyr.Text.StreamingConsensus
 import Tyr.Text.VADProvider
 import Tyr.Tokenizer.Qwen3
@@ -20,15 +20,14 @@ structure StreamModel where
 
 /-- Streaming session mutable state.
     `encoderCachedFrames`/`decoderCachedTokens` are reserved for true
-    incremental cache plumbing; current step uses overlap fallback while the
-    cache-backed path is implemented. -/
+    incremental cache plumbing; streaming decode now runs in fixed `chunk`
+    windows at `hop` cadence through `ASRStreamingState`. -/
 structure StreamSession where
   chunkSec : Float := 2.0
   hopSec : Float := 0.5
   chunkSamples : Nat := 32000
   hopSamples : Nat := 8000
-  ring : Array Float := #[]
-  sinceLastDecode : Nat := 0
+  asrState : ASRStreamingState := {}
   context : String := ""
   language : Option String := none
   textConsensus : Tyr.Text.ConsensusState := {}
@@ -41,14 +40,11 @@ structure StreamStepOutput where
   stableAppend : String := ""
   unstableText : String := ""
   fullText : String := ""
-  mode : String := "fallback_overlap"
+  mode : String := "streaming_step"
 
 private def toSamples (sec : Float) : Nat :=
   let n := ((sec * 16000.0) + 0.5).toUInt64.toNat
   if n == 0 then 1 else n
-
-private def tailSlice (xs : Array Float) (n : Nat) : Array Float :=
-  if xs.size <= n then xs else xs.extract (xs.size - n) xs.size
 
 def loadFromPretrained
     (source : String)
@@ -68,7 +64,7 @@ def loadFromPretrained
   pure { cfg, model, tok, preprocessor, modelDir }
 
 def newSession
-    (_m : StreamModel)
+    (m : StreamModel)
     (chunkSec : Float := 2.0)
     (hopSec : Float := 0.5)
     (context : String := "")
@@ -97,11 +93,18 @@ def newSession
       else
         pure (some (← Tyr.Text.initSileroProvider p))
     | none => pure none
+  let asrState ← initStreamingState
+    m.cfg.supportLanguages
+    context
+    language
+    (chunkSizeSec := chunkSec)
+    (stepSizeSec := hopSec)
   pure {
     chunkSec := chunkSec
     hopSec := hopSec
     chunkSamples := toSamples chunkSec
     hopSamples := toSamples hopSec
+    asrState := asrState
     context := context
     language := language
     textConsensus := { cfg := cCfg }
@@ -109,17 +112,15 @@ def newSession
   }
 
 /-- Push PCM16k samples and optionally decode one step.
-    This currently uses overlap decode fallback while true incremental
-    encoder/KV cache path is being introduced in this separate codepath. -/
+    Runs streaming decode at hop cadence and updates consensus with VAD
+    stabilization signals. -/
 def pushAudio
     (m : StreamModel)
     (s : StreamSession)
     (pcm16k : Array Float)
     (maxNewTokens : UInt64 := 128)
     : IO (StreamSession × StreamStepOutput) := do
-  let ring := tailSlice (s.ring ++ pcm16k) s.chunkSamples
-  let since := s.sinceLastDecode + pcm16k.size
-  let mut s' := { s with ring := ring, sinceLastDecode := since }
+  let mut s' := s
   let vadSignal : Tyr.Text.VADSignal ←
     match s'.sileroVAD with
     | some p =>
@@ -129,33 +130,35 @@ def pushAudio
     | none =>
       pure { speechActive := true, boundary := false }
 
-  if s'.ring.size < s'.chunkSamples || s'.sinceLastDecode < s'.hopSamples then
-    pure (s', { didDecode := false, stableAppend := "", unstableText := "", fullText := "", mode := "fallback_overlap" })
+  let beforeChunkId := s'.asrState.chunkId
+  let asrNext ← streamingTranscribeWithModel
+    m.model
+    m.tok
+    m.preprocessor
+    pcm16k
+    s'.asrState
+    (maxNewTokens := maxNewTokens)
+  s' := { s' with asrState := asrNext }
+  let decodedSteps := asrNext.chunkId - beforeChunkId
+  if decodedSteps == 0 then
+    pure (s', { didDecode := false, stableAppend := "", unstableText := "", fullText := "", mode := "streaming_step" })
   else
-    let window := tailSlice s'.ring s'.chunkSamples
-    let out ← m.model.transcribeWaveform
-      m.tok
-      m.preprocessor
-      window
-      (context := s'.context)
-      (language := s'.language)
-      (returnTimeStamps := false)
-      (maxNewTokens := maxNewTokens)
-    let ids := tokenizer.qwen3.encodeText m.tok out.text
+    let ids := tokenizer.qwen3.encodeText m.tok asrNext.text
     let (cs', delta) := Tyr.Text.updateWithSignals
       s'.textConsensus ids vadSignal.speechActive vadSignal.boundary (tokenizer.qwen3.decodeText m.tok)
-    s' := {
+    let decodedSamples := decodedSteps * asrNext.stepSizeSamples
+    let s'' := {
       s' with
       textConsensus := cs'
-      sinceLastDecode := 0
-      encoderCachedFrames := s'.encoderCachedFrames + s'.hopSamples.toUInt64
+      encoderCachedFrames := s'.encoderCachedFrames + decodedSamples.toUInt64
+      decoderCachedTokens := ids.size.toUInt64
     }
-    pure (s', {
+    pure (s'', {
       didDecode := true
       stableAppend := delta.stableAppend
       unstableText := delta.unstableText
       fullText := delta.fullText
-      mode := "fallback_overlap"
+      mode := "streaming_step"
     })
 
 def flush
@@ -163,28 +166,31 @@ def flush
     (s : StreamSession)
     (maxNewTokens : UInt64 := 128)
     : IO (StreamSession × StreamStepOutput) := do
-  if s.ring.isEmpty then
-    pure (s, { didDecode := false, stableAppend := "", unstableText := "", fullText := "", mode := "fallback_overlap" })
+  let beforeChunkId := s.asrState.chunkId
+  let asrNext ← finishStreamingTranscribeWithModel
+    m.model
+    m.tok
+    m.preprocessor
+    s.asrState
+    (maxNewTokens := maxNewTokens)
+  let s1 := { s with asrState := asrNext }
+  if asrNext.chunkId == beforeChunkId then
+    pure (s1, { didDecode := false, stableAppend := "", unstableText := "", fullText := "", mode := "streaming_step" })
   else
-    let window := tailSlice s.ring s.chunkSamples
-    let out ← m.model.transcribeWaveform
-      m.tok
-      m.preprocessor
-      window
-      (context := s.context)
-      (language := s.language)
-      (returnTimeStamps := false)
-      (maxNewTokens := maxNewTokens)
-    let ids := tokenizer.qwen3.encodeText m.tok out.text
+    let ids := tokenizer.qwen3.encodeText m.tok asrNext.text
     let (cs', delta) := Tyr.Text.updateWithSignals
-      s.textConsensus ids false true (tokenizer.qwen3.decodeText m.tok)
-    let s' := { s with textConsensus := cs' }
+      s1.textConsensus ids false true (tokenizer.qwen3.decodeText m.tok)
+    let s' := {
+      s1 with
+      textConsensus := cs'
+      decoderCachedTokens := ids.size.toUInt64
+    }
     pure (s', {
       didDecode := true
       stableAppend := delta.stableAppend
       unstableText := delta.unstableText
       fullText := delta.fullText
-      mode := "fallback_overlap"
+      mode := "streaming_step"
     })
 
 end torch.qwen3asr

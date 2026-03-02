@@ -180,12 +180,14 @@ private def preparePromptInputIds
     (audioLen : UInt64)
     : IO (Sigma (fun seq => T #[1, seq])) := do
   let processor : Qwen3ASRProcessor := {}
-  let promptExpanded ←
-    match processor.replaceMultimodalSpecialTokens #[prompt] #[audioLen] with
-    | .ok xs => pure (xs.getD 0 prompt)
+  let promptIds ←
+    match processor.encodeWithExpandedAudioTokenIds
+      tok
+      prompt
+      #[audioLen]
+      cfg.thinkerConfig.audioTokenId.toUInt32 with
+    | .ok ids => pure ids
     | .error e => throw <| IO.userError e
-
-  let promptIds := tokenizer.qwen3.encodeText tok promptExpanded
   let idsVals : Array Int64 := promptIds.map (fun id => Int64.ofNat id.toNat)
 
   let seq : UInt64 := idsVals.size.toUInt64
@@ -241,11 +243,14 @@ private def maybeAlignTimestamps
   else
     let (wordList, alignRaw) := Qwen3ForceAlignProcessor.encodeTimestampText text language
     let processor : Qwen3ASRProcessor := {}
-    let alignExpanded ←
-      match processor.replaceMultimodalSpecialTokens #[alignRaw] #[audioLen] with
-      | .ok xs => pure (xs.getD 0 alignRaw)
+    let alignIdsArr ←
+      match processor.encodeWithExpandedAudioTokenIds
+        tok
+        alignRaw
+        #[audioLen]
+        cfg.thinkerConfig.audioTokenId.toUInt32 with
+      | .ok ids => pure ids
       | .error e => throw <| IO.userError e
-    let alignIdsArr := tokenizer.qwen3.encodeText tok alignExpanded
     let seqAlign : UInt64 := alignIdsArr.size.toUInt64
     if seqAlign == 0 then
       pure none

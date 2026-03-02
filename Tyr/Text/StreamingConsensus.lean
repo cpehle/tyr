@@ -100,9 +100,21 @@ def updateWithSignals
     else
       ids.size
   let candidate := Nat.min speechCap (Nat.max candidate0 (Nat.max freezeCommit boundaryCommit))
-  let commitLen := Nat.max st.stableIds.size candidate
-  let stableIds := ids.extract 0 (Nat.min commitLen ids.size)
-  let unstableIds := if commitLen >= ids.size then #[] else ids.extract commitLen ids.size
+  let oldStableLen := st.stableIds.size
+  let anchoredStable := commonPrefixLenIds st.stableIds ids
+  let canAdvanceStable := anchoredStable == oldStableLen
+  let commitLenRaw := Nat.max oldStableLen candidate
+  let commitLen := if canAdvanceStable then commitLenRaw else oldStableLen
+  let stableIds :=
+    if canAdvanceStable then
+      ids.extract 0 (Nat.min commitLen ids.size)
+    else
+      st.stableIds
+  let unstableIds :=
+    if canAdvanceStable then
+      if commitLen >= ids.size then #[] else ids.extract commitLen ids.size
+    else
+      st.unstableIds
 
   let newStableText := decode stableIds
   let stableAppend :=

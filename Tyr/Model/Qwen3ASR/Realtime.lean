@@ -42,22 +42,35 @@ private def suffixChars (s : String) (start : Nat) : String :=
 
 private def safeSub (a b : Nat) : Nat := if a >= b then a - b else 0
 
+private def charLen (s : String) : Nat := (toChars s).size
+
 /-- Merge a fresh hypothesis into coherent `(stable, unstable)` form. -/
 def updateTranscriptState
     (st : RealtimeTranscriptState)
     (hypothesis : String)
     : RealtimeTranscriptState × TranscriptDelta :=
+  let oldStableLen := charLen st.stableText
+  let lcpStable := commonPrefixLen st.stableText hypothesis
+  let stableRegression := lcpStable < oldStableLen
   let lcpPrev := commonPrefixLen st.prevHypothesis hypothesis
   let commitCandidate := safeSub lcpPrev st.rollbackChars
-  let commitChars := Nat.max st.committedChars commitCandidate
-  let stable := prefixChars hypothesis commitChars
-  let unstable := suffixChars hypothesis commitChars
-  let oldStableLen := (toChars st.stableText).size
-  let newStableLen := (toChars stable).size
+  let commitCharsRaw := Nat.max st.committedChars commitCandidate
+  let commitChars := Nat.max oldStableLen commitCharsRaw
+  let stable :=
+    if stableRegression then
+      st.stableText
+    else
+      prefixChars hypothesis commitChars
+  let unstable :=
+    if stableRegression then
+      st.unstableText
+    else
+      suffixChars hypothesis commitChars
+  let newStableLen := charLen stable
   let stableAppend := if newStableLen > oldStableLen then suffixChars stable oldStableLen else ""
   let st' : RealtimeTranscriptState := {
     st with
-    committedChars := commitChars
+    committedChars := if stableRegression then oldStableLen else commitChars
     stableText := stable
     unstableText := unstable
     prevHypothesis := hypothesis
@@ -66,6 +79,28 @@ def updateTranscriptState
     stableAppend := stableAppend
     unstableText := unstable
     fullText := stable ++ unstable
+  }
+  (st', delta)
+
+/-- Force unstable tail into stable text at a commit boundary. -/
+def finalizeTranscriptState
+    (st : RealtimeTranscriptState)
+    : RealtimeTranscriptState × TranscriptDelta :=
+  let oldStableLen := charLen st.stableText
+  let stable := st.stableText ++ st.unstableText
+  let newStableLen := charLen stable
+  let stableAppend := if newStableLen > oldStableLen then suffixChars stable oldStableLen else ""
+  let st' : RealtimeTranscriptState := {
+    st with
+    committedChars := newStableLen
+    stableText := stable
+    unstableText := ""
+    prevHypothesis := stable
+  }
+  let delta : TranscriptDelta := {
+    stableAppend := stableAppend
+    unstableText := ""
+    fullText := stable
   }
   (st', delta)
 
