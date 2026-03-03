@@ -19,7 +19,7 @@ structure Args where
   topP : Float := 1.0
   logprobThreshold : Float := -1.0
   noSpeechThreshold : Float := 0.6
-  compressionRatioThreshold : Float := 0.0
+  compressionRatioThreshold : Float := 2.4
   noContext : Bool := false
   maxContextTokens : UInt64 := 0
   deriving Inhabited
@@ -116,7 +116,7 @@ private partial def parseArgsLoop (xs : List String) (acc : Args) : IO Args := d
       IO.println "  --top-p <x>              Top-p filter for stochastic passes (default: 1.0)"
       IO.println "  --logprob-thold <x>      Avg logprob fallback threshold (default: -1.0)"
       IO.println "  --no-speech-thold <x>    No-speech probability threshold (default: 0.6)"
-      IO.println "  --compression-ratio-thold <x>  Repetition fallback threshold (default: 0.0 disabled)"
+      IO.println "  --compression-ratio-thold <x>  Repetition fallback threshold (default: 2.4)"
       IO.println "  --no-context             Disable rolling prompt context carry across chunks"
       IO.println "  --max-context <n>        Max carried context tokens (default: auto)"
       IO.println "  --no-timestamps          Use <|notimestamps|> decoding prompt token"
