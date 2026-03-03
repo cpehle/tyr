@@ -77,6 +77,8 @@ structure StreamingFrontendCache (cfg : Qwen3ASRConfig) where
   frames : UInt64
   inputFeaturesDyn : T #[]
   featureAttentionMaskDyn : T #[]
+  inputFeaturesDevDyn : Option (T #[]) := none
+  featureAttentionMaskDevDyn : Option (T #[]) := none
 
 /-- Full decode cache state carried across streaming decode hops. -/
 structure StreamingDecodeCache (cfg : Qwen3ASRConfig) where
@@ -202,7 +204,7 @@ private def buildStreamingFrontendPackWithCache
     (decodeMode : StreamingDecodeMode)
     (cache : Option (StreamingFrontendCache cfg))
     : IO ((Sigma (fun frames => WhisperFrontendOutput preprocessor.featureSize frames)) ×
-      Option (StreamingFrontendCache cfg)) := do
+      Option (StreamingFrontendCache cfg) × Option UInt64) := do
   let maxSec :=
     (PreprocessorConfig.expectedSampleCount preprocessor).toFloat / sampleRate16k
   let maxSamples := PreprocessorConfig.expectedSampleCount preprocessor
@@ -211,7 +213,7 @@ private def buildStreamingFrontendPackWithCache
       s!"Audio duration exceeds maxSeconds={maxSec}: samples={audio16k.size.toUInt64}, limit={maxSamples}"
 
   let fullFallback : IO ((Sigma (fun frames => WhisperFrontendOutput preprocessor.featureSize frames)) ×
-      Option (StreamingFrontendCache cfg)) := do
+      Option (StreamingFrontendCache cfg) × Option UInt64) := do
     let fullPack ←
       waveformToWhisperFeaturesDynamic
         preprocessor
@@ -228,7 +230,7 @@ private def buildStreamingFrontendPackWithCache
         }
       else
         none
-    pure (fullPack, fullCache)
+    pure (fullPack, fullCache, none)
 
   let canTryIncremental :=
     decodeMode == .fullAccumulation &&
@@ -306,7 +308,7 @@ private def buildStreamingFrontendPackWithCache
               frames := mergedFrames
               inputFeaturesDyn := nn.eraseShape mergedOut.inputFeatures
               featureAttentionMaskDyn := nn.eraseShape mergedOut.featureAttentionMask
-            })
+            }, some prefixFrames)
 
 private def joinWith (sep : String) (parts : List String) : String :=
   match parts with
@@ -706,7 +708,7 @@ def decodeStreamingChunkWithModelStateCached
   else
     autograd.no_grad do
       let cache0 : StreamingDecodeCache cfg := cache.getD {}
-      let (frontendPack, frontendCache') ←
+      let (frontendPack, frontendCacheCpu', reusedPrefixFrames) ←
         buildStreamingFrontendPackWithCache
           (cfg := cfg)
           preprocessor
@@ -743,10 +745,60 @@ def decodeStreamingChunkWithModelStateCached
       let dev := model.thinker.textModel.embed_tokens.device
       let inputIdsCpu : T #[1, seq] := reshape (data.fromInt64Array idsVals) #[1, seq]
       let inputIds : T #[1, seq] := inputIdsCpu.to dev
-      let inputFeaturesDev : T #[1, preprocessor.featureSize, frames] :=
-        frontendOut.inputFeatures.to dev
-      let featureAttentionMaskDev : T #[1, frames] :=
-        frontendOut.featureAttentionMask.to dev
+      let mkFrontendCacheWithDev
+          (cpuCache : Option (StreamingFrontendCache cfg))
+          (featuresDev : T #[1, preprocessor.featureSize, frames])
+          (maskDev : T #[1, frames])
+          : Option (StreamingFrontendCache cfg) :=
+        cpuCache.map (fun fc => {
+          fc with
+            inputFeaturesDevDyn := some (nn.eraseShape featuresDev)
+            featureAttentionMaskDevDyn := some (nn.eraseShape maskDev)
+        })
+      let mkFrontendFullDev
+          : IO (T #[1, preprocessor.featureSize, frames] × T #[1, frames] × Option (StreamingFrontendCache cfg)) := do
+        let fDev : T #[1, preprocessor.featureSize, frames] := frontendOut.inputFeatures.to dev
+        let mDev : T #[1, frames] := frontendOut.featureAttentionMask.to dev
+        pure (fDev, mDev, mkFrontendCacheWithDev frontendCacheCpu' fDev mDev)
+      let (inputFeaturesDev, _featureAttentionMaskDev, frontendCache') ←
+        if decodeMode == .fullAccumulation then
+          match reusedPrefixFrames, cache0.frontendCache, frontendCacheCpu' with
+          | some prefixFrames, some prevCache, some _ =>
+            match prevCache.inputFeaturesDevDyn, prevCache.featureAttentionMaskDevDyn with
+            | some prevFeatDyn, some prevMaskDyn =>
+              if prefixFrames <= prevCache.frames && prefixFrames <= frames then
+                let prevFeatDev : T #[1, preprocessor.featureSize, prevCache.frames] :=
+                  reshape prevFeatDyn #[1, preprocessor.featureSize, prevCache.frames]
+                let prevMaskDev : T #[1, prevCache.frames] :=
+                  reshape prevMaskDyn #[1, prevCache.frames]
+                let prefixFeatDev : T #[1, preprocessor.featureSize, prefixFrames] :=
+                  data.slice prevFeatDev 2 0 prefixFrames
+                let prefixMaskDev : T #[1, prefixFrames] :=
+                  data.slice prevMaskDev 1 0 prefixFrames
+                let suffixFrames := frames - prefixFrames
+                let suffixFeatCpu : T #[1, preprocessor.featureSize, suffixFrames] :=
+                  data.slice frontendOut.inputFeatures 2 prefixFrames suffixFrames
+                let suffixMaskCpu : T #[1, suffixFrames] :=
+                  data.slice frontendOut.featureAttentionMask 1 prefixFrames suffixFrames
+                let suffixFeatDev : T #[1, preprocessor.featureSize, suffixFrames] := suffixFeatCpu.to dev
+                let suffixMaskDev : T #[1, suffixFrames] := suffixMaskCpu.to dev
+                let mergedFeatDyn : T #[] :=
+                  nn.cat_dyn #[nn.eraseShape prefixFeatDev, nn.eraseShape suffixFeatDev] 2
+                let mergedMaskDyn : T #[] :=
+                  nn.cat_dyn #[nn.eraseShape prefixMaskDev, nn.eraseShape suffixMaskDev] 1
+                let mergedFeatDev : T #[1, preprocessor.featureSize, frames] :=
+                  reshape mergedFeatDyn #[1, preprocessor.featureSize, frames]
+                let mergedMaskDev : T #[1, frames] :=
+                  reshape mergedMaskDyn #[1, frames]
+                pure (mergedFeatDev, mergedMaskDev, mkFrontendCacheWithDev frontendCacheCpu' mergedFeatDev mergedMaskDev)
+              else
+                mkFrontendFullDev
+            | _, _ =>
+              mkFrontendFullDev
+          | _, _, _ =>
+            mkFrontendFullDev
+        else
+          mkFrontendFullDev
       let fullStepFeature : UInt64 := cfg.thinkerConfig.audioConfig.nWindow * 2
       let (audioEmbedsValid, audioCache') ←
         match cache0.audioEncoderCache with
