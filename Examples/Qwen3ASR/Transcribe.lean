@@ -17,6 +17,7 @@ structure Args where
   streamOutput : Bool := false
   streamChunkSec : Float := 2.0
   streamHopSec : Float := 0.5
+  streamDecodeMode : StreamingDecodeMode := .rollingWindow
   maxInferenceBatchSize : Int := -1
   maxNewTokens : UInt64 := 1024
   deriving Inhabited
@@ -48,6 +49,15 @@ private def parseFloatArg (name : String) (v : String) : IO Float := do
   | some x => pure x
   | none => throw <| IO.userError s!"Invalid {name}: {v}"
 
+private def parseStreamDecodeModeArg (name : String) (v : String) : IO StreamingDecodeMode := do
+  let mode := v.trimAscii.toString.toLower
+  if mode == "rolling" || mode == "rolling-window" || mode == "rolling_window" then
+    pure .rollingWindow
+  else if mode == "full" || mode == "full-accumulation" || mode == "full_accumulation" then
+    pure .fullAccumulation
+  else
+    throw <| IO.userError s!"Invalid {name}: {v} (expected rolling|full)"
+
 private partial def parseArgsLoop (xs : List String) (acc : Args) : IO Args := do
   match xs with
   | [] => pure acc
@@ -73,6 +83,8 @@ private partial def parseArgsLoop (xs : List String) (acc : Args) : IO Args := d
       parseArgsLoop rest { acc with streamChunkSec := (← parseFloatArg "--stream-chunk-sec" v) }
   | "--stream-hop-sec" :: v :: rest =>
       parseArgsLoop rest { acc with streamHopSec := (← parseFloatArg "--stream-hop-sec" v) }
+  | "--stream-decode-mode" :: v :: rest =>
+      parseArgsLoop rest { acc with streamDecodeMode := (← parseStreamDecodeModeArg "--stream-decode-mode" v) }
   | "--max-inference-batch-size" :: v :: rest =>
       parseArgsLoop rest { acc with maxInferenceBatchSize := (← parseIntArg "--max-inference-batch-size" v) }
   | "--max-new-tokens" :: v :: rest =>
@@ -90,6 +102,7 @@ private partial def parseArgsLoop (xs : List String) (acc : Args) : IO Args := d
       IO.println "  --stream-output          Show whisper.cpp-style inline streaming updates while processing WAV"
       IO.println "  --stream-chunk-sec <f>   Streaming decode window seconds (default: 2.0)"
       IO.println "  --stream-hop-sec <f>     Streaming hop size seconds (default: 0.5)"
+      IO.println "  --stream-decode-mode <m> Streaming decode mode: rolling|full (default: rolling)"
       IO.println "  --max-inference-batch-size <n>  Batch chunking control (-1 = unbounded)"
       IO.println "  --max-new-tokens <n>     Greedy decode max new tokens"
       IO.println "Example: lake exe Qwen3ASRTranscribe --source Qwen/Qwen3-ASR-1.7B --wav-path MLKDream.wav"
@@ -120,10 +133,20 @@ private def transcribeWavStreamed
     (maxNewTokens : UInt64)
     (chunkSec : Float)
     (hopSec : Float)
+    (decodeMode : StreamingDecodeMode)
     : IO ASRTranscription := do
   if chunkSec <= 0.0 || hopSec <= 0.0 then
     throw <| IO.userError "stream-chunk-sec and stream-hop-sec must be > 0"
   let wav16k ← normalizeAudioTo16kFromWav wavPath
+  let maxSamples := PreprocessorConfig.expectedSampleCount pre
+  let effectiveDecodeMode ←
+    if decodeMode == .fullAccumulation && wav16k.size.toUInt64 > maxSamples then do
+      let maxSec := maxSamples.toFloat / 16000.0
+      IO.eprintln
+        s!"stream-decode-mode=full exceeds model maxSeconds={maxSec} for this file; switching to rolling mode."
+      pure .rollingWindow
+    else
+      pure decodeMode
   let sm : StreamModel := {
     cfg := cfg
     model := model
@@ -134,7 +157,7 @@ private def transcribeWavStreamed
   let mut ss ← newSession sm
     (chunkSec := chunkSec)
     (hopSec := hopSec)
-    (decodeMode := .fullAccumulation)
+    (decodeMode := effectiveDecodeMode)
     (language := language)
   let hopSamples := toSamples hopSec
   let mut off : Nat := 0
@@ -209,6 +232,7 @@ def runMain (argv : List String) : IO UInt32 := do
         args.maxNewTokens
         args.streamChunkSec
         args.streamHopSec
+        args.streamDecodeMode
     else
       if args.streamOutput && (args.returnTimeStamps || forcedAligner.isSome) then
         IO.eprintln
