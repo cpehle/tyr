@@ -30,6 +30,7 @@ structure StreamSession (cfg : Qwen3ASRConfig) where
   language : Option String := none
   textConsensus : Tyr.Text.ConsensusState := {}
   sileroVAD : Option Tyr.Text.SileroProvider := none
+  decodeCache : Option (StreamingDecodeCache cfg) := none
   promptCache : Option (StreamingPromptCache cfg) := none
   encoderCachedFrames : UInt64 := 0
   decoderCachedTokens : UInt64 := 0
@@ -132,15 +133,16 @@ def pushAudio
       pure { speechActive := true, boundary := false }
 
   let beforeChunkId := s'.asrState.chunkId
-  let (asrNext, promptCacheNext) ← streamingTranscribeWithModelCached
+  let (asrNext, decodeCacheNext) ← streamingTranscribeWithModelStateCached
     m.model
     m.tok
     m.preprocessor
     pcm16k
     s'.asrState
-    (prefixCache := s'.promptCache)
+    (cache := s'.decodeCache)
     (maxNewTokens := maxNewTokens)
-  s' := { s' with asrState := asrNext, promptCache := promptCacheNext }
+  let promptCacheNext := decodeCacheNext.bind (fun c => c.promptCache)
+  s' := { s' with asrState := asrNext, decodeCache := decodeCacheNext, promptCache := promptCacheNext }
   let decodedSteps := asrNext.chunkId - beforeChunkId
   if decodedSteps == 0 then
     pure (s', { didDecode := false, stableAppend := "", unstableText := "", fullText := "", mode := "streaming_step" })
@@ -169,14 +171,15 @@ def flush
     (maxNewTokens : UInt64 := 128)
     : IO ((StreamSession m.cfg) × StreamStepOutput) := do
   let beforeChunkId := s.asrState.chunkId
-  let (asrNext, promptCacheNext) ← finishStreamingTranscribeWithModelCached
+  let (asrNext, decodeCacheNext) ← finishStreamingTranscribeWithModelStateCached
     m.model
     m.tok
     m.preprocessor
     s.asrState
-    (prefixCache := s.promptCache)
+    (cache := s.decodeCache)
     (maxNewTokens := maxNewTokens)
-  let s1 := { s with asrState := asrNext, promptCache := promptCacheNext }
+  let promptCacheNext := decodeCacheNext.bind (fun c => c.promptCache)
+  let s1 := { s with asrState := asrNext, decodeCache := decodeCacheNext, promptCache := promptCacheNext }
   if asrNext.chunkId == beforeChunkId then
     pure (s1, { didDecode := false, stableAppend := "", unstableText := "", fullText := "", mode := "streaming_step" })
   else

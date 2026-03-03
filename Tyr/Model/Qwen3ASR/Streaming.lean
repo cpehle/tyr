@@ -54,6 +54,29 @@ abbrev StreamingDecodeFn := String → Array Float → IO String
 abbrev StreamingPromptCache (cfg : Qwen3ASRConfig) :=
   Qwen3ASRForConditionalGeneration.StreamingPromptCache cfg
 
+/-- Cached prompt tokenization state for append-only streaming prompt updates. -/
+structure StreamingPromptTokenCache where
+  basePrompt : String
+  basePromptLen : Nat
+  audioToken : String
+  beforeAudioIds : Array UInt32
+  afterAudioIds : Array UInt32
+  lastSuffix : String := ""
+  lastSuffixIds : Array UInt32 := #[]
+  deriving Inhabited
+
+/-- Cached projected-audio embedding prefix for full-accumulation streaming mode. -/
+structure StreamingAudioEncoderCache (cfg : Qwen3ASRConfig) where
+  validFeatureLen : UInt64
+  validAudioLen : UInt64
+  audioEmbedsValidDyn : T #[]
+
+/-- Full decode cache state carried across streaming decode hops. -/
+structure StreamingDecodeCache (cfg : Qwen3ASRConfig) where
+  promptCache : Option (StreamingPromptCache cfg) := none
+  promptTokenCache : Option StreamingPromptTokenCache := none
+  audioEncoderCache : Option (StreamingAudioEncoderCache cfg) := none
+
 private def toLower (s : String) : String :=
   String.ofList (s.toList.map Char.toLower)
 
@@ -64,6 +87,72 @@ private def startsWithStr (s pref : String) : Bool :=
 
 private def dropChars (s : String) (n : Nat) : String :=
   String.ofList (s.toList.drop n)
+
+private def minU64 (a b : UInt64) : UInt64 :=
+  if a <= b then a else b
+
+private def appendRepeatedTokenId (ids : Array UInt32) (tokId : UInt32) (n : UInt64) : Array UInt32 :=
+  Id.run do
+    let mut out := ids
+    for _ in [:n.toNat] do
+      out := out.push tokId
+    out
+
+private def mkStreamingPromptTokenCache
+    (tok : tokenizer.qwen3.QwenTokenizer)
+    (processor : Qwen3ASRProcessor)
+    (basePrompt : String)
+    : Option StreamingPromptTokenCache := do
+  let parts := (basePrompt.splitOn processor.audioToken).toArray
+  if parts.size != 2 then
+    none
+  else
+    let beforeAudioIds := tokenizer.qwen3.encodeText tok parts[0]!
+    let afterAudioIds := tokenizer.qwen3.encodeText tok parts[1]!
+    some {
+      basePrompt := basePrompt
+      basePromptLen := basePrompt.toList.length
+      audioToken := processor.audioToken
+      beforeAudioIds := beforeAudioIds
+      afterAudioIds := afterAudioIds
+    }
+
+private def encodePromptIdsWithCache
+    (tok : tokenizer.qwen3.QwenTokenizer)
+    (processor : Qwen3ASRProcessor)
+    (basePrompt : String)
+    (prompt : String)
+    (audioLen : UInt64)
+    (audioTokenId : UInt32)
+    (cache : Option StreamingPromptTokenCache)
+    : IO (Array UInt32 × Option StreamingPromptTokenCache) := do
+  let seedCache :=
+    match cache with
+    | some c => some c
+    | none => mkStreamingPromptTokenCache tok processor basePrompt
+  match seedCache with
+  | some c =>
+    if startsWithStr prompt c.basePrompt then
+      let suffix := dropChars prompt c.basePromptLen
+      let suffixIds :=
+        if startsWithStr suffix c.lastSuffix then
+          let suffixTail := dropChars suffix c.lastSuffix.toList.length
+          c.lastSuffixIds ++ tokenizer.qwen3.encodeText tok suffixTail
+        else
+          tokenizer.qwen3.encodeText tok suffix
+      let mut ids := c.beforeAudioIds
+      ids := appendRepeatedTokenId ids audioTokenId audioLen
+      ids := ids ++ c.afterAudioIds
+      ids := ids ++ suffixIds
+      pure (ids, some { c with lastSuffix := suffix, lastSuffixIds := suffixIds })
+    else
+      match processor.encodeWithExpandedAudioTokenIds tok prompt #[audioLen] audioTokenId with
+      | .ok ids => pure (ids, seedCache)
+      | .error e => throw <| IO.userError e
+  | none =>
+    match processor.encodeWithExpandedAudioTokenIds tok prompt #[audioLen] audioTokenId with
+    | .ok ids => pure (ids, none)
+    | .error e => throw <| IO.userError e
 
 private def joinWith (sep : String) (parts : List String) : String :=
   match parts with
@@ -444,20 +533,22 @@ def finishStreamingTranscribe
     pure st
 
 /-- Lean decode helper that runs one model generation from `(prompt, audio)` pair
-    and returns updated prompt cache for the next hop. -/
-def decodeStreamingChunkWithModelCached
+    and returns updated full decode-cache state for the next hop. -/
+def decodeStreamingChunkWithModelStateCached
     {cfg : Qwen3ASRConfig}
     (model : Qwen3ASRForConditionalGeneration cfg)
     (tok : tokenizer.qwen3.QwenTokenizer)
     (preprocessor : PreprocessorConfig)
+    (basePrompt : String)
+    (decodeMode : StreamingDecodeMode)
     (prompt : String)
     (audio16k : Array Float)
-    (prefixCache : Option (StreamingPromptCache cfg) := none)
+    (cache : Option (StreamingDecodeCache cfg) := none)
     (maxNewTokens : UInt64 := 512)
     (eosTokenIds : Array UInt64 := defaultEosTokenIds)
-    : IO (String × Option (StreamingPromptCache cfg)) := do
+    : IO (String × Option (StreamingDecodeCache cfg)) := do
   if audio16k.isEmpty then
-    pure ("", prefixCache)
+    pure ("", cache)
   else
     let maxSec :=
       (PreprocessorConfig.expectedSampleCount preprocessor).toFloat / sampleRate16k
@@ -476,17 +567,19 @@ def decodeStreamingChunkWithModelCached
       AudioEncoderConfig.framesAfterConv3
         cfg.thinkerConfig.audioConfig
         frames
-    let audioLen := if audioLenRaw <= audioLenCap then audioLenRaw else audioLenCap
+    let audioLen := minU64 audioLenRaw audioLenCap
 
     let processor : Qwen3ASRProcessor := {}
-    let promptIds ←
-      match processor.encodeWithExpandedAudioTokenIds
+    let cache0 : StreamingDecodeCache cfg := cache.getD {}
+    let (promptIds, promptTokenCache') ←
+      encodePromptIdsWithCache
         tok
+        processor
+        basePrompt
         prompt
-        #[audioLen]
-        cfg.thinkerConfig.audioTokenId.toUInt32 with
-      | .ok ids => pure ids
-      | .error e => throw <| IO.userError e
+        audioLen
+        cfg.thinkerConfig.audioTokenId.toUInt32
+        cache0.promptTokenCache
 
     let idsVals : Array Int64 := promptIds.map (fun id => Int64.ofNat id.toNat)
 
@@ -500,15 +593,153 @@ def decodeStreamingChunkWithModelCached
       frontendOut.inputFeatures.to dev
     let featureAttentionMaskDev : T #[1, frames] :=
       frontendOut.featureAttentionMask.to dev
-    let (generated, nextCache) ←
-      model.generateGreedyWithPromptCache
+    let fullStepFeature : UInt64 := cfg.thinkerConfig.audioConfig.nWindow * 2
+    let (audioEmbedsValid, audioCache') ←
+      match cache0.audioEncoderCache with
+      | some ac =>
+        let canReuse :=
+          decodeMode == .fullAccumulation &&
+          fullStepFeature > 0 &&
+          ac.validFeatureLen <= validFrames
+        if !canReuse then
+          let audioRaw : T #[1, AudioEncoderConfig.framesAfterConv3 cfg.thinkerConfig.audioConfig frames, cfg.thinkerConfig.audioConfig.outputDim] :=
+            model.thinker.encodeAudioVarLen inputFeaturesDev #[validFrames]
+          let audioProj : T #[1, AudioEncoderConfig.framesAfterConv3 cfg.thinkerConfig.audioConfig frames, cfg.thinkerConfig.textConfig.hiddenSize] :=
+            model.thinker.projectAudio audioRaw
+          let audioValid : T #[1, audioLen, cfg.thinkerConfig.textConfig.hiddenSize] := data.slice audioProj 1 0 audioLen
+          let nextAudioCache :=
+            if decodeMode == .fullAccumulation then
+              some {
+                validFeatureLen := validFrames
+                validAudioLen := audioLen
+                audioEmbedsValidDyn := nn.eraseShape audioValid
+              }
+            else
+              none
+          pure (audioValid, nextAudioCache)
+        else
+          let prevFull := (ac.validFeatureLen / fullStepFeature) * fullStepFeature
+          let curFull := (validFrames / fullStepFeature) * fullStepFeature
+          let reuseBase := minU64 prevFull curFull
+          let reuseFeatureLen :=
+            if reuseBase > 0 && validFrames % fullStepFeature != 0 then
+              reuseBase - fullStepFeature
+            else
+              reuseBase
+          let reuseAudioLenRaw := AudioEncoderConfig.featExtractOutputLength reuseFeatureLen
+          let reuseAudioLen := minU64 (minU64 reuseAudioLenRaw ac.validAudioLen) audioLen
+          let prevAudio : T #[1, ac.validAudioLen, cfg.thinkerConfig.textConfig.hiddenSize] :=
+            reshape ac.audioEmbedsValidDyn #[1, ac.validAudioLen, cfg.thinkerConfig.textConfig.hiddenSize]
+          let prefixAudio : T #[1, reuseAudioLen, cfg.thinkerConfig.textConfig.hiddenSize] := data.slice prevAudio 1 0 reuseAudioLen
+          let tailFeatureLen := validFrames - reuseFeatureLen
+          if tailFeatureLen == 0 then
+            let audioValid : T #[1, audioLen, cfg.thinkerConfig.textConfig.hiddenSize] :=
+              if reuseAudioLen == audioLen then
+                reshape prefixAudio #[1, audioLen, cfg.thinkerConfig.textConfig.hiddenSize]
+              else if reuseAudioLen > audioLen then
+                data.slice prefixAudio 1 0 audioLen
+              else
+                let padLen := audioLen - reuseAudioLen
+                let pad : T #[1, padLen, cfg.thinkerConfig.textConfig.hiddenSize] :=
+                  torch.zeros #[1, padLen, cfg.thinkerConfig.textConfig.hiddenSize] false prefixAudio.device
+                reshape (nn.cat prefixAudio pad 1) #[1, audioLen, cfg.thinkerConfig.textConfig.hiddenSize]
+            let nextAudioCache :=
+              if decodeMode == .fullAccumulation then
+                some {
+                  validFeatureLen := validFrames
+                  validAudioLen := audioLen
+                  audioEmbedsValidDyn := nn.eraseShape audioValid
+                }
+              else
+                none
+            pure (audioValid, nextAudioCache)
+          else
+            let tailFrames := frames - reuseFeatureLen
+            let tailInput : T #[1, preprocessor.featureSize, tailFrames] :=
+              data.slice inputFeaturesDev 2 reuseFeatureLen tailFrames
+            let tailAudioRaw : T #[1, AudioEncoderConfig.framesAfterConv3 cfg.thinkerConfig.audioConfig tailFrames, cfg.thinkerConfig.audioConfig.outputDim] :=
+              model.thinker.encodeAudioVarLen tailInput #[tailFeatureLen]
+            let tailAudioProj : T #[1, AudioEncoderConfig.framesAfterConv3 cfg.thinkerConfig.audioConfig tailFrames, cfg.thinkerConfig.textConfig.hiddenSize] :=
+              model.thinker.projectAudio tailAudioRaw
+            let tailAudioLenRaw := AudioEncoderConfig.featExtractOutputLength tailFeatureLen
+            let tailAudioCap := AudioEncoderConfig.framesAfterConv3 cfg.thinkerConfig.audioConfig tailFrames
+            let tailAudioLen := minU64 tailAudioLenRaw tailAudioCap
+            let tailValid : T #[1, tailAudioLen, cfg.thinkerConfig.textConfig.hiddenSize] :=
+              data.slice tailAudioProj 1 0 tailAudioLen
+            let combinedDyn : T #[] := nn.cat_dyn #[nn.eraseShape prefixAudio, nn.eraseShape tailValid] 1
+            let combinedLen := reuseAudioLen + tailAudioLen
+            let audioValid : T #[1, audioLen, cfg.thinkerConfig.textConfig.hiddenSize] :=
+              if combinedLen == audioLen then
+                reshape combinedDyn #[1, audioLen, cfg.thinkerConfig.textConfig.hiddenSize]
+              else if combinedLen > audioLen then
+                let combined : T #[1, combinedLen, cfg.thinkerConfig.textConfig.hiddenSize] :=
+                  reshape combinedDyn #[1, combinedLen, cfg.thinkerConfig.textConfig.hiddenSize]
+                data.slice combined 1 0 audioLen
+              else
+                let combined : T #[1, combinedLen, cfg.thinkerConfig.textConfig.hiddenSize] :=
+                  reshape combinedDyn #[1, combinedLen, cfg.thinkerConfig.textConfig.hiddenSize]
+                let padLen := audioLen - combinedLen
+                let pad : T #[1, padLen, cfg.thinkerConfig.textConfig.hiddenSize] :=
+                  torch.zeros #[1, padLen, cfg.thinkerConfig.textConfig.hiddenSize] false combined.device
+                reshape (nn.cat combined pad 1) #[1, audioLen, cfg.thinkerConfig.textConfig.hiddenSize]
+            let nextAudioCache :=
+              if decodeMode == .fullAccumulation then
+                some {
+                  validFeatureLen := validFrames
+                  validAudioLen := audioLen
+                  audioEmbedsValidDyn := nn.eraseShape audioValid
+                }
+              else
+                none
+            pure (audioValid, nextAudioCache)
+      | none =>
+        let audioRaw : T #[1, AudioEncoderConfig.framesAfterConv3 cfg.thinkerConfig.audioConfig frames, cfg.thinkerConfig.audioConfig.outputDim] :=
+          model.thinker.encodeAudioVarLen inputFeaturesDev #[validFrames]
+        let audioProj : T #[1, AudioEncoderConfig.framesAfterConv3 cfg.thinkerConfig.audioConfig frames, cfg.thinkerConfig.textConfig.hiddenSize] :=
+          model.thinker.projectAudio audioRaw
+        let audioValid : T #[1, audioLen, cfg.thinkerConfig.textConfig.hiddenSize] := data.slice audioProj 1 0 audioLen
+        let nextAudioCache :=
+          if decodeMode == .fullAccumulation then
+            some {
+              validFeatureLen := validFrames
+              validAudioLen := audioLen
+              audioEmbedsValidDyn := nn.eraseShape audioValid
+            }
+          else
+            none
+        pure (audioValid, nextAudioCache)
+
+    let inputsEmbeds0 : T #[1, seq, cfg.thinkerConfig.textConfig.hiddenSize] := model.thinker.embedText inputIds
+    let placeholderMask2d : T #[1, seq] := eq_scalar inputIds (Int64.ofNat cfg.thinkerConfig.audioTokenId.toNat)
+    let placeholderCountTensor : T #[1] := nn.sumDim (data.toLong placeholderMask2d) 1 false
+    let placeholderCount := (nn.item placeholderCountTensor).toUInt64
+    if placeholderCount != audioLen then
+      throw <| IO.userError
+        s!"decodeStreamingChunkWithModel placeholder mismatch: expected {audioLen}, got {placeholderCount}"
+    let inputsEmbeds : T #[1, seq, cfg.thinkerConfig.textConfig.hiddenSize] :=
+      if audioLen == 0 then
+        inputsEmbeds0
+      else
+        let placeholderMask : T #[1, seq, cfg.thinkerConfig.textConfig.hiddenSize] :=
+          nn.expand (reshape placeholderMask2d #[1, seq, 1]) #[1, seq, cfg.thinkerConfig.textConfig.hiddenSize]
+        let source : T #[audioLen * cfg.thinkerConfig.textConfig.hiddenSize] :=
+          reshape audioEmbedsValid #[audioLen * cfg.thinkerConfig.textConfig.hiddenSize]
+        nn.masked_scatter inputsEmbeds0 placeholderMask source
+
+    let (generated, nextPromptCache) ←
+      model.generateGreedyFromInputsEmbedsWithPromptCache
         inputIds
-        (inputFeatures := some inputFeaturesDev)
-        (featureAttentionMask := some featureAttentionMaskDev)
+        inputsEmbeds
         (promptTokenIds := promptIds)
-        (prefixCache := prefixCache)
+        (prefixCache := cache0.promptCache)
         (maxNewTokens := maxNewTokens)
         (eosTokenIds := eosTokenIds)
+
+    let nextCache : StreamingDecodeCache cfg := {
+      promptCache := some nextPromptCache
+      promptTokenCache := promptTokenCache'
+      audioEncoderCache := audioCache'
+    }
 
     let outSeq := generated.1
     let outIds := generated.2
@@ -521,6 +752,34 @@ def decodeStreamingChunkWithModelCached
       let idsU64 ← data.tensorToUInt64Array flat
       let ids := idsU64.map (fun x => x.toUInt32)
       pure (tokenizer.qwen3.decodeText tok ids, some nextCache)
+
+/-- Lean decode helper that runs one model generation from `(prompt, audio)` pair
+    and returns updated prompt cache for the next hop. -/
+def decodeStreamingChunkWithModelCached
+    {cfg : Qwen3ASRConfig}
+    (model : Qwen3ASRForConditionalGeneration cfg)
+    (tok : tokenizer.qwen3.QwenTokenizer)
+    (preprocessor : PreprocessorConfig)
+    (prompt : String)
+    (audio16k : Array Float)
+    (prefixCache : Option (StreamingPromptCache cfg) := none)
+    (maxNewTokens : UInt64 := 512)
+    (eosTokenIds : Array UInt64 := defaultEosTokenIds)
+    : IO (String × Option (StreamingPromptCache cfg)) := do
+  let stateCache : StreamingDecodeCache cfg := { promptCache := prefixCache }
+  let (text, cache') ←
+    decodeStreamingChunkWithModelStateCached
+      model
+      tok
+      preprocessor
+      prompt
+      .rollingWindow
+      prompt
+      audio16k
+      (cache := some stateCache)
+      (maxNewTokens := maxNewTokens)
+      (eosTokenIds := eosTokenIds)
+  pure (text, cache'.bind (fun c => c.promptCache))
 
 /-- Lean decode helper that runs one model generation from `(prompt, audio)` pair. -/
 def decodeStreamingChunkWithModel
@@ -544,6 +803,41 @@ def decodeStreamingChunkWithModel
     (eosTokenIds := eosTokenIds)
   pure out.1
 
+/-- Model-backed streaming decode step with reusable full decode-cache state. -/
+def streamingTranscribeWithModelStateCached
+    {cfg : Qwen3ASRConfig}
+    (model : Qwen3ASRForConditionalGeneration cfg)
+    (tok : tokenizer.qwen3.QwenTokenizer)
+    (preprocessor : PreprocessorConfig)
+    (pcm16k : Array Float)
+    (state : ASRStreamingState)
+    (cache : Option (StreamingDecodeCache cfg) := none)
+    (maxNewTokens : UInt64 := 512)
+    (eosTokenIds : Array UInt64 := defaultEosTokenIds)
+    : IO (ASRStreamingState × Option (StreamingDecodeCache cfg)) := do
+  let cacheRef ← IO.mkRef cache
+  let basePrompt := state.promptRaw
+  let decodeMode := state.decodeMode
+  let decodeFn : StreamingDecodeFn := fun prompt audio => do
+    let cache0 ← cacheRef.get
+    let (text, cache') ←
+      decodeStreamingChunkWithModelStateCached
+        model
+        tok
+        preprocessor
+        basePrompt
+        decodeMode
+        prompt
+        audio
+        (cache := cache0)
+        (maxNewTokens := maxNewTokens)
+        (eosTokenIds := eosTokenIds)
+    cacheRef.set cache'
+    pure text
+  let next ← streamingTranscribe tok decodeFn pcm16k state
+  let cache' ← cacheRef.get
+  pure (next, cache')
+
 /-- Model-backed streaming decode step with reusable prompt cache across hops. -/
 def streamingTranscribeWithModelCached
     {cfg : Qwen3ASRConfig}
@@ -556,24 +850,18 @@ def streamingTranscribeWithModelCached
     (maxNewTokens : UInt64 := 512)
     (eosTokenIds : Array UInt64 := defaultEosTokenIds)
     : IO (ASRStreamingState × Option (StreamingPromptCache cfg)) := do
-  let cacheRef ← IO.mkRef prefixCache
-  let decodeFn : StreamingDecodeFn := fun prompt audio => do
-    let cache ← cacheRef.get
-    let (text, cache') ←
-      decodeStreamingChunkWithModelCached
-        model
-        tok
-        preprocessor
-        prompt
-        audio
-        (prefixCache := cache)
-        (maxNewTokens := maxNewTokens)
-        (eosTokenIds := eosTokenIds)
-    cacheRef.set cache'
-    pure text
-  let next ← streamingTranscribe tok decodeFn pcm16k state
-  let cache' ← cacheRef.get
-  pure (next, cache')
+  let stateCache : StreamingDecodeCache cfg := { promptCache := prefixCache }
+  let (next, cache') ←
+    streamingTranscribeWithModelStateCached
+      model
+      tok
+      preprocessor
+      pcm16k
+      state
+      (cache := some stateCache)
+      (maxNewTokens := maxNewTokens)
+      (eosTokenIds := eosTokenIds)
+  pure (next, cache'.bind (fun c => c.promptCache))
 
 /-- Model-backed streaming decode step (no Python/vLLM bridge). -/
 def streamingTranscribeWithModel
@@ -598,6 +886,40 @@ def streamingTranscribeWithModel
       (eosTokenIds := eosTokenIds)
   pure next
 
+/-- Model-backed streaming finish step with reusable full decode-cache state. -/
+def finishStreamingTranscribeWithModelStateCached
+    {cfg : Qwen3ASRConfig}
+    (model : Qwen3ASRForConditionalGeneration cfg)
+    (tok : tokenizer.qwen3.QwenTokenizer)
+    (preprocessor : PreprocessorConfig)
+    (state : ASRStreamingState)
+    (cache : Option (StreamingDecodeCache cfg) := none)
+    (maxNewTokens : UInt64 := 512)
+    (eosTokenIds : Array UInt64 := defaultEosTokenIds)
+    : IO (ASRStreamingState × Option (StreamingDecodeCache cfg)) := do
+  let cacheRef ← IO.mkRef cache
+  let basePrompt := state.promptRaw
+  let decodeMode := state.decodeMode
+  let decodeFn : StreamingDecodeFn := fun prompt audio => do
+    let cache0 ← cacheRef.get
+    let (text, cache') ←
+      decodeStreamingChunkWithModelStateCached
+        model
+        tok
+        preprocessor
+        basePrompt
+        decodeMode
+        prompt
+        audio
+        (cache := cache0)
+        (maxNewTokens := maxNewTokens)
+        (eosTokenIds := eosTokenIds)
+    cacheRef.set cache'
+    pure text
+  let next ← finishStreamingTranscribe tok decodeFn state
+  let cache' ← cacheRef.get
+  pure (next, cache')
+
 /-- Model-backed streaming finish step with reusable prompt cache across hops. -/
 def finishStreamingTranscribeWithModelCached
     {cfg : Qwen3ASRConfig}
@@ -609,24 +931,17 @@ def finishStreamingTranscribeWithModelCached
     (maxNewTokens : UInt64 := 512)
     (eosTokenIds : Array UInt64 := defaultEosTokenIds)
     : IO (ASRStreamingState × Option (StreamingPromptCache cfg)) := do
-  let cacheRef ← IO.mkRef prefixCache
-  let decodeFn : StreamingDecodeFn := fun prompt audio => do
-    let cache ← cacheRef.get
-    let (text, cache') ←
-      decodeStreamingChunkWithModelCached
-        model
-        tok
-        preprocessor
-        prompt
-        audio
-        (prefixCache := cache)
-        (maxNewTokens := maxNewTokens)
-        (eosTokenIds := eosTokenIds)
-    cacheRef.set cache'
-    pure text
-  let next ← finishStreamingTranscribe tok decodeFn state
-  let cache' ← cacheRef.get
-  pure (next, cache')
+  let stateCache : StreamingDecodeCache cfg := { promptCache := prefixCache }
+  let (next, cache') ←
+    finishStreamingTranscribeWithModelStateCached
+      model
+      tok
+      preprocessor
+      state
+      (cache := some stateCache)
+      (maxNewTokens := maxNewTokens)
+      (eosTokenIds := eosTokenIds)
+  pure (next, cache'.bind (fun c => c.promptCache))
 
 /-- Model-backed streaming finish step (flush tail audio). -/
 def finishStreamingTranscribeWithModel
@@ -667,6 +982,27 @@ def initStreamingState
     m.supportLanguages context language unfixedChunkNum unfixedTokenNum promptMaxTokens chunkSizeSec stepSizeSec decodeMode
 
 /-- Method-style streaming step with Lean model backend. -/
+def streamingTranscribeStateCached
+    (m : Qwen3ASRForConditionalGeneration cfg)
+    (tok : tokenizer.qwen3.QwenTokenizer)
+    (preprocessor : PreprocessorConfig)
+    (pcm16k : Array Float)
+    (state : ASRStreamingState)
+    (cache : Option (StreamingDecodeCache cfg) := none)
+    (maxNewTokens : UInt64 := 512)
+    (eosTokenIds : Array UInt64 := defaultEosTokenIds)
+    : IO (ASRStreamingState × Option (StreamingDecodeCache cfg)) :=
+  streamingTranscribeWithModelStateCached
+    m
+    tok
+    preprocessor
+    pcm16k
+    state
+    cache
+    maxNewTokens
+    eosTokenIds
+
+/-- Method-style streaming step with Lean model backend. -/
 def streamingTranscribeCached
     (m : Qwen3ASRForConditionalGeneration cfg)
     (tok : tokenizer.qwen3.QwenTokenizer)
@@ -698,6 +1034,25 @@ def streamingTranscribe
     (eosTokenIds : Array UInt64 := defaultEosTokenIds)
     : IO ASRStreamingState :=
   streamingTranscribeWithModel m tok preprocessor pcm16k state maxNewTokens eosTokenIds
+
+/-- Method-style streaming flush with Lean model backend. -/
+def finishStreamingTranscribeStateCached
+    (m : Qwen3ASRForConditionalGeneration cfg)
+    (tok : tokenizer.qwen3.QwenTokenizer)
+    (preprocessor : PreprocessorConfig)
+    (state : ASRStreamingState)
+    (cache : Option (StreamingDecodeCache cfg) := none)
+    (maxNewTokens : UInt64 := 512)
+    (eosTokenIds : Array UInt64 := defaultEosTokenIds)
+    : IO (ASRStreamingState × Option (StreamingDecodeCache cfg)) :=
+  finishStreamingTranscribeWithModelStateCached
+    m
+    tok
+    preprocessor
+    state
+    cache
+    maxNewTokens
+    eosTokenIds
 
 /-- Method-style streaming flush with Lean model backend. -/
 def finishStreamingTranscribeCached

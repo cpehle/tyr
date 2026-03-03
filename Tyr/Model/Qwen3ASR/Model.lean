@@ -792,11 +792,10 @@ def generateGreedy {batch seq frames : UInt64}
 /-- Greedy generation with reusable batch=1 prompt-prefix cache.
     Intended for streaming decode where successive prompts typically extend
     previously accepted text prefixes. -/
-def generateGreedyWithPromptCache {seq frames : UInt64}
+def generateGreedyFromInputsEmbedsWithPromptCache {seq : UInt64}
     (m : Qwen3ASRThinkerForConditionalGeneration cfg)
     (inputIds : T #[1, seq])
-    (inputFeatures : Option (T #[1, cfg.audioConfig.numMelBins, frames]) := none)
-    (featureAttentionMask : Option (T #[1, frames]) := none)
+    (inputsEmbeds : T #[1, seq, cfg.textConfig.hiddenSize])
     (promptTokenIds : Array UInt32)
     (prefixCache : Option (StreamingPromptCache cfg) := none)
     (maxNewTokens : UInt64 := 512)
@@ -808,7 +807,6 @@ def generateGreedyWithPromptCache {seq frames : UInt64}
     throw <| IO.userError
       s!"generateGreedyWithPromptCache prompt-id mismatch: tensor_seq={seq}, prompt_ids={promptTokenIds.size}"
   if maxNewTokens == 0 then
-    let inputsEmbeds ← buildInputsEmbeds m inputIds inputFeatures featureAttentionMask
     let cache ←
       match prefixCache with
       | some c =>
@@ -820,7 +818,6 @@ def generateGreedyWithPromptCache {seq frames : UInt64}
         buildStreamingPromptCacheFromEmbeds m inputsEmbeds promptTokenIds maxNewTokens
     pure (⟨seq, inputIds⟩, cache)
   else
-    let inputsEmbeds ← buildInputsEmbeds m inputIds inputFeatures featureAttentionMask
     let cache ←
       match prefixCache with
       | some c =>
@@ -843,6 +840,28 @@ def generateGreedyWithPromptCache {seq frames : UInt64}
         cache.lastLogits
         inputIds
     pure (generated, cache)
+
+/-- Greedy generation with reusable batch=1 prompt-prefix cache.
+    Intended for streaming decode where successive prompts typically extend
+    previously accepted text prefixes. -/
+def generateGreedyWithPromptCache {seq frames : UInt64}
+    (m : Qwen3ASRThinkerForConditionalGeneration cfg)
+    (inputIds : T #[1, seq])
+    (inputFeatures : Option (T #[1, cfg.audioConfig.numMelBins, frames]) := none)
+    (featureAttentionMask : Option (T #[1, frames]) := none)
+    (promptTokenIds : Array UInt32)
+    (prefixCache : Option (StreamingPromptCache cfg) := none)
+    (maxNewTokens : UInt64 := 512)
+    (eosTokenIds : Array UInt64 := defaultEosTokenIds)
+    : IO ((Sigma (fun outSeq => T #[1, outSeq])) × StreamingPromptCache cfg) := do
+  let inputsEmbeds ← buildInputsEmbeds m inputIds inputFeatures featureAttentionMask
+  m.generateGreedyFromInputsEmbedsWithPromptCache
+    inputIds
+    inputsEmbeds
+    promptTokenIds
+    prefixCache
+    maxNewTokens
+    eosTokenIds
 
 def forwardFromMel {batch frames textSeq : UInt64}
     (m : Qwen3ASRThinkerForConditionalGeneration cfg)
@@ -931,6 +950,25 @@ def generateGreedyWithPromptCache {seq frames : UInt64}
     inputIds
     inputFeatures
     featureAttentionMask
+    promptTokenIds
+    prefixCache
+    maxNewTokens
+    eosTokenIds
+
+/-- Greedy generation from precomputed input embeddings with reusable
+    batch=1 streaming prompt cache. -/
+def generateGreedyFromInputsEmbedsWithPromptCache {seq : UInt64}
+    (m : Qwen3ASRForConditionalGeneration cfg)
+    (inputIds : T #[1, seq])
+    (inputsEmbeds : T #[1, seq, cfg.thinkerConfig.textConfig.hiddenSize])
+    (promptTokenIds : Array UInt32)
+    (prefixCache : Option (StreamingPromptCache cfg) := none)
+    (maxNewTokens : UInt64 := 512)
+    (eosTokenIds : Array UInt64 := defaultEosTokenIds)
+    : IO ((Sigma (fun outSeq => T #[1, outSeq])) × StreamingPromptCache cfg) :=
+  m.thinker.generateGreedyFromInputsEmbedsWithPromptCache
+    inputIds
+    inputsEmbeds
     promptTokenIds
     prefixCache
     maxNewTokens

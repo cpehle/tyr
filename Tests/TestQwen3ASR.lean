@@ -1078,3 +1078,91 @@ def testQwen3ASRStreamModelPersistsPromptCache : IO Unit := do
     "subsequent pushes should continue decoding at hop cadence"
   LeanTest.assertTrue ss2.promptCache.isSome
     "stream session should keep prompt cache between decode hops"
+
+@[test]
+def testQwen3ASRStreamingDecodeCacheBenchmark : IO Unit := do
+  let cfg := tinyCfg
+  let model ← Qwen3ASRForConditionalGeneration.init cfg
+  let tok := mkAsciiStreamingTokenizer
+  let pre := tinyPreprocessorCfg cfg.thinkerConfig.audioConfig.numMelBins 32
+  let chunkSec : Float := 2.0 / 16000.0
+  let stBase ← initStreamingState
+    cfg.supportLanguages
+    (context := "")
+    (language := some "English")
+    (unfixedChunkNum := 0)
+    (unfixedTokenNum := 1)
+    (chunkSizeSec := chunkSec)
+    (stepSizeSec := chunkSec)
+    (decodeMode := .fullAccumulation)
+  let hopAudio : Array Float := #[0.1, 0.2]
+  let iters : Nat := 20
+
+  -- Warmup both paths once to reduce one-time kernel/setup noise.
+  let (_warmSt1, warmPromptCache) ←
+    streamingTranscribeWithModelCached
+      model
+      tok
+      pre
+      hopAudio
+      stBase
+      (maxNewTokens := 1)
+      (eosTokenIds := #[])
+  let (_warmSt2, _warmDecodeCache) ←
+    streamingTranscribeWithModelStateCached
+      model
+      tok
+      pre
+      hopAudio
+      stBase
+      (cache := some { promptCache := warmPromptCache })
+      (maxNewTokens := 1)
+      (eosTokenIds := #[])
+
+  let t0 ← IO.monoMsNow
+  let mut stPrompt := stBase
+  let mut promptCache : Option (StreamingPromptCache cfg) := none
+  for _ in [:iters] do
+    let (stNext, cacheNext) ←
+      streamingTranscribeWithModelCached
+        model
+        tok
+        pre
+        hopAudio
+        stPrompt
+        (prefixCache := promptCache)
+        (maxNewTokens := 1)
+        (eosTokenIds := #[])
+    stPrompt := stNext
+    promptCache := cacheNext
+  let t1 ← IO.monoMsNow
+
+  let t2 ← IO.monoMsNow
+  let mut stDecode := stBase
+  let mut decodeCache : Option (StreamingDecodeCache cfg) := none
+  for _ in [:iters] do
+    let (stNext, cacheNext) ←
+      streamingTranscribeWithModelStateCached
+        model
+        tok
+        pre
+        hopAudio
+        stDecode
+        (cache := decodeCache)
+        (maxNewTokens := 1)
+        (eosTokenIds := #[])
+    stDecode := stNext
+    decodeCache := cacheNext
+  let t3 ← IO.monoMsNow
+
+  LeanTest.assertEqual stPrompt.chunkId stDecode.chunkId
+    "baseline and decode-cache streaming paths should decode the same number of chunks"
+  LeanTest.assertEqual stPrompt.text stDecode.text
+    "baseline and decode-cache streaming paths should produce identical text for deterministic tiny model"
+
+  let baselineMs := (t1 - t0).toFloat
+  let optimizedMs := (t3 - t2).toFloat
+  let speedup :=
+    if optimizedMs > 0.0 then baselineMs / optimizedMs else 0.0
+  IO.println
+    s!"[bench][qwen3asr_stream_decode_cache] iters={iters} baseline_ms={baselineMs} optimized_ms={optimizedMs} speedup={speedup}"

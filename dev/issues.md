@@ -45,6 +45,10 @@ Status legend:
 - [x] `H15` Qwen3TTS decode no longer hard-fails on non-16 code groups; decode now auto-falls back to Python bridge in both offline and true-streaming paths.
 - [x] `H16` Qwen3TTS speech-tokenizer variant support now runs Lean-native for 12Hz-family tokenizer configs with dynamic code-group counts (no Python encode fallback).
 - [x] `H17` Qwen3TTS encode now supports separate Lean-native 25Hz tokenizer architecture via dedicated encoder module and bridge-time model-type dispatch.
+- [x] `H24` ASR streaming prompt tokenization now uses append-only suffix caching to avoid full prompt re-encode on every decode hop.
+- [x] `H25` ASR full-accumulation streaming now reuses cached audio-encoder projected prefixes and encodes only tail features when possible.
+- [x] `H26` ASR streaming decode now supports generation from precomputed `inputs_embeds`, avoiding redundant embed construction in cache-aware paths.
+- [x] `M24` Added a deterministic ASR streaming decode-cache benchmark regression test to measure prompt-cache-only vs full decode-cache performance.
 
 ## Open Issues
 
@@ -61,6 +65,12 @@ Status legend:
   Refs: `Tyr/Model/Qwen3ASR/Transcribe.lean`, `Tyr/Model/Qwen3ASR/Model.lean`
 - [~] `H23` Reduce ASR host-device sync overhead in decode hot paths (`tensorToUInt64Array` usage around per-step token handling).
   Refs: `Tyr/Model/Qwen3ASR/Transcribe.lean`, `Tyr/Model/Qwen3ASR/Streaming.lean`
+- [x] `H24` Add append-only prompt-token cache for ASR streaming decode to avoid full prompt tokenization each hop.
+  Refs: `Tyr/Model/Qwen3ASR/Streaming.lean`
+- [x] `H25` Add audio-encoder prefix cache reuse in ASR full-accumulation streaming decode to avoid re-encoding unchanged prefix frames.
+  Refs: `Tyr/Model/Qwen3ASR/Streaming.lean`
+- [x] `H26` Add ASR decode path that accepts precomputed `inputs_embeds` and prompt-cache reuse to bypass redundant embed recomputation.
+  Refs: `Tyr/Model/Qwen3ASR/Model.lean`, `Tyr/Model/Qwen3ASR/Streaming.lean`
 
 
 ### Medium
@@ -186,6 +196,14 @@ Status legend:
   Refs: `Tyr/Model/Qwen3ASR/Transcribe.lean`, `Tyr/Model/Qwen3ASR/Streaming.lean`
 - [~] `H23` Reduced scalar sync overhead by switching per-sample valid-frame extraction from `tensorToUInt64Array` to `nn.item` in both offline and streaming decode paths.
   Refs: `Tyr/Model/Qwen3ASR/Transcribe.lean`, `Tyr/Model/Qwen3ASR/Streaming.lean`
+- [x] `H24` Added append-only prompt tokenization cache (`StreamingPromptTokenCache`) so streaming decode can reuse encoded prompt prefixes and only tokenize suffix deltas.
+  Refs: `Tyr/Model/Qwen3ASR/Streaming.lean`
+- [x] `H25` Added full-accumulation audio encoder prefix reuse cache (`StreamingAudioEncoderCache`) and tail-only audio projection updates in streaming decode.
+  Refs: `Tyr/Model/Qwen3ASR/Streaming.lean`
+- [x] `H26` Added `generateGreedyFromInputsEmbedsWithPromptCache` and wired streaming decode to precompute/scatter audio embeddings once before generation.
+  Refs: `Tyr/Model/Qwen3ASR/Model.lean`, `Tyr/Model/Qwen3ASR/Streaming.lean`, `Tyr/Model/Qwen3ASR/StreamModel.lean`
+- [x] `M24` Added `testQwen3ASRStreamingDecodeCacheBenchmark` to validate decode-cache parity and print measured speedup (`iters=20`, baseline `68ms`, optimized `66ms`, `1.03x`).
+  Refs: `Tests/TestQwen3ASR.lean`
 - [~] `L06` Base64 ASR input path now decodes WAV directly in-memory (no temp file); URL path still uses temp-file materialization pending in-memory download path.
   Refs: `Tyr/Model/Qwen3ASR/Frontend.lean`
 
