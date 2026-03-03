@@ -316,11 +316,13 @@ private def alignSingleWithForcedAligner
     (language : String)
     : IO (Option ForcedAlignResult) := do
   let preCfg : PreprocessorConfig := { aligner.preprocessor with returnAttentionMask := true }
+  let dev := modelDevice aligner.model
   let ⟨frames, frontendOut⟩ ← waveformToWhisperFeaturesDynamic
     preCfg
     audio16k
     (minSeconds := minAsrInputSeconds)
     (maxSeconds := some maxForceAlignInputSeconds)
+    (device := dev)
   let audioLen ← extractAudioLenFromFeatureMask (cfg := aligner.cfg) (frames := frames) frontendOut.featureAttentionMask
   alignSingleWithModel aligner.model aligner.tok text language frontendOut audioLen
 
@@ -412,6 +414,7 @@ def transcribeWaveform
     (maxNewTokens : UInt64 := 512)
     (eosTokenIds : Array UInt64 := defaultEosTokenIds)
     : IO ASRTranscription := do
+  let dev := modelDevice model
   let maxChunkSec := if returnTimeStamps then maxForceAlignInputSeconds else maxAsrInputSeconds
   -- In non-timestamp mode, reduce boundary search window to lower CPU cost on long audios.
   let searchExpandSec := if returnTimeStamps then 5.0 else 1.0
@@ -428,6 +431,7 @@ def transcribeWaveform
         chunkWav
         (minSeconds := minAsrInputSeconds)
         (maxSeconds := some maxChunkSec)
+        (device := dev)
     let _frames := frontendPack.1
     let frontendOut := frontendPack.2
     let r ← transcribeWithFrontend
@@ -536,6 +540,7 @@ private def tryTranscribeWaveformsBatchedChunk
     (maxNewTokens : UInt64)
     (eosTokenIds : Array UInt64)
     : IO (Option (Array ASRTranscription)) := do
+  let dev := modelDevice model
   let n := audios16k.size
   if n == 0 then
     return some #[]
@@ -564,6 +569,7 @@ private def tryTranscribeWaveformsBatchedChunk
         chunkWav
         (minSeconds := minAsrInputSeconds)
         (maxSeconds := some maxChunkSec)
+        (device := dev)
     let frames := frontendPack.1
     let frontendOut := frontendPack.2
     let audioLen ← extractAudioLenFromFeatureMask (cfg := cfg) (frames := frames) frontendOut.featureAttentionMask
@@ -581,7 +587,6 @@ private def tryTranscribeWaveformsBatchedChunk
       featureAttentionMaskRow := featureAttentionMaskRowDyn
     }
 
-  let dev := modelDevice model
   let mut outByIdx : Array (Option ASRTranscription) := Array.replicate n none
   for bucket in buckets do
     if bucket.rows.isEmpty then
@@ -905,6 +910,7 @@ def alignWaveform
     (text : String)
     (language : String)
     : IO ForcedAlignResult := do
+  let dev := modelDevice aligner.model
   let ln ← validateAlignLanguage aligner language
   let trimmed := text.trim
   if trimmed.isEmpty then
@@ -916,6 +922,7 @@ def alignWaveform
       audio16k
       (minSeconds := minAsrInputSeconds)
       (maxSeconds := some maxForceAlignInputSeconds)
+      (device := dev)
     let audioLen ← extractAudioLenFromFeatureMask (cfg := aligner.cfg) (frames := frames) frontendOut.featureAttentionMask
     match (← alignSingleWithModel aligner.model aligner.tok trimmed ln frontendOut audioLen) with
     | some r => pure r

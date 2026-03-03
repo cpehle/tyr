@@ -324,6 +324,7 @@ private def buildStreamingFrontendPackWithCache
     (audio16k : Array Float)
     (decodeMode : StreamingDecodeMode)
     (cache : Option (StreamingFrontendCache cfg))
+    (frontendDevice : Device := Device.CPU)
     : IO ((Sigma (fun frames => WhisperFrontendOutput preprocessor.featureSize frames)) ×
       Option (StreamingFrontendCache cfg) × Option UInt64) := do
   let maxSec :=
@@ -341,6 +342,7 @@ private def buildStreamingFrontendPackWithCache
         audio16k
         (minSeconds := 0.05)
         (maxSeconds := some maxSec)
+        (device := frontendDevice)
     let fullCache : Option (StreamingFrontendCache cfg) :=
       if decodeMode == .fullAccumulation then
         some {
@@ -396,6 +398,7 @@ private def buildStreamingFrontendPackWithCache
               suffixAudio
               (minSeconds := 0.0)
               (maxSeconds := none)
+              (device := frontendDevice)
           let suffixFrames := suffixPack.1
           let dropFrames := dropFramesNat.toUInt64
           if dropFrames > suffixFrames then
@@ -829,6 +832,7 @@ def decodeStreamingChunkWithModelStateCached
   else
     autograd.no_grad do
       let cache0 : StreamingDecodeCache cfg := cache.getD {}
+      let dev := model.thinker.textModel.embed_tokens.device
       let (frontendPack, frontendCacheCpu', reusedPrefixFrames) ←
         buildStreamingFrontendPackWithCache
           (cfg := cfg)
@@ -836,6 +840,7 @@ def decodeStreamingChunkWithModelStateCached
           audio16k
           decodeMode
           cache0.frontendCache
+          (frontendDevice := dev)
       let frames := frontendPack.1
       let frontendOut := frontendPack.2
       let validFramesTensor : T #[1] := nn.sumDim (data.toLong frontendOut.featureAttentionMask) 1 false
@@ -858,7 +863,6 @@ def decodeStreamingChunkWithModelStateCached
           cfg.thinkerConfig.audioTokenId.toUInt32
           cache0.promptTokenCache
 
-      let dev := model.thinker.textModel.embed_tokens.device
       let (inputIdsPack, promptDeviceCache') ←
         buildInputIdsWithPromptDeviceCache
           promptIds

@@ -573,6 +573,7 @@ def waveformToWhisperFeaturesDynamic
     (wave : Array Float)
     (minSeconds : Float := 0.5)
     (maxSeconds : Option Float := none)
+    (device : Device := Device.CPU)
     : IO (Sigma (fun frames => WhisperFrontendOutput cfg.featureSize frames)) := do
   let nFft := if cfg.nFft == 0 then 400 else cfg.nFft
   let hop := if cfg.hopLength == 0 then 160 else cfg.hopLength
@@ -606,57 +607,73 @@ def waveformToWhisperFeaturesDynamic
     else
       prepared0
 
-  let wav0 : T #[targetSamples] := reshape (data.fromFloatArray prepared) #[targetSamples]
-  let wav ←
-    if cfg.dither == 0.0 then
-      pure wav0
-    else
-      let noise ← randn #[targetSamples]
-      pure (wav0 + noise * cfg.dither)
+  let runOnDevice
+      (runDevice : Device)
+      : IO (Sigma (fun frames => WhisperFrontendOutput cfg.featureSize frames)) := do
+    let wav0Cpu : T #[targetSamples] := reshape (data.fromFloatArray prepared) #[targetSamples]
+    let wav0 : T #[targetSamples] :=
+      if wav0Cpu.device == runDevice then wav0Cpu else wav0Cpu.to runDevice
+    let wav ←
+      if cfg.dither == 0.0 then
+        pure wav0
+      else
+        let noise0 ← randn #[targetSamples]
+        let noise : T #[targetSamples] :=
+          if noise0.device == wav0.device then noise0 else noise0.to wav0.device
+        pure (wav0 + noise * cfg.dither)
 
-  let window : T #[nFft] := signal.hannWindow nFft
-  let stftDyn : T #[] := signal.stft1d (n := targetSamples) wav nFft hop nFft window true false
-  let stftShape := stftDyn.runtimeShape
-  if stftShape.size < 3 then
-    throw <| IO.userError s!"Unexpected STFT rank {stftShape.size}, expected 3"
+    let windowCpu : T #[nFft] := signal.hannWindow nFft
+    let window : T #[nFft] := if windowCpu.device == wav.device then windowCpu else windowCpu.to wav.device
+    let stftDyn : T #[] := signal.stft1d (n := targetSamples) wav nFft hop nFft window true false
+    let stftShape := stftDyn.runtimeShape
+    if stftShape.size < 3 then
+      throw <| IO.userError s!"Unexpected STFT rank {stftShape.size}, expected 3"
 
-  let freqBins := stftShape.getD 0 0
-  let stftFrames := stftShape.getD 1 0
-  let packed := stftShape.getD 2 0
-  if packed != 2 then
-    throw <| IO.userError s!"Unexpected STFT packed size {packed}, expected 2"
+    let freqBins := stftShape.getD 0 0
+    let stftFrames := stftShape.getD 1 0
+    let packed := stftShape.getD 2 0
+    if packed != 2 then
+      throw <| IO.userError s!"Unexpected STFT packed size {packed}, expected 2"
 
-  let frames := if stftFrames > 0 then stftFrames - 1 else 0
-  let stftVals ← data.tensorToFloatArray' stftDyn
-  let freqNat := freqBins.toNat
-  let stftFramesNat := stftFrames.toNat
-  let framesNat := frames.toNat
-  let packedNat := packed.toNat
+    let frames := if stftFrames > 0 then stftFrames - 1 else 0
+    let stft : T #[freqBins, stftFrames, 2] := reshape stftDyn #[freqBins, stftFrames, 2]
+    let stftTrim : T #[freqBins, frames, 2] := data.slice stft 1 0 frames
+    let re3 : T #[freqBins, frames, 1] := data.slice stftTrim 2 0 1
+    let im3 : T #[freqBins, frames, 1] := data.slice stftTrim 2 1 1
+    let re : T #[freqBins, frames] := reshape re3 #[freqBins, frames]
+    let im : T #[freqBins, frames] := reshape im3 #[freqBins, frames]
+    let powerSpec : T #[freqBins, frames] := re * re + im * im
 
-  let mut powerFlat : Array Float := Array.mkEmpty (freqNat * framesNat)
-  for f in [:freqNat] do
-    for t in [:framesNat] do
-      let base := ((f * stftFramesNat + t) * packedNat)
-      let re := stftVals.getD base 0.0
-      let im := stftVals.getD (base + 1) 0.0
-      powerFlat := powerFlat.push (re * re + im * im)
+    let melFilterFlat := buildSlaneyMelFilterBankFlat freqBins.toNat melBins.toNat cfg.samplingRate.toNat
+    let melFilterCpu : T #[freqBins, melBins] := reshape (data.fromFloatArray melFilterFlat) #[freqBins, melBins]
+    let melFilter : T #[freqBins, melBins] :=
+      if melFilterCpu.device == powerSpec.device then melFilterCpu else melFilterCpu.to powerSpec.device
+    let melPower : T #[melBins, frames] := nn.mm (nn.transpose2d melFilter) powerSpec
+    let logSpec : T #[melBins, frames] := nn.log10 (clampFloat melPower (1e-10 : Float) (1e10 : Float))
+    let maxVal := nn.item (nn.maxAll logSpec)
+    let floored : T #[melBins, frames] := clampFloat logSpec (maxVal - (8.0 : Float)) (1e10 : Float)
+    let normalized : T #[melBins, frames] := (floored + (4.0 : Float)) / (4.0 : Float)
+    let inputFeatures : T #[1, melBins, frames] := reshape normalized #[1, melBins, frames]
 
-  let melFilterFlat := buildSlaneyMelFilterBankFlat freqNat melBins.toNat cfg.samplingRate.toNat
-  let powerSpec : T #[freqBins, frames] := reshape (data.fromFloatArray powerFlat) #[freqBins, frames]
-  let melFilter : T #[freqBins, melBins] := reshape (data.fromFloatArray melFilterFlat) #[freqBins, melBins]
-  let melPower : T #[melBins, frames] := nn.mm (nn.transpose2d melFilter) powerSpec
-  let logSpec : T #[melBins, frames] := nn.log10 (clampFloat melPower (1e-10 : Float) (1e10 : Float))
-  let maxVal := nn.item (nn.maxAll logSpec)
-  let floored : T #[melBins, frames] := clampFloat logSpec (maxVal - (8.0 : Float)) (1e10 : Float)
-  let normalized : T #[melBins, frames] := (floored + (4.0 : Float)) / (4.0 : Float)
-  let inputFeatures : T #[1, melBins, frames] := reshape normalized #[1, melBins, frames]
+    let maskVals0 := buildFeatureAttentionMask validLenNat targetSamples.toNat hop.toNat cfg.returnAttentionMask
+    let maskVals := adjustMaskLength maskVals0 frames.toNat
+    let featureAttentionMaskCpu : T #[1, frames] :=
+      reshape (data.fromInt64Array maskVals) #[1, frames]
+    let featureAttentionMask : T #[1, frames] :=
+      if featureAttentionMaskCpu.device == inputFeatures.device then
+        featureAttentionMaskCpu
+      else
+        featureAttentionMaskCpu.to inputFeatures.device
 
-  let maskVals0 := buildFeatureAttentionMask validLenNat targetSamples.toNat hop.toNat cfg.returnAttentionMask
-  let maskVals := adjustMaskLength maskVals0 frames.toNat
-  let featureAttentionMask : T #[1, frames] :=
-    reshape (data.fromInt64Array maskVals) #[1, frames]
+    pure ⟨frames, { inputFeatures, featureAttentionMask }⟩
 
-  pure ⟨frames, { inputFeatures, featureAttentionMask }⟩
+  if device == Device.CPU then
+    runOnDevice Device.CPU
+  else
+    try
+      runOnDevice device
+    catch _ =>
+      runOnDevice Device.CPU
 
 /-- Load WAV, resample to preprocessor sampling rate, then extract Whisper-style features. -/
 def wavToWhisperFeatures
@@ -678,6 +695,7 @@ def wavToWhisperFeaturesDynamic
     (path : String)
     (minSeconds : Float := 0.5)
     (maxSeconds : Option Float := none)
+    (device : Device := Device.CPU)
     : IO (Sigma (fun frames => WhisperFrontendOutput cfg.featureSize frames)) := do
   let (sr, wav) ← loadMonoPcm16Wav path
   let wavTarget ←
@@ -685,7 +703,7 @@ def wavToWhisperFeaturesDynamic
       pure wav
     else
       data.resampleSoxrHQ wav sr cfg.samplingRate
-  waveformToWhisperFeaturesDynamic cfg wavTarget minSeconds maxSeconds
+  waveformToWhisperFeaturesDynamic cfg wavTarget minSeconds maxSeconds device
 
 /-- Backward-compatible convenience wrapper.
     This now runs the faithful Whisper-style frontend instead of pseudo-mel. -/

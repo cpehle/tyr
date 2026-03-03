@@ -56,6 +56,7 @@ Status legend:
 - [ ] `M26` Add stream micro-batching scheduler for multi-session ASR throughput (shared decode batch across active sessions).
 - [x] `H30` Eliminate prompt-ID host→device rebuild each streaming hop by introducing device-resident prompt token buffers and append-only device assembly.
 - [ ] `H31` Eliminate per-hop generated-token host pull/decode in hot path by supporting deferred text decode or token-level streaming buffers.
+- [x] `H32` Run dynamic ASR frontend on model device (MPS/CUDA) with CPU fallback, and wire streaming/offline/align callsites to avoid default-CPU extraction.
 
 ## Open Issues
 
@@ -88,6 +89,8 @@ Status legend:
   Refs: `Tyr/Model/Qwen3ASR/Streaming.lean`
 - [ ] `H31` Remove per-hop generated-token host transfer (`tensorToUInt64Array`) in streaming decode hot path by introducing deferred decode/token-buffer API.
   Refs: `Tyr/Model/Qwen3ASR/Streaming.lean`, `Tyr/Model/Qwen3ASR/Transcribe.lean`
+- [x] `H32` Move dynamic ASR frontend compute (STFT/power/mel/log) onto model device, with CPU fallback for unsupported kernels/backends.
+  Refs: `Tyr/Model/Qwen3ASR/Frontend.lean`, `Tyr/Model/Qwen3ASR/Streaming.lean`, `Tyr/Model/Qwen3ASR/Transcribe.lean`
 
 
 ### Medium
@@ -233,6 +236,8 @@ Status legend:
   Refs: `Tyr/Model/Qwen3ASR/Streaming.lean`
 - [x] `H30` Added device-side prompt token segment cache (`before/after/suffix`) and on-device prompt-id assembly for streaming decode, avoiding full prompt-id host→device transfer each hop.
   Refs: `Tyr/Model/Qwen3ASR/Streaming.lean`
+- [x] `H32` Dynamic ASR frontend now supports explicit target device execution (MPS/CUDA/CPU), uses tensor-native power-spectrum computation, falls back to CPU when device kernels fail, and is wired through streaming/offline/align callsites.
+  Refs: `Tyr/Model/Qwen3ASR/Frontend.lean`, `Tyr/Model/Qwen3ASR/Streaming.lean`, `Tyr/Model/Qwen3ASR/Transcribe.lean`
 - [x] `H28` Streaming decode now replaces audio placeholders via contiguous token-span slice composition, removing full-sequence boolean-mask `masked_scatter` in the hot path.
   Refs: `Tyr/Model/Qwen3ASR/Streaming.lean`
 - [x] `H29` Prompt-cache reuse now relies on prompt token-prefix and capacity invariants (removed per-hop embed-prefix tensor diff reduction).
