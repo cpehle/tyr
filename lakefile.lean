@@ -51,6 +51,35 @@ def macOSSDKLinkArgs : Array String :=
     ]
   | none => #[]
 
+/-- Resolve macOS deployment target:
+    `TYR_MACOS_DEPLOYMENT_TARGET` > `MACOSX_DEPLOYMENT_TARGET` > active SDK version > `14.0`. -/
+def macOSDeploymentTarget : String := run_io do
+  let envTarget? ← do
+    match (← IO.getEnv "TYR_MACOS_DEPLOYMENT_TARGET") with
+    | some t => pure (some t)
+    | none => IO.getEnv "MACOSX_DEPLOYMENT_TARGET"
+  match envTarget?.bind nonEmptyTrimmed? with
+  | some t => pure t
+  | none =>
+    try
+      let out ← IO.Process.output {
+        cmd := "xcrun"
+        args := #["--sdk", "macosx", "--show-sdk-version"]
+      }
+      if out.exitCode == 0 then
+        pure ((nonEmptyTrimmed? out.stdout).getD "14.0")
+      else
+        pure "14.0"
+    catch _ =>
+      pure "14.0"
+
+/-- macOS deployment-target link args to keep linker target aligned with local SDK/libs. -/
+def macOSDeploymentLinkArgs : Array String :=
+  if System.Platform.isOSX then
+    #[s!"-mmacosx-version-min={macOSDeploymentTarget}"]
+  else
+    #[]
+
 /-- Absolute Lean shared-library directory used for runtime lookup (`libLake_shared`, `libleanshared`, ...). -/
 def leanSharedLibRPath : String := run_io do
   let out ← IO.Process.output { cmd := "lean", args := #["--print-prefix"] }
@@ -79,7 +108,7 @@ def packageLinkArgs : Array String :=
       "-ltorch", "-ltorch_cpu", "-lc10",
       "-L/opt/homebrew/opt/libomp/lib", "-lomp",
       "-L/opt/homebrew/lib", "-larrow", "-lparquet", "-lsoxr"
-    ] ++ macOSSDKLinkArgs ++ macOSFrameworkArgs ++ #[
+    ] ++ macOSSDKLinkArgs ++ macOSDeploymentLinkArgs ++ macOSFrameworkArgs ++ #[
       "-Wl,-rpath,@loader_path/../../external/libtorch/lib",
       "-Wl,-rpath,/opt/homebrew/opt/libomp/lib",
       "-Wl,-rpath,/opt/homebrew/lib",
@@ -103,7 +132,7 @@ def commonLinkArgs : Array String :=
       "-ltorch", "-ltorch_cpu", "-lc10",
       "-L/opt/homebrew/opt/libomp/lib", "-lomp",
       "-L/opt/homebrew/lib", "-larrow", "-lparquet", "-lsoxr"
-    ] ++ macOSSDKLinkArgs ++ macOSFrameworkArgs ++ #[
+    ] ++ macOSSDKLinkArgs ++ macOSDeploymentLinkArgs ++ macOSFrameworkArgs ++ #[
       "-Wl,-rpath,@executable_path/../../../external/libtorch/lib",
       "-Wl,-rpath,/opt/homebrew/opt/libomp/lib",
       "-Wl,-rpath,/opt/homebrew/lib",
@@ -177,10 +206,15 @@ extern_lib libtyr pkg := do
 
   buildFileAfterDep tyrCLib depJob fun _ => do
     let sysroot ← getLeanSysroot
+    let extraEnv :=
+      if System.Platform.isOSX then
+        #[("MACOSX_DEPLOYMENT_TARGET", some macOSDeploymentTarget)]
+      else
+        #[]
     proc {
       cmd := "make"
       args := #["-C", (pkg.dir / "cc").toString, "lib"]
-      env := #[("LEAN_HOME", sysroot.toString)]
+      env := #[("LEAN_HOME", some sysroot.toString)] ++ extraEnv
     }
 
 /-! ## Lean Library -/
