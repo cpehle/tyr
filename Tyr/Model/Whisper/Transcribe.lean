@@ -41,7 +41,7 @@ structure WhisperDecodeOptions where
   topP : Float := 1.0
   logprobThreshold : Float := -1.0
   noSpeechThreshold : Float := 0.6
-  compressionRatioThreshold : Float := 2.4
+  compressionRatioThreshold : Float := 0.0
   conditionOnPreviousText : Bool := true
   maxContextTokens : UInt64 := 0
   resetContextOnFallback : Bool := true
@@ -316,21 +316,29 @@ private def topKLogProbPairs (logProbs : Array Float) (k : Nat) : Array (Nat × 
       let sorted := pairs.qsort (fun a b => a.2 > b.2)
       sorted.extract 0 (Nat.min k sorted.size)
 
+private def logDenFromLogits {vocab : UInt64} (logits : T #[1, vocab]) : Float :=
+  let maxV := nn.item (nn.maxAll logits)
+  let shifted : T #[1, vocab] := logits - maxV
+  let sumExp := nn.item (nn.sumAll (nn.exp shifted))
+  if sumExp <= 0.0 then maxV else maxV + Float.log sumExp
+
 private def tokenLogProbFromLogits {vocab : UInt64}
     (logits : T #[1, vocab])
     (tokenId : UInt32)
     : IO Float := do
-  let vals ← data.tensorToFloatArray' (nn.eraseShape logits)
-  let logProbs := logProbsFromLogitsArray vals
-  pure (logProbs.getD tokenId.toNat (-100.0))
+  if vocab == 0 then
+    pure (-100.0)
+  else
+    let tid := if tokenId.toUInt64 < vocab then tokenId.toUInt64 else 0
+    let tokLogit : T #[1, 1] := data.slice logits 1 tid 1
+    let logDen := logDenFromLogits logits
+    pure (nn.item tokLogit - logDen)
 
 private def tokenProbFromLogits {vocab : UInt64}
     (logits : T #[1, vocab])
     (tokenId : UInt32)
     : IO Float := do
-  let vals ← data.tensorToFloatArray' (nn.eraseShape logits)
-  let logProbs := logProbsFromLogitsArray vals
-  pure (Float.exp (logProbs.getD tokenId.toNat (-100.0)))
+  pure (Float.exp (← tokenLogProbFromLogits logits tokenId))
 
 private def clampTopK (topK vocab : UInt64) : UInt64 :=
   if topK == 0 then
@@ -380,9 +388,7 @@ private def argmaxTokenFromLogits {vocab : UInt64}
 private def sampleTokenFromLogits {vocab : UInt64}
     (logits : T #[1, vocab])
     : IO UInt32 := do
-  let vals ← data.tensorToFloatArray' (nn.eraseShape logits)
-  let probsVals := (logProbsFromLogitsArray vals).map Float.exp
-  let probs : T #[1, vocab] := reshape (data.fromFloatArray probsVals) #[1, vocab]
+  let probs : T #[1, vocab] := nn.softmax logits (-1)
   let sampled ← nn.multinomial probs 1 false
   let sampledFlat : T #[1] := reshape (nn.eraseShape sampled) #[1]
   let sampledVals ← data.tensorToUInt64Array sampledFlat
@@ -494,14 +500,17 @@ private def expandBeam
         | none => pure 0.0
         | some tid => tokenProbFromLogits last tid
     let kNat := Nat.max 1 (Nat.min beamWidth.toNat cfg.vocabSize.toNat)
-    let logitsArr ← data.tensorToFloatArray' (nn.eraseShape last)
-    let logProbs := logProbsFromLogitsArray logitsArr
-    let topPairs := topKLogProbPairs logProbs kNat
+    let k : UInt64 := kNat.toUInt64
+    let (topVals, topIdx) := topk_2d last k 1
+    let topValsArr ← data.tensorToFloatArray' (nn.eraseShape topVals)
+    let topIdxFlat : T #[k] := reshape topIdx #[k]
+    let topIdxArr ← data.tensorToUInt64Array topIdxFlat
+    let logDen := logDenFromLogits last
     let mut out : Array BeamState := #[]
-    for p in topPairs do
-      let nextIdU64 := p.1.toUInt64
+    for i in [:kNat] do
+      let nextIdU64 := topIdxArr.getD i eosTokenId
       let nextId := nextIdU64.toUInt32
-      let lp := p.2
+      let lp := (topValsArr.getD i (-100.0)) - logDen
       let generated' :=
         if nextIdU64 == eosTokenId then beam.generated else beam.generated.push nextId
       let tokenCount' :=
