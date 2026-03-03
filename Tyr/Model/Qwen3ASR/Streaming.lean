@@ -18,6 +18,11 @@ private def asrTextTag : String := "<asr_text>"
 private def languagePrefix : String := "language "
 private def sampleRate16k : Float := 16000.0
 
+inductive StreamingDecodeMode where
+  | rollingWindow
+  | fullAccumulation
+  deriving Repr, Inhabited, BEq
+
 /-- Streaming ASR state (single stream). -/
 structure ASRStreamingState where
   unfixedChunkNum : Nat := 2
@@ -31,6 +36,7 @@ structure ASRStreamingState where
   chunkId : Nat := 0
   buffer : Array Float := #[]
   audioAccum : Array Float := #[]
+  decodeMode : StreamingDecodeMode := .rollingWindow
 
   promptRaw : String := ""
   context : String := ""
@@ -238,14 +244,12 @@ def mergeLanguages (langs : Array String) : String :=
   joinArrayWith "," merged
 
 /-- Build base text prompt for streaming decode. -/
-def buildTextPrompt (context : String) (forceLanguage : Option String := none) : String :=
-  let base :=
-    "<|im_start|>system\n" ++ context ++ "<|im_end|>\n" ++
-    "<|im_start|>user\n<|audio_start|><|audio_pad|><|audio_end|><|im_end|>\n" ++
-    "<|im_start|>assistant\n"
-  match forceLanguage with
-  | some l => base ++ s!"language {l}{asrTextTag}"
-  | none => base
+def buildTextPrompt
+    (context : String)
+    (forceLanguage : Option String := none)
+    (processor : Qwen3ASRProcessor := {})
+    : String :=
+  processor.buildAsrPrompt context forceLanguage
 
 private def chunkSizeSamplesFromSec (chunkSizeSec : Float) : Nat :=
   let rounded := ((chunkSizeSec * sampleRate16k) + 0.5).toUInt64.toNat
@@ -264,6 +268,7 @@ def initStreamingState
     (promptMaxTokens : Nat := 96)
     (chunkSizeSec : Float := 2.0)
     (stepSizeSec : Float := 0.5)
+    (decodeMode : StreamingDecodeMode := .rollingWindow)
     : IO ASRStreamingState := do
   if chunkSizeSec <= 0.0 || stepSizeSec <= 0.0 then
     throw <| IO.userError
@@ -286,7 +291,7 @@ def initStreamingState
 
   let chunkSizeSamples := chunkSizeSamplesFromSec chunkSizeSec
   let stepSizeSamples := chunkSizeSamplesFromSec stepSizeSec
-  let promptRaw := buildTextPrompt context forceLanguage
+  let promptRaw := buildTextPrompt context forceLanguage {}
   pure {
     unfixedChunkNum
     unfixedTokenNum
@@ -298,6 +303,7 @@ def initStreamingState
     chunkId := 0
     buffer := #[]
     audioAccum := #[]
+    decodeMode := decodeMode
     promptRaw
     context := context
     forceLanguage
@@ -377,7 +383,10 @@ def streamingTranscribe
   while st.buffer.size >= st.stepSizeSamples do
     let stepChunk := st.buffer.extract 0 st.stepSizeSamples
     let rest := st.buffer.extract st.stepSizeSamples st.buffer.size
-    let audioAccum := tailSlice (st.audioAccum ++ stepChunk) st.chunkSizeSamples
+    let audioAccum :=
+      match st.decodeMode with
+      | .rollingWindow => tailSlice (st.audioAccum ++ stepChunk) st.chunkSizeSamples
+      | .fullAccumulation => st.audioAccum ++ stepChunk
     st := { st with buffer := rest, audioAccum := audioAccum }
 
     let pref :=
@@ -408,7 +417,10 @@ def finishStreamingTranscribe
     pure state
   else
     let tail := state.buffer
-    let audioAccum := tailSlice (state.audioAccum ++ tail) state.chunkSizeSamples
+    let audioAccum :=
+      match state.decodeMode with
+      | .rollingWindow => tailSlice (state.audioAccum ++ tail) state.chunkSizeSamples
+      | .fullAccumulation => state.audioAccum ++ tail
     let mut st := { state with buffer := #[], audioAccum := audioAccum }
     let pref :=
       if st.chunkId < st.unfixedChunkNum then
@@ -544,9 +556,10 @@ def initStreamingState
     (promptMaxTokens : Nat := 96)
     (chunkSizeSec : Float := 2.0)
     (stepSizeSec : Float := 0.5)
+    (decodeMode : StreamingDecodeMode := .rollingWindow)
     : IO ASRStreamingState :=
   torch.qwen3asr.initStreamingState
-    m.supportLanguages context language unfixedChunkNum unfixedTokenNum promptMaxTokens chunkSizeSec stepSizeSec
+    m.supportLanguages context language unfixedChunkNum unfixedTokenNum promptMaxTokens chunkSizeSec stepSizeSec decodeMode
 
 /-- Method-style streaming step with Lean model backend. -/
 def streamingTranscribe

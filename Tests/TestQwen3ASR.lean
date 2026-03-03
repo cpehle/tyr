@@ -177,6 +177,29 @@ private def mkAsciiStreamingTokenizer : tokenizer.qwen3.QwenTokenizer := Id.run 
     padToken := 0
   }
 
+private def runStreamingAudioSizesForMode
+    (mode : StreamingDecodeMode)
+    (audio : Array Float)
+    : IO (Array Nat) := do
+  let tok := mkAsciiStreamingTokenizer
+  let chunkSec : Float := 2.0 / 16000.0
+  let st0 ← initStreamingState
+    tinyCfg.supportLanguages
+    (context := "")
+    (language := some "English")
+    (unfixedChunkNum := 0)
+    (unfixedTokenNum := 1)
+    (chunkSizeSec := chunkSec)
+    (stepSizeSec := chunkSec)
+    (decodeMode := mode)
+  let sizesRef ← IO.mkRef (#[] : Array Nat)
+  let decodeFn : StreamingDecodeFn := fun _prompt audioAccum => do
+    sizesRef.modify (fun xs => xs.push audioAccum.size)
+    pure "x"
+  let st1 ← streamingTranscribe tok decodeFn audio st0
+  let _ ← finishStreamingTranscribe tok decodeFn st1
+  sizesRef.get
+
 @[test]
 def testQwen3TokenizerDecodeTextSpecialToken : IO Unit := do
   let tok := mkAsciiStreamingTokenizer
@@ -200,6 +223,189 @@ def testQwen3ASRParseAsrOutput : IO Unit := do
   let (lang3, txt3) := parseAsrOutput "forced output body" (userLanguage := some "English")
   LeanTest.assertEqual lang3 "English" "forced language should override parsed metadata"
   LeanTest.assertEqual txt3 "forced output body" "forced-language parse should treat raw as text-only"
+
+@[test]
+def testQwen3ASRAudioInputAutoDetect : IO Unit := do
+  let autoUrl := ASRAudioInput.ofStringAuto "https://example.com/demo.wav"
+  LeanTest.assertTrue
+    (match autoUrl with | .url _ => true | _ => false)
+    "audio source auto-detection should classify http/https strings as URL inputs"
+
+  let autoDataUrl := ASRAudioInput.ofStringAuto "data:audio/wav;base64,AAAA"
+  LeanTest.assertTrue
+    (match autoDataUrl with | .base64 _ => true | _ => false)
+    "audio source auto-detection should classify data:audio URLs as base64 inputs"
+
+  let rawBase64 := String.ofList (List.replicate 128 'A')
+  let autoRawBase64 := ASRAudioInput.ofStringAuto rawBase64
+  LeanTest.assertTrue
+    (match autoRawBase64 with | .base64 _ => true | _ => false)
+    "audio source auto-detection should classify long raw base64 payloads as base64 inputs"
+
+  let autoPath := ASRAudioInput.ofStringAuto "./fixtures/input.wav"
+  LeanTest.assertTrue
+    (match autoPath with | .wavPath _ => true | _ => false)
+    "audio source auto-detection should classify local filesystem strings as wavPath inputs"
+
+@[test]
+def testQwen3ASRNormalizeAudioInputWaveform : IO Unit := do
+  let direct ← normalizeAudioInputTo16k (.waveform #[2.0, -2.0, 0.5] 16000)
+  LeanTest.assertEqual direct.size 3
+    "waveform normalization at 16k should preserve sample count"
+  LeanTest.assertTrue (direct.all (fun x => x <= 1.0 && x >= -1.0))
+    "waveform normalization should clamp/scale all samples into [-1, 1]"
+
+  let resampled ← normalizeAudioInputTo16k (.waveform #[0.1, -0.1, 0.2, -0.2] 8000)
+  LeanTest.assertTrue (resampled.size > 0)
+    "waveform normalization with non-16k source should return a non-empty resampled waveform"
+  LeanTest.assertTrue (resampled.all (fun x => x <= 1.0 && x >= -1.0))
+    "resampled waveform should remain in [-1, 1]"
+
+@[test]
+def testQwen3ASRProcessorPromptTemplateSurface : IO Unit := do
+  let p : Qwen3ASRProcessor := {
+    audioToken := "<AP>"
+    audioBosToken := "<AB>"
+    audioEosToken := "<AE>"
+    imStartToken := "<S>"
+    imEndToken := "</S>"
+  }
+  let expected :=
+    "<S>system\nctx</S>\n"
+    ++ "<S>user\n<AB><AP><AE></S>\n"
+    ++ "<S>assistant\nlanguage English<asr_text>"
+  let prompt := p.buildAsrPrompt "ctx" (some "English")
+  LeanTest.assertEqual prompt expected
+    "processor prompt construction should honor processor role/audio token markers"
+  LeanTest.assertEqual (buildTextPrompt "ctx" (some "English") p) expected
+    "streaming prompt builder should delegate to processor prompt construction"
+
+@[test]
+def testQwen3ASRStreamingDecodeModes : IO Unit := do
+  let audio : Array Float := #[0.1, 0.2, 0.3, 0.4, 0.5]
+  let rolling ← runStreamingAudioSizesForMode .rollingWindow audio
+  let full ← runStreamingAudioSizesForMode .fullAccumulation audio
+  LeanTest.assertEqual rolling #[2, 2, 2]
+    "rolling-window decode mode should keep a fixed-size audio accumulation window"
+  LeanTest.assertEqual full #[2, 4, 5]
+    "full-accumulation decode mode should grow accumulation across chunks and tail"
+
+@[test]
+def testQwen3ASRForcedAlignerJpKrSegmentation : IO Unit := do
+  let (jaWords, _) := Qwen3ForceAlignProcessor.encodeTimestampText "abcあい" "Japanese"
+  LeanTest.assertEqual jaWords #["abc", "あ", "い"]
+    "Japanese forced-alignment tokenization should split script chars while preserving latin runs"
+
+  let (koWords, _) := Qwen3ForceAlignProcessor.encodeTimestampText "ab한글cd" "Korean"
+  LeanTest.assertEqual koWords #["ab", "한", "글", "cd"]
+    "Korean forced-alignment tokenization should split Hangul chars while preserving latin runs"
+
+@[test]
+def testQwen3ASRTimestampsRequireForcedAlignerOrHandle : IO Unit := do
+  let cfg := tinyCfg
+  let model ← Qwen3ASRForConditionalGeneration.init cfg
+  let tok := mkAsciiStreamingTokenizer
+  let pre := tinyPreprocessorCfg cfg.thinkerConfig.audioConfig.numMelBins 32
+  let audio := mkDeterministicWavSamples 12000
+
+  let threwWithoutHandle ←
+    try
+      let _ ← model.transcribeWaveform
+        tok
+        pre
+        audio
+        (context := "")
+        (language := some "English")
+        (returnTimeStamps := true)
+        (maxNewTokens := 2)
+        (eosTokenIds := #[])
+      pure false
+    catch _ =>
+      pure true
+  LeanTest.assertTrue threwWithoutHandle
+    "timestamps on non-forced-aligner ASR checkpoint should fail without explicit forced-aligner handle"
+
+  let alignCfg := tinyForcedAlignerCfg
+  let alignModel ← Qwen3ASRForConditionalGeneration.init alignCfg
+  let aligner : Qwen3ForcedAligner := {
+    cfg := alignCfg
+    model := alignModel
+    tok := tok
+    preprocessor := tinyPreprocessorCfg alignCfg.thinkerConfig.audioConfig.numMelBins 32
+  }
+  let threwWithHandle ←
+    try
+      let _ ← model.transcribeWaveform
+        tok
+        pre
+        audio
+        (forcedAligner := some aligner)
+        (context := "")
+        (language := some "English")
+        (returnTimeStamps := true)
+        (maxNewTokens := 2)
+        (eosTokenIds := #[])
+      pure false
+    catch _ =>
+      pure true
+  LeanTest.assertTrue (!threwWithHandle)
+    "timestamps should succeed on non-forced-aligner ASR checkpoint when a forced-aligner handle is supplied"
+
+@[test]
+def testQwen3ASRTranscribeAudioInputAndBatchStepParity : IO Unit := do
+  let cfg := tinyCfg
+  let model ← Qwen3ASRForConditionalGeneration.init cfg
+  let tok := mkAsciiStreamingTokenizer
+  let pre := tinyPreprocessorCfg cfg.thinkerConfig.audioConfig.numMelBins 32
+  let audioA := mkDeterministicWavSamples 9000
+  let audioB := mkDeterministicWavSamples 11000
+
+  let outWaveform ← model.transcribeWaveform
+    tok
+    pre
+    audioA
+    (context := "")
+    (language := some "English")
+    (returnTimeStamps := false)
+    (maxNewTokens := 2)
+    (eosTokenIds := #[])
+  let outAudioInput ← model.transcribeAudioInput
+    tok
+    pre
+    (.waveform audioA 16000)
+    (context := "")
+    (language := some "English")
+    (returnTimeStamps := false)
+    (maxNewTokens := 2)
+    (eosTokenIds := #[])
+  LeanTest.assertEqual outAudioInput.language outWaveform.language
+    "unified waveform+sample-rate audio input should match direct waveform transcription language"
+  LeanTest.assertEqual outAudioInput.text outWaveform.text
+    "unified waveform+sample-rate audio input should match direct waveform transcription text"
+
+  let audios : Array (Array Float) := #[audioA, audioB]
+  let outsUnbounded ← model.transcribeWaveforms
+    tok
+    pre
+    audios
+    (contexts := #["ctx"])
+    (languages := #[some "English"])
+    (maxInferenceBatchSize := -1)
+    (returnTimeStamps := false)
+    (maxNewTokens := 2)
+    (eosTokenIds := #[])
+  let outsChunked ← model.transcribeWaveforms
+    tok
+    pre
+    audios
+    (contexts := #["ctx"])
+    (languages := #[some "English"])
+    (maxInferenceBatchSize := 1)
+    (returnTimeStamps := false)
+    (maxNewTokens := 2)
+    (eosTokenIds := #[])
+  LeanTest.assertEqual (outsUnbounded.map (fun r => r.text)) (outsChunked.map (fun r => r.text))
+    "maxInferenceBatchSize chunking should preserve transcription outputs"
 
 @[test]
 def testQwen3ASRMergeLanguages : IO Unit := do
@@ -249,6 +455,8 @@ def testQwen3ASRStreamingTranscribeAndFinish : IO Unit := do
     (unfixedChunkNum := 0)
     (unfixedTokenNum := 1)
     (chunkSizeSec := chunkSec)
+    (stepSizeSec := chunkSec)
+    (decodeMode := .fullAccumulation)
 
   let promptsRef ← IO.mkRef (#[] : Array String)
   let decodeFn : StreamingDecodeFn := fun prompt audioAccum => do
@@ -775,7 +983,7 @@ def testQwen3ASRForcedAlignFromOutputIds : IO Unit := do
   LeanTest.assertTrue (Float.abs (i1.endTime - 0.4) < 1e-6) "second end_time should match converted timestamp"
 
 @[test]
-def testQwen3ASRStreamModelPushAudioBoundsRing : IO Unit := do
+def testQwen3ASRStreamModelPushAudioBoundsAccum : IO Unit := do
   let cfg := tinyCfg
   let model ← Qwen3ASRForConditionalGeneration.init cfg
   let tok := mkAsciiStreamingTokenizer
@@ -787,10 +995,10 @@ def testQwen3ASRStreamModelPushAudioBoundsRing : IO Unit := do
     preprocessor := pre
     modelDir := "."
   }
-  let ss0 ← newSession sm (chunkSec := 0.001) (hopSec := 10.0)
+  let ss0 ← newSession sm (chunkSec := 0.5) (hopSec := 10.0)
   let pcm : Array Float := Array.replicate 128 0.1
   let (ss1, out) ← pushAudio sm ss0 pcm
-  LeanTest.assertEqual ss1.ring.size ss1.chunkSamples
-    "ring buffer should be bounded to chunkSamples after push"
+  LeanTest.assertEqual ss1.asrState.buffer.size pcm.size
+    "when hop threshold is not met, push should append audio into the streaming buffer"
   LeanTest.assertTrue (!out.didDecode)
     "push should not decode when hop threshold is not met"

@@ -26,6 +26,8 @@ structure Qwen3ASRProcessor where
   audioToken : String := "<|audio_pad|>"
   audioBosToken : String := "<|audio_start|>"
   audioEosToken : String := "<|audio_end|>"
+  imStartToken : String := "<|im_start|>"
+  imEndToken : String := "<|im_end|>"
   kwargs : ProcessorKwargs := {}
   deriving Repr, Inhabited
 
@@ -133,6 +135,40 @@ def getChunkedIndex (tokenIndices : Array UInt64) (tokensPerChunk : UInt64) : Ar
     We expose the canonical multimodal names used by the Lean port. -/
 def modelInputNames (_p : Qwen3ASRProcessor) : Array String :=
   #["input_ids", "attention_mask", "input_features", "feature_attention_mask"]
+
+private def mkRoleBlock (p : Qwen3ASRProcessor) (role content : String) : String :=
+  p.imStartToken ++ role ++ "\n" ++ content ++ p.imEndToken ++ "\n"
+
+/-- Processor-side chat-template rendering used by ASR prompt construction.
+    This keeps prompt assembly aligned with processor role/marker semantics. -/
+def applyChatTemplate
+    (p : Qwen3ASRProcessor)
+    (systemContent : String)
+    (userContent : String)
+    (addGenerationPrompt : Bool := true)
+    : String :=
+  let base :=
+    mkRoleBlock p "system" systemContent ++
+    mkRoleBlock p "user" userContent
+  if addGenerationPrompt then
+    base ++ p.imStartToken ++ "assistant\n"
+  else
+    base
+
+/-- Build user audio placeholder span in processor token space. -/
+def audioUserPlaceholder (p : Qwen3ASRProcessor) : String :=
+  p.audioBosToken ++ p.audioToken ++ p.audioEosToken
+
+/-- Build ASR text prompt from processor chat-template semantics. -/
+def buildAsrPrompt
+    (p : Qwen3ASRProcessor)
+    (context : String := "")
+    (forceLanguage : Option String := none)
+    : String :=
+  let base := p.applyChatTemplate context p.audioUserPlaceholder true
+  match forceLanguage with
+  | some l => base ++ s!"language {l}<asr_text>"
+  | none => base
 
 end Qwen3ASRProcessor
 

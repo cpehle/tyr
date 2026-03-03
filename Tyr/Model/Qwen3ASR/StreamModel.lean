@@ -67,6 +67,7 @@ def newSession
     (m : StreamModel)
     (chunkSec : Float := 2.0)
     (hopSec : Float := 0.5)
+    (decodeMode : StreamingDecodeMode := .rollingWindow)
     (context : String := "")
     (language : Option String := none)
     (historyWindows : Nat := 6)
@@ -99,6 +100,7 @@ def newSession
     language
     (chunkSizeSec := chunkSec)
     (stepSizeSec := hopSec)
+    (decodeMode := decodeMode)
   pure {
     chunkSec := chunkSec
     hopSec := hopSec

@@ -55,6 +55,57 @@ private def splitSegmentWithChinese (seg : String) : Array String :=
       out := out.push (String.ofList buf.toList)
     out
 
+private def isJapaneseChar (ch : Char) : Bool :=
+  let code := ch.toNat
+  isCjkChar ch ||
+  (0x3040 <= code && code <= 0x309F) ||  -- Hiragana
+  (0x30A0 <= code && code <= 0x30FF) ||  -- Katakana
+  (0x31F0 <= code && code <= 0x31FF) ||  -- Katakana Phonetic Extensions
+  (0xFF66 <= code && code <= 0xFF9D)     -- Halfwidth Katakana
+
+private def isKoreanChar (ch : Char) : Bool :=
+  let code := ch.toNat
+  (0xAC00 <= code && code <= 0xD7AF) ||  -- Hangul Syllables
+  (0x1100 <= code && code <= 0x11FF) ||  -- Hangul Jamo
+  (0x3130 <= code && code <= 0x318F) ||  -- Hangul Compatibility Jamo
+  (0xA960 <= code && code <= 0xA97F) ||  -- Hangul Jamo Extended-A
+  (0xD7B0 <= code && code <= 0xD7FF)     -- Hangul Jamo Extended-B
+
+private def tokenizeScriptMixed (text : String) (isScriptChar : Char → Bool) : Array String :=
+  Id.run do
+    let mut out : Array String := #[]
+    let mut buf : Array Char := #[]
+    for ch in text.toList do
+      if isScriptChar ch then
+        if !buf.isEmpty then
+          let tok := cleanToken (String.ofList buf.toList)
+          if !tok.isEmpty then
+            out := out.push tok
+          buf := #[]
+        out := out.push (String.singleton ch)
+      else if isKeptChar ch then
+        buf := buf.push ch
+      else
+        if !buf.isEmpty then
+          let tok := cleanToken (String.ofList buf.toList)
+          if !tok.isEmpty then
+            out := out.push tok
+          buf := #[]
+    if !buf.isEmpty then
+      let tok := cleanToken (String.ofList buf.toList)
+      if !tok.isEmpty then
+        out := out.push tok
+    out
+
+private def lowerAscii (c : Char) : Char :=
+  if c >= 'A' && c <= 'Z' then
+    Char.ofNat (c.toNat + 32)
+  else
+    c
+
+private def toLowerAscii (s : String) : String :=
+  String.ofList (s.toList.map lowerAscii)
+
 def tokenizeSpaceLang (text : String) : Array String :=
   Id.run do
     let mut out : Array String := #[]
@@ -77,10 +128,16 @@ private def joinWith (xs : Array String) (sep : String) : String :=
       out
 
 /-- Encode text into forced-aligner prompt tokens.
-    Note: Japanese/Korean specialized tokenizers are not available in Lean yet;
-    we currently use the same whitespace/CJK split fallback for all languages. -/
-def encodeTimestampText (text : String) (_language : String) : Array String × String :=
-  let wordList := tokenizeSpaceLang text
+    Uses language-specific segmentation strategy for Japanese/Korean. -/
+def encodeTimestampText (text : String) (language : String) : Array String × String :=
+  let lang := toLowerAscii (language.trim)
+  let wordList :=
+    if lang == "japanese" then
+      tokenizeScriptMixed text isJapaneseChar
+    else if lang == "korean" then
+      tokenizeScriptMixed text isKoreanChar
+    else
+      tokenizeSpaceLang text
   let inter := joinWith wordList "<timestamp><timestamp>"
   let body := if inter.isEmpty then "<timestamp><timestamp>" else inter ++ "<timestamp><timestamp>"
   let inputText := "<|audio_start|><|audio_pad|><|audio_end|>" ++ body

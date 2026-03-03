@@ -1,6 +1,6 @@
 # Tyr Code Review Tracker
 
-Last updated: 2026-03-02
+Last updated: 2026-03-03
 Scope: broad static review across `Tyr/`, `cc/src/`, `Examples/`, `Tests/`, CI/workflows, hooks, and scripts.
 
 Status legend:
@@ -49,11 +49,11 @@ Status legend:
 ## Open Issues
 
 ### High
-- [ ] `H18` Add upstream-compatible ASR audio input normalization surface (URL/base64/typed in-memory + resample), not just local PCM16 WAV/16k-float entrypoints.
+- [x] `H18` Add upstream-compatible ASR audio input normalization surface (URL/base64/typed in-memory + resample), not just local PCM16 WAV/16k-float entrypoints.
   Refs: `Tyr/Model/Qwen3ASR/Transcribe.lean`, `Tyr/Model/Qwen3ASR/Frontend.lean`, `../Qwen3-ASR/qwen_asr/inference/utils.py`
-- [ ] `H19` Support upstream-style ASR timestamp flow with separate forced-aligner handle (`ASR + aligner`) instead of requiring a forced-aligner thinker checkpoint for transcription.
+- [x] `H19` Support upstream-style ASR timestamp flow with separate forced-aligner handle (`ASR + aligner`) instead of requiring a forced-aligner thinker checkpoint for transcription.
   Refs: `Tyr/Model/Qwen3ASR/Transcribe.lean`, `Tyr/Model/Qwen3ASR/Model.lean`, `../Qwen3-ASR/qwen_asr/inference/qwen3_asr.py`
-- [ ] `H20` Reconcile streaming decode semantics with upstream (full-accumulation chunk decode) or make behavior-selectable to reduce long-utterance parity drift.
+- [x] `H20` Reconcile streaming decode semantics with upstream (full-accumulation chunk decode) or make behavior-selectable to reduce long-utterance parity drift.
   Refs: `Tyr/Model/Qwen3ASR/Streaming.lean`, `../Qwen3-ASR/qwen_asr/inference/qwen3_asr.py`
 
 
@@ -62,11 +62,11 @@ Status legend:
   Refs: `Examples/Qwen3TTS/EndToEnd.lean`, `Tyr/Model/Qwen3TTS/Model.lean`
 - [ ] `M17` Improve language parity for `Auto`/dialect handling to match upstream behavior (currently mostly token gating without dialect override logic).
   Refs: `Examples/Qwen3TTS/EndToEnd.lean`
-- [ ] `M18` Add standalone ASR forced-aligner wrapper parity (`from_pretrained` + `align(audio,text,language)` single/batch API) on top of existing low-level align helpers.
+- [x] `M18` Add standalone ASR forced-aligner wrapper parity (`from_pretrained` + `align(audio,text,language)` single/batch API) on top of existing low-level align helpers.
   Refs: `Tyr/Model/Qwen3ASR/ForcedAligner.lean`, `Tyr/Model/Qwen3ASR/Transcribe.lean`, `../Qwen3-ASR/qwen_asr/inference/qwen3_forced_aligner.py`
-- [ ] `M19` Improve forced-alignment tokenization parity for JP/KR by adding language-specific segmentation strategy (upstream uses dedicated tokenizers).
+- [x] `M19` Improve forced-alignment tokenization parity for JP/KR by adding language-specific segmentation strategy (upstream uses dedicated tokenizers).
   Refs: `Tyr/Model/Qwen3ASR/ForcedAligner.lean`, `../Qwen3-ASR/qwen_asr/inference/qwen3_forced_aligner.py`
-- [ ] `M20` Reduce ASR prompt-template drift risk by deriving prompt construction from processor/chat-template semantics instead of hardcoded template strings.
+- [x] `M20` Reduce ASR prompt-template drift risk by deriving prompt construction from processor/chat-template semantics instead of hardcoded template strings.
   Refs: `Tyr/Model/Qwen3ASR/Streaming.lean`, `../Qwen3-ASR/qwen_asr/inference/qwen3_asr.py`
 
 ### Low
@@ -74,7 +74,7 @@ Status legend:
   Refs: `Tyr/Model/Qwen3TTS/Config.lean`, `Examples/Qwen3TTS/EndToEnd.lean`
 - [ ] `L04` Extend public demo/streaming entrypoints to ergonomic multi-sample batching (core tensors support batch, demo is mostly single-sample).
   Refs: `Examples/Qwen3TTS/EndToEnd.lean`, `Tyr/Model/Qwen3TTS/Streaming.lean`
-- [ ] `L05` Add ASR batch-throughput control parity (`max_inference_batch_size` style chunking knob) for large batch transcription/alignment workloads.
+- [x] `L05` Add ASR batch-throughput control parity (`max_inference_batch_size` style chunking knob) for large batch transcription/alignment workloads.
   Refs: `Tyr/Model/Qwen3ASR/Transcribe.lean`, `../Qwen3-ASR/qwen_asr/inference/qwen3_asr.py`
 
 
@@ -144,6 +144,20 @@ Status legend:
   Refs: `Tyr/Model/Qwen3TTS/SpeechTokenizerBridge.lean`, `Tyr/Model/Qwen3TTS/SpeechTokenizerEncoder.lean`
 - [x] `H17` Qwen3TTS audio encode now supports tokenizer `model_type="qwen3_tts_tokenizer_25hz"` through a separate Lean-native encoder architecture (Whisper frontend + 25Hz transformer/VQ path) with bridge dispatch.
   Refs: `Tyr/Model/Qwen3TTS/SpeechTokenizer25HzEncoder.lean`, `Tyr/Model/Qwen3TTS/SpeechTokenizerBridge.lean`, `Tyr/Model/Qwen3TTS.lean`
+- [x] `H18` Qwen3ASR now supports unified audio input normalization across local path, URL, base64 payload, and in-memory waveform+sample-rate entrypoints.
+  Refs: `Tyr/Model/Qwen3ASR/Frontend.lean`, `Tyr/Model/Qwen3ASR/Transcribe.lean`
+- [x] `H19` Qwen3ASR timestamp flow now accepts a separate forced-aligner handle and no longer requires forced-aligner thinker checkpoints for transcription.
+  Refs: `Tyr/Model/Qwen3ASR/Transcribe.lean`
+- [x] `H20` Qwen3ASR streaming now supports selectable decode semantics (`rollingWindow` vs `fullAccumulation`) to reduce long-utterance parity drift.
+  Refs: `Tyr/Model/Qwen3ASR/Streaming.lean`, `Tyr/Model/Qwen3ASR/StreamModel.lean`
+- [x] `M18` Added standalone `Qwen3ForcedAligner` parity API with `loadFromPretrained`, single/batch align entrypoints, and transcription integration.
+  Refs: `Tyr/Model/Qwen3ASR/Transcribe.lean`
+- [x] `M19` Forced-alignment text encoding now applies language-specific segmentation for Japanese/Korean instead of generic fallback-only tokenization.
+  Refs: `Tyr/Model/Qwen3ASR/ForcedAligner.lean`
+- [x] `M20` ASR prompt building now routes through processor chat-template semantics to reduce hardcoded-template drift risk.
+  Refs: `Tyr/Model/Qwen3ASR/Processor.lean`, `Tyr/Model/Qwen3ASR/Streaming.lean`
+- [x] `L05` Added `maxInferenceBatchSize` chunking knobs across ASR transcription and forced-aligner batch entrypoints.
+  Refs: `Tyr/Model/Qwen3ASR/Transcribe.lean`, `Examples/Qwen3ASR/Transcribe.lean`
 
 ## Imported From `qwen_review_issues_2026-02-28`
 

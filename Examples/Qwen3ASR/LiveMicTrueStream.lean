@@ -96,7 +96,9 @@ def runMain (argv : List String) : IO UInt32 := do
       match (← IO.getEnv "SILERO_VAD_PATH") with
       | some p => pure (some p)
       | none => pure none
-  let mut ss ← newSession sm args.chunkSec args.hopSec args.context args.language
+  let mut ss ← newSession sm args.chunkSec args.hopSec
+    (context := args.context)
+    (language := args.language)
     (sileroVADPath := sileroPath)
 
   let hopSamples := toSamples args.hopSec
