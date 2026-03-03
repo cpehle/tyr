@@ -347,7 +347,7 @@ structure ValidationLoader where
 def ValidationLoader.init (tokens : T #[]) (seqLen : UInt64) : ValidationLoader :=
   { tokens, position := 0, seqLen }
 
-def ValidationLoader.nextBatch (loader : ValidationLoader) (batchSize : UInt64)
+def ValidationLoader.nextBatch (loader : ValidationLoader) (_batchSize : UInt64)
     : IO (Option (T #[] × T #[]) × ValidationLoader) := do
   -- Implementation would slice tokens and create batches
   -- Placeholder for now

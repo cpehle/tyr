@@ -25,7 +25,7 @@ open torch.Data.Task
       {"role": "assistant", "content": "..."}
     ]
 -/
-partial def parseJsonConversations (json : String) : Array Conversation := Id.run do
+partial def parseJsonConversations (_json : String) : Array Conversation := Id.run do
   -- Simple parsing - in production would use proper JSON parser
   -- This is a placeholder that creates empty conversations
   -- Real implementation would parse the JSON structure
@@ -205,14 +205,14 @@ def createSFTMixture (modelName : String) : TaskMixture :=
 
 /-- Load conversations from a JSONL file.
     Each line should be a JSON object with a "messages" array. -/
-def loadJsonlTask (path : String) (name : String) : IO LoadedTask := do
+def loadJsonlTask (_path : String) (name : String) : IO LoadedTask := do
   -- Placeholder - would read file and parse JSONL
   -- For now, return empty task
   return { name, conversations := #[], config := {} }
 
 /-- Load from HuggingFace datasets format (parquet/arrow).
     This is a placeholder - actual implementation would use FFI to HF datasets. -/
-def loadHFDataset (datasetName split : String) : IO LoadedTask := do
+def loadHFDataset (datasetName _split : String) : IO LoadedTask := do
   -- Placeholder - would load from HuggingFace
   return { name := datasetName, conversations := #[], config := {} }
 

@@ -453,7 +453,7 @@ private def splitFirst (s sep : String) : Option (String × String) :=
 
 /-- Normalize language as `Xxxxx...` (first upper, rest lower). -/
 def normalizeLanguageName (language : String) : Except String String := do
-  let s := language.trim
+  let s := language.trimAscii.toString
   if s.isEmpty then
     throw "language is empty"
   match s.toList with
@@ -550,25 +550,25 @@ def detectAndFixRepetitions (text : String) (threshold : Nat := 20) : String :=
 
 /-- Parse raw ASR output into `(language, text)` with upstream semantics. -/
 def parseAsrOutput (raw : String) (userLanguage : Option String := none) : String × String :=
-  let s0 := raw.trim
+  let s0 := raw.trimAscii.toString
   if s0.isEmpty then
     ("", "")
   else
     let s := detectAndFixRepetitions s0
     match userLanguage with
     | some forced =>
-      let f := forced.trim
+      let f := forced.trimAscii.toString
       if f.isEmpty then
         ("", s)
       else
         (f, s)
     | none =>
       match splitFirst s asrTextTag with
-      | none => ("", s.trim)
+      | none => ("", s.trimAscii.toString)
       | some (metaPart, textPart) =>
         let metaLower := toLower metaPart
         if containsSubstr metaLower "language none" then
-          let t := textPart.trim
+          let t := textPart.trimAscii.toString
           if t.isEmpty then
             ("", "")
           else
@@ -578,16 +578,16 @@ def parseAsrOutput (raw : String) (userLanguage : Option String := none) : Strin
             let mut lang := ""
             for line in metaPart.splitOn "\n" do
               if lang.isEmpty then
-                let lineTrim := line.trim
+                let lineTrim := line.trimAscii.toString
                 if !lineTrim.isEmpty then
                   let low := toLower lineTrim
                   if startsWithStr low languagePrefix then
-                    let val := (dropChars lineTrim languagePrefix.length).trim
+                    let val := (dropChars lineTrim languagePrefix.length).trimAscii.toString
                     if !val.isEmpty then
                       match normalizeLanguageName val with
                       | .ok ln => lang := ln
                       | .error _ => lang := val
-            (lang, textPart.trim)
+            (lang, textPart.trimAscii.toString)
 
 private def joinArrayWith (sep : String) (xs : Array String) : String := Id.run do
   if xs.isEmpty then
@@ -603,7 +603,7 @@ def mergeLanguages (langs : Array String) : String :=
     let mut out : Array String := #[]
     let mut prev : Option String := none
     for l in langs do
-      let x := l.trim
+      let x := l.trimAscii.toString
       if !x.isEmpty then
         match prev with
         | some p =>
@@ -651,7 +651,7 @@ def initStreamingState
     match language with
     | none => pure none
     | some l =>
-      let s := l.trim
+      let s := l.trimAscii.toString
       if s.isEmpty then
         pure none
       else

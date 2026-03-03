@@ -184,7 +184,7 @@ private def validateForcedLanguage
   match language with
   | none => pure none
   | some l =>
-    let s := l.trim
+    let s := l.trimAscii.toString
     if s.isEmpty then
       pure none
     else
@@ -342,7 +342,7 @@ private def maybeAlignTimestamps
     : IO (Option ForcedAlignResult) := do
   if !returnTimeStamps then
     pure none
-  else if text.trim.isEmpty then
+  else if (text.trimAscii.toString).isEmpty then
     pure none
   else
     match forcedAligner with
@@ -912,7 +912,7 @@ def alignWaveform
     : IO ForcedAlignResult := do
   let dev := modelDevice aligner.model
   let ln ← validateAlignLanguage aligner language
-  let trimmed := text.trim
+  let trimmed := text.trimAscii.toString
   if trimmed.isEmpty then
     pure { items := #[] }
   else

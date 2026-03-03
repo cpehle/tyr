@@ -280,6 +280,7 @@ def encodeAudioVarLen {batch frames : UInt64}
 private def featureLengthsFromFeatureMask (cfg : ThinkerConfig) {batch featureSeq : UInt64}
     (featureAttentionMask : T #[batch, featureSeq])
     : IO (Array UInt64) := do
+  let _ := cfg
   let featureLensTensor : T #[batch] := nn.sumDim (data.toLong featureAttentionMask) 1 false
   let featureLensRaw ← data.tensorToUInt64Array featureLensTensor
   pure <| featureLensRaw.map (fun l => if l <= featureSeq then l else featureSeq)

@@ -130,7 +130,7 @@ private def joinWith (xs : Array String) (sep : String) : String :=
 /-- Encode text into forced-aligner prompt tokens.
     Uses language-specific segmentation strategy for Japanese/Korean. -/
 def encodeTimestampText (text : String) (language : String) : Array String × String :=
-  let lang := toLowerAscii (language.trim)
+  let lang := toLowerAscii (language.trimAscii.toString)
   let wordList :=
     if lang == "japanese" then
       tokenizeScriptMixed text isJapaneseChar

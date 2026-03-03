@@ -165,7 +165,7 @@ private def isProbablyBase64 (s : String) : Bool :=
   if s.startsWith "data:audio" then
     true
   else
-    let t := s.trim
+    let t := s.trimAscii.toString
     let filtered := t.toList.filter (fun c => !(c.isWhitespace))
     if filtered.length < 64 then
       false

@@ -186,7 +186,7 @@ def forwardStep {batch hidden_size num_heads num_kv_heads head_dim : UInt64}
   let vStore : T #[batch, num_kv_heads, cache.maxLen, head_dim] :=
     reshape cache.vStoreDyn #[batch, num_kv_heads, cache.maxLen, head_dim]
 
-  if hCap : cache.seq < cache.maxLen then
+  if cache.seq < cache.maxLen then
     let kStore' : T #[batch, num_kv_heads, cache.maxLen, head_dim] :=
       data.sliceScatter kStore 2 cache.seq kNew
     let vStore' : T #[batch, num_kv_heads, cache.maxLen, head_dim] :=

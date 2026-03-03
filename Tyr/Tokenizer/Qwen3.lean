@@ -109,7 +109,7 @@ def loadTokenizer (dir : String) : IO QwenTokenizer := do
       let mergesText <- IO.FS.readFile s!"{dir}/merges.txt"
       let mut merges : Array Json := #[]
       for raw in mergesText.splitOn "\n" do
-        let line := raw.trim
+        let line := raw.trimAscii.toString
         if !line.isEmpty && !line.startsWith "#" then
           merges := merges.push (.str line)
       let unkName :=

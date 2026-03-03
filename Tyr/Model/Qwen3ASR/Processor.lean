@@ -58,7 +58,7 @@ private def replaceInSample
   let mut idx := startIdx
   let mut out := parts[0]!
   for i in [1:parts.size] do
-    if h : idx < audioLengths.size then
+    if idx < audioLengths.size then
       let aLen := audioLengths[idx]!
       out := out ++ repeatToken audioToken aLen.toNat ++ parts[i]!
       idx := idx + 1
