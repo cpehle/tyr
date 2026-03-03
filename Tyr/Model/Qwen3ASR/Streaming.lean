@@ -50,6 +50,10 @@ structure ASRStreamingState where
 /-- Streaming decode callback: `(prompt, accumulated_audio_16k) -> raw decoded text`. -/
 abbrev StreamingDecodeFn := String → Array Float → IO String
 
+/-- Per-stream reusable prompt-cache state for model-backed ASR decode. -/
+abbrev StreamingPromptCache (cfg : Qwen3ASRConfig) :=
+  Qwen3ASRForConditionalGeneration.StreamingPromptCache cfg
+
 private def toLower (s : String) : String :=
   String.ofList (s.toList.map Char.toLower)
 
@@ -439,19 +443,21 @@ def finishStreamingTranscribe
     }
     pure st
 
-/-- Lean decode helper that runs one model generation from `(prompt, audio)` pair. -/
-def decodeStreamingChunkWithModel
+/-- Lean decode helper that runs one model generation from `(prompt, audio)` pair
+    and returns updated prompt cache for the next hop. -/
+def decodeStreamingChunkWithModelCached
     {cfg : Qwen3ASRConfig}
     (model : Qwen3ASRForConditionalGeneration cfg)
     (tok : tokenizer.qwen3.QwenTokenizer)
     (preprocessor : PreprocessorConfig)
     (prompt : String)
     (audio16k : Array Float)
+    (prefixCache : Option (StreamingPromptCache cfg) := none)
     (maxNewTokens : UInt64 := 512)
     (eosTokenIds : Array UInt64 := defaultEosTokenIds)
-    : IO String := do
+    : IO (String × Option (StreamingPromptCache cfg)) := do
   if audio16k.isEmpty then
-    pure ""
+    pure ("", prefixCache)
   else
     let maxSec :=
       (PreprocessorConfig.expectedSampleCount preprocessor).toFloat / sampleRate16k
@@ -494,25 +500,80 @@ def decodeStreamingChunkWithModel
       frontendOut.inputFeatures.to dev
     let featureAttentionMaskDev : T #[1, frames] :=
       frontendOut.featureAttentionMask.to dev
-    let generated ←
-      model.generateGreedy
+    let (generated, nextCache) ←
+      model.generateGreedyWithPromptCache
         inputIds
         (inputFeatures := some inputFeaturesDev)
         (featureAttentionMask := some featureAttentionMaskDev)
+        (promptTokenIds := promptIds)
+        (prefixCache := prefixCache)
         (maxNewTokens := maxNewTokens)
         (eosTokenIds := eosTokenIds)
 
     let outSeq := generated.1
     let outIds := generated.2
     if outSeq <= seq then
-      pure ""
+      pure ("", some nextCache)
     else
       let newSeq := outSeq - seq
       let newOnly : T #[1, newSeq] := data.slice outIds 1 seq newSeq
       let flat : T #[newSeq] := reshape newOnly #[newSeq]
       let idsU64 ← data.tensorToUInt64Array flat
       let ids := idsU64.map (fun x => x.toUInt32)
-      pure (tokenizer.qwen3.decodeText tok ids)
+      pure (tokenizer.qwen3.decodeText tok ids, some nextCache)
+
+/-- Lean decode helper that runs one model generation from `(prompt, audio)` pair. -/
+def decodeStreamingChunkWithModel
+    {cfg : Qwen3ASRConfig}
+    (model : Qwen3ASRForConditionalGeneration cfg)
+    (tok : tokenizer.qwen3.QwenTokenizer)
+    (preprocessor : PreprocessorConfig)
+    (prompt : String)
+    (audio16k : Array Float)
+    (maxNewTokens : UInt64 := 512)
+    (eosTokenIds : Array UInt64 := defaultEosTokenIds)
+    : IO String := do
+  let out ← decodeStreamingChunkWithModelCached
+    model
+    tok
+    preprocessor
+    prompt
+    audio16k
+    (prefixCache := none)
+    (maxNewTokens := maxNewTokens)
+    (eosTokenIds := eosTokenIds)
+  pure out.1
+
+/-- Model-backed streaming decode step with reusable prompt cache across hops. -/
+def streamingTranscribeWithModelCached
+    {cfg : Qwen3ASRConfig}
+    (model : Qwen3ASRForConditionalGeneration cfg)
+    (tok : tokenizer.qwen3.QwenTokenizer)
+    (preprocessor : PreprocessorConfig)
+    (pcm16k : Array Float)
+    (state : ASRStreamingState)
+    (prefixCache : Option (StreamingPromptCache cfg) := none)
+    (maxNewTokens : UInt64 := 512)
+    (eosTokenIds : Array UInt64 := defaultEosTokenIds)
+    : IO (ASRStreamingState × Option (StreamingPromptCache cfg)) := do
+  let cacheRef ← IO.mkRef prefixCache
+  let decodeFn : StreamingDecodeFn := fun prompt audio => do
+    let cache ← cacheRef.get
+    let (text, cache') ←
+      decodeStreamingChunkWithModelCached
+        model
+        tok
+        preprocessor
+        prompt
+        audio
+        (prefixCache := cache)
+        (maxNewTokens := maxNewTokens)
+        (eosTokenIds := eosTokenIds)
+    cacheRef.set cache'
+    pure text
+  let next ← streamingTranscribe tok decodeFn pcm16k state
+  let cache' ← cacheRef.get
+  pure (next, cache')
 
 /-- Model-backed streaming decode step (no Python/vLLM bridge). -/
 def streamingTranscribeWithModel
@@ -525,9 +586,47 @@ def streamingTranscribeWithModel
     (maxNewTokens : UInt64 := 512)
     (eosTokenIds : Array UInt64 := defaultEosTokenIds)
     : IO ASRStreamingState := do
-  let decodeFn : StreamingDecodeFn := fun prompt audio =>
-    decodeStreamingChunkWithModel model tok preprocessor prompt audio maxNewTokens eosTokenIds
-  streamingTranscribe tok decodeFn pcm16k state
+  let (next, _cache) ←
+    streamingTranscribeWithModelCached
+      model
+      tok
+      preprocessor
+      pcm16k
+      state
+      (prefixCache := none)
+      (maxNewTokens := maxNewTokens)
+      (eosTokenIds := eosTokenIds)
+  pure next
+
+/-- Model-backed streaming finish step with reusable prompt cache across hops. -/
+def finishStreamingTranscribeWithModelCached
+    {cfg : Qwen3ASRConfig}
+    (model : Qwen3ASRForConditionalGeneration cfg)
+    (tok : tokenizer.qwen3.QwenTokenizer)
+    (preprocessor : PreprocessorConfig)
+    (state : ASRStreamingState)
+    (prefixCache : Option (StreamingPromptCache cfg) := none)
+    (maxNewTokens : UInt64 := 512)
+    (eosTokenIds : Array UInt64 := defaultEosTokenIds)
+    : IO (ASRStreamingState × Option (StreamingPromptCache cfg)) := do
+  let cacheRef ← IO.mkRef prefixCache
+  let decodeFn : StreamingDecodeFn := fun prompt audio => do
+    let cache ← cacheRef.get
+    let (text, cache') ←
+      decodeStreamingChunkWithModelCached
+        model
+        tok
+        preprocessor
+        prompt
+        audio
+        (prefixCache := cache)
+        (maxNewTokens := maxNewTokens)
+        (eosTokenIds := eosTokenIds)
+    cacheRef.set cache'
+    pure text
+  let next ← finishStreamingTranscribe tok decodeFn state
+  let cache' ← cacheRef.get
+  pure (next, cache')
 
 /-- Model-backed streaming finish step (flush tail audio). -/
 def finishStreamingTranscribeWithModel
@@ -539,9 +638,16 @@ def finishStreamingTranscribeWithModel
     (maxNewTokens : UInt64 := 512)
     (eosTokenIds : Array UInt64 := defaultEosTokenIds)
     : IO ASRStreamingState := do
-  let decodeFn : StreamingDecodeFn := fun prompt audio =>
-    decodeStreamingChunkWithModel model tok preprocessor prompt audio maxNewTokens eosTokenIds
-  finishStreamingTranscribe tok decodeFn state
+  let (next, _cache) ←
+    finishStreamingTranscribeWithModelCached
+      model
+      tok
+      preprocessor
+      state
+      (prefixCache := none)
+      (maxNewTokens := maxNewTokens)
+      (eosTokenIds := eosTokenIds)
+  pure next
 
 namespace Qwen3ASRForConditionalGeneration
 
@@ -561,6 +667,27 @@ def initStreamingState
     m.supportLanguages context language unfixedChunkNum unfixedTokenNum promptMaxTokens chunkSizeSec stepSizeSec decodeMode
 
 /-- Method-style streaming step with Lean model backend. -/
+def streamingTranscribeCached
+    (m : Qwen3ASRForConditionalGeneration cfg)
+    (tok : tokenizer.qwen3.QwenTokenizer)
+    (preprocessor : PreprocessorConfig)
+    (pcm16k : Array Float)
+    (state : ASRStreamingState)
+    (prefixCache : Option (StreamingPromptCache cfg) := none)
+    (maxNewTokens : UInt64 := 512)
+    (eosTokenIds : Array UInt64 := defaultEosTokenIds)
+    : IO (ASRStreamingState × Option (StreamingPromptCache cfg)) :=
+  streamingTranscribeWithModelCached
+    m
+    tok
+    preprocessor
+    pcm16k
+    state
+    prefixCache
+    maxNewTokens
+    eosTokenIds
+
+/-- Method-style streaming step with Lean model backend. -/
 def streamingTranscribe
     (m : Qwen3ASRForConditionalGeneration cfg)
     (tok : tokenizer.qwen3.QwenTokenizer)
@@ -571,6 +698,25 @@ def streamingTranscribe
     (eosTokenIds : Array UInt64 := defaultEosTokenIds)
     : IO ASRStreamingState :=
   streamingTranscribeWithModel m tok preprocessor pcm16k state maxNewTokens eosTokenIds
+
+/-- Method-style streaming flush with Lean model backend. -/
+def finishStreamingTranscribeCached
+    (m : Qwen3ASRForConditionalGeneration cfg)
+    (tok : tokenizer.qwen3.QwenTokenizer)
+    (preprocessor : PreprocessorConfig)
+    (state : ASRStreamingState)
+    (prefixCache : Option (StreamingPromptCache cfg) := none)
+    (maxNewTokens : UInt64 := 512)
+    (eosTokenIds : Array UInt64 := defaultEosTokenIds)
+    : IO (ASRStreamingState × Option (StreamingPromptCache cfg)) :=
+  finishStreamingTranscribeWithModelCached
+    m
+    tok
+    preprocessor
+    state
+    prefixCache
+    maxNewTokens
+    eosTokenIds
 
 /-- Method-style streaming flush with Lean model backend. -/
 def finishStreamingTranscribe

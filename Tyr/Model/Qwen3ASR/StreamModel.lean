@@ -19,10 +19,8 @@ structure StreamModel where
   modelDir : String
 
 /-- Streaming session mutable state.
-    `encoderCachedFrames`/`decoderCachedTokens` are reserved for true
-    incremental cache plumbing; streaming decode now runs in fixed `chunk`
-    windows at `hop` cadence through `ASRStreamingState`. -/
-structure StreamSession where
+    Carries rolling ASR state plus reusable decode prompt cache. -/
+structure StreamSession (cfg : Qwen3ASRConfig) where
   chunkSec : Float := 2.0
   hopSec : Float := 0.5
   chunkSamples : Nat := 32000
@@ -32,6 +30,7 @@ structure StreamSession where
   language : Option String := none
   textConsensus : Tyr.Text.ConsensusState := {}
   sileroVAD : Option Tyr.Text.SileroProvider := none
+  promptCache : Option (StreamingPromptCache cfg) := none
   encoderCachedFrames : UInt64 := 0
   decoderCachedTokens : UInt64 := 0
 
@@ -76,7 +75,7 @@ def newSession
     (freezeAfterSteps : Nat := 4)
     (mutableTailTokensWhileSpeech : Nat := 6)
     (sileroVADPath : Option String := none)
-    : IO StreamSession := do
+    : IO (StreamSession m.cfg) := do
   if chunkSec <= 0.0 || hopSec <= 0.0 then
     throw <| IO.userError "chunkSec and hopSec must be > 0"
   let cCfg : Tyr.Text.ConsensusConfig := {
@@ -118,10 +117,10 @@ def newSession
     stabilization signals. -/
 def pushAudio
     (m : StreamModel)
-    (s : StreamSession)
+    (s : StreamSession m.cfg)
     (pcm16k : Array Float)
     (maxNewTokens : UInt64 := 128)
-    : IO (StreamSession × StreamStepOutput) := do
+    : IO ((StreamSession m.cfg) × StreamStepOutput) := do
   let mut s' := s
   let vadSignal : Tyr.Text.VADSignal ←
     match s'.sileroVAD with
@@ -133,14 +132,15 @@ def pushAudio
       pure { speechActive := true, boundary := false }
 
   let beforeChunkId := s'.asrState.chunkId
-  let asrNext ← streamingTranscribeWithModel
+  let (asrNext, promptCacheNext) ← streamingTranscribeWithModelCached
     m.model
     m.tok
     m.preprocessor
     pcm16k
     s'.asrState
+    (prefixCache := s'.promptCache)
     (maxNewTokens := maxNewTokens)
-  s' := { s' with asrState := asrNext }
+  s' := { s' with asrState := asrNext, promptCache := promptCacheNext }
   let decodedSteps := asrNext.chunkId - beforeChunkId
   if decodedSteps == 0 then
     pure (s', { didDecode := false, stableAppend := "", unstableText := "", fullText := "", mode := "streaming_step" })
@@ -165,17 +165,18 @@ def pushAudio
 
 def flush
     (m : StreamModel)
-    (s : StreamSession)
+    (s : StreamSession m.cfg)
     (maxNewTokens : UInt64 := 128)
-    : IO (StreamSession × StreamStepOutput) := do
+    : IO ((StreamSession m.cfg) × StreamStepOutput) := do
   let beforeChunkId := s.asrState.chunkId
-  let asrNext ← finishStreamingTranscribeWithModel
+  let (asrNext, promptCacheNext) ← finishStreamingTranscribeWithModelCached
     m.model
     m.tok
     m.preprocessor
     s.asrState
+    (prefixCache := s.promptCache)
     (maxNewTokens := maxNewTokens)
-  let s1 := { s with asrState := asrNext }
+  let s1 := { s with asrState := asrNext, promptCache := promptCacheNext }
   if asrNext.chunkId == beforeChunkId then
     pure (s1, { didDecode := false, stableAppend := "", unstableText := "", fullText := "", mode := "streaming_step" })
   else

@@ -55,7 +55,7 @@ Status legend:
   Refs: `Tyr/Model/Qwen3ASR/Transcribe.lean`, `Tyr/Model/Qwen3ASR/Model.lean`, `../Qwen3-ASR/qwen_asr/inference/qwen3_asr.py`
 - [x] `H20` Reconcile streaming decode semantics with upstream (full-accumulation chunk decode) or make behavior-selectable to reduce long-utterance parity drift.
   Refs: `Tyr/Model/Qwen3ASR/Streaming.lean`, `../Qwen3-ASR/qwen_asr/inference/qwen3_asr.py`
-- [ ] `H21` Add true streaming incremental-cache decode path for ASR (audio/text cache reuse per hop) to avoid full recompute each streaming step.
+- [x] `H21` Add true streaming incremental-cache decode path for ASR (audio/text cache reuse per hop) to avoid full recompute each streaming step.
   Refs: `Tyr/Model/Qwen3ASR/StreamModel.lean`, `Tyr/Model/Qwen3ASR/Streaming.lean`, `Tyr/Model/Qwen3ASR/Model.lean`
 - [x] `H22` Add native batch collation/inference path for offline ASR (batched prompt/audio tensors) instead of per-item decode loops.
   Refs: `Tyr/Model/Qwen3ASR/Transcribe.lean`, `Tyr/Model/Qwen3ASR/Model.lean`
@@ -178,6 +178,8 @@ Status legend:
   Refs: `Tyr/Model/Qwen3ASR/Frontend.lean`
 - [x] `M23` Non-timestamp long-audio ASR now uses a smaller boundary-search window and supports a no-search cut fast path for chunk splitting.
   Refs: `Tyr/Model/Qwen3ASR/Transcribe.lean`
+- [x] `H21` Added true streaming incremental-cache decode plumbing for ASR prompt reuse across hops (cache-aware decode helpers + `StreamSession` cache persistence).
+  Refs: `Tyr/Model/Qwen3ASR/Model.lean`, `Tyr/Model/Qwen3ASR/Streaming.lean`, `Tyr/Model/Qwen3ASR/StreamModel.lean`, `Tests/TestQwen3ASR.lean`
 - [x] `H22` Offline ASR now uses native bucketed batch collation/inference for single-chunk waveforms (`frames+seq` buckets), with fallback for non-collatable rows.
   Refs: `Tyr/Model/Qwen3ASR/Transcribe.lean`
 - [~] `H23` Added batched token decode extraction path to reduce host sync frequency in offline ASR bucketed decode; further streaming-path sync reductions remain open.

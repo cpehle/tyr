@@ -502,6 +502,49 @@ def testQwen3ASRStreamingTranscribeAndFinish : IO Unit := do
     "finish prompt should use max(1, len-k) rollback behavior"
 
 @[test]
+def testQwen3ASRStreamingPromptCacheLifecycle : IO Unit := do
+  let cfg := tinyCfg
+  let model ← Qwen3ASRForConditionalGeneration.init cfg
+  let tok := mkAsciiStreamingTokenizer
+  let pre := tinyPreprocessorCfg cfg.thinkerConfig.audioConfig.numMelBins 32
+  let chunkSec : Float := 2.0 / 16000.0
+  let st0 ← initStreamingState
+    cfg.supportLanguages
+    (context := "")
+    (language := some "English")
+    (unfixedChunkNum := 0)
+    (unfixedTokenNum := 1)
+    (chunkSizeSec := chunkSec)
+    (stepSizeSec := chunkSec)
+    (decodeMode := .fullAccumulation)
+
+  let (st1, cache1) ← streamingTranscribeWithModelCached
+    model
+    tok
+    pre
+    #[0.1, 0.2, 0.3, 0.4, 0.5]
+    st0
+    (maxNewTokens := 1)
+    (eosTokenIds := #[])
+  LeanTest.assertEqual st1.chunkId 2
+    "cached streaming decode should process the same chunk count as the uncached path"
+  LeanTest.assertTrue cache1.isSome
+    "cached streaming decode should return a reusable prompt cache after decoding chunks"
+
+  let (st2, cache2) ← finishStreamingTranscribeWithModelCached
+    model
+    tok
+    pre
+    st1
+    (prefixCache := cache1)
+    (maxNewTokens := 1)
+    (eosTokenIds := #[])
+  LeanTest.assertEqual st2.chunkId 3
+    "cached finish decode should process one additional tail chunk"
+  LeanTest.assertTrue cache2.isSome
+    "cached finish decode should keep returning prompt cache state"
+
+@[test]
 def testQwen3ASRTranscribeWavOffline : IO Unit := do
   if (← skipWavFrontendRegressionTest "testQwen3ASRTranscribeWavOffline") then
     return
@@ -1002,3 +1045,36 @@ def testQwen3ASRStreamModelPushAudioBoundsAccum : IO Unit := do
     "when hop threshold is not met, push should append audio into the streaming buffer"
   LeanTest.assertTrue (!out.didDecode)
     "push should not decode when hop threshold is not met"
+  LeanTest.assertTrue ss1.promptCache.isNone
+    "when no decode occurs, stream session should keep prompt cache unset"
+
+@[test]
+def testQwen3ASRStreamModelPersistsPromptCache : IO Unit := do
+  let cfg := tinyCfg
+  let model ← Qwen3ASRForConditionalGeneration.init cfg
+  let tok := mkAsciiStreamingTokenizer
+  let pre := tinyPreprocessorCfg cfg.thinkerConfig.audioConfig.numMelBins 32
+  let sm : StreamModel := {
+    cfg := cfg
+    model := model
+    tok := tok
+    preprocessor := pre
+    modelDir := "."
+  }
+  let chunkSec : Float := 2.0 / 16000.0
+  let ss0 ← newSession sm
+    (chunkSec := chunkSec)
+    (hopSec := chunkSec)
+    (decodeMode := .fullAccumulation)
+
+  let (ss1, out1) ← pushAudio sm ss0 #[0.1, 0.2] (maxNewTokens := 1)
+  LeanTest.assertTrue out1.didDecode
+    "push should decode when enough audio is buffered for one chunk"
+  LeanTest.assertTrue ss1.promptCache.isSome
+    "stream session should persist decoder prompt cache after first decode"
+
+  let (ss2, out2) ← pushAudio sm ss1 #[0.3, 0.4] (maxNewTokens := 1)
+  LeanTest.assertTrue out2.didDecode
+    "subsequent pushes should continue decoding at hop cadence"
+  LeanTest.assertTrue ss2.promptCache.isSome
+    "stream session should keep prompt cache between decode hops"
