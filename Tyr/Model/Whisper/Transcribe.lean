@@ -79,6 +79,10 @@ private structure WhisperDecodeCandidate where
   temperature : Float := 0.0
   deriving Inhabited
 
+private structure DecodeTokenRules where
+  forbiddenSpecial : Array UInt32 := #[]
+  deriving Inhabited
+
 private def normalizeLanguageCode (language : String) : String :=
   let l := language.trimAscii.toString.toLower
   if l.isEmpty then
@@ -103,6 +107,25 @@ private def languageTokenString (language : String) : String :=
 
 private def tokenIdByText? (tok : tokenizer.qwen3.QwenTokenizer) (text : String) : Option UInt32 :=
   tok.specialTokens.get? text <|> tok.tokenToId.get? text
+
+private def isTimestampSpecialToken (text : String) : Bool :=
+  text.startsWith "<|" && text.endsWith "|>" && text.contains '.'
+
+private def buildDecodeTokenRules
+    (tok : tokenizer.qwen3.QwenTokenizer)
+    (cfg : WhisperConfig)
+    (noTimestamps : Bool)
+    : DecodeTokenRules :=
+  Id.run do
+    let mut forbidden : Array UInt32 := #[]
+    for (id, text) in tok.idToSpecial.toList do
+      let isEos := id.toUInt64 == cfg.eosTokenId
+      let isTimestamp := isTimestampSpecialToken text
+      let allowSpecial :=
+        isEos || (!noTimestamps && isTimestamp)
+      if !allowSpecial then
+        forbidden := forbidden.push id
+    { forbiddenSpecial := forbidden }
 
 private def buildPromptIds
     (cfg : WhisperConfig)
@@ -253,14 +276,25 @@ private def composePromptIds
     (promptMaxLen : Nat)
     (contextLimit : Nat)
     (conditionOnPreviousText : Bool)
+    (prevTokenId : Option UInt32)
     : Array UInt32 :=
   if promptMaxLen <= basePrompt.size then
     basePrompt.extract 0 promptMaxLen
   else if !conditionOnPreviousText || rollingContext.isEmpty || contextLimit == 0 then
     basePrompt
   else
-    let ctxBudget := Nat.min contextLimit (promptMaxLen - basePrompt.size)
-    basePrompt ++ takeLast rollingContext ctxBudget
+    let room := promptMaxLen - basePrompt.size
+    let usePrev := prevTokenId.isSome && room > 0
+    let ctxRoom := if usePrev then room - 1 else room
+    let ctxBudget := Nat.min contextLimit ctxRoom
+    let ctx := takeLast rollingContext ctxBudget
+    Id.run do
+      let mut out : Array UInt32 := #[]
+      if usePrev then
+        if let some prev := prevTokenId then
+          out := out.push prev
+      out := out ++ ctx
+      out ++ basePrompt
 
 private def candidateNeedsFallback (opts : WhisperDecodeOptions) (cand : WhisperDecodeCandidate) : Bool :=
   let badCompression :=
@@ -291,6 +325,9 @@ private def buildInputIdsOnDevice
     else
       inputIdsCpu.to device
   pure ⟨seq, inputIds⟩
+
+private def isForbiddenToken (rules : DecodeTokenRules) (id : UInt32) : Bool :=
+  rules.forbiddenSpecial.contains id
 
 private def logProbsFromLogitsArray (logits : Array Float) : Array Float :=
   if logits.isEmpty then
@@ -372,21 +409,37 @@ private def filteredSamplingLogits {vocab : UInt64}
 private def argmaxTokenFromLogits {vocab : UInt64}
     (logits : T #[1, vocab])
     (fallback : UInt64)
+    (rules : DecodeTokenRules := {})
     : IO UInt32 := do
+  let kNat := Nat.max 1 (Nat.min 64 vocab.toNat)
+  let logProbs := logProbsFromLogitsArray (← data.tensorToFloatArray' (nn.eraseShape logits))
+  let topPairs := topKLogProbPairs logProbs kNat
+  for p in topPairs do
+    let id := p.1.toUInt32
+    if !(isForbiddenToken rules id) then
+      return id
   let nextTokRaw : T #[1] := nn.argmax logits 1
   let nextVals ← data.tensorToUInt64Array nextTokRaw
   pure (nextVals.getD 0 fallback).toUInt32
 
 private def sampleTokenFromLogits {vocab : UInt64}
     (logits : T #[1, vocab])
+    (rules : DecodeTokenRules := {})
+    (fallback : UInt64 := 0)
     : IO UInt32 := do
   let vals ← data.tensorToFloatArray' (nn.eraseShape logits)
   let probsVals := (logProbsFromLogitsArray vals).map Float.exp
   let probs : T #[1, vocab] := reshape (data.fromFloatArray probsVals) #[1, vocab]
-  let sampled ← nn.multinomial probs 1 false
-  let sampledFlat : T #[1] := reshape (nn.eraseShape sampled) #[1]
-  let sampledVals ← data.tensorToUInt64Array sampledFlat
-  pure (sampledVals.getD 0 0).toUInt32
+  let mut tries : Nat := 0
+  while tries < 8 do
+    let sampled ← nn.multinomial probs 1 false
+    let sampledFlat : T #[1] := reshape (nn.eraseShape sampled) #[1]
+    let sampledVals ← data.tensorToUInt64Array sampledFlat
+    let id := (sampledVals.getD 0 0).toUInt32
+    if !isForbiddenToken rules id then
+      return id
+    tries := tries + 1
+  argmaxTokenFromLogits logits fallback rules
 
 private partial def decodeLoop
     {cfg : WhisperConfig}
@@ -394,6 +447,7 @@ private partial def decodeLoop
     (model : WhisperForConditionalGeneration cfg)
     (encoderHidden : T #[1, encSeq, cfg.dModel])
     (noSpeechTokenId : Option UInt32)
+    (rules : DecodeTokenRules)
     (eosTokenId : UInt64)
     (temperature : Float)
     (topK : UInt64)
@@ -426,11 +480,16 @@ private partial def decodeLoop
             filteredSamplingLogits last temperature topK topP
           else
             last
+        let stepRules :=
+          if state.tokenCount == 0 then
+            { forbiddenSpecial := rules.forbiddenSpecial.push eosTokenId.toUInt32 }
+          else
+            rules
         let nextId ←
           if sample then
-            sampleTokenFromLogits distLogits
+            sampleTokenFromLogits distLogits stepRules eosTokenId
           else
-            argmaxTokenFromLogits last eosTokenId
+            argmaxTokenFromLogits last eosTokenId stepRules
         let tokLogprob ← tokenLogProbFromLogits distLogits nextId
         let nextIdU64 := nextId.toUInt64
         let generated' :=
@@ -454,6 +513,7 @@ private partial def decodeLoop
             model
             encoderHidden
             noSpeechTokenId
+            rules
             eosTokenId
             temperature
             topK
@@ -477,6 +537,7 @@ private def expandBeam
     (model : WhisperForConditionalGeneration cfg)
     (encoderHidden : T #[1, encSeq, cfg.dModel])
     (noSpeechTokenId : Option UInt32)
+    (rules : DecodeTokenRules)
     (eosTokenId : UInt64)
     (beamWidth : UInt64)
     (beam : BeamState)
@@ -497,10 +558,17 @@ private def expandBeam
     let logitsArr ← data.tensorToFloatArray' (nn.eraseShape last)
     let logProbs := logProbsFromLogitsArray logitsArr
     let topPairs := topKLogProbPairs logProbs kNat
+    let stepRules :=
+      if beam.tokenCount == 0 then
+        { forbiddenSpecial := rules.forbiddenSpecial.push eosTokenId.toUInt32 }
+      else
+        rules
     let mut out : Array BeamState := #[]
     for p in topPairs do
       let nextIdU64 := p.1.toUInt64
       let nextId := nextIdU64.toUInt32
+      if isForbiddenToken stepRules nextId then
+        continue
       let lp := p.2
       let generated' :=
         if nextIdU64 == eosTokenId then beam.generated else beam.generated.push nextId
@@ -525,6 +593,7 @@ private partial def beamDecodeLoop
     (model : WhisperForConditionalGeneration cfg)
     (encoderHidden : T #[1, encSeq, cfg.dModel])
     (noSpeechTokenId : Option UInt32)
+    (rules : DecodeTokenRules)
     (eosTokenId : UInt64)
     (beamWidth : UInt64)
     (remaining : Nat)
@@ -545,7 +614,7 @@ private partial def beamDecodeLoop
         if beam.finished then
           expanded := expanded.push beam
         else
-          expanded := expanded ++ (← expandBeam model encoderHidden noSpeechTokenId eosTokenId beamWidth beam)
+          expanded := expanded ++ (← expandBeam model encoderHidden noSpeechTokenId rules eosTokenId beamWidth beam)
       if expanded.isEmpty then
         pure beams
       else
@@ -555,6 +624,7 @@ private partial def beamDecodeLoop
           model
           encoderHidden
           noSpeechTokenId
+          rules
           eosTokenId
           beamWidth
           (remaining - 1)
@@ -567,6 +637,7 @@ private def decodeBeam
     (encoderHidden : T #[1, encSeq, cfg.dModel])
     (promptIds : Array UInt32)
     (noSpeechTokenId : Option UInt32)
+    (rules : DecodeTokenRules)
     (eosTokenId : UInt64)
     (beamWidth : UInt64)
     (remaining : Nat)
@@ -577,6 +648,7 @@ private def decodeBeam
       model
       encoderHidden
       noSpeechTokenId
+      rules
       eosTokenId
       beamWidth
       remaining
@@ -630,6 +702,7 @@ private def decodeAtTemperature
     (encoderHidden : T #[1, encSeq, cfg.dModel])
     (promptIds : Array UInt32)
     (noSpeechTokenId : Option UInt32)
+    (rules : DecodeTokenRules)
     (eosTokenId : UInt64)
     (maxNewTokens : Nat)
     (opts : WhisperDecodeOptions)
@@ -643,6 +716,7 @@ private def decodeAtTemperature
           encoderHidden
           promptIds
           noSpeechTokenId
+          rules
           eosTokenId
           opts.beamSize
           maxNewTokens
@@ -651,6 +725,7 @@ private def decodeAtTemperature
           model
           encoderHidden
           noSpeechTokenId
+          rules
           eosTokenId
           0.0
           opts.topK
@@ -668,6 +743,7 @@ private def decodeAtTemperature
           model
           encoderHidden
           noSpeechTokenId
+          rules
           eosTokenId
           temperature
           opts.topK
@@ -689,7 +765,9 @@ private partial def decodeWithFallbackLoop
     (tok : tokenizer.qwen3.QwenTokenizer)
     (encoderHidden : T #[1, encSeq, cfg.dModel])
     (promptIds : Array UInt32)
+    (promptIdsFallback : Array UInt32)
     (noSpeechTokenId : Option UInt32)
+    (rules : DecodeTokenRules)
     (eosTokenId : UInt64)
     (maxNewTokens : Nat)
     (opts : WhisperDecodeOptions)
@@ -703,8 +781,9 @@ private partial def decodeWithFallbackLoop
       model
       tok
       encoderHidden
-      promptIds
+      (if idx > 0 && opts.resetContextOnFallback then promptIdsFallback else promptIds)
       noSpeechTokenId
+      rules
       eosTokenId
       maxNewTokens
       opts
@@ -718,7 +797,9 @@ private partial def decodeWithFallbackLoop
       tok
       encoderHidden
       promptIds
+      promptIdsFallback
       noSpeechTokenId
+      rules
       eosTokenId
       maxNewTokens
       opts
@@ -735,7 +816,9 @@ private def decodeWithFallback
     (tok : tokenizer.qwen3.QwenTokenizer)
     (encoderHidden : T #[1, encSeq, cfg.dModel])
     (promptIds : Array UInt32)
+    (promptIdsFallback : Array UInt32)
     (noSpeechTokenId : Option UInt32)
+    (rules : DecodeTokenRules)
     (eosTokenId : UInt64)
     (maxNewTokens : Nat)
     (opts : WhisperDecodeOptions)
@@ -746,7 +829,9 @@ private def decodeWithFallback
     tok
     encoderHidden
     promptIds
+    promptIdsFallback
     noSpeechTokenId
+    rules
     eosTokenId
     maxNewTokens
     opts
@@ -785,12 +870,14 @@ def transcribeWav
   let wav16k ← normalizeAudioTo16kFromWav wavPath
   let frontendDevice := model.model.decoderTokenEmbedding.device
   let basePrompt := buildPromptIds cfg tok language noTimestamps
+  let rules := buildDecodeTokenRules tok cfg noTimestamps
   let maxTarget := cfg.maxTargetPositions.toNat
   if maxTarget <= basePrompt.size + 1 then
     throw <| IO.userError
       s!"Whisper max_target_positions={cfg.maxTargetPositions} is too small for base prompt size={basePrompt.size}"
   let maxNewCap := maxTarget - basePrompt.size - 1
-  let maxNewNat := Nat.max 1 (Nat.min maxNewTokens.toNat maxNewCap)
+  let requestedMaxNew := if maxNewTokens == 0 then maxNewCap else maxNewTokens.toNat
+  let maxNewNat := Nat.max 1 (Nat.min requestedMaxNew maxNewCap)
   let promptMaxLen := maxTarget - maxNewNat - 1
   let modelContextLimit := maxTarget / 2
   let userContextLimit :=
@@ -801,6 +888,7 @@ def transcribeWav
   let contextBudget := if promptMaxLen > basePrompt.size then promptMaxLen - basePrompt.size else 0
   let contextLimit := Nat.min contextBudget userContextLimit
   let noSpeechTokenId := tokenIdByText? tok "<|nospeech|>"
+  let prevTokenId := tokenIdByText? tok "<|startofprev|>"
   let cfgCapSec := whisperMaxChunkSeconds cfg pre
   let preChunkSec :=
     if pre.chunkLength == 0 then
@@ -846,13 +934,18 @@ def transcribeWav
           promptMaxLen
           contextLimit
           decodeOpts.conditionOnPreviousText
+          prevTokenId
+      let promptIdsFallback :=
+        if decodeOpts.resetContextOnFallback then basePrompt else promptIds
       let (cand, usedFallback) ←
         decodeWithFallback
           model
           tok
           encoderHidden
           promptIds
+          promptIdsFallback
           noSpeechTokenId
+          rules
           cfg.eosTokenId
           maxNewNat
           decodeOpts

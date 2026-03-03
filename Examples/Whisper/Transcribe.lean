@@ -8,7 +8,7 @@ structure Args where
   modelDir : String := "weights/whisper-tiny"
   wavPath : String := "MLKDream.wav"
   language : String := "en"
-  maxNewTokens : UInt64 := 128
+  maxNewTokens : UInt64 := 0
   noTimestamps : Bool := false
   beamSize : UInt64 := 5
   bestOf : UInt64 := 5
@@ -106,7 +106,7 @@ private partial def parseArgsLoop (xs : List String) (acc : Args) : IO Args := d
       IO.println "  --source <path>          Alias for --model-dir"
       IO.println "  --wav-path <path>        WAV file path"
       IO.println "  --language <code>        Language code/name (default: en)"
-      IO.println "  --max-new-tokens <n>     Max generated decoder tokens (default: 128)"
+      IO.println "  --max-new-tokens <n>     Max generated decoder tokens (default: 0 = model max)"
       IO.println "  --beam-size <n>          Beam size at temperature=0 (default: 5)"
       IO.println "  --best-of <n>            Best-of samples at temperature>0 (default: 5)"
       IO.println "  --temperature <x>        Initial decoding temperature (default: 0.0)"
