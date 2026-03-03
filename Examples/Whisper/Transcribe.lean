@@ -5,7 +5,7 @@ open torch.whisper
 namespace Examples.Whisper
 
 structure Args where
-  modelDir : String := "weights/whisper-tiny"
+  modelDir : String := "weights/whisper-base.en"
   wavPath : String := "MLKDream.wav"
   language : String := "en"
   maxNewTokens : UInt64 := 0
