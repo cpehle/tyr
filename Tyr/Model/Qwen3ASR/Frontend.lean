@@ -657,7 +657,11 @@ def wavToWhisperFeatures
     (path : String)
     : IO (WhisperFrontendOutput cfg.featureSize (PreprocessorConfig.expectedFrames cfg)) := do
   let (sr, wav) ← loadMonoPcm16Wav path
-  let wavTarget ← data.resampleSoxrHQ wav sr cfg.samplingRate
+  let wavTarget ←
+    if sr == cfg.samplingRate || sr == 0 || cfg.samplingRate == 0 then
+      pure wav
+    else
+      data.resampleSoxrHQ wav sr cfg.samplingRate
   waveformToWhisperFeatures cfg wavTarget
 
 /-- Dynamic-length WAV frontend path.
@@ -669,7 +673,11 @@ def wavToWhisperFeaturesDynamic
     (maxSeconds : Option Float := none)
     : IO (Sigma (fun frames => WhisperFrontendOutput cfg.featureSize frames)) := do
   let (sr, wav) ← loadMonoPcm16Wav path
-  let wavTarget ← data.resampleSoxrHQ wav sr cfg.samplingRate
+  let wavTarget ←
+    if sr == cfg.samplingRate || sr == 0 || cfg.samplingRate == 0 then
+      pure wav
+    else
+      data.resampleSoxrHQ wav sr cfg.samplingRate
   waveformToWhisperFeaturesDynamic cfg wavTarget minSeconds maxSeconds
 
 /-- Backward-compatible convenience wrapper.
@@ -695,7 +703,10 @@ def fullFeatureAttentionMask {frames : UInt64} : T #[1, frames] :=
 def normalizeAudioTo16kFromWav (path : String) : IO (Array Float) := do
   let path ← expandHome path
   let (sr, wav) ← loadMonoPcm16Wav path
-  pure (normalizeFloatRange (← data.resampleSoxrHQ wav sr 16000))
+  if sr == 16000 || sr == 0 then
+    pure (normalizeFloatRange wav)
+  else
+    pure (normalizeFloatRange (← data.resampleSoxrHQ wav sr 16000))
 
 /-- Normalize one unified audio input into mono 16k float waveform in `[-1, 1]`.
     URL/base64 paths currently decode via WAV PCM16 loader after materialization. -/

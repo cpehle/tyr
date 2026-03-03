@@ -55,6 +55,12 @@ Status legend:
   Refs: `Tyr/Model/Qwen3ASR/Transcribe.lean`, `Tyr/Model/Qwen3ASR/Model.lean`, `../Qwen3-ASR/qwen_asr/inference/qwen3_asr.py`
 - [x] `H20` Reconcile streaming decode semantics with upstream (full-accumulation chunk decode) or make behavior-selectable to reduce long-utterance parity drift.
   Refs: `Tyr/Model/Qwen3ASR/Streaming.lean`, `../Qwen3-ASR/qwen_asr/inference/qwen3_asr.py`
+- [ ] `H21` Add true streaming incremental-cache decode path for ASR (audio/text cache reuse per hop) to avoid full recompute each streaming step.
+  Refs: `Tyr/Model/Qwen3ASR/StreamModel.lean`, `Tyr/Model/Qwen3ASR/Streaming.lean`, `Tyr/Model/Qwen3ASR/Model.lean`
+- [ ] `H22` Add native batch collation/inference path for offline ASR (batched prompt/audio tensors) instead of per-item decode loops.
+  Refs: `Tyr/Model/Qwen3ASR/Transcribe.lean`, `Tyr/Model/Qwen3ASR/Model.lean`
+- [ ] `H23` Reduce ASR host-device sync overhead in decode hot paths (`tensorToUInt64Array` usage around per-step token handling).
+  Refs: `Tyr/Model/Qwen3ASR/Transcribe.lean`, `Tyr/Model/Qwen3ASR/Streaming.lean`
 
 
 ### Medium
@@ -68,6 +74,12 @@ Status legend:
   Refs: `Tyr/Model/Qwen3ASR/ForcedAligner.lean`, `../Qwen3-ASR/qwen_asr/inference/qwen3_forced_aligner.py`
 - [x] `M20` Reduce ASR prompt-template drift risk by deriving prompt construction from processor/chat-template semantics instead of hardcoded template strings.
   Refs: `Tyr/Model/Qwen3ASR/Streaming.lean`, `../Qwen3-ASR/qwen_asr/inference/qwen3_asr.py`
+- [x] `M21` Avoid duplicate ASR frontend extraction in separate-aligner timestamp flow by reusing decode frontend features when preprocessors are compatible.
+  Refs: `Tyr/Model/Qwen3ASR/Transcribe.lean`
+- [x] `M22` Skip no-op audio resampling in ASR frontend/normalization paths when source sample rate already matches target sample rate.
+  Refs: `Tyr/Model/Qwen3ASR/Frontend.lean`
+- [x] `M23` Reduce long-audio chunk-boundary scan overhead in non-timestamp ASR by tightening silence-search window and supporting zero-window fast path.
+  Refs: `Tyr/Model/Qwen3ASR/Transcribe.lean`
 
 ### Low
 - [ ] `L03` Expose direct speaker-name selection in CLI from loaded speaker maps.
@@ -76,6 +88,8 @@ Status legend:
   Refs: `Examples/Qwen3TTS/EndToEnd.lean`, `Tyr/Model/Qwen3TTS/Streaming.lean`
 - [x] `L05` Add ASR batch-throughput control parity (`max_inference_batch_size` style chunking knob) for large batch transcription/alignment workloads.
   Refs: `Tyr/Model/Qwen3ASR/Transcribe.lean`, `../Qwen3-ASR/qwen_asr/inference/qwen3_asr.py`
+- [ ] `L06` Remove URL/base64 temp-file materialization from ASR normalization by adding in-memory decode frontend path.
+  Refs: `Tyr/Model/Qwen3ASR/Frontend.lean`
 
 
 ## Completed (This Pass)
@@ -158,6 +172,12 @@ Status legend:
   Refs: `Tyr/Model/Qwen3ASR/Processor.lean`, `Tyr/Model/Qwen3ASR/Streaming.lean`
 - [x] `L05` Added `maxInferenceBatchSize` chunking knobs across ASR transcription and forced-aligner batch entrypoints.
   Refs: `Tyr/Model/Qwen3ASR/Transcribe.lean`, `Examples/Qwen3ASR/Transcribe.lean`
+- [x] `M21` Separate-aligner timestamp path now reuses ASR frontend features when preprocessor settings are compatible, avoiding a duplicate mel extraction pass.
+  Refs: `Tyr/Model/Qwen3ASR/Transcribe.lean`
+- [x] `M22` ASR frontend/normalization now skips expensive resample calls when source and target sample rates already match.
+  Refs: `Tyr/Model/Qwen3ASR/Frontend.lean`
+- [x] `M23` Non-timestamp long-audio ASR now uses a smaller boundary-search window and supports a no-search cut fast path for chunk splitting.
+  Refs: `Tyr/Model/Qwen3ASR/Transcribe.lean`
 
 ## Imported From `qwen_review_issues_2026-02-28`
 

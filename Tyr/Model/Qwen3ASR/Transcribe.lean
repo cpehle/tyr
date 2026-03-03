@@ -103,7 +103,7 @@ private def splitAudioIntoChunks
         let maxLenRaw := ((maxChunkSec * srNat.toFloat) + 0.5).toUInt64.toNat
         let maxLen := if maxLenRaw == 0 then 1 else maxLenRaw
         let expandRaw := ((searchExpandSec * srNat.toFloat) + 0.5).toUInt64.toNat
-        let expand := if expandRaw == 0 then 1 else expandRaw
+        let expand := expandRaw
         let winRaw := (((minWindowMs / 1000.0) * srNat.toFloat) + 0.5).toUInt64.toNat
         let win := Nat.max 4 winRaw
 
@@ -113,10 +113,10 @@ private def splitAudioIntoChunks
 
         while (totalLen - start) > maxLen do
           let cut := start + maxLen
-          let left := Nat.max start (cut - expand)
-          let right := Nat.min totalLen (cut + expand)
+          let left := if expand == 0 then cut else Nat.max start (cut - expand)
+          let right := if expand == 0 then cut else Nat.min totalLen (cut + expand)
           let boundary0 :=
-            if right - left <= win then
+            if expand == 0 || right <= left || right - left <= win then
               cut
             else
               Id.run do
@@ -159,6 +159,19 @@ private def mergeChunkTexts (parts : Array String) : String := Id.run do
   for p in parts do
     out := out ++ p
   out
+
+/-- Preprocessor compatibility check for reusing computed frontend features
+    between ASR decode and standalone forced-aligner timestamp pass. -/
+private def isFrontendReuseCompatible
+    (base : PreprocessorConfig)
+    (align : PreprocessorConfig)
+    : Bool :=
+  base.featureSize == align.featureSize &&
+  base.samplingRate == align.samplingRate &&
+  base.hopLength == align.hopLength &&
+  base.nFft == align.nFft &&
+  base.doNormalize == align.doNormalize &&
+  base.dither == align.dither
 
 private def modelDevice {cfg : Qwen3ASRConfig}
     (model : Qwen3ASRForConditionalGeneration cfg) : Device :=
@@ -290,6 +303,7 @@ private def maybeAlignTimestamps
     {cfg : Qwen3ASRConfig}
     (model : Qwen3ASRForConditionalGeneration cfg)
     (tok : tokenizer.qwen3.QwenTokenizer)
+    (preprocessor : PreprocessorConfig)
     (forcedAligner : Option Qwen3ForcedAligner := none)
     (text : String)
     (language : String)
@@ -306,7 +320,10 @@ private def maybeAlignTimestamps
   else
     match forcedAligner with
     | some aligner =>
-        alignSingleWithForcedAligner aligner audio16k text language
+        if isFrontendReuseCompatible preprocessor aligner.preprocessor then
+          alignSingleWithModel aligner.model aligner.tok text language frontendOut audioLen
+        else
+          alignSingleWithForcedAligner aligner audio16k text language
     | none =>
       if !ThinkerConfig.isForcedAligner cfg.thinkerConfig then
         throw <| IO.userError
@@ -318,6 +335,7 @@ private def transcribeWithFrontend
     {cfg : Qwen3ASRConfig}
     (model : Qwen3ASRForConditionalGeneration cfg)
     (tok : tokenizer.qwen3.QwenTokenizer)
+    (preprocessor : PreprocessorConfig)
     (forcedAligner : Option Qwen3ForcedAligner := none)
     (audio16k : Array Float)
     {melBins frames : UInt64}
@@ -351,7 +369,7 @@ private def transcribeWithFrontend
   let rawDecoded ← decodeGeneratedText tok (seq := seq) outSeq outIds
   let (lang, txt) := parseAsrOutput rawDecoded forceLanguage
   let timeStamps ← maybeAlignTimestamps
-    model tok forcedAligner txt lang audio16k frontendOut audioLen returnTimeStamps
+    model tok preprocessor forcedAligner txt lang audio16k frontendOut audioLen returnTimeStamps
   pure { language := lang, text := txt, timeStamps := timeStamps }
 
 /-- Offline ASR for one in-memory 16k mono waveform. -/
@@ -369,7 +387,9 @@ def transcribeWaveform
     (eosTokenIds : Array UInt64 := defaultEosTokenIds)
     : IO ASRTranscription := do
   let maxChunkSec := if returnTimeStamps then maxForceAlignInputSeconds else maxAsrInputSeconds
-  let chunks := splitAudioIntoChunks audio16k sampleRate16k maxChunkSec
+  -- In non-timestamp mode, reduce boundary search window to lower CPU cost on long audios.
+  let searchExpandSec := if returnTimeStamps then 5.0 else 1.0
+  let chunks := splitAudioIntoChunks audio16k sampleRate16k maxChunkSec (searchExpandSec := searchExpandSec)
 
   let mut langs : Array String := #[]
   let mut texts : Array String := #[]
@@ -385,7 +405,7 @@ def transcribeWaveform
     let _frames := frontendPack.1
     let frontendOut := frontendPack.2
     let r ← transcribeWithFrontend
-      model tok forcedAligner chunkWav frontendOut context language returnTimeStamps maxNewTokens eosTokenIds
+      model tok preprocessor forcedAligner chunkWav frontendOut context language returnTimeStamps maxNewTokens eosTokenIds
     langs := langs.push r.language
     texts := texts.push r.text
     if returnTimeStamps then
