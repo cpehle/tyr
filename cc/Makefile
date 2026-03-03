@@ -47,6 +47,7 @@ RMPATH := rm -rf
 AR := ar
 CXX := c++
 NVCC ?= nvcc
+HAS_NVCC := $(shell command -v $(NVCC) >/dev/null 2>&1 && echo 1 || echo 0)
 CXX_STD ?= c++20
 CXX_STD_FLAG := --std=$(CXX_STD)
 EXTRA_CXX_FLAGS := -fPIC -O3 -Wall -Wno-sign-compare \
@@ -114,6 +115,13 @@ else
 APPLE_FRAMEWORK_FLAGS :=
 endif
 CU_SRCS := $(wildcard $(SRC_DIR)/generated/*.cu)
+ifneq ($(HAS_NVCC),1)
+ifneq ($(strip $(CU_SRCS)),)
+$(warning NVCC not found; disabling CUDA kernel compilation and using CPU stubs)
+endif
+CU_SRCS :=
+SRCS += tyr_gpu_kernel_stubs.cpp
+endif
 
 LIB_NAME := TyrC
 LIB := lib${LIB_NAME}.a

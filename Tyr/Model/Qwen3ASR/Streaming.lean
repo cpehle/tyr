@@ -1044,26 +1044,27 @@ def decodeStreamingChunkWithModelStateCached
           pure (audioValid, nextAudioCache)
 
       let inputsEmbeds0 : T #[1, seq, cfg.thinkerConfig.textConfig.hiddenSize] := model.thinker.embedText inputIds
-      let inputsEmbeds : T #[1, seq, cfg.thinkerConfig.textConfig.hiddenSize] :=
+      let inputsEmbeds : T #[1, seq, cfg.thinkerConfig.textConfig.hiddenSize] ←
         if audioLen == 0 then
-          inputsEmbeds0
+          pure inputsEmbeds0
         else
           match findSingleContiguousAudioSpanStart promptIds cfg.thinkerConfig.audioTokenId.toUInt32 audioLen with
           | some spanStart =>
             if spanStart + audioLen > seq then
               throw <| IO.userError
                 s!"decodeStreamingChunkWithModel placeholder span overflow: start={spanStart}, audio_len={audioLen}, seq={seq}"
-            let prefix : T #[1, spanStart, cfg.thinkerConfig.textConfig.hiddenSize] :=
-              data.slice inputsEmbeds0 1 0 spanStart
-            let suffixStart := spanStart + audioLen
-            let suffixLen := seq - suffixStart
-            let suffix : T #[1, suffixLen, cfg.thinkerConfig.textConfig.hiddenSize] :=
-              data.slice inputsEmbeds0 1 suffixStart suffixLen
-            let mergedDyn : T #[] :=
-              nn.cat_dyn
-                #[nn.eraseShape prefix, nn.eraseShape audioEmbedsValid, nn.eraseShape suffix]
-                1
-            reshape mergedDyn #[1, seq, cfg.thinkerConfig.textConfig.hiddenSize]
+            else do
+              let prefixEmbeds : T #[1, spanStart, cfg.thinkerConfig.textConfig.hiddenSize] :=
+                data.slice inputsEmbeds0 1 0 spanStart
+              let suffixStart := spanStart + audioLen
+              let suffixLen := seq - suffixStart
+              let suffixEmbeds : T #[1, suffixLen, cfg.thinkerConfig.textConfig.hiddenSize] :=
+                data.slice inputsEmbeds0 1 suffixStart suffixLen
+              let mergedDyn : T #[] :=
+                nn.cat_dyn
+                  #[nn.eraseShape prefixEmbeds, nn.eraseShape audioEmbedsValid, nn.eraseShape suffixEmbeds]
+                  1
+              pure (reshape mergedDyn #[1, seq, cfg.thinkerConfig.textConfig.hiddenSize])
           | none =>
             throw <| IO.userError
               s!"decodeStreamingChunkWithModel expected one contiguous audio-token span of length {audioLen}, but prompt ids were not span-compatible"
