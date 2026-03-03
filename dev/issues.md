@@ -88,7 +88,7 @@ Status legend:
   Refs: `Examples/Qwen3TTS/EndToEnd.lean`, `Tyr/Model/Qwen3TTS/Streaming.lean`
 - [x] `L05` Add ASR batch-throughput control parity (`max_inference_batch_size` style chunking knob) for large batch transcription/alignment workloads.
   Refs: `Tyr/Model/Qwen3ASR/Transcribe.lean`, `../Qwen3-ASR/qwen_asr/inference/qwen3_asr.py`
-- [ ] `L06` Remove URL/base64 temp-file materialization from ASR normalization by adding in-memory decode frontend path.
+- [~] `L06` Remove URL/base64 temp-file materialization from ASR normalization by adding in-memory decode frontend path.
   Refs: `Tyr/Model/Qwen3ASR/Frontend.lean`
 
 
@@ -182,6 +182,10 @@ Status legend:
   Refs: `Tyr/Model/Qwen3ASR/Transcribe.lean`
 - [~] `H23` Added batched token decode extraction path to reduce host sync frequency in offline ASR bucketed decode; further streaming-path sync reductions remain open.
   Refs: `Tyr/Model/Qwen3ASR/Transcribe.lean`, `Tyr/Model/Qwen3ASR/Streaming.lean`
+- [~] `H23` Reduced scalar sync overhead by switching per-sample valid-frame extraction from `tensorToUInt64Array` to `nn.item` in both offline and streaming decode paths.
+  Refs: `Tyr/Model/Qwen3ASR/Transcribe.lean`, `Tyr/Model/Qwen3ASR/Streaming.lean`
+- [~] `L06` Base64 ASR input path now decodes WAV directly in-memory (no temp file); URL path still uses temp-file materialization pending in-memory download path.
+  Refs: `Tyr/Model/Qwen3ASR/Frontend.lean`
 
 ## Imported From `qwen_review_issues_2026-02-28`
 

@@ -262,8 +262,7 @@ private def extractAudioLenFromFeatureMask {cfg : Qwen3ASRConfig} {frames : UInt
     (featureAttentionMask : T #[1, frames])
     : IO UInt64 := do
   let validFramesTensor : T #[1] := nn.sumDim (data.toLong featureAttentionMask) 1 false
-  let validFramesArr ← data.tensorToUInt64Array validFramesTensor
-  let validFrames := validFramesArr.getD 0 0
+  let validFrames := (nn.item validFramesTensor).toUInt64
   let audioLenRaw := AudioEncoderConfig.featExtractOutputLength validFrames
   let audioLenCap := AudioEncoderConfig.framesAfterConv3 cfg.thinkerConfig.audioConfig frames
   pure (if audioLenRaw <= audioLenCap then audioLenRaw else audioLenCap)

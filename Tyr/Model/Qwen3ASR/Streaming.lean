@@ -464,8 +464,7 @@ def decodeStreamingChunkWithModel
     let frames := frontendPack.1
     let frontendOut := frontendPack.2
     let validFramesTensor : T #[1] := nn.sumDim (data.toLong frontendOut.featureAttentionMask) 1 false
-    let validFramesArr ← data.tensorToUInt64Array validFramesTensor
-    let validFrames := validFramesArr.getD 0 0
+    let validFrames := (nn.item validFramesTensor).toUInt64
     let audioLenRaw := AudioEncoderConfig.featExtractOutputLength validFrames
     let audioLenCap :=
       AudioEncoderConfig.framesAfterConv3
