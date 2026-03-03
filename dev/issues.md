@@ -63,8 +63,8 @@ Status legend:
   Refs: `Tyr/Model/Qwen3ASR/StreamModel.lean`, `Tyr/Model/Qwen3ASR/Streaming.lean`, `Tyr/Model/Qwen3ASR/Model.lean`
 - [x] `H22` Add native batch collation/inference path for offline ASR (batched prompt/audio tensors) instead of per-item decode loops.
   Refs: `Tyr/Model/Qwen3ASR/Transcribe.lean`, `Tyr/Model/Qwen3ASR/Model.lean`
-- [~] `H23` Reduce ASR host-device sync overhead in decode hot paths (`tensorToUInt64Array` usage around per-step token handling).
-  Refs: `Tyr/Model/Qwen3ASR/Transcribe.lean`, `Tyr/Model/Qwen3ASR/Streaming.lean`
+- [x] `H23` Reduce ASR host-device sync overhead in decode hot paths by keeping per-step EOS/finished-row handling on-device (no per-token `tensorToUInt64Array` round-trips in greedy loops).
+  Refs: `Tyr/Model/Qwen3ASR/Model.lean`, `Tyr/Model/Qwen3ASR/Transcribe.lean`, `Tyr/Model/Qwen3ASR/Streaming.lean`
 - [x] `H24` Add append-only prompt-token cache for ASR streaming decode to avoid full prompt tokenization each hop.
   Refs: `Tyr/Model/Qwen3ASR/Streaming.lean`
 - [x] `H25` Add audio-encoder prefix cache reuse in ASR full-accumulation streaming decode to avoid re-encoding unchanged prefix frames.
@@ -192,10 +192,12 @@ Status legend:
   Refs: `Tyr/Model/Qwen3ASR/Model.lean`, `Tyr/Model/Qwen3ASR/Streaming.lean`, `Tyr/Model/Qwen3ASR/StreamModel.lean`, `Tests/TestQwen3ASR.lean`
 - [x] `H22` Offline ASR now uses native bucketed batch collation/inference for single-chunk waveforms (`frames+seq` buckets), with fallback for non-collatable rows.
   Refs: `Tyr/Model/Qwen3ASR/Transcribe.lean`
-- [~] `H23` Added batched token decode extraction path to reduce host sync frequency in offline ASR bucketed decode; further streaming-path sync reductions remain open.
+- [x] `H23` Added batched token decode extraction path to reduce host sync frequency in offline ASR bucketed decode.
   Refs: `Tyr/Model/Qwen3ASR/Transcribe.lean`, `Tyr/Model/Qwen3ASR/Streaming.lean`
-- [~] `H23` Reduced scalar sync overhead by switching per-sample valid-frame extraction from `tensorToUInt64Array` to `nn.item` in both offline and streaming decode paths.
+- [x] `H23` Reduced scalar sync overhead by switching per-sample valid-frame extraction from `tensorToUInt64Array` to `nn.item` in both offline and streaming decode paths.
   Refs: `Tyr/Model/Qwen3ASR/Transcribe.lean`, `Tyr/Model/Qwen3ASR/Streaming.lean`
+- [x] `H23` ASR greedy decode loops now run EOS/finished-row masking fully on-device (cached + uncached + prompt-cache decode), removing per-step host token pulls in generation hot paths.
+  Refs: `Tyr/Model/Qwen3ASR/Model.lean`
 - [x] `H24` Added append-only prompt tokenization cache (`StreamingPromptTokenCache`) so streaming decode can reuse encoded prompt prefixes and only tokenize suffix deltas.
   Refs: `Tyr/Model/Qwen3ASR/Streaming.lean`
 - [x] `H25` Added full-accumulation audio encoder prefix reuse cache (`StreamingAudioEncoderCache`) and tail-only audio projection updates in streaming decode.
