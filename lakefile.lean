@@ -367,6 +367,12 @@ lean_exe Qwen3ASRTranscribe where
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
+/-- Offline Whisper transcription demo (native Tyr encoder-decoder implementation). -/
+lean_exe WhisperTranscribe where
+  root := `Examples.Whisper.Transcribe
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
 /-- Qwen3.5 model loader/generation demo with HF repo-id resolution. -/
 lean_exe Qwen35RunHF where
   root := `Examples.Qwen35.RunHF

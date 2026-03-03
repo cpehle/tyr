@@ -1,0 +1,172 @@
+/-
+  Tyr/Model/Whisper/Weights.lean
+
+  Pretrained weight loading for native Whisper model in Tyr.
+-/
+import Tyr.Torch
+import Tyr.TensorStruct
+import Tyr.Model.Whisper.Model
+
+namespace torch.whisper
+
+private def reqGradFalse {s : Shape} (t : T s) : T s :=
+  autograd.set_requires_grad (toFloat' t) false
+
+private def tryLoadTensorSharded (modelDir : String) (name : String) (s : Shape)
+    : IO (Option (T s)) := do
+  try
+    pure (some (← safetensors.loadTensorSharded modelDir name s))
+  catch _ =>
+    pure none
+
+private def loadLayerNormSharded (modelDir : String) (namePrefix : String) (dim : UInt64) (eps : Float)
+    : IO (LayerNorm dim) := do
+  let weight ← safetensors.loadTensorSharded modelDir s!"{namePrefix}.weight" #[dim]
+  let bias ← safetensors.loadTensorSharded modelDir s!"{namePrefix}.bias" #[dim]
+  pure { weight := reqGradFalse weight, bias := reqGradFalse bias, eps := ⟨eps⟩ }
+
+private def loadAttentionSharded
+    (modelDir : String)
+    (namePrefix : String)
+    (dModel nHeads : UInt64)
+    : IO (WhisperAttention dModel nHeads) := do
+  let qProjWeight ← safetensors.loadTensorSharded modelDir s!"{namePrefix}.q_proj.weight" #[dModel, dModel]
+  let qProjBias ← safetensors.loadTensorSharded modelDir s!"{namePrefix}.q_proj.bias" #[dModel]
+  let kProjWeight ← safetensors.loadTensorSharded modelDir s!"{namePrefix}.k_proj.weight" #[dModel, dModel]
+  let kProjBias ← safetensors.loadTensorSharded modelDir s!"{namePrefix}.k_proj.bias" #[dModel]
+  let vProjWeight ← safetensors.loadTensorSharded modelDir s!"{namePrefix}.v_proj.weight" #[dModel, dModel]
+  let vProjBias ← safetensors.loadTensorSharded modelDir s!"{namePrefix}.v_proj.bias" #[dModel]
+  let outProjWeight ← safetensors.loadTensorSharded modelDir s!"{namePrefix}.out_proj.weight" #[dModel, dModel]
+  let outProjBias ← safetensors.loadTensorSharded modelDir s!"{namePrefix}.out_proj.bias" #[dModel]
+  pure {
+    qProjWeight := reqGradFalse qProjWeight
+    qProjBias := reqGradFalse qProjBias
+    kProjWeight := reqGradFalse kProjWeight
+    kProjBias := reqGradFalse kProjBias
+    vProjWeight := reqGradFalse vProjWeight
+    vProjBias := reqGradFalse vProjBias
+    outProjWeight := reqGradFalse outProjWeight
+    outProjBias := reqGradFalse outProjBias
+  }
+
+private def loadEncoderLayerSharded (modelDir : String) (layerIdx : UInt64) (cfg : WhisperConfig)
+    : IO (WhisperEncoderLayer cfg) := do
+  let p := s!"model.encoder.layers.{layerIdx}"
+  let selfAttn ← loadAttentionSharded modelDir s!"{p}.self_attn" cfg.dModel cfg.encoderAttentionHeads
+  let selfAttnLayerNorm ← loadLayerNormSharded modelDir s!"{p}.self_attn_layer_norm" cfg.dModel cfg.layerNormEps
+  let fc1Weight ← safetensors.loadTensorSharded modelDir s!"{p}.fc1.weight" #[cfg.encoderFfnDim, cfg.dModel]
+  let fc1Bias ← safetensors.loadTensorSharded modelDir s!"{p}.fc1.bias" #[cfg.encoderFfnDim]
+  let fc2Weight ← safetensors.loadTensorSharded modelDir s!"{p}.fc2.weight" #[cfg.dModel, cfg.encoderFfnDim]
+  let fc2Bias ← safetensors.loadTensorSharded modelDir s!"{p}.fc2.bias" #[cfg.dModel]
+  let finalLayerNorm ← loadLayerNormSharded modelDir s!"{p}.final_layer_norm" cfg.dModel cfg.layerNormEps
+  pure {
+    selfAttn
+    selfAttnLayerNorm
+    fc1Weight := reqGradFalse fc1Weight
+    fc1Bias := reqGradFalse fc1Bias
+    fc2Weight := reqGradFalse fc2Weight
+    fc2Bias := reqGradFalse fc2Bias
+    finalLayerNorm
+  }
+
+private def loadDecoderLayerSharded (modelDir : String) (layerIdx : UInt64) (cfg : WhisperConfig)
+    : IO (WhisperDecoderLayer cfg) := do
+  let p := s!"model.decoder.layers.{layerIdx}"
+  let selfAttn ← loadAttentionSharded modelDir s!"{p}.self_attn" cfg.dModel cfg.decoderAttentionHeads
+  let selfAttnLayerNorm ← loadLayerNormSharded modelDir s!"{p}.self_attn_layer_norm" cfg.dModel cfg.layerNormEps
+  let encoderAttn ← loadAttentionSharded modelDir s!"{p}.encoder_attn" cfg.dModel cfg.decoderAttentionHeads
+  let encoderAttnLayerNorm ← loadLayerNormSharded modelDir s!"{p}.encoder_attn_layer_norm" cfg.dModel cfg.layerNormEps
+  let fc1Weight ← safetensors.loadTensorSharded modelDir s!"{p}.fc1.weight" #[cfg.decoderFfnDim, cfg.dModel]
+  let fc1Bias ← safetensors.loadTensorSharded modelDir s!"{p}.fc1.bias" #[cfg.decoderFfnDim]
+  let fc2Weight ← safetensors.loadTensorSharded modelDir s!"{p}.fc2.weight" #[cfg.dModel, cfg.decoderFfnDim]
+  let fc2Bias ← safetensors.loadTensorSharded modelDir s!"{p}.fc2.bias" #[cfg.dModel]
+  let finalLayerNorm ← loadLayerNormSharded modelDir s!"{p}.final_layer_norm" cfg.dModel cfg.layerNormEps
+  pure {
+    selfAttn
+    selfAttnLayerNorm
+    encoderAttn
+    encoderAttnLayerNorm
+    fc1Weight := reqGradFalse fc1Weight
+    fc1Bias := reqGradFalse fc1Bias
+    fc2Weight := reqGradFalse fc2Weight
+    fc2Bias := reqGradFalse fc2Bias
+    finalLayerNorm
+  }
+
+private def loadModelSharded (modelDir : String) (cfg : WhisperConfig) : IO (WhisperModel cfg) := do
+  let encoderConv1Weight ← safetensors.loadTensorSharded modelDir "model.encoder.conv1.weight" #[cfg.dModel, cfg.numMelBins, 3]
+  let encoderConv1Bias ← safetensors.loadTensorSharded modelDir "model.encoder.conv1.bias" #[cfg.dModel]
+  let encoderConv2Weight ← safetensors.loadTensorSharded modelDir "model.encoder.conv2.weight" #[cfg.dModel, cfg.dModel, 3]
+  let encoderConv2Bias ← safetensors.loadTensorSharded modelDir "model.encoder.conv2.bias" #[cfg.dModel]
+  let encoderPositionalEmbedding ←
+    safetensors.loadTensorSharded modelDir "model.encoder.embed_positions.weight" #[cfg.maxSourcePositions, cfg.dModel]
+
+  let mut encoderLayers : Array (WhisperEncoderLayer cfg) := #[]
+  for i in [:cfg.encoderLayers.toNat] do
+    encoderLayers := encoderLayers.push (← loadEncoderLayerSharded modelDir i.toUInt64 cfg)
+  let encoderLayerNorm ← loadLayerNormSharded modelDir "model.encoder.layer_norm" cfg.dModel cfg.layerNormEps
+
+  let decoderTokenEmbedding ←
+    safetensors.loadTensorSharded modelDir "model.decoder.embed_tokens.weight" #[cfg.vocabSize, cfg.dModel]
+  let decoderPositionalEmbedding ←
+    safetensors.loadTensorSharded modelDir "model.decoder.embed_positions.weight" #[cfg.maxTargetPositions, cfg.dModel]
+
+  let mut decoderLayers : Array (WhisperDecoderLayer cfg) := #[]
+  for i in [:cfg.decoderLayers.toNat] do
+    decoderLayers := decoderLayers.push (← loadDecoderLayerSharded modelDir i.toUInt64 cfg)
+  let decoderLayerNorm ← loadLayerNormSharded modelDir "model.decoder.layer_norm" cfg.dModel cfg.layerNormEps
+
+  pure {
+    encoderConv1Weight := reqGradFalse encoderConv1Weight
+    encoderConv1Bias := reqGradFalse encoderConv1Bias
+    encoderConv2Weight := reqGradFalse encoderConv2Weight
+    encoderConv2Bias := reqGradFalse encoderConv2Bias
+    encoderPositionalEmbedding := reqGradFalse encoderPositionalEmbedding
+    encoderLayers
+    encoderLayerNorm
+    decoderTokenEmbedding := reqGradFalse decoderTokenEmbedding
+    decoderPositionalEmbedding := reqGradFalse decoderPositionalEmbedding
+    decoderLayers
+    decoderLayerNorm
+  }
+
+namespace WhisperForConditionalGeneration
+
+private def resolveWhisperDevice : IO Device := do
+  let requested := (← IO.getEnv "TYR_DEVICE").map String.toLower
+  match requested with
+  | some "cpu" => pure Device.CPU
+  | some "cuda" =>
+    if ← cuda_is_available then
+      pure (Device.CUDA 0)
+    else
+      IO.eprintln "TYR_DEVICE=cuda requested but CUDA is unavailable; falling back to auto."
+      getBestDevice
+  | some "mps" =>
+    if ← mps_is_available then
+      pure Device.MPS
+    else
+      IO.eprintln "TYR_DEVICE=mps requested but MPS is unavailable; falling back to auto."
+      getBestDevice
+  | some "auto" => getBestDevice
+  | some _ => getBestDevice
+  | none => getBestDevice
+
+def loadSharded (modelDir : String) (cfg : WhisperConfig := {}) : IO (WhisperForConditionalGeneration cfg) := do
+  IO.println s!"Loading Whisper weights from {modelDir}..."
+  let model ← loadModelSharded modelDir cfg
+  let projOut ←
+    match (← tryLoadTensorSharded modelDir "proj_out.weight" #[cfg.vocabSize, cfg.dModel]) with
+    | some w => pure (reqGradFalse w)
+    | none =>
+      IO.println "  proj_out.weight not found; tying output projection to decoder token embeddings."
+      pure model.decoderTokenEmbedding
+  let targetDevice ← resolveWhisperDevice
+  let model := TensorStruct.map (fun t => t.to targetDevice) model
+  let projOut := projOut.to targetDevice
+  IO.println s!"Whisper target device: {repr targetDevice}"
+  pure { model, projOut }
+
+end WhisperForConditionalGeneration
+
+end torch.whisper
