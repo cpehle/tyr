@@ -44,6 +44,7 @@ structure WhisperDecodeOptions where
   compressionRatioThreshold : Float := 2.4
   conditionOnPreviousText : Bool := true
   maxContextTokens : UInt64 := 0
+  chunkOverlapSeconds : Float := 2.0
   resetContextOnFallback : Bool := true
   noFallback : Bool := false
   deriving Repr, Inhabited
@@ -81,6 +82,12 @@ private structure WhisperDecodeCandidate where
 
 private structure DecodeTokenRules where
   forbiddenSpecial : Array UInt32 := #[]
+  deriving Inhabited
+
+private structure AudioChunk where
+  start : Nat
+  stop : Nat
+  wav : Array Float
   deriving Inhabited
 
 private def normalizeLanguageCode (language : String) : String :=
@@ -190,6 +197,30 @@ private def splitWaveformFixed
         start := stop
       out
 
+private def splitWaveformWithOverlap
+    (wav : Array Float)
+    (chunkSamples : Nat)
+    (overlapSamples : Nat)
+    : Array AudioChunk :=
+  if chunkSamples == 0 || wav.size <= chunkSamples then
+    #[{ start := 0, stop := wav.size, wav := wav }]
+  else
+    Id.run do
+      let maxOverlap := if chunkSamples <= 1 then 0 else chunkSamples - 1
+      let overlap := Nat.min overlapSamples maxOverlap
+      let stepRaw := chunkSamples - overlap
+      let step := Nat.max 1 stepRaw
+      let mut out : Array AudioChunk := #[]
+      let mut start : Nat := 0
+      while start < wav.size do
+        let stop := Nat.min wav.size (start + chunkSamples)
+        out := out.push { start := start, stop := stop, wav := wav.extract start stop }
+        if stop == wav.size then
+          start := wav.size
+        else
+          start := start + step
+      out
+
 private def whisperMaxChunkSeconds
     (cfg : WhisperConfig)
     (pre : PreprocessorConfig)
@@ -295,6 +326,39 @@ private def composePromptIds
           out := out.push prev
       out := out ++ ctx
       out ++ basePrompt
+
+private def tokenOverlapLength
+    (leftIds : Array UInt32)
+    (rightIds : Array UInt32)
+    (maxSearch : Nat := 256)
+    : Nat :=
+  if leftIds.isEmpty || rightIds.isEmpty then
+    0
+  else
+    let maxCand := Nat.min maxSearch (Nat.min leftIds.size rightIds.size)
+    Id.run do
+      let mut k := maxCand
+      let mut best : Nat := 0
+      while k > 0 && best == 0 do
+        let left := leftIds.extract (leftIds.size - k) leftIds.size
+        let right := rightIds.extract 0 k
+        if left == right then
+          best := k
+        else
+          k := k - 1
+      best
+
+private def appendWithTokenStitch
+    (acc : Array UInt32)
+    (next : Array UInt32)
+    : Array UInt32 :=
+  if acc.isEmpty then
+    next
+  else if next.isEmpty then
+    acc
+  else
+    let overlap := tokenOverlapLength acc next
+    acc ++ next.extract overlap next.size
 
 private def candidateNeedsFallback (opts : WhisperDecodeOptions) (cand : WhisperDecodeCandidate) : Bool :=
   let badCompression :=
@@ -903,13 +967,20 @@ def transcribeWav
   let sr := if pre.samplingRate == 0 then sampleRate16k else pre.samplingRate
   let chunkSamplesRaw := ((chunkSeconds * sr.toFloat) + 0.5).toUInt64.toNat
   let chunkSamples := if chunkSamplesRaw == 0 then wav16k.size else chunkSamplesRaw
-  let chunks := splitWaveformFixed wav16k chunkSamples
+  let overlapSec :=
+    if decodeOpts.chunkOverlapSeconds <= 0.0 then
+      0.0
+    else
+      decodeOpts.chunkOverlapSeconds
+  let overlapSamplesRaw := ((overlapSec * sr.toFloat) + 0.5).toUInt64.toNat
+  let chunks := splitWaveformWithOverlap wav16k chunkSamples overlapSamplesRaw
 
   let mut rollingContext : Array UInt32 := #[]
   let mut texts : Array String := #[]
   let mut allTokenIds : Array UInt32 := #[]
   for i in [:chunks.size] do
-    let chunk := chunks[i]!
+    let chunkMeta := chunks[i]!
+    let chunk := chunkMeta.wav
     if i > 0 && i + 1 == chunks.size && chunk.size < (chunkSamples / 2) then
       -- Very short tail chunks tend to hallucinate with carried text context.
       rollingContext := #[]
@@ -954,7 +1025,7 @@ def transcribeWav
         let text := cand.text.trimAscii.toString
         if !text.isEmpty then
           texts := texts.push text
-        allTokenIds := allTokenIds ++ cand.generated
+        allTokenIds := appendWithTokenStitch allTokenIds cand.generated
       if decodeOpts.conditionOnPreviousText then
         if silent then
           pure ()
@@ -963,9 +1034,11 @@ def transcribeWav
         else
           rollingContext := takeLast (rollingContext ++ cand.generated) contextLimit
 
+  let stitchedText := decodeGeneratedText tok allTokenIds
+  let mergedText := mergeChunkTexts texts
   pure {
     language := normalizeLanguageCode language
-    text := mergeChunkTexts texts
+    text := if stitchedText.isEmpty then mergedText else stitchedText
     tokenIds := allTokenIds
   }
 

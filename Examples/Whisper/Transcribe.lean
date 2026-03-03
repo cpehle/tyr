@@ -22,6 +22,7 @@ structure Args where
   compressionRatioThreshold : Float := 2.4
   noContext : Bool := false
   maxContextTokens : UInt64 := 0
+  chunkOverlapSec : Float := 2.0
   deriving Inhabited
 
 private def parseNatArg (name : String) (v : String) : IO UInt64 := do
@@ -58,6 +59,7 @@ private def toDecodeOptions (args : Args) : WhisperDecodeOptions := {
   compressionRatioThreshold := args.compressionRatioThreshold
   conditionOnPreviousText := !args.noContext
   maxContextTokens := args.maxContextTokens
+  chunkOverlapSeconds := args.chunkOverlapSec
   noFallback := args.noFallback
 }
 
@@ -98,6 +100,8 @@ private partial def parseArgsLoop (xs : List String) (acc : Args) : IO Args := d
       parseArgsLoop rest { acc with noContext := true }
   | "--max-context" :: v :: rest =>
       parseArgsLoop rest { acc with maxContextTokens := (← parseNatArg "--max-context" v) }
+  | "--chunk-overlap-sec" :: v :: rest =>
+      parseArgsLoop rest { acc with chunkOverlapSec := (← parseFloatArg "--chunk-overlap-sec" v) }
   | "--no-timestamps" :: rest =>
       parseArgsLoop rest { acc with noTimestamps := true }
   | "--help" :: _ =>
@@ -119,6 +123,7 @@ private partial def parseArgsLoop (xs : List String) (acc : Args) : IO Args := d
       IO.println "  --compression-ratio-thold <x>  Repetition fallback threshold (default: 2.4)"
       IO.println "  --no-context             Disable rolling prompt context carry across chunks"
       IO.println "  --max-context <n>        Max carried context tokens (default: auto)"
+      IO.println "  --chunk-overlap-sec <x>  Overlap between adjacent audio chunks in seconds (default: 2.0)"
       IO.println "  --no-timestamps          Use <|notimestamps|> decoding prompt token"
       throw <| IO.userError ""
   | x :: _ =>
