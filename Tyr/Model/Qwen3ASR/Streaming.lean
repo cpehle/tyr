@@ -71,11 +71,19 @@ structure StreamingAudioEncoderCache (cfg : Qwen3ASRConfig) where
   validAudioLen : UInt64
   audioEmbedsValidDyn : T #[]
 
+/-- Cached frontend tensors for append-only full-accumulation streaming audio. -/
+structure StreamingFrontendCache (cfg : Qwen3ASRConfig) where
+  audioSamples : Nat
+  frames : UInt64
+  inputFeaturesDyn : T #[]
+  featureAttentionMaskDyn : T #[]
+
 /-- Full decode cache state carried across streaming decode hops. -/
 structure StreamingDecodeCache (cfg : Qwen3ASRConfig) where
   promptCache : Option (StreamingPromptCache cfg) := none
   promptTokenCache : Option StreamingPromptTokenCache := none
   audioEncoderCache : Option (StreamingAudioEncoderCache cfg) := none
+  frontendCache : Option (StreamingFrontendCache cfg) := none
 
 private def toLower (s : String) : String :=
   String.ofList (s.toList.map Char.toLower)
@@ -183,6 +191,122 @@ private def findSingleContiguousAudioSpanStart
         else
           none
       | none => none
+
+private def ceilDivNat (num den : Nat) : Nat :=
+  if den == 0 then 0 else (num + den - 1) / den
+
+private def buildStreamingFrontendPackWithCache
+    {cfg : Qwen3ASRConfig}
+    (preprocessor : PreprocessorConfig)
+    (audio16k : Array Float)
+    (decodeMode : StreamingDecodeMode)
+    (cache : Option (StreamingFrontendCache cfg))
+    : IO ((Sigma (fun frames => WhisperFrontendOutput preprocessor.featureSize frames)) ×
+      Option (StreamingFrontendCache cfg)) := do
+  let maxSec :=
+    (PreprocessorConfig.expectedSampleCount preprocessor).toFloat / sampleRate16k
+  let maxSamples := PreprocessorConfig.expectedSampleCount preprocessor
+  if audio16k.size.toUInt64 > maxSamples then
+    throw <| IO.userError
+      s!"Audio duration exceeds maxSeconds={maxSec}: samples={audio16k.size.toUInt64}, limit={maxSamples}"
+
+  let fullFallback : IO ((Sigma (fun frames => WhisperFrontendOutput preprocessor.featureSize frames)) ×
+      Option (StreamingFrontendCache cfg)) := do
+    let fullPack ←
+      waveformToWhisperFeaturesDynamic
+        preprocessor
+        audio16k
+        (minSeconds := 0.05)
+        (maxSeconds := some maxSec)
+    let fullCache : Option (StreamingFrontendCache cfg) :=
+      if decodeMode == .fullAccumulation then
+        some {
+          audioSamples := audio16k.size
+          frames := fullPack.1
+          inputFeaturesDyn := nn.eraseShape fullPack.2.inputFeatures
+          featureAttentionMaskDyn := nn.eraseShape fullPack.2.featureAttentionMask
+        }
+      else
+        none
+    pure (fullPack, fullCache)
+
+  let canTryIncremental :=
+    decodeMode == .fullAccumulation &&
+    preprocessor.doNormalize == false &&
+    preprocessor.dither == 0.0 &&
+    (if preprocessor.hopLength == 0 then (160 : UInt64) else preprocessor.hopLength) > 0 &&
+    audio16k.size > 0
+
+  if !canTryIncremental then
+    fullFallback
+  else
+    match cache with
+    | none => fullFallback
+    | some fc =>
+      if audio16k.size <= fc.audioSamples then
+        fullFallback
+      else
+        let hopNat := (if preprocessor.hopLength == 0 then (160 : UInt64) else preprocessor.hopLength).toNat
+        let nFftNat := (if preprocessor.nFft == 0 then (400 : UInt64) else preprocessor.nFft).toNat
+        let halfWindow := nFftNat / 2
+        let contextFrames := ceilDivNat halfWindow hopNat + 1
+        let prevFramesNat := fc.frames.toNat
+        let replaceStartFrameNat :=
+          if prevFramesNat > contextFrames then
+            prevFramesNat - contextFrames
+          else
+            0
+        let startFrameNat :=
+          if replaceStartFrameNat > contextFrames then
+            replaceStartFrameNat - contextFrames
+          else
+            0
+        let dropFramesNat := replaceStartFrameNat - startFrameNat
+        let startSample := startFrameNat * hopNat
+        if startSample >= audio16k.size then
+          fullFallback
+        else
+          let suffixAudio := audio16k.extract startSample audio16k.size
+          let suffixPack ←
+            waveformToWhisperFeaturesDynamic
+              preprocessor
+              suffixAudio
+              (minSeconds := 0.0)
+              (maxSeconds := none)
+          let suffixFrames := suffixPack.1
+          let dropFrames := dropFramesNat.toUInt64
+          if dropFrames > suffixFrames then
+            fullFallback
+          else
+            let prevFeatures : T #[1, preprocessor.featureSize, fc.frames] :=
+              reshape fc.inputFeaturesDyn #[1, preprocessor.featureSize, fc.frames]
+            let prevMask : T #[1, fc.frames] :=
+              reshape fc.featureAttentionMaskDyn #[1, fc.frames]
+            let prefixFrames := replaceStartFrameNat.toUInt64
+            let prefixFeatures : T #[1, preprocessor.featureSize, prefixFrames] :=
+              data.slice prevFeatures 2 0 prefixFrames
+            let prefixMask : T #[1, prefixFrames] :=
+              data.slice prevMask 1 0 prefixFrames
+            let suffixKeepFrames := suffixFrames - dropFrames
+            let suffixFeatures : T #[1, preprocessor.featureSize, suffixKeepFrames] :=
+              data.slice suffixPack.2.inputFeatures 2 dropFrames suffixKeepFrames
+            let suffixMask : T #[1, suffixKeepFrames] :=
+              data.slice suffixPack.2.featureAttentionMask 1 dropFrames suffixKeepFrames
+            let mergedFrames := prefixFrames + suffixKeepFrames
+            let mergedFeaturesDyn : T #[] :=
+              nn.cat_dyn #[nn.eraseShape prefixFeatures, nn.eraseShape suffixFeatures] 2
+            let mergedMaskDyn : T #[] :=
+              nn.cat_dyn #[nn.eraseShape prefixMask, nn.eraseShape suffixMask] 1
+            let mergedOut : WhisperFrontendOutput preprocessor.featureSize mergedFrames := {
+              inputFeatures := reshape mergedFeaturesDyn #[1, preprocessor.featureSize, mergedFrames]
+              featureAttentionMask := reshape mergedMaskDyn #[1, mergedFrames]
+            }
+            pure (⟨mergedFrames, mergedOut⟩, some {
+              audioSamples := audio16k.size
+              frames := mergedFrames
+              inputFeaturesDyn := nn.eraseShape mergedOut.inputFeatures
+              featureAttentionMaskDyn := nn.eraseShape mergedOut.featureAttentionMask
+            })
 
 private def joinWith (sep : String) (parts : List String) : String :=
   match parts with
@@ -581,14 +705,14 @@ def decodeStreamingChunkWithModelStateCached
     pure ("", cache)
   else
     autograd.no_grad do
-      let maxSec :=
-        (PreprocessorConfig.expectedSampleCount preprocessor).toFloat / sampleRate16k
-      let frontendPack ←
-        waveformToWhisperFeaturesDynamic
+      let cache0 : StreamingDecodeCache cfg := cache.getD {}
+      let (frontendPack, frontendCache') ←
+        buildStreamingFrontendPackWithCache
+          (cfg := cfg)
           preprocessor
           audio16k
-          (minSeconds := 0.05)
-          (maxSeconds := some maxSec)
+          decodeMode
+          cache0.frontendCache
       let frames := frontendPack.1
       let frontendOut := frontendPack.2
       let validFramesTensor : T #[1] := nn.sumDim (data.toLong frontendOut.featureAttentionMask) 1 false
@@ -601,7 +725,6 @@ def decodeStreamingChunkWithModelStateCached
       let audioLen := minU64 audioLenRaw audioLenCap
 
       let processor : Qwen3ASRProcessor := {}
-      let cache0 : StreamingDecodeCache cfg := cache.getD {}
       let (promptIds, promptTokenCache') ←
         encodePromptIdsWithCache
           tok
@@ -778,6 +901,7 @@ def decodeStreamingChunkWithModelStateCached
         promptCache := some nextPromptCache
         promptTokenCache := promptTokenCache'
         audioEncoderCache := audioCache'
+        frontendCache := frontendCache'
       }
 
       let outSeq := generated.1

@@ -49,7 +49,7 @@ Status legend:
 - [x] `H25` ASR full-accumulation streaming now reuses cached audio-encoder projected prefixes and encodes only tail features when possible.
 - [x] `H26` ASR streaming decode now supports generation from precomputed `inputs_embeds`, avoiding redundant embed construction in cache-aware paths.
 - [x] `M24` Added a deterministic ASR streaming decode-cache benchmark regression test to measure prompt-cache-only vs full decode-cache performance.
-- [ ] `H27` Add incremental streaming Whisper-frontend cache so full-accumulation decode only computes new tail mel features each hop.
+- [x] `H27` Add incremental streaming Whisper-frontend cache so full-accumulation decode only computes new tail mel features each hop.
 - [x] `H28` Replace full-sequence placeholder `masked_scatter` in streaming decode with cached placeholder-span writes to reduce O(seq*hidden) per-hop work.
 - [x] `H29` Remove per-hop prompt-embed tensor diff check from prompt-cache reuse (`maxAll(abs(...))`) and rely on token-prefix/shape invariants.
 - [x] `M25` Wrap ASR inference hot paths in `autograd.no_grad` to reduce autograd overhead and transient memory during decode.
@@ -76,7 +76,7 @@ Status legend:
   Refs: `Tyr/Model/Qwen3ASR/Streaming.lean`
 - [x] `H26` Add ASR decode path that accepts precomputed `inputs_embeds` and prompt-cache reuse to bypass redundant embed recomputation.
   Refs: `Tyr/Model/Qwen3ASR/Model.lean`, `Tyr/Model/Qwen3ASR/Streaming.lean`
-- [ ] `H27` Add incremental streaming frontend cache that reuses prior waveform/mel overlap and appends only new feature frames per hop.
+- [x] `H27` Add incremental streaming frontend cache that reuses prior waveform/mel overlap and appends only new feature frames per hop.
   Refs: `Tyr/Model/Qwen3ASR/Streaming.lean`, `Tyr/Model/Qwen3ASR/Frontend.lean`
 - [x] `H28` Replace streaming decode full-mask `masked_scatter` with cached placeholder span offsets + targeted slice writes for audio token insertion.
   Refs: `Tyr/Model/Qwen3ASR/Streaming.lean`, `Tyr/Model/Qwen3ASR/Model.lean`
@@ -221,6 +221,8 @@ Status legend:
   Refs: `Tyr/Model/Qwen3ASR/Model.lean`, `Tyr/Model/Qwen3ASR/Streaming.lean`, `Tyr/Model/Qwen3ASR/StreamModel.lean`
 - [x] `M24` Added `testQwen3ASRStreamingDecodeCacheBenchmark` to validate decode-cache parity and print measured speedup (`iters=20`, baseline `68ms`, optimized `66ms`, `1.03x`).
   Refs: `Tests/TestQwen3ASR.lean`
+- [x] `H27` Added full-accumulation frontend-cache reuse in streaming decode: when audio grows append-only, recompute a suffix window and splice prior feature/mask prefixes instead of full-wave frontend recomputation.
+  Refs: `Tyr/Model/Qwen3ASR/Streaming.lean`
 - [x] `H28` Streaming decode now replaces audio placeholders via contiguous token-span slice composition, removing full-sequence boolean-mask `masked_scatter` in the hot path.
   Refs: `Tyr/Model/Qwen3ASR/Streaming.lean`
 - [x] `H29` Prompt-cache reuse now relies on prompt token-prefix and capacity invariants (removed per-hop embed-prefix tensor diff reduction).
