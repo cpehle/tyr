@@ -87,7 +87,7 @@ private partial def parseArgsLoop (xs : List String) (acc : Args) : IO Args := d
       IO.println "  --wav-path <path>        WAV path to transcribe"
       IO.println "  --language <name>        Optional forced language (e.g. English)"
       IO.println "  --return-timestamps      Enable forced-alignment timestamps"
-      IO.println "  --stream-output          Print incremental streaming decode updates while processing WAV"
+      IO.println "  --stream-output          Show whisper.cpp-style inline streaming updates while processing WAV"
       IO.println "  --stream-chunk-sec <f>   Streaming decode window seconds (default: 2.0)"
       IO.println "  --stream-hop-sec <f>     Streaming hop size seconds (default: 0.5)"
       IO.println "  --max-inference-batch-size <n>  Batch chunking control (-1 = unbounded)"
@@ -103,6 +103,11 @@ private def parseArgs (xs : List String) : IO Args :=
 private def toSamples (sec : Float) : Nat :=
   let n := ((sec * 16000.0) + 0.5).toUInt64.toNat
   if n == 0 then 1 else n
+
+private def uiPrintInline (s : String) : IO Unit := do
+  IO.print "\x1b[2K\r"
+  IO.print s
+  (← IO.getStdout).flush
 
 private def transcribeWavStreamed
     (modelDir : String)
@@ -134,6 +139,8 @@ private def transcribeWavStreamed
   let hopSamples := toSamples hopSec
   let mut off : Nat := 0
   let mut latestFull := ""
+  let mut lastPrinted := ""
+  let mut printedInline := false
   while off < wav16k.size do
     let hi := Nat.min wav16k.size (off + hopSamples)
     let chunk := wav16k.extract off hi
@@ -141,21 +148,24 @@ private def transcribeWavStreamed
     ss := ssNext
     if step.didDecode then
       latestFull := step.fullText
-      if !step.stableAppend.isEmpty then
-        IO.println s!"STREAM_STABLE+= {step.stableAppend}"
-      let unstable := step.unstableText.trimAscii.toString
-      if !unstable.isEmpty then
-        IO.println s!"STREAM_UNSTABLE= {unstable}"
+      let view := step.fullText.trimAscii.toString
+      if view != lastPrinted then
+        uiPrintInline view
+        lastPrinted := view
+        printedInline := true
     off := hi
   let (ssFinal, finalStep) ← flush sm ss (maxNewTokens := maxNewTokens)
   ss := ssFinal
   if finalStep.didDecode then
     latestFull := finalStep.fullText
-    if !finalStep.stableAppend.isEmpty then
-      IO.println s!"STREAM_STABLE+= {finalStep.stableAppend}"
-    let unstable := finalStep.unstableText.trimAscii.toString
-    if !unstable.isEmpty then
-      IO.println s!"STREAM_UNSTABLE= {unstable}"
+    let view := finalStep.fullText.trimAscii.toString
+    if view != lastPrinted then
+      uiPrintInline view
+      lastPrinted := view
+      printedInline := true
+
+  if printedInline then
+    IO.println ""
 
   let text :=
     let t := latestFull.trimAscii.toString
