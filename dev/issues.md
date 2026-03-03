@@ -49,6 +49,11 @@ Status legend:
 - [x] `H25` ASR full-accumulation streaming now reuses cached audio-encoder projected prefixes and encodes only tail features when possible.
 - [x] `H26` ASR streaming decode now supports generation from precomputed `inputs_embeds`, avoiding redundant embed construction in cache-aware paths.
 - [x] `M24` Added a deterministic ASR streaming decode-cache benchmark regression test to measure prompt-cache-only vs full decode-cache performance.
+- [ ] `H27` Add incremental streaming Whisper-frontend cache so full-accumulation decode only computes new tail mel features each hop.
+- [ ] `H28` Replace full-sequence placeholder `masked_scatter` in streaming decode with cached placeholder-span writes to reduce O(seq*hidden) per-hop work.
+- [ ] `H29` Remove per-hop prompt-embed tensor diff check from prompt-cache reuse (`maxAll(abs(...))`) and rely on token-prefix/shape invariants.
+- [ ] `M25` Wrap ASR inference hot paths in `autograd.no_grad` to reduce autograd overhead and transient memory during decode.
+- [ ] `M26` Add stream micro-batching scheduler for multi-session ASR throughput (shared decode batch across active sessions).
 
 ## Open Issues
 
@@ -71,6 +76,12 @@ Status legend:
   Refs: `Tyr/Model/Qwen3ASR/Streaming.lean`
 - [x] `H26` Add ASR decode path that accepts precomputed `inputs_embeds` and prompt-cache reuse to bypass redundant embed recomputation.
   Refs: `Tyr/Model/Qwen3ASR/Model.lean`, `Tyr/Model/Qwen3ASR/Streaming.lean`
+- [ ] `H27` Add incremental streaming frontend cache that reuses prior waveform/mel overlap and appends only new feature frames per hop.
+  Refs: `Tyr/Model/Qwen3ASR/Streaming.lean`, `Tyr/Model/Qwen3ASR/Frontend.lean`
+- [ ] `H28` Replace streaming decode full-mask `masked_scatter` with cached placeholder span offsets + targeted slice writes for audio token insertion.
+  Refs: `Tyr/Model/Qwen3ASR/Streaming.lean`, `Tyr/Model/Qwen3ASR/Model.lean`
+- [ ] `H29` Eliminate prompt-cache reuse embed-prefix equality reduction (`maxAll(abs(...))`) from streaming path and gate reuse by prompt token prefix + shape only.
+  Refs: `Tyr/Model/Qwen3ASR/Model.lean`
 
 
 ### Medium
@@ -90,6 +101,10 @@ Status legend:
   Refs: `Tyr/Model/Qwen3ASR/Frontend.lean`
 - [x] `M23` Reduce long-audio chunk-boundary scan overhead in non-timestamp ASR by tightening silence-search window and supporting zero-window fast path.
   Refs: `Tyr/Model/Qwen3ASR/Transcribe.lean`
+- [ ] `M25` Apply `autograd.no_grad` across ASR transcription/streaming inference entrypoints to avoid unnecessary graph tracking overhead.
+  Refs: `Tyr/Model/Qwen3ASR/Transcribe.lean`, `Tyr/Model/Qwen3ASR/Streaming.lean`
+- [ ] `M26` Add multi-session streaming micro-batching for ASR `StreamModel` so concurrent sessions share decoder batch steps.
+  Refs: `Tyr/Model/Qwen3ASR/StreamModel.lean`, `Tyr/Model/Qwen3ASR/Streaming.lean`
 
 ### Low
 - [ ] `L03` Expose direct speaker-name selection in CLI from loaded speaker maps.
