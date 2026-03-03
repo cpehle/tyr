@@ -31,13 +31,25 @@ private def loadAttentionSharded
     (dModel nHeads : UInt64)
     : IO (WhisperAttention dModel nHeads) := do
   let qProjWeight ← safetensors.loadTensorSharded modelDir s!"{namePrefix}.q_proj.weight" #[dModel, dModel]
-  let qProjBias ← safetensors.loadTensorSharded modelDir s!"{namePrefix}.q_proj.bias" #[dModel]
   let kProjWeight ← safetensors.loadTensorSharded modelDir s!"{namePrefix}.k_proj.weight" #[dModel, dModel]
-  let kProjBias ← safetensors.loadTensorSharded modelDir s!"{namePrefix}.k_proj.bias" #[dModel]
   let vProjWeight ← safetensors.loadTensorSharded modelDir s!"{namePrefix}.v_proj.weight" #[dModel, dModel]
-  let vProjBias ← safetensors.loadTensorSharded modelDir s!"{namePrefix}.v_proj.bias" #[dModel]
   let outProjWeight ← safetensors.loadTensorSharded modelDir s!"{namePrefix}.out_proj.weight" #[dModel, dModel]
-  let outProjBias ← safetensors.loadTensorSharded modelDir s!"{namePrefix}.out_proj.bias" #[dModel]
+  let qProjBias ←
+    match (← tryLoadTensorSharded modelDir s!"{namePrefix}.q_proj.bias" #[dModel]) with
+    | some b => pure b
+    | none => pure (torch.zeros #[dModel])
+  let kProjBias ←
+    match (← tryLoadTensorSharded modelDir s!"{namePrefix}.k_proj.bias" #[dModel]) with
+    | some b => pure b
+    | none => pure (torch.zeros #[dModel])
+  let vProjBias ←
+    match (← tryLoadTensorSharded modelDir s!"{namePrefix}.v_proj.bias" #[dModel]) with
+    | some b => pure b
+    | none => pure (torch.zeros #[dModel])
+  let outProjBias ←
+    match (← tryLoadTensorSharded modelDir s!"{namePrefix}.out_proj.bias" #[dModel]) with
+    | some b => pure b
+    | none => pure (torch.zeros #[dModel])
   pure {
     qProjWeight := reqGradFalse qProjWeight
     qProjBias := reqGradFalse qProjBias

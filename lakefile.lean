@@ -80,12 +80,6 @@ def macOSDeploymentLinkArgs : Array String :=
   else
     #[]
 
-/-- Absolute Lean shared-library directory used for runtime lookup (`libLake_shared`, `libleanshared`, ...). -/
-def leanSharedLibRPath : String := run_io do
-  let out ← IO.Process.output { cmd := "lean", args := #["--print-prefix"] }
-  let toolchainPrefix := out.stdout.trimAscii.toString
-  pure s!"{toolchainPrefix}/lib/lean"
-
 /-- Apple system frameworks used by the C++ bridge/runtime on macOS. -/
 def macOSFrameworkArgs : Array String :=
   #[
@@ -139,8 +133,7 @@ def commonLinkArgs : Array String :=
     ] ++ soxrLinkArgs ++ macOSSDKLinkArgs ++ macOSDeploymentLinkArgs ++ macOSFrameworkArgs ++ #[
       "-Wl,-rpath,@executable_path/../../../external/libtorch/lib",
       "-Wl,-rpath,/opt/homebrew/opt/libomp/lib",
-      "-Wl,-rpath,/opt/homebrew/lib",
-      s!"-Wl,-rpath,{leanSharedLibRPath}"
+      "-Wl,-rpath,/opt/homebrew/lib"
     ]
   else
     #[

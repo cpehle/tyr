@@ -26,6 +26,8 @@ structure WhisperBundle where
   tok : tokenizer.qwen3.QwenTokenizer
   preprocessor : PreprocessorConfig
 
+private def sampleRate16k : UInt64 := 16000
+
 private def normalizeLanguageCode (language : String) : String :=
   let l := language.trimAscii.toString.toLower
   if l.isEmpty then
@@ -78,6 +80,43 @@ private def decodeGeneratedText
   let filtered := ids.filter (fun id => !tok.idToSpecial.contains id)
   (tokenizer.qwen3.decodeText tok filtered).trimAscii.toString
 
+private def mergeChunkTexts (parts : Array String) : String :=
+  Id.run do
+    let mut out := ""
+    for p in parts do
+      let t := p.trimAscii.toString
+      if !t.isEmpty then
+        if out.isEmpty then
+          out := t
+        else
+          out := out ++ " " ++ t
+    out
+
+private def splitWaveformFixed
+    (wav : Array Float)
+    (chunkSamples : Nat)
+    : Array (Array Float) :=
+  if chunkSamples == 0 || wav.size <= chunkSamples then
+    #[wav]
+  else
+    Id.run do
+      let mut out : Array (Array Float) := #[]
+      let mut start : Nat := 0
+      while start < wav.size do
+        let stop := Nat.min wav.size (start + chunkSamples)
+        out := out.push (wav.extract start stop)
+        start := stop
+      out
+
+private def whisperMaxChunkSeconds
+    (cfg : WhisperConfig)
+    (pre : PreprocessorConfig)
+    : Float :=
+  let sr := if pre.samplingRate == 0 then sampleRate16k else pre.samplingRate
+  let hop := if pre.hopLength == 0 then 160 else pre.hopLength
+  let maxFrames := cfg.maxSourcePositions * 2
+  (maxFrames * hop).toFloat / sr.toFloat
+
 private partial def greedyDecodeLoop
     {cfg : WhisperConfig}
     {encSeq : UInt64}
@@ -96,7 +135,12 @@ private partial def greedyDecodeLoop
       pure (allIds, generated)
     else
       let idsVals : Array Int64 := allIds.map (fun id => Int64.ofNat id.toNat)
-      let inputIds : T #[1, seq] := reshape (data.fromInt64Array idsVals) #[1, seq]
+      let inputIdsCpu : T #[1, seq] := reshape (data.fromInt64Array idsVals) #[1, seq]
+      let inputIds : T #[1, seq] :=
+        if inputIdsCpu.device == encoderHidden.device then
+          inputIdsCpu
+        else
+          inputIdsCpu.to encoderHidden.device
       let logits ← model.decode inputIds encoderHidden
       let last : T #[1, cfg.vocabSize] :=
         reshape (data.slice logits 1 (seq - 1) 1) #[1, cfg.vocabSize]
@@ -139,34 +183,57 @@ def transcribeWav
     : IO WhisperTranscription := do
   let wav16k ← normalizeAudioTo16kFromWav wavPath
   let frontendDevice := model.model.decoderTokenEmbedding.device
-  let pack ←
-    waveformToWhisperFeaturesDynamic
-      pre
-      wav16k
-      (minSeconds := 0.05)
-      (maxSeconds := none)
-      (device := frontendDevice)
-  match pack with
-  | ⟨frames, out⟩ =>
-    let inputFeatures : T #[1, cfg.numMelBins, frames] :=
-      reshape (nn.eraseShape out.inputFeatures) #[1, cfg.numMelBins, frames]
-    let encoderHidden : T #[1, WhisperConfig.conv2OutputSeq frames, cfg.dModel] ←
-      model.encode (frames := frames) inputFeatures
-    let promptIds := buildPromptIds cfg tok language noTimestamps
-    let (_allIds, generated) ←
-      greedyDecodeLoop
-        (encSeq := WhisperConfig.conv2OutputSeq frames)
-        model
-        encoderHidden
-        cfg.eosTokenId
-        maxNewTokens.toNat
-        promptIds
-        #[]
-    let text := decodeGeneratedText tok generated
-    pure {
-      language := normalizeLanguageCode language
-      text := text
-      tokenIds := generated
-    }
+  let cfgCapSec := whisperMaxChunkSeconds cfg pre
+  let preChunkSec :=
+    if pre.chunkLength == 0 then
+      cfgCapSec
+    else
+      pre.chunkLength.toFloat
+  let chunkSeconds :=
+    if preChunkSec <= 0.0 then
+      cfgCapSec
+    else
+      if preChunkSec <= cfgCapSec then preChunkSec else cfgCapSec
+  let sr := if pre.samplingRate == 0 then sampleRate16k else pre.samplingRate
+  let chunkSamplesRaw := ((chunkSeconds * sr.toFloat) + 0.5).toUInt64.toNat
+  let chunkSamples := if chunkSamplesRaw == 0 then wav16k.size else chunkSamplesRaw
+  let chunks := splitWaveformFixed wav16k chunkSamples
+
+  let mut texts : Array String := #[]
+  let mut allTokenIds : Array UInt32 := #[]
+  for chunk in chunks do
+    let pack ←
+      waveformToWhisperFeaturesDynamic
+        pre
+        chunk
+        (minSeconds := 0.05)
+        (maxSeconds := some chunkSeconds)
+        (device := frontendDevice)
+    match pack with
+    | ⟨frames, out⟩ =>
+      let inputFeatures : T #[1, cfg.numMelBins, frames] :=
+        reshape (nn.eraseShape out.inputFeatures) #[1, cfg.numMelBins, frames]
+      let encoderHidden : T #[1, WhisperConfig.conv2OutputSeq frames, cfg.dModel] ←
+        model.encode (frames := frames) inputFeatures
+      let promptIds := buildPromptIds cfg tok language noTimestamps
+      let (_allIds, generated) ←
+        greedyDecodeLoop
+          (encSeq := WhisperConfig.conv2OutputSeq frames)
+          model
+          encoderHidden
+          cfg.eosTokenId
+          maxNewTokens.toNat
+          promptIds
+          #[]
+      let text := decodeGeneratedText tok generated
+      if !(text.trimAscii.toString).isEmpty then
+        texts := texts.push text
+      allTokenIds := allTokenIds ++ generated
+
+  pure {
+    language := normalizeLanguageCode language
+    text := mergeChunkTexts texts
+    tokenIds := allTokenIds
+  }
 
 end torch.whisper
