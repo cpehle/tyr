@@ -80,10 +80,21 @@ structure StreamingFrontendCache (cfg : Qwen3ASRConfig) where
   inputFeaturesDevDyn : Option (T #[]) := none
   featureAttentionMaskDevDyn : Option (T #[]) := none
 
+/-- Cached device-side prompt token segments for streaming input-id assembly. -/
+structure StreamingPromptDeviceCache where
+  beforeLen : UInt64
+  beforeIdsDevDyn : T #[]
+  afterLen : UInt64
+  afterIdsDevDyn : T #[]
+  lastSuffix : String := ""
+  suffixLen : UInt64 := 0
+  suffixIdsDevDyn : Option (T #[]) := none
+
 /-- Full decode cache state carried across streaming decode hops. -/
 structure StreamingDecodeCache (cfg : Qwen3ASRConfig) where
   promptCache : Option (StreamingPromptCache cfg) := none
   promptTokenCache : Option StreamingPromptTokenCache := none
+  promptDeviceCache : Option StreamingPromptDeviceCache := none
   audioEncoderCache : Option (StreamingAudioEncoderCache cfg) := none
   frontendCache : Option (StreamingFrontendCache cfg) := none
 
@@ -163,6 +174,116 @@ private def encodePromptIdsWithCache
     match processor.encodeWithExpandedAudioTokenIds tok prompt #[audioLen] audioTokenId with
     | .ok ids => pure (ids, none)
     | .error e => throw <| IO.userError e
+
+private def idsToDyn1dOnDevice (ids : Array UInt32) (dev : Device) : IO (UInt64 × T #[]) := do
+  let n : UInt64 := ids.size.toUInt64
+  let vals : Array Int64 := ids.map (fun id => Int64.ofNat id.toNat)
+  let tCpu : T #[n] := reshape (data.fromInt64Array vals) #[n]
+  let tDev : T #[n] := tCpu.to dev
+  pure (n, nn.eraseShape tDev)
+
+private def repeatedTokenDynOnDevice (tokId : UInt32) (n : UInt64) (dev : Device) : T #[] :=
+  if n == 0 then
+    nn.eraseShape (reshape (data.fromInt64Array #[]) #[0])
+  else
+    let tCpu : T #[n] := torch.full_int #[n] (Int64.ofNat tokId.toNat)
+    nn.eraseShape (tCpu.to dev)
+
+private def mkPromptDeviceCache
+    (tokenCache : StreamingPromptTokenCache)
+    (dev : Device)
+    : IO StreamingPromptDeviceCache := do
+  let (beforeLen, beforeDyn) ← idsToDyn1dOnDevice tokenCache.beforeAudioIds dev
+  let (afterLen, afterDyn) ← idsToDyn1dOnDevice tokenCache.afterAudioIds dev
+  let (suffixLen, suffixDynOpt) ←
+    if tokenCache.lastSuffixIds.isEmpty then
+      pure (0, none)
+    else
+      let (n, dyn) ← idsToDyn1dOnDevice tokenCache.lastSuffixIds dev
+      pure (n, some dyn)
+  pure {
+    beforeLen := beforeLen
+    beforeIdsDevDyn := beforeDyn
+    afterLen := afterLen
+    afterIdsDevDyn := afterDyn
+    lastSuffix := tokenCache.lastSuffix
+    suffixLen := suffixLen
+    suffixIdsDevDyn := suffixDynOpt
+  }
+
+private def updatePromptDeviceCacheSuffix
+    (cache : StreamingPromptDeviceCache)
+    (tokenCache : StreamingPromptTokenCache)
+    (dev : Device)
+    : IO StreamingPromptDeviceCache := do
+  if cache.lastSuffix == tokenCache.lastSuffix then
+    pure cache
+  else if tokenCache.lastSuffixIds.isEmpty then
+    pure { cache with lastSuffix := tokenCache.lastSuffix, suffixLen := 0, suffixIdsDevDyn := none }
+  else
+    let (n, dyn) ← idsToDyn1dOnDevice tokenCache.lastSuffixIds dev
+    pure {
+      cache with
+        lastSuffix := tokenCache.lastSuffix
+        suffixLen := n
+        suffixIdsDevDyn := some dyn
+    }
+
+private def buildInputIdsWithPromptDeviceCache
+    (promptIds : Array UInt32)
+    (promptTokenCache : Option StreamingPromptTokenCache)
+    (promptDeviceCache : Option StreamingPromptDeviceCache)
+    (audioLen : UInt64)
+    (audioTokenId : UInt32)
+    (dev : Device)
+    : IO ((Sigma (fun seq => T #[1, seq])) × Option StreamingPromptDeviceCache) := do
+  match promptTokenCache with
+  | some ptc =>
+    let devCache ←
+      match promptDeviceCache with
+      | some dc =>
+        if dc.beforeLen == ptc.beforeAudioIds.size.toUInt64 &&
+           dc.afterLen == ptc.afterAudioIds.size.toUInt64 then
+          updatePromptDeviceCacheSuffix dc ptc dev
+        else
+          mkPromptDeviceCache ptc dev
+      | none =>
+        mkPromptDeviceCache ptc dev
+    let audioDyn := repeatedTokenDynOnDevice audioTokenId audioLen dev
+    let mut parts : Array (UInt64 × T #[]) := #[]
+    if devCache.beforeLen > 0 then
+      parts := parts.push (devCache.beforeLen, devCache.beforeIdsDevDyn)
+    if audioLen > 0 then
+      parts := parts.push (audioLen, audioDyn)
+    if devCache.afterLen > 0 then
+      parts := parts.push (devCache.afterLen, devCache.afterIdsDevDyn)
+    if devCache.suffixLen > 0 then
+      match devCache.suffixIdsDevDyn with
+      | some dyn => parts := parts.push (devCache.suffixLen, dyn)
+      | none => pure ()
+    let seqFromParts := parts.foldl (fun acc p => acc + p.1) 0
+    let seqFromPrompt := promptIds.size.toUInt64
+    if seqFromParts != seqFromPrompt then
+      throw <| IO.userError
+        s!"prompt device cache length mismatch: from_parts={seqFromParts}, from_prompt={seqFromPrompt}"
+    if seqFromPrompt == 0 then
+      throw <| IO.userError "decodeStreamingChunkWithModel produced empty prompt/input sequence"
+    let dynParts := parts.map (fun p => p.2)
+    let ids1dDyn : T #[] :=
+      match dynParts[0]? with
+      | some _ => nn.cat_dyn dynParts 0
+      | none => nn.eraseShape (reshape (data.fromInt64Array #[]) #[0])
+    let ids1d : T #[seqFromPrompt] := reshape ids1dDyn #[seqFromPrompt]
+    let inputIds : T #[1, seqFromPrompt] := reshape ids1d #[1, seqFromPrompt]
+    pure (⟨seqFromPrompt, inputIds⟩, some devCache)
+  | none =>
+    let idsVals : Array Int64 := promptIds.map (fun id => Int64.ofNat id.toNat)
+    let seq : UInt64 := idsVals.size.toUInt64
+    if seq == 0 then
+      throw <| IO.userError "decodeStreamingChunkWithModel produced empty prompt/input sequence"
+    let inputIdsCpu : T #[1, seq] := reshape (data.fromInt64Array idsVals) #[1, seq]
+    let inputIds : T #[1, seq] := inputIdsCpu.to dev
+    pure (⟨seq, inputIds⟩, none)
 
 private def findSingleContiguousAudioSpanStart
     (promptIds : Array UInt32)
@@ -737,14 +858,17 @@ def decodeStreamingChunkWithModelStateCached
           cfg.thinkerConfig.audioTokenId.toUInt32
           cache0.promptTokenCache
 
-      let idsVals : Array Int64 := promptIds.map (fun id => Int64.ofNat id.toNat)
-
-      let seq : UInt64 := idsVals.size.toUInt64
-      if seq == 0 then
-        throw <| IO.userError "decodeStreamingChunkWithModel produced empty prompt/input sequence"
       let dev := model.thinker.textModel.embed_tokens.device
-      let inputIdsCpu : T #[1, seq] := reshape (data.fromInt64Array idsVals) #[1, seq]
-      let inputIds : T #[1, seq] := inputIdsCpu.to dev
+      let (inputIdsPack, promptDeviceCache') ←
+        buildInputIdsWithPromptDeviceCache
+          promptIds
+          promptTokenCache'
+          cache0.promptDeviceCache
+          audioLen
+          cfg.thinkerConfig.audioTokenId.toUInt32
+          dev
+      let seq := inputIdsPack.1
+      let inputIds := inputIdsPack.2
       let mkFrontendCacheWithDev
           (cpuCache : Option (StreamingFrontendCache cfg))
           (featuresDev : T #[1, preprocessor.featureSize, frames])
@@ -952,6 +1076,7 @@ def decodeStreamingChunkWithModelStateCached
       let nextCache : StreamingDecodeCache cfg := {
         promptCache := some nextPromptCache
         promptTokenCache := promptTokenCache'
+        promptDeviceCache := promptDeviceCache'
         audioEncoderCache := audioCache'
         frontendCache := frontendCache'
       }

@@ -54,7 +54,7 @@ Status legend:
 - [x] `H29` Remove per-hop prompt-embed tensor diff check from prompt-cache reuse (`maxAll(abs(...))`) and rely on token-prefix/shape invariants.
 - [x] `M25` Wrap ASR inference hot paths in `autograd.no_grad` to reduce autograd overhead and transient memory during decode.
 - [ ] `M26` Add stream micro-batching scheduler for multi-session ASR throughput (shared decode batch across active sessions).
-- [ ] `H30` Eliminate prompt-ID host→device rebuild each streaming hop by introducing device-resident prompt token buffers and append-only device assembly.
+- [x] `H30` Eliminate prompt-ID host→device rebuild each streaming hop by introducing device-resident prompt token buffers and append-only device assembly.
 - [ ] `H31` Eliminate per-hop generated-token host pull/decode in hot path by supporting deferred text decode or token-level streaming buffers.
 
 ## Open Issues
@@ -84,7 +84,7 @@ Status legend:
   Refs: `Tyr/Model/Qwen3ASR/Streaming.lean`, `Tyr/Model/Qwen3ASR/Model.lean`
 - [x] `H29` Eliminate prompt-cache reuse embed-prefix equality reduction (`maxAll(abs(...))`) from streaming path and gate reuse by prompt token prefix + shape only.
   Refs: `Tyr/Model/Qwen3ASR/Model.lean`
-- [ ] `H30` Remove per-hop prompt-ID CPU tensor materialization + `.to(device)` by caching device-side prompt token tensors and composing audio/suffix deltas on-device.
+- [x] `H30` Remove per-hop prompt-ID CPU tensor materialization + `.to(device)` by caching device-side prompt token tensors and composing audio/suffix deltas on-device.
   Refs: `Tyr/Model/Qwen3ASR/Streaming.lean`
 - [ ] `H31` Remove per-hop generated-token host transfer (`tensorToUInt64Array`) in streaming decode hot path by introducing deferred decode/token-buffer API.
   Refs: `Tyr/Model/Qwen3ASR/Streaming.lean`, `Tyr/Model/Qwen3ASR/Transcribe.lean`
@@ -230,6 +230,8 @@ Status legend:
 - [x] `H27` Added full-accumulation frontend-cache reuse in streaming decode: when audio grows append-only, recompute a suffix window and splice prior feature/mask prefixes instead of full-wave frontend recomputation.
   Refs: `Tyr/Model/Qwen3ASR/Streaming.lean`
 - [x] `H27` Added device-resident frontend cache reuse for full-accumulation streaming: when prefix frames are reusable, keep prior device prefix and transfer only suffix feature/mask frames.
+  Refs: `Tyr/Model/Qwen3ASR/Streaming.lean`
+- [x] `H30` Added device-side prompt token segment cache (`before/after/suffix`) and on-device prompt-id assembly for streaming decode, avoiding full prompt-id host→device transfer each hop.
   Refs: `Tyr/Model/Qwen3ASR/Streaming.lean`
 - [x] `H28` Streaming decode now replaces audio placeholders via contiguous token-span slice composition, removing full-sequence boolean-mask `masked_scatter` in the hot path.
   Refs: `Tyr/Model/Qwen3ASR/Streaming.lean`
