@@ -234,6 +234,30 @@ private def decodeGeneratedText
     let ids := idsU64.map (fun x => x.toUInt32)
     pure (tokenizer.qwen3.decodeText tok ids)
 
+private def decodeGeneratedTextsBatch
+    (tok : tokenizer.qwen3.QwenTokenizer)
+    {batch seq : UInt64}
+    (outSeq : UInt64)
+    (outIds : T #[batch, outSeq])
+    : IO (Array String) := do
+  if batch == 0 then
+    pure #[]
+  else if outSeq <= seq then
+    pure (Array.replicate batch.toNat "")
+  else
+    let newSeq := outSeq - seq
+    let newOnly : T #[batch, newSeq] := data.slice outIds 1 seq newSeq
+    let flat : T #[batch * newSeq] := reshape newOnly #[batch * newSeq]
+    let idsU64 ← data.tensorToUInt64Array flat
+    let rowWidth := newSeq.toNat
+    let mut out : Array String := Array.mkEmpty batch.toNat
+    for b in [:batch.toNat] do
+      let start := b * rowWidth
+      let stop := start + rowWidth
+      let rowIds := (idsU64.extract start stop).map (fun x => x.toUInt32)
+      out := out.push (tokenizer.qwen3.decodeText tok rowIds)
+    pure out
+
 private def extractAudioLenFromFeatureMask {cfg : Qwen3ASRConfig} {frames : UInt64}
     (featureAttentionMask : T #[1, frames])
     : IO UInt64 := do
@@ -458,6 +482,151 @@ private def effectiveBatchStep (n : Nat) (maxInferenceBatchSize : Int) : Nat :=
   else
     Nat.max 1 maxInferenceBatchSize.toNat
 
+private structure BatchedDecodeRow where
+  idx : Nat
+  forceLanguage : Option String
+  inputIdsRow : T #[]
+  inputFeaturesRow : T #[]
+  featureAttentionMaskRow : T #[]
+  deriving Inhabited
+
+private structure BatchedDecodeBucket where
+  frames : UInt64
+  seq : UInt64
+  rows : Array BatchedDecodeRow := #[]
+  deriving Inhabited
+
+private def findBucketIdx
+    (buckets : Array BatchedDecodeBucket)
+    (frames seq : UInt64)
+    : Option Nat :=
+  Id.run do
+    let mut found : Option Nat := none
+    for i in [:buckets.size] do
+      if found.isNone then
+        let b := buckets[i]!
+        if b.frames == frames && b.seq == seq then
+          found := some i
+    found
+
+private def addRowToBuckets
+    (buckets : Array BatchedDecodeBucket)
+    (frames seq : UInt64)
+    (row : BatchedDecodeRow)
+    : Array BatchedDecodeBucket :=
+  match findBucketIdx buckets frames seq with
+  | some i =>
+      let b := buckets[i]!
+      buckets.set! i { b with rows := b.rows.push row }
+  | none =>
+      buckets.push { frames := frames, seq := seq, rows := #[row] }
+
+/-- Try native batched decode for one chunk of waveforms.
+    Returns `none` when inputs are not batch-collatable (e.g. multi-chunk split). -/
+private def tryTranscribeWaveformsBatchedChunk
+    {cfg : Qwen3ASRConfig}
+    (model : Qwen3ASRForConditionalGeneration cfg)
+    (tok : tokenizer.qwen3.QwenTokenizer)
+    (preprocessor : PreprocessorConfig)
+    (audios16k : Array (Array Float))
+    (contexts : Array String)
+    (languages : Array (Option String))
+    (maxNewTokens : UInt64)
+    (eosTokenIds : Array UInt64)
+    : IO (Option (Array ASRTranscription)) := do
+  let n := audios16k.size
+  if n == 0 then
+    return some #[]
+  if contexts.size != n || languages.size != n then
+    throw <| IO.userError
+      s!"Internal batch collation mismatch: audio={n}, context={contexts.size}, language={languages.size}"
+
+  let maxChunkSec := maxAsrInputSeconds
+  let mut buckets : Array BatchedDecodeBucket := #[]
+  for i in [:n] do
+    let searchExpandSec : Float := 1.0
+    let chunks :=
+      splitAudioIntoChunks
+        (audios16k[i]!)
+        sampleRate16k
+        maxChunkSec
+        (searchExpandSec := searchExpandSec)
+    if chunks.size != 1 then
+      return none
+    let chunkWav := (chunks[0]!).1
+    let forceLanguage ← validateForcedLanguage model.supportLanguages (languages[i]!)
+    let prompt := buildTextPrompt (contexts[i]!) forceLanguage
+    let frontendPack ←
+      waveformToWhisperFeaturesDynamic
+        preprocessor
+        chunkWav
+        (minSeconds := minAsrInputSeconds)
+        (maxSeconds := some maxChunkSec)
+    let frames := frontendPack.1
+    let frontendOut := frontendPack.2
+    let audioLen ← extractAudioLenFromFeatureMask (cfg := cfg) (frames := frames) frontendOut.featureAttentionMask
+    let promptPack ← preparePromptInputIds (cfg := cfg) tok prompt audioLen
+    let seq := promptPack.1
+    let inputIdsRowDyn : T #[] := reshape promptPack.2 #[1, seq]
+    let inputFeaturesRowDyn : T #[] :=
+      reshape frontendOut.inputFeatures #[1, preprocessor.featureSize, frames]
+    let featureAttentionMaskRowDyn : T #[] := reshape frontendOut.featureAttentionMask #[1, frames]
+    buckets := addRowToBuckets buckets frames seq {
+      idx := i
+      forceLanguage := forceLanguage
+      inputIdsRow := inputIdsRowDyn
+      inputFeaturesRow := inputFeaturesRowDyn
+      featureAttentionMaskRow := featureAttentionMaskRowDyn
+    }
+
+  let dev := modelDevice model
+  let mut outByIdx : Array (Option ASRTranscription) := Array.replicate n none
+  for bucket in buckets do
+    if bucket.rows.isEmpty then
+      pure ()
+    else
+      let batch := bucket.rows.size.toUInt64
+      let seq := bucket.seq
+      let frames := bucket.frames
+      let inputRows := bucket.rows.map (fun r => r.inputIdsRow)
+      let featRows := bucket.rows.map (fun r => r.inputFeaturesRow)
+      let fmaskRows := bucket.rows.map (fun r => r.featureAttentionMaskRow)
+      let inputIdsCpu : T #[batch, seq] := reshape (nn.cat_dyn inputRows 0) #[batch, seq]
+      let inputFeaturesCpu : T #[batch, preprocessor.featureSize, frames] :=
+        reshape (nn.cat_dyn featRows 0) #[batch, preprocessor.featureSize, frames]
+      let featureAttentionMaskCpu : T #[batch, frames] :=
+        reshape (nn.cat_dyn fmaskRows 0) #[batch, frames]
+      let generated ←
+        model.generateGreedy
+          (inputIdsCpu.to dev)
+          (inputFeatures := some (inputFeaturesCpu.to dev))
+          (featureAttentionMask := some (featureAttentionMaskCpu.to dev))
+          (maxNewTokens := maxNewTokens)
+          (eosTokenIds := eosTokenIds)
+      let outSeq := generated.1
+      let outIds := generated.2
+      let raws ← decodeGeneratedTextsBatch tok (batch := batch) (seq := seq) outSeq outIds
+      if raws.size != bucket.rows.size then
+        throw <| IO.userError
+          s!"Internal batch decode mismatch: rows={bucket.rows.size}, decoded={raws.size}"
+      for i in [:bucket.rows.size] do
+        let row := bucket.rows[i]!
+        let raw := raws[i]!
+        let (lang, txt) := parseAsrOutput raw row.forceLanguage
+        outByIdx := outByIdx.set! row.idx (some {
+          language := lang
+          text := txt
+          timeStamps := none
+        })
+
+  let mut out : Array ASRTranscription := Array.mkEmpty n
+  for i in [:n] do
+    match outByIdx[i]! with
+    | some r => out := out.push r
+    | none =>
+        throw <| IO.userError s!"Internal batch decode missing output for row {i}"
+  pure (some out)
+
 /-- Offline ASR for a batch of in-memory 16k mono waveforms. -/
 def transcribeWaveforms
     {cfg : Qwen3ASRConfig}
@@ -481,16 +650,38 @@ def transcribeWaveforms
   let mut off : Nat := 0
   while off < n do
     let hi := Nat.min n (off + step)
-    for i in [off:hi] do
-      let r ← transcribeWaveform
-        model tok preprocessor (audios16k[i]!)
-        (forcedAligner := forcedAligner)
-        (context := ctxs[i]!)
-        (language := langs[i]!)
-        (returnTimeStamps := returnTimeStamps)
-        (maxNewTokens := maxNewTokens)
-        (eosTokenIds := eosTokenIds)
-      out := out.push r
+    let audChunk := audios16k.extract off hi
+    let ctxChunk := ctxs.extract off hi
+    let langChunk := langs.extract off hi
+    let usedBatch ←
+      if returnTimeStamps || forcedAligner.isSome then
+        pure false
+      else
+        match (← tryTranscribeWaveformsBatchedChunk
+          model
+          tok
+          preprocessor
+          audChunk
+          ctxChunk
+          langChunk
+          maxNewTokens
+          eosTokenIds) with
+        | some rs =>
+            out := out ++ rs
+            pure true
+        | none =>
+            pure false
+    if !usedBatch then
+      for i in [off:hi] do
+        let r ← transcribeWaveform
+          model tok preprocessor (audios16k[i]!)
+          (forcedAligner := forcedAligner)
+          (context := ctxs[i]!)
+          (language := langs[i]!)
+          (returnTimeStamps := returnTimeStamps)
+          (maxNewTokens := maxNewTokens)
+          (eosTokenIds := eosTokenIds)
+        out := out.push r
     off := hi
   pure out
 
@@ -573,29 +764,21 @@ def transcribeWavs
     (maxNewTokens : UInt64 := 512)
     (eosTokenIds : Array UInt64 := defaultEosTokenIds)
     : IO (Array ASRTranscription) := do
-  let n := wavPaths.size
-  let ctxs ← broadcastContexts n contexts
-  let langs ← broadcastLanguages n languages
-  let mut out : Array ASRTranscription := Array.mkEmpty n
-  let step := effectiveBatchStep n maxInferenceBatchSize
-  let mut off : Nat := 0
-  while off < n do
-    let hi := Nat.min n (off + step)
-    for i in [off:hi] do
-      let r ← transcribeWav
-        model
-        tok
-        preprocessor
-        (wavPaths[i]!)
-        (forcedAligner := forcedAligner)
-        (context := ctxs[i]!)
-        (language := langs[i]!)
-        (returnTimeStamps := returnTimeStamps)
-        (maxNewTokens := maxNewTokens)
-        (eosTokenIds := eosTokenIds)
-      out := out.push r
-    off := hi
-  pure out
+  let mut audios16k : Array (Array Float) := Array.mkEmpty wavPaths.size
+  for p in wavPaths do
+    audios16k := audios16k.push (← normalizeAudioTo16kFromWav p)
+  transcribeWaveforms
+    model
+    tok
+    preprocessor
+    audios16k
+    forcedAligner
+    contexts
+    languages
+    maxInferenceBatchSize
+    returnTimeStamps
+    maxNewTokens
+    eosTokenIds
 
 /-- Offline ASR from unified audio input batch.
     Inputs can mix path/URL/base64/in-memory waveform forms. -/
@@ -613,29 +796,21 @@ def transcribeAudioInputs
     (maxNewTokens : UInt64 := 512)
     (eosTokenIds : Array UInt64 := defaultEosTokenIds)
     : IO (Array ASRTranscription) := do
-  let n := audios.size
-  let ctxs ← broadcastContexts n contexts
-  let langs ← broadcastLanguages n languages
-  let mut out : Array ASRTranscription := Array.mkEmpty n
-  let step := effectiveBatchStep n maxInferenceBatchSize
-  let mut off : Nat := 0
-  while off < n do
-    let hi := Nat.min n (off + step)
-    for i in [off:hi] do
-      let r ← transcribeAudioInput
-        model
-        tok
-        preprocessor
-        (audios[i]!)
-        (forcedAligner := forcedAligner)
-        (context := ctxs[i]!)
-        (language := langs[i]!)
-        (returnTimeStamps := returnTimeStamps)
-        (maxNewTokens := maxNewTokens)
-        (eosTokenIds := eosTokenIds)
-      out := out.push r
-    off := hi
-  pure out
+  let mut audios16k : Array (Array Float) := Array.mkEmpty audios.size
+  for a in audios do
+    audios16k := audios16k.push (← normalizeAudioInputTo16k a)
+  transcribeWaveforms
+    model
+    tok
+    preprocessor
+    audios16k
+    forcedAligner
+    contexts
+    languages
+    maxInferenceBatchSize
+    returnTimeStamps
+    maxNewTokens
+    eosTokenIds
 
 /-- Offline ASR from string sources with auto-detection per source string. -/
 def transcribeAudioSources
