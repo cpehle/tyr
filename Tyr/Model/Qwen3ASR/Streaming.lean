@@ -154,6 +154,36 @@ private def encodePromptIdsWithCache
     | .ok ids => pure (ids, none)
     | .error e => throw <| IO.userError e
 
+private def findSingleContiguousAudioSpanStart
+    (promptIds : Array UInt32)
+    (audioTokenId : UInt32)
+    (audioLen : UInt64)
+    : Option UInt64 :=
+  if audioLen == 0 then
+    if promptIds.contains audioTokenId then none else some 0
+  else
+    let targetLen := audioLen.toNat
+    Id.run do
+      let mut spans : Array (Nat × Nat) := #[]
+      let mut i : Nat := 0
+      while i < promptIds.size do
+        if promptIds.getD i 0 == audioTokenId then
+          let start := i
+          let mut j := i
+          while j < promptIds.size && promptIds.getD j 0 == audioTokenId do
+            j := j + 1
+          spans := spans.push (start, j - start)
+          i := j
+        else
+          i := i + 1
+      match spans[0]? with
+      | some (start, spanLen) =>
+        if spans.size == 1 && spanLen == targetLen then
+          some start.toUInt64
+        else
+          none
+      | none => none
+
 private def joinWith (sep : String) (parts : List String) : String :=
   match parts with
   | [] => ""
@@ -550,58 +580,150 @@ def decodeStreamingChunkWithModelStateCached
   if audio16k.isEmpty then
     pure ("", cache)
   else
-    let maxSec :=
-      (PreprocessorConfig.expectedSampleCount preprocessor).toFloat / sampleRate16k
-    let frontendPack ←
-      waveformToWhisperFeaturesDynamic
-        preprocessor
-        audio16k
-        (minSeconds := 0.05)
-        (maxSeconds := some maxSec)
-    let frames := frontendPack.1
-    let frontendOut := frontendPack.2
-    let validFramesTensor : T #[1] := nn.sumDim (data.toLong frontendOut.featureAttentionMask) 1 false
-    let validFrames := (nn.item validFramesTensor).toUInt64
-    let audioLenRaw := AudioEncoderConfig.featExtractOutputLength validFrames
-    let audioLenCap :=
-      AudioEncoderConfig.framesAfterConv3
-        cfg.thinkerConfig.audioConfig
-        frames
-    let audioLen := minU64 audioLenRaw audioLenCap
+    autograd.no_grad do
+      let maxSec :=
+        (PreprocessorConfig.expectedSampleCount preprocessor).toFloat / sampleRate16k
+      let frontendPack ←
+        waveformToWhisperFeaturesDynamic
+          preprocessor
+          audio16k
+          (minSeconds := 0.05)
+          (maxSeconds := some maxSec)
+      let frames := frontendPack.1
+      let frontendOut := frontendPack.2
+      let validFramesTensor : T #[1] := nn.sumDim (data.toLong frontendOut.featureAttentionMask) 1 false
+      let validFrames := (nn.item validFramesTensor).toUInt64
+      let audioLenRaw := AudioEncoderConfig.featExtractOutputLength validFrames
+      let audioLenCap :=
+        AudioEncoderConfig.framesAfterConv3
+          cfg.thinkerConfig.audioConfig
+          frames
+      let audioLen := minU64 audioLenRaw audioLenCap
 
-    let processor : Qwen3ASRProcessor := {}
-    let cache0 : StreamingDecodeCache cfg := cache.getD {}
-    let (promptIds, promptTokenCache') ←
-      encodePromptIdsWithCache
-        tok
-        processor
-        basePrompt
-        prompt
-        audioLen
-        cfg.thinkerConfig.audioTokenId.toUInt32
-        cache0.promptTokenCache
+      let processor : Qwen3ASRProcessor := {}
+      let cache0 : StreamingDecodeCache cfg := cache.getD {}
+      let (promptIds, promptTokenCache') ←
+        encodePromptIdsWithCache
+          tok
+          processor
+          basePrompt
+          prompt
+          audioLen
+          cfg.thinkerConfig.audioTokenId.toUInt32
+          cache0.promptTokenCache
 
-    let idsVals : Array Int64 := promptIds.map (fun id => Int64.ofNat id.toNat)
+      let idsVals : Array Int64 := promptIds.map (fun id => Int64.ofNat id.toNat)
 
-    let seq : UInt64 := idsVals.size.toUInt64
-    if seq == 0 then
-      throw <| IO.userError "decodeStreamingChunkWithModel produced empty prompt/input sequence"
-    let dev := model.thinker.textModel.embed_tokens.device
-    let inputIdsCpu : T #[1, seq] := reshape (data.fromInt64Array idsVals) #[1, seq]
-    let inputIds : T #[1, seq] := inputIdsCpu.to dev
-    let inputFeaturesDev : T #[1, preprocessor.featureSize, frames] :=
-      frontendOut.inputFeatures.to dev
-    let featureAttentionMaskDev : T #[1, frames] :=
-      frontendOut.featureAttentionMask.to dev
-    let fullStepFeature : UInt64 := cfg.thinkerConfig.audioConfig.nWindow * 2
-    let (audioEmbedsValid, audioCache') ←
-      match cache0.audioEncoderCache with
-      | some ac =>
-        let canReuse :=
-          decodeMode == .fullAccumulation &&
-          fullStepFeature > 0 &&
-          ac.validFeatureLen <= validFrames
-        if !canReuse then
+      let seq : UInt64 := idsVals.size.toUInt64
+      if seq == 0 then
+        throw <| IO.userError "decodeStreamingChunkWithModel produced empty prompt/input sequence"
+      let dev := model.thinker.textModel.embed_tokens.device
+      let inputIdsCpu : T #[1, seq] := reshape (data.fromInt64Array idsVals) #[1, seq]
+      let inputIds : T #[1, seq] := inputIdsCpu.to dev
+      let inputFeaturesDev : T #[1, preprocessor.featureSize, frames] :=
+        frontendOut.inputFeatures.to dev
+      let featureAttentionMaskDev : T #[1, frames] :=
+        frontendOut.featureAttentionMask.to dev
+      let fullStepFeature : UInt64 := cfg.thinkerConfig.audioConfig.nWindow * 2
+      let (audioEmbedsValid, audioCache') ←
+        match cache0.audioEncoderCache with
+        | some ac =>
+          let canReuse :=
+            decodeMode == .fullAccumulation &&
+            fullStepFeature > 0 &&
+            ac.validFeatureLen <= validFrames
+          if !canReuse then
+            let audioRaw : T #[1, AudioEncoderConfig.framesAfterConv3 cfg.thinkerConfig.audioConfig frames, cfg.thinkerConfig.audioConfig.outputDim] :=
+              model.thinker.encodeAudioVarLen inputFeaturesDev #[validFrames]
+            let audioProj : T #[1, AudioEncoderConfig.framesAfterConv3 cfg.thinkerConfig.audioConfig frames, cfg.thinkerConfig.textConfig.hiddenSize] :=
+              model.thinker.projectAudio audioRaw
+            let audioValid : T #[1, audioLen, cfg.thinkerConfig.textConfig.hiddenSize] := data.slice audioProj 1 0 audioLen
+            let nextAudioCache :=
+              if decodeMode == .fullAccumulation then
+                some {
+                  validFeatureLen := validFrames
+                  validAudioLen := audioLen
+                  audioEmbedsValidDyn := nn.eraseShape audioValid
+                }
+              else
+                none
+            pure (audioValid, nextAudioCache)
+          else
+            let prevFull := (ac.validFeatureLen / fullStepFeature) * fullStepFeature
+            let curFull := (validFrames / fullStepFeature) * fullStepFeature
+            let reuseBase := minU64 prevFull curFull
+            let reuseFeatureLen :=
+              if reuseBase > 0 && validFrames % fullStepFeature != 0 then
+                reuseBase - fullStepFeature
+              else
+                reuseBase
+            let reuseAudioLenRaw := AudioEncoderConfig.featExtractOutputLength reuseFeatureLen
+            let reuseAudioLen := minU64 (minU64 reuseAudioLenRaw ac.validAudioLen) audioLen
+            let prevAudio : T #[1, ac.validAudioLen, cfg.thinkerConfig.textConfig.hiddenSize] :=
+              reshape ac.audioEmbedsValidDyn #[1, ac.validAudioLen, cfg.thinkerConfig.textConfig.hiddenSize]
+            let prefixAudio : T #[1, reuseAudioLen, cfg.thinkerConfig.textConfig.hiddenSize] := data.slice prevAudio 1 0 reuseAudioLen
+            let tailFeatureLen := validFrames - reuseFeatureLen
+            if tailFeatureLen == 0 then
+              let audioValid : T #[1, audioLen, cfg.thinkerConfig.textConfig.hiddenSize] :=
+                if reuseAudioLen == audioLen then
+                  reshape prefixAudio #[1, audioLen, cfg.thinkerConfig.textConfig.hiddenSize]
+                else if reuseAudioLen > audioLen then
+                  data.slice prefixAudio 1 0 audioLen
+                else
+                  let padLen := audioLen - reuseAudioLen
+                  let pad : T #[1, padLen, cfg.thinkerConfig.textConfig.hiddenSize] :=
+                    torch.zeros #[1, padLen, cfg.thinkerConfig.textConfig.hiddenSize] false prefixAudio.device
+                  reshape (nn.cat prefixAudio pad 1) #[1, audioLen, cfg.thinkerConfig.textConfig.hiddenSize]
+              let nextAudioCache :=
+                if decodeMode == .fullAccumulation then
+                  some {
+                    validFeatureLen := validFrames
+                    validAudioLen := audioLen
+                    audioEmbedsValidDyn := nn.eraseShape audioValid
+                  }
+                else
+                  none
+              pure (audioValid, nextAudioCache)
+            else
+              let tailFrames := frames - reuseFeatureLen
+              let tailInput : T #[1, preprocessor.featureSize, tailFrames] :=
+                data.slice inputFeaturesDev 2 reuseFeatureLen tailFrames
+              let tailAudioRaw : T #[1, AudioEncoderConfig.framesAfterConv3 cfg.thinkerConfig.audioConfig tailFrames, cfg.thinkerConfig.audioConfig.outputDim] :=
+                model.thinker.encodeAudioVarLen tailInput #[tailFeatureLen]
+              let tailAudioProj : T #[1, AudioEncoderConfig.framesAfterConv3 cfg.thinkerConfig.audioConfig tailFrames, cfg.thinkerConfig.textConfig.hiddenSize] :=
+                model.thinker.projectAudio tailAudioRaw
+              let tailAudioLenRaw := AudioEncoderConfig.featExtractOutputLength tailFeatureLen
+              let tailAudioCap := AudioEncoderConfig.framesAfterConv3 cfg.thinkerConfig.audioConfig tailFrames
+              let tailAudioLen := minU64 tailAudioLenRaw tailAudioCap
+              let tailValid : T #[1, tailAudioLen, cfg.thinkerConfig.textConfig.hiddenSize] :=
+                data.slice tailAudioProj 1 0 tailAudioLen
+              let combinedDyn : T #[] := nn.cat_dyn #[nn.eraseShape prefixAudio, nn.eraseShape tailValid] 1
+              let combinedLen := reuseAudioLen + tailAudioLen
+              let audioValid : T #[1, audioLen, cfg.thinkerConfig.textConfig.hiddenSize] :=
+                if combinedLen == audioLen then
+                  reshape combinedDyn #[1, audioLen, cfg.thinkerConfig.textConfig.hiddenSize]
+                else if combinedLen > audioLen then
+                  let combined : T #[1, combinedLen, cfg.thinkerConfig.textConfig.hiddenSize] :=
+                    reshape combinedDyn #[1, combinedLen, cfg.thinkerConfig.textConfig.hiddenSize]
+                  data.slice combined 1 0 audioLen
+                else
+                  let combined : T #[1, combinedLen, cfg.thinkerConfig.textConfig.hiddenSize] :=
+                    reshape combinedDyn #[1, combinedLen, cfg.thinkerConfig.textConfig.hiddenSize]
+                  let padLen := audioLen - combinedLen
+                  let pad : T #[1, padLen, cfg.thinkerConfig.textConfig.hiddenSize] :=
+                    torch.zeros #[1, padLen, cfg.thinkerConfig.textConfig.hiddenSize] false combined.device
+                  reshape (nn.cat combined pad 1) #[1, audioLen, cfg.thinkerConfig.textConfig.hiddenSize]
+              let nextAudioCache :=
+                if decodeMode == .fullAccumulation then
+                  some {
+                    validFeatureLen := validFrames
+                    validAudioLen := audioLen
+                    audioEmbedsValidDyn := nn.eraseShape audioValid
+                  }
+                else
+                  none
+              pure (audioValid, nextAudioCache)
+        | none =>
           let audioRaw : T #[1, AudioEncoderConfig.framesAfterConv3 cfg.thinkerConfig.audioConfig frames, cfg.thinkerConfig.audioConfig.outputDim] :=
             model.thinker.encodeAudioVarLen inputFeaturesDev #[validFrames]
           let audioProj : T #[1, AudioEncoderConfig.framesAfterConv3 cfg.thinkerConfig.audioConfig frames, cfg.thinkerConfig.textConfig.hiddenSize] :=
@@ -617,141 +739,58 @@ def decodeStreamingChunkWithModelStateCached
             else
               none
           pure (audioValid, nextAudioCache)
+
+      let inputsEmbeds0 : T #[1, seq, cfg.thinkerConfig.textConfig.hiddenSize] := model.thinker.embedText inputIds
+      let inputsEmbeds : T #[1, seq, cfg.thinkerConfig.textConfig.hiddenSize] :=
+        if audioLen == 0 then
+          inputsEmbeds0
         else
-          let prevFull := (ac.validFeatureLen / fullStepFeature) * fullStepFeature
-          let curFull := (validFrames / fullStepFeature) * fullStepFeature
-          let reuseBase := minU64 prevFull curFull
-          let reuseFeatureLen :=
-            if reuseBase > 0 && validFrames % fullStepFeature != 0 then
-              reuseBase - fullStepFeature
-            else
-              reuseBase
-          let reuseAudioLenRaw := AudioEncoderConfig.featExtractOutputLength reuseFeatureLen
-          let reuseAudioLen := minU64 (minU64 reuseAudioLenRaw ac.validAudioLen) audioLen
-          let prevAudio : T #[1, ac.validAudioLen, cfg.thinkerConfig.textConfig.hiddenSize] :=
-            reshape ac.audioEmbedsValidDyn #[1, ac.validAudioLen, cfg.thinkerConfig.textConfig.hiddenSize]
-          let prefixAudio : T #[1, reuseAudioLen, cfg.thinkerConfig.textConfig.hiddenSize] := data.slice prevAudio 1 0 reuseAudioLen
-          let tailFeatureLen := validFrames - reuseFeatureLen
-          if tailFeatureLen == 0 then
-            let audioValid : T #[1, audioLen, cfg.thinkerConfig.textConfig.hiddenSize] :=
-              if reuseAudioLen == audioLen then
-                reshape prefixAudio #[1, audioLen, cfg.thinkerConfig.textConfig.hiddenSize]
-              else if reuseAudioLen > audioLen then
-                data.slice prefixAudio 1 0 audioLen
-              else
-                let padLen := audioLen - reuseAudioLen
-                let pad : T #[1, padLen, cfg.thinkerConfig.textConfig.hiddenSize] :=
-                  torch.zeros #[1, padLen, cfg.thinkerConfig.textConfig.hiddenSize] false prefixAudio.device
-                reshape (nn.cat prefixAudio pad 1) #[1, audioLen, cfg.thinkerConfig.textConfig.hiddenSize]
-            let nextAudioCache :=
-              if decodeMode == .fullAccumulation then
-                some {
-                  validFeatureLen := validFrames
-                  validAudioLen := audioLen
-                  audioEmbedsValidDyn := nn.eraseShape audioValid
-                }
-              else
-                none
-            pure (audioValid, nextAudioCache)
-          else
-            let tailFrames := frames - reuseFeatureLen
-            let tailInput : T #[1, preprocessor.featureSize, tailFrames] :=
-              data.slice inputFeaturesDev 2 reuseFeatureLen tailFrames
-            let tailAudioRaw : T #[1, AudioEncoderConfig.framesAfterConv3 cfg.thinkerConfig.audioConfig tailFrames, cfg.thinkerConfig.audioConfig.outputDim] :=
-              model.thinker.encodeAudioVarLen tailInput #[tailFeatureLen]
-            let tailAudioProj : T #[1, AudioEncoderConfig.framesAfterConv3 cfg.thinkerConfig.audioConfig tailFrames, cfg.thinkerConfig.textConfig.hiddenSize] :=
-              model.thinker.projectAudio tailAudioRaw
-            let tailAudioLenRaw := AudioEncoderConfig.featExtractOutputLength tailFeatureLen
-            let tailAudioCap := AudioEncoderConfig.framesAfterConv3 cfg.thinkerConfig.audioConfig tailFrames
-            let tailAudioLen := minU64 tailAudioLenRaw tailAudioCap
-            let tailValid : T #[1, tailAudioLen, cfg.thinkerConfig.textConfig.hiddenSize] :=
-              data.slice tailAudioProj 1 0 tailAudioLen
-            let combinedDyn : T #[] := nn.cat_dyn #[nn.eraseShape prefixAudio, nn.eraseShape tailValid] 1
-            let combinedLen := reuseAudioLen + tailAudioLen
-            let audioValid : T #[1, audioLen, cfg.thinkerConfig.textConfig.hiddenSize] :=
-              if combinedLen == audioLen then
-                reshape combinedDyn #[1, audioLen, cfg.thinkerConfig.textConfig.hiddenSize]
-              else if combinedLen > audioLen then
-                let combined : T #[1, combinedLen, cfg.thinkerConfig.textConfig.hiddenSize] :=
-                  reshape combinedDyn #[1, combinedLen, cfg.thinkerConfig.textConfig.hiddenSize]
-                data.slice combined 1 0 audioLen
-              else
-                let combined : T #[1, combinedLen, cfg.thinkerConfig.textConfig.hiddenSize] :=
-                  reshape combinedDyn #[1, combinedLen, cfg.thinkerConfig.textConfig.hiddenSize]
-                let padLen := audioLen - combinedLen
-                let pad : T #[1, padLen, cfg.thinkerConfig.textConfig.hiddenSize] :=
-                  torch.zeros #[1, padLen, cfg.thinkerConfig.textConfig.hiddenSize] false combined.device
-                reshape (nn.cat combined pad 1) #[1, audioLen, cfg.thinkerConfig.textConfig.hiddenSize]
-            let nextAudioCache :=
-              if decodeMode == .fullAccumulation then
-                some {
-                  validFeatureLen := validFrames
-                  validAudioLen := audioLen
-                  audioEmbedsValidDyn := nn.eraseShape audioValid
-                }
-              else
-                none
-            pure (audioValid, nextAudioCache)
-      | none =>
-        let audioRaw : T #[1, AudioEncoderConfig.framesAfterConv3 cfg.thinkerConfig.audioConfig frames, cfg.thinkerConfig.audioConfig.outputDim] :=
-          model.thinker.encodeAudioVarLen inputFeaturesDev #[validFrames]
-        let audioProj : T #[1, AudioEncoderConfig.framesAfterConv3 cfg.thinkerConfig.audioConfig frames, cfg.thinkerConfig.textConfig.hiddenSize] :=
-          model.thinker.projectAudio audioRaw
-        let audioValid : T #[1, audioLen, cfg.thinkerConfig.textConfig.hiddenSize] := data.slice audioProj 1 0 audioLen
-        let nextAudioCache :=
-          if decodeMode == .fullAccumulation then
-            some {
-              validFeatureLen := validFrames
-              validAudioLen := audioLen
-              audioEmbedsValidDyn := nn.eraseShape audioValid
-            }
-          else
-            none
-        pure (audioValid, nextAudioCache)
+          match findSingleContiguousAudioSpanStart promptIds cfg.thinkerConfig.audioTokenId.toUInt32 audioLen with
+          | some spanStart =>
+            if spanStart + audioLen > seq then
+              throw <| IO.userError
+                s!"decodeStreamingChunkWithModel placeholder span overflow: start={spanStart}, audio_len={audioLen}, seq={seq}"
+            let prefix : T #[1, spanStart, cfg.thinkerConfig.textConfig.hiddenSize] :=
+              data.slice inputsEmbeds0 1 0 spanStart
+            let suffixStart := spanStart + audioLen
+            let suffixLen := seq - suffixStart
+            let suffix : T #[1, suffixLen, cfg.thinkerConfig.textConfig.hiddenSize] :=
+              data.slice inputsEmbeds0 1 suffixStart suffixLen
+            let mergedDyn : T #[] :=
+              nn.cat_dyn
+                #[nn.eraseShape prefix, nn.eraseShape audioEmbedsValid, nn.eraseShape suffix]
+                1
+            reshape mergedDyn #[1, seq, cfg.thinkerConfig.textConfig.hiddenSize]
+          | none =>
+            throw <| IO.userError
+              s!"decodeStreamingChunkWithModel expected one contiguous audio-token span of length {audioLen}, but prompt ids were not span-compatible"
 
-    let inputsEmbeds0 : T #[1, seq, cfg.thinkerConfig.textConfig.hiddenSize] := model.thinker.embedText inputIds
-    let placeholderMask2d : T #[1, seq] := eq_scalar inputIds (Int64.ofNat cfg.thinkerConfig.audioTokenId.toNat)
-    let placeholderCountTensor : T #[1] := nn.sumDim (data.toLong placeholderMask2d) 1 false
-    let placeholderCount := (nn.item placeholderCountTensor).toUInt64
-    if placeholderCount != audioLen then
-      throw <| IO.userError
-        s!"decodeStreamingChunkWithModel placeholder mismatch: expected {audioLen}, got {placeholderCount}"
-    let inputsEmbeds : T #[1, seq, cfg.thinkerConfig.textConfig.hiddenSize] :=
-      if audioLen == 0 then
-        inputsEmbeds0
+      let (generated, nextPromptCache) ←
+        model.generateGreedyFromInputsEmbedsWithPromptCache
+          inputIds
+          inputsEmbeds
+          (promptTokenIds := promptIds)
+          (prefixCache := cache0.promptCache)
+          (maxNewTokens := maxNewTokens)
+          (eosTokenIds := eosTokenIds)
+
+      let nextCache : StreamingDecodeCache cfg := {
+        promptCache := some nextPromptCache
+        promptTokenCache := promptTokenCache'
+        audioEncoderCache := audioCache'
+      }
+
+      let outSeq := generated.1
+      let outIds := generated.2
+      if outSeq <= seq then
+        pure ("", some nextCache)
       else
-        let placeholderMask : T #[1, seq, cfg.thinkerConfig.textConfig.hiddenSize] :=
-          nn.expand (reshape placeholderMask2d #[1, seq, 1]) #[1, seq, cfg.thinkerConfig.textConfig.hiddenSize]
-        let source : T #[audioLen * cfg.thinkerConfig.textConfig.hiddenSize] :=
-          reshape audioEmbedsValid #[audioLen * cfg.thinkerConfig.textConfig.hiddenSize]
-        nn.masked_scatter inputsEmbeds0 placeholderMask source
-
-    let (generated, nextPromptCache) ←
-      model.generateGreedyFromInputsEmbedsWithPromptCache
-        inputIds
-        inputsEmbeds
-        (promptTokenIds := promptIds)
-        (prefixCache := cache0.promptCache)
-        (maxNewTokens := maxNewTokens)
-        (eosTokenIds := eosTokenIds)
-
-    let nextCache : StreamingDecodeCache cfg := {
-      promptCache := some nextPromptCache
-      promptTokenCache := promptTokenCache'
-      audioEncoderCache := audioCache'
-    }
-
-    let outSeq := generated.1
-    let outIds := generated.2
-    if outSeq <= seq then
-      pure ("", some nextCache)
-    else
-      let newSeq := outSeq - seq
-      let newOnly : T #[1, newSeq] := data.slice outIds 1 seq newSeq
-      let flat : T #[newSeq] := reshape newOnly #[newSeq]
-      let idsU64 ← data.tensorToUInt64Array flat
-      let ids := idsU64.map (fun x => x.toUInt32)
-      pure (tokenizer.qwen3.decodeText tok ids, some nextCache)
+        let newSeq := outSeq - seq
+        let newOnly : T #[1, newSeq] := data.slice outIds 1 seq newSeq
+        let flat : T #[newSeq] := reshape newOnly #[newSeq]
+        let idsU64 ← data.tensorToUInt64Array flat
+        let ids := idsU64.map (fun x => x.toUInt32)
+        pure (tokenizer.qwen3.decodeText tok ids, some nextCache)
 
 /-- Lean decode helper that runs one model generation from `(prompt, audio)` pair
     and returns updated prompt cache for the next hop. -/

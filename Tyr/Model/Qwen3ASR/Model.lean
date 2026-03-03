@@ -586,26 +586,9 @@ private def buildStreamingPromptCacheFromEmbeds {seq : UInt64}
     lastLogits := lastLogits
   }
 
-private def promptEmbedsPrefixCompatible {seq : UInt64}
-    (cache : StreamingPromptCache cfg)
-    (inputsEmbeds : T #[1, seq, cfg.textConfig.hiddenSize])
-    (tol : Float := 1e-6)
-    : IO Bool := do
-  if cache.seq == 0 then
-    pure true
-  else if cache.seq > seq then
-    pure false
-  else
-    let prev : T #[1, cache.seq, cfg.textConfig.hiddenSize] :=
-      reshape cache.promptEmbedsDyn #[1, cache.seq, cfg.textConfig.hiddenSize]
-    let nextPref : T #[1, cache.seq, cfg.textConfig.hiddenSize] :=
-      data.slice inputsEmbeds 1 0 cache.seq
-    let maxDiff := nn.item (nn.maxAll (nn.abs (nextPref - prev)))
-    pure (maxDiff <= tol)
-
 private def canReuseStreamingPromptCache {seq : UInt64}
     (cache : StreamingPromptCache cfg)
-    (inputsEmbeds : T #[1, seq, cfg.textConfig.hiddenSize])
+    (_inputsEmbeds : T #[1, seq, cfg.textConfig.hiddenSize])
     (promptTokenIds : Array UInt32)
     (maxNewTokens : UInt64)
     : IO Bool := do
@@ -619,7 +602,7 @@ private def canReuseStreamingPromptCache {seq : UInt64}
     if cache.maxLen < neededMax then
       pure false
     else
-      promptEmbedsPrefixCompatible cache inputsEmbeds
+      pure true
 
 private def extendStreamingPromptCacheFromEmbeds {seq : UInt64}
     (m : Qwen3ASRThinkerForConditionalGeneration cfg)

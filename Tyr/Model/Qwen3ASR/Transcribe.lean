@@ -297,14 +297,16 @@ private def alignSingleWithModel
     let inputIdsAlign : T #[1, seqAlign] := inputIdsAlignCpu.to dev
     let inputFeaturesDev : T #[1, melBins, frames] := frontendOut.inputFeatures.to dev
     let featureAttentionMaskDev : T #[1, frames] := frontendOut.featureAttentionMask.to dev
-    let results ← alignModel.alignPrepared
-      inputIdsAlign
-      #[wordList]
-      (inputFeatures := some inputFeaturesDev)
-      (featureAttentionMask := some featureAttentionMaskDev)
-      (attentionMask := (none : Option (T #[1, seqAlign])))
-      (timestampTokenId := alignCfg.timestampTokenId)
-      (timestampSegmentTime := alignCfg.timestampSegmentTime)
+    let results ←
+      autograd.no_grad do
+        alignModel.alignPrepared
+          inputIdsAlign
+          #[wordList]
+          (inputFeatures := some inputFeaturesDev)
+          (featureAttentionMask := some featureAttentionMaskDev)
+          (attentionMask := (none : Option (T #[1, seqAlign])))
+          (timestampTokenId := alignCfg.timestampTokenId)
+          (timestampSegmentTime := alignCfg.timestampSegmentTime)
     pure (results[0]?)
 
 private def alignSingleWithForcedAligner
@@ -380,12 +382,13 @@ private def transcribeWithFrontend
   let inputFeaturesDev : T #[1, melBins, frames] := frontendOut.inputFeatures.to dev
   let featureAttentionMaskDev : T #[1, frames] := frontendOut.featureAttentionMask.to dev
   let generated ←
-    model.generateGreedy
-      inputIds
-      (inputFeatures := some inputFeaturesDev)
-      (featureAttentionMask := some featureAttentionMaskDev)
-      (maxNewTokens := maxNewTokens)
-      (eosTokenIds := eosTokenIds)
+    autograd.no_grad do
+      model.generateGreedy
+        inputIds
+        (inputFeatures := some inputFeaturesDev)
+        (featureAttentionMask := some featureAttentionMaskDev)
+        (maxNewTokens := maxNewTokens)
+        (eosTokenIds := eosTokenIds)
 
   let outSeq := generated.1
   let outIds := generated.2
@@ -596,12 +599,13 @@ private def tryTranscribeWaveformsBatchedChunk
       let featureAttentionMaskCpu : T #[batch, frames] :=
         reshape (nn.cat_dyn fmaskRows 0) #[batch, frames]
       let generated ←
-        model.generateGreedy
-          (inputIdsCpu.to dev)
-          (inputFeatures := some (inputFeaturesCpu.to dev))
-          (featureAttentionMask := some (featureAttentionMaskCpu.to dev))
-          (maxNewTokens := maxNewTokens)
-          (eosTokenIds := eosTokenIds)
+        autograd.no_grad do
+          model.generateGreedy
+            (inputIdsCpu.to dev)
+            (inputFeatures := some (inputFeaturesCpu.to dev))
+            (featureAttentionMask := some (featureAttentionMaskCpu.to dev))
+            (maxNewTokens := maxNewTokens)
+            (eosTokenIds := eosTokenIds)
       let outSeq := generated.1
       let outIds := generated.2
       let raws ← decodeGeneratedTextsBatch tok (batch := batch) (seq := seq) outSeq outIds
