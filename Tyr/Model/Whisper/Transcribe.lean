@@ -46,7 +46,7 @@ structure WhisperDecodeOptions where
   maxContextTokens : UInt64 := 0
   chunkOverlapSeconds : Float := 2.0
   resetContextOnFallback : Bool := true
-  noFallback : Bool := false
+  noFallback : Bool := true
   deriving Repr, Inhabited
 
 private def sampleRate16k : UInt64 := 16000
@@ -206,6 +206,32 @@ private def mergeChunkTexts (parts : Array String) : String :=
         else
           out := out ++ " " ++ t
     out
+
+private def trimDanglingTailAfterPeriod (text : String) : String :=
+  let t := text.trimAscii.toString
+  let parts := t.splitOn "."
+  match parts.reverse with
+  | [] => t
+  | suffixRaw :: restRev =>
+      let suffix := suffixRaw.trimAscii.toString
+      if suffix.isEmpty then
+        t
+      else
+        let suffixWords :=
+          (suffix.splitOn " ").foldl
+            (fun acc w =>
+              let ww := w.trimAscii.toString
+              if ww.isEmpty then acc else acc + 1)
+            0
+        let isLongText := t.toList.length > 200
+        if isLongText && suffixWords <= 8 then
+          let body := (String.intercalate "." restRev.reverse).trimAscii.toString
+          if body.isEmpty then
+            t
+          else
+            body ++ "."
+        else
+          t
 
 private def splitWaveformFixed
     (wav : Array Float)
@@ -1188,93 +1214,110 @@ def transcribeWav
     seekStep := seekStep + 1
     let stop := Nat.min wav16k.size (seek + chunkSamples)
     let chunk := wav16k.extract seek stop
-    if seek > 0 && stop == wav16k.size && chunk.size < (chunkSamples / 2) then
-      -- Very short tail chunks tend to hallucinate with carried text context.
-      rollingContext := #[]
-
-    let pack ←
-      waveformToWhisperFeaturesDynamic
-        pre
-        chunk
-        (minSeconds := 0.05)
-        (maxSeconds := some chunkSeconds)
-        (device := frontendDevice)
-    match pack with
-    | ⟨frames, out⟩ =>
-      let inputFeatures : T #[1, cfg.numMelBins, frames] :=
-        reshape (nn.eraseShape out.inputFeatures) #[1, cfg.numMelBins, frames]
-      let encoderHidden : T #[1, WhisperConfig.conv2OutputSeq frames, cfg.dModel] ←
-        model.encode (frames := frames) inputFeatures
-      let promptIds :=
-        composePromptIds
-          basePrompt
-          rollingContext
-          promptMaxLen
-          contextLimit
-          decodeOpts.conditionOnPreviousText
-          prevTokenId
-      let promptIdsFallback :=
-        if decodeOpts.resetContextOnFallback then basePrompt else promptIds
-      let maxNewCapPrompt :=
-        if maxTarget <= promptIds.size + 1 then
-          1
-        else
-          maxTarget - promptIds.size - 1
-      let maxNewNatChunk := Nat.max 1 (Nat.min requestedMaxNew maxNewCapPrompt)
-      let (cand, usedFallback) ←
-        decodeWithFallback
-          model
-          tok
-          encoderHidden
-          promptIds
-          promptIdsFallback
-          noSpeechTokenId
-          rules
-          cfg.eosTokenId
-          maxNewNatChunk
-          decodeOpts
-      let silent := isNoSpeechChunk decodeOpts cand
-      if !silent then
-        let text := cand.text.trimAscii.toString
-        if !text.isEmpty then
-          texts := texts.push text
-        allTokenIds := appendWithTokenStitch allTokenIds cand.generated
-      if decodeOpts.conditionOnPreviousText then
-        if silent then
-          pure ()
-        else if decodeOpts.resetContextOnFallback && (usedFallback || cand.temperature > 0.5) then
-          rollingContext := #[]
-        else
-          rollingContext := takeLast (rollingContext ++ cand.generated) contextLimit
-      let mut advance := Nat.min chunk.size defaultAdvance
-      if !noTimestamps then
-        -- Keep runtime bounded while preserving overlap when explicit timestamp advance is absent.
-        let minTimestampAdvance := Nat.max 1 (Nat.min chunk.size (sr.toNat * 5))
-        let tsAdvance :=
-          timestampAdvanceSamples
-            cand.generated
-            timestampBeginId
-            samplesPerTimestamp
-            chunk.size
-        if tsAdvance > 0 then
-          advance := Nat.max minTimestampAdvance tsAdvance
-        else
-          advance := Nat.max minTimestampAdvance (Nat.min chunk.size defaultAdvance)
-        if cand.generated.size > 1 then
-          let last := cand.generated[cand.generated.size - 1]!
-          let prev := cand.generated[cand.generated.size - 2]!
-          if isTimestampTokenId tok last && !(isTimestampTokenId tok prev) then
-            advance := chunk.size
-      if advance == 0 then
-        seek := Nat.min wav16k.size (seek + 1)
+    let tailNewSamples :=
+      if chunk.size > overlapSamples then
+        chunk.size - overlapSamples
       else
-        seek := Nat.min wav16k.size (seek + advance)
+        0
+    let skipShortTail :=
+      noTimestamps &&
+      seek > 0 &&
+      stop == wav16k.size &&
+      -- Previous overlapped chunk already covered almost everything; decoding <=1s of novel tail
+      -- often adds hallucinated suffixes.
+      tailNewSamples <= sr.toNat
+    if skipShortTail then
+      seek := wav16k.size
+    else
+      if seek > 0 && stop == wav16k.size && chunk.size < (chunkSamples / 2) then
+        -- Very short tail chunks tend to hallucinate with carried text context.
+        rollingContext := #[]
+
+      let pack ←
+        waveformToWhisperFeaturesDynamic
+          pre
+          chunk
+          (minSeconds := 0.05)
+          (maxSeconds := some chunkSeconds)
+          (device := frontendDevice)
+      match pack with
+      | ⟨frames, out⟩ =>
+        let inputFeatures : T #[1, cfg.numMelBins, frames] :=
+          reshape (nn.eraseShape out.inputFeatures) #[1, cfg.numMelBins, frames]
+        let encoderHidden : T #[1, WhisperConfig.conv2OutputSeq frames, cfg.dModel] ←
+          model.encode (frames := frames) inputFeatures
+        let promptIds :=
+          composePromptIds
+            basePrompt
+            rollingContext
+            promptMaxLen
+            contextLimit
+            decodeOpts.conditionOnPreviousText
+            prevTokenId
+        let promptIdsFallback :=
+          if decodeOpts.resetContextOnFallback then basePrompt else promptIds
+        let maxNewCapPrompt :=
+          if maxTarget <= promptIds.size + 1 then
+            1
+          else
+            maxTarget - promptIds.size - 1
+        let maxNewNatChunk := Nat.max 1 (Nat.min requestedMaxNew maxNewCapPrompt)
+        let (cand, usedFallback) ←
+          decodeWithFallback
+            model
+            tok
+            encoderHidden
+            promptIds
+            promptIdsFallback
+            noSpeechTokenId
+            rules
+            cfg.eosTokenId
+            maxNewNatChunk
+            decodeOpts
+        let silent := isNoSpeechChunk decodeOpts cand
+        if !silent then
+          let text := cand.text.trimAscii.toString
+          if !text.isEmpty then
+            texts := texts.push text
+          allTokenIds := appendWithTokenStitch allTokenIds cand.generated
+        if decodeOpts.conditionOnPreviousText then
+          if silent then
+            pure ()
+          else if decodeOpts.resetContextOnFallback && (usedFallback || cand.temperature > 0.5) then
+            rollingContext := #[]
+          else
+            rollingContext := takeLast (rollingContext ++ cand.generated) contextLimit
+        let mut advance := Nat.min chunk.size defaultAdvance
+        if !noTimestamps then
+          -- Keep runtime bounded while preserving overlap when explicit timestamp advance is absent.
+          let minTimestampAdvance := Nat.max 1 (Nat.min chunk.size (sr.toNat * 5))
+          let tsAdvance :=
+            timestampAdvanceSamples
+              cand.generated
+              timestampBeginId
+              samplesPerTimestamp
+              chunk.size
+          if tsAdvance > 0 then
+            advance := Nat.max minTimestampAdvance tsAdvance
+          else
+            advance := Nat.max minTimestampAdvance (Nat.min chunk.size defaultAdvance)
+          if cand.generated.size > 1 then
+            let last := cand.generated[cand.generated.size - 1]!
+            let prev := cand.generated[cand.generated.size - 2]!
+            if isTimestampTokenId tok last && !(isTimestampTokenId tok prev) then
+              advance := chunk.size
+        if advance == 0 then
+          seek := Nat.min wav16k.size (seek + 1)
+        else
+          seek := Nat.min wav16k.size (seek + advance)
 
   let stitchedText := decodeGeneratedText tok allTokenIds
   let mergedText := mergeChunkTexts texts
+  let finalTextRaw := if stitchedText.isEmpty then mergedText else stitchedText
+  let finalText := trimDanglingTailAfterPeriod finalTextRaw
   pure {
     language := normalizeLanguageCode language
-    text := if stitchedText.isEmpty then mergedText else stitchedText
+    text := finalText
     tokenIds := allTokenIds
   }
 

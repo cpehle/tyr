@@ -14,7 +14,7 @@ structure Args where
   bestOf : UInt64 := 1
   temperature : Float := 0.0
   temperatureInc : Float := 0.2
-  noFallback : Bool := false
+  noFallback : Bool := true
   topK : UInt64 := 0
   topP : Float := 1.0
   logprobThreshold : Float := -1.0
@@ -86,6 +86,8 @@ private partial def parseArgsLoop (xs : List String) (acc : Args) : IO Args := d
       parseArgsLoop rest { acc with temperatureInc := (← parseFloatArg "--temperature-inc" v) }
   | "--no-fallback" :: rest =>
       parseArgsLoop rest { acc with noFallback := true }
+  | "--fallback" :: rest =>
+      parseArgsLoop rest { acc with noFallback := false }
   | "--top-k" :: v :: rest =>
       parseArgsLoop rest { acc with topK := (← parseNatArg "--top-k" v) }
   | "--top-p" :: v :: rest =>
@@ -117,7 +119,8 @@ private partial def parseArgsLoop (xs : List String) (acc : Args) : IO Args := d
       IO.println "  --best-of <n>            Best-of samples at temperature>0 (default: 1)"
       IO.println "  --temperature <x>        Initial decoding temperature (default: 0.0)"
       IO.println "  --temperature-inc <x>    Temperature fallback increment (default: 0.2)"
-      IO.println "  --no-fallback            Disable temperature fallback retries"
+      IO.println "  --no-fallback            Disable temperature fallback retries (default: true)"
+      IO.println "  --fallback               Enable temperature fallback retries"
       IO.println "  --top-k <n>              Top-k filter for stochastic passes (default: 0 = disabled)"
       IO.println "  --top-p <x>              Top-p filter for stochastic passes (default: 1.0)"
       IO.println "  --logprob-thold <x>      Avg logprob fallback threshold (default: -1.0)"
