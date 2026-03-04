@@ -232,6 +232,37 @@ private def splitWaveformWithOverlap
           start := start + step
       out
 
+private def isTimestampTokenId
+    (tok : tokenizer.qwen3.QwenTokenizer)
+    (id : UInt32)
+    : Bool :=
+  match tok.idToSpecial.get? id with
+  | some text => isTimestampSpecialToken text
+  | none => false
+
+private def timestampAdvanceSamples
+    (generated : Array UInt32)
+    (timestampBeginId : Option UInt32)
+    (samplesPerTimestamp : Nat)
+    (chunkSize : Nat)
+    : Nat :=
+  match timestampBeginId with
+  | none => 0
+  | some tsBegin =>
+      Id.run do
+        let mut maxDelta : Nat := 0
+        let tsBeginNat := tsBegin.toNat
+        for id in generated do
+          let idNat := id.toNat
+          if idNat >= tsBeginNat then
+            let delta := idNat - tsBeginNat
+            if delta > maxDelta then
+              maxDelta := delta
+        if maxDelta == 0 then
+          0
+        else
+          Nat.min chunkSize (maxDelta * samplesPerTimestamp)
+
 private def whisperMaxChunkSeconds
     (cfg : WhisperConfig)
     (pre : PreprocessorConfig)
@@ -984,15 +1015,30 @@ def transcribeWav
     else
       decodeOpts.chunkOverlapSeconds
   let overlapSamplesRaw := ((overlapSec * sr.toFloat) + 0.5).toUInt64.toNat
-  let chunks := splitWaveformWithOverlap wav16k chunkSamples overlapSamplesRaw
+  let overlapSamples :=
+    if chunkSamples <= 1 then
+      0
+    else
+      Nat.min overlapSamplesRaw (chunkSamples - 1)
+  let defaultAdvance := Nat.max 1 (chunkSamples - overlapSamples)
+  let timestampBeginId := if noTimestamps then none else tokenIdByText? tok "<|0.00|>"
+  let samplesPerTimestamp := Nat.max 1 (((0.02 * sr.toFloat) + 0.5).toUInt64.toNat)
 
   let mut rollingContext : Array UInt32 := #[]
   let mut texts : Array String := #[]
   let mut allTokenIds : Array UInt32 := #[]
-  for i in [:chunks.size] do
-    let chunkMeta := chunks[i]!
-    let chunk := chunkMeta.wav
-    if i > 0 && i + 1 == chunks.size && chunk.size < (chunkSamples / 2) then
+  let mut seek : Nat := 0
+  let maxSeekSteps :=
+    if noTimestamps then
+      (wav16k.size / defaultAdvance) + 2
+    else
+      (wav16k.size / (Nat.max 1 (sr.toNat * 5))) + 4
+  let mut seekStep : Nat := 0
+  while seek < wav16k.size && seekStep < maxSeekSteps do
+    seekStep := seekStep + 1
+    let stop := Nat.min wav16k.size (seek + chunkSamples)
+    let chunk := wav16k.extract seek stop
+    if seek > 0 && stop == wav16k.size && chunk.size < (chunkSamples / 2) then
       -- Very short tail chunks tend to hallucinate with carried text context.
       rollingContext := #[]
 
@@ -1050,6 +1096,29 @@ def transcribeWav
           rollingContext := #[]
         else
           rollingContext := takeLast (rollingContext ++ cand.generated) contextLimit
+      let mut advance := Nat.min chunk.size defaultAdvance
+      if !noTimestamps then
+        -- Keep runtime bounded on Tyr's full-sequence decode path.
+        let minTimestampAdvance := Nat.max 1 (Nat.min chunk.size (sr.toNat * 5))
+        let tsAdvance :=
+          timestampAdvanceSamples
+            cand.generated
+            timestampBeginId
+            samplesPerTimestamp
+            chunk.size
+        if tsAdvance > 0 then
+          advance := Nat.max minTimestampAdvance tsAdvance
+        else
+          advance := chunk.size
+        if cand.generated.size > 1 then
+          let last := cand.generated[cand.generated.size - 1]!
+          let prev := cand.generated[cand.generated.size - 2]!
+          if isTimestampTokenId tok last && !(isTimestampTokenId tok prev) then
+            advance := chunk.size
+      if advance == 0 then
+        seek := Nat.min wav16k.size (seek + 1)
+      else
+        seek := Nat.min wav16k.size (seek + advance)
 
   let stitchedText := decodeGeneratedText tok allTokenIds
   let mergedText := mergeChunkTexts texts
