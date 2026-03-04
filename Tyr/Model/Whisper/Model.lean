@@ -50,31 +50,55 @@ def init (dModel nHeads : UInt64) : IO (WhisperAttention dModel nHeads) := do
   let outProjBias := initBias #[dModel]
   pure { qProjWeight, qProjBias, kProjWeight, kProjBias, vProjWeight, vProjBias, outProjWeight, outProjBias }
 
-def forwardCross {batch qSeq kvSeq : UInt64}
+/-- Incremental self-attention KV cache for one decoder layer. -/
+structure KVCache (batch nHeads headDim : UInt64) where
+  kStoreDyn : T #[]
+  vStoreDyn : T #[]
+  seq : UInt64 := 0
+  maxLen : UInt64 := 0
+
+/-- Initialize an empty static-capacity KV cache on `device`. -/
+def initKVCache {batch nHeads headDim : UInt64}
+    (maxLen : UInt64)
+    (device : Device := Device.CPU) : KVCache batch nHeads headDim :=
+  let k0 : T #[batch, nHeads, maxLen, headDim] :=
+    torch.zeros #[batch, nHeads, maxLen, headDim] false device
+  let v0 : T #[batch, nHeads, maxLen, headDim] :=
+    torch.zeros #[batch, nHeads, maxLen, headDim] false device
+  { kStoreDyn := nn.eraseShape k0, vStoreDyn := nn.eraseShape v0, seq := 0, maxLen := maxLen }
+
+/-- Project external key/value states once into attention layout.
+    Output layout is `[batch, nHeads, kvSeq, headDim]`. -/
+def projectKV {batch kvSeq : UInt64}
+    (m : WhisperAttention dModel nHeads)
+    (keyValueStates : T #[batch, kvSeq, dModel])
+    : T #[batch, nHeads, kvSeq, dModel / nHeads] × T #[batch, nHeads, kvSeq, dModel / nHeads] :=
+  let headDim : UInt64 := dModel / nHeads
+  let k : T #[batch, kvSeq, dModel] := affine3d keyValueStates m.kProjWeight m.kProjBias
+  let v : T #[batch, kvSeq, dModel] := affine3d keyValueStates m.vProjWeight m.vProjBias
+  let k : T #[batch, kvSeq, nHeads, headDim] := reshape k #[batch, kvSeq, nHeads, headDim]
+  let v : T #[batch, kvSeq, nHeads, headDim] := reshape v #[batch, kvSeq, nHeads, headDim]
+  (nn.transpose_for_attention k, nn.transpose_for_attention v)
+
+/-- Run attention where K/V are already projected and transposed.
+    `keyStates` / `valueStates` layout: `[batch, nHeads, kvSeq, headDim]`. -/
+def forwardWithProjectedKV {batch qSeq kvSeq : UInt64}
     (m : WhisperAttention dModel nHeads)
     (queryStates : T #[batch, qSeq, dModel])
-    (keyValueStates : T #[batch, kvSeq, dModel])
+    (keyStates : T #[batch, nHeads, kvSeq, dModel / nHeads])
+    (valueStates : T #[batch, nHeads, kvSeq, dModel / nHeads])
     (isCausal : Bool := false)
     : T #[batch, qSeq, dModel] :=
   let headDim : UInt64 := dModel / nHeads
   let q : T #[batch, qSeq, dModel] := affine3d queryStates m.qProjWeight m.qProjBias
-  let k : T #[batch, kvSeq, dModel] := affine3d keyValueStates m.kProjWeight m.kProjBias
-  let v : T #[batch, kvSeq, dModel] := affine3d keyValueStates m.vProjWeight m.vProjBias
-
   let q : T #[batch, qSeq, nHeads, headDim] := reshape q #[batch, qSeq, nHeads, headDim]
-  let k : T #[batch, kvSeq, nHeads, headDim] := reshape k #[batch, kvSeq, nHeads, headDim]
-  let v : T #[batch, kvSeq, nHeads, headDim] := reshape v #[batch, kvSeq, nHeads, headDim]
-
   let qh : T #[batch, nHeads, qSeq, headDim] := nn.transpose_for_attention q
-  let kh : T #[batch, nHeads, kvSeq, headDim] := nn.transpose_for_attention k
-  let vh : T #[batch, nHeads, kvSeq, headDim] := nn.transpose_for_attention v
-
   let attn : T #[batch, nHeads, qSeq, headDim] :=
     nn.scaledDotProductAttentionGQAQKV
       (n_kv_head := nHeads)
       qh
-      kh
-      vh
+      keyStates
+      valueStates
       0.0
       isCausal
       true
@@ -82,12 +106,101 @@ def forwardCross {batch qSeq kvSeq : UInt64}
   let out : T #[batch, qSeq, dModel] := reshape out #[batch, qSeq, dModel]
   affine3d out m.outProjWeight m.outProjBias
 
+def forwardCross {batch qSeq kvSeq : UInt64}
+    (m : WhisperAttention dModel nHeads)
+    (queryStates : T #[batch, qSeq, dModel])
+    (keyValueStates : T #[batch, kvSeq, dModel])
+    (isCausal : Bool := false)
+    : T #[batch, qSeq, dModel] :=
+  let (kh, vh) := projectKV m keyValueStates
+  forwardWithProjectedKV m queryStates kh vh isCausal
+
 def forwardSelf {batch seq : UInt64}
     (m : WhisperAttention dModel nHeads)
     (x : T #[batch, seq, dModel])
     (isCausal : Bool := false)
     : T #[batch, seq, dModel] :=
   forwardCross m x x isCausal
+
+/-- Incremental one-token self-attention step with KV cache update. -/
+def forwardSelfStep {batch : UInt64}
+    (m : WhisperAttention dModel nHeads)
+    (x : T #[batch, 1, dModel])
+    (cache : KVCache batch nHeads (dModel / nHeads))
+    : T #[batch, 1, dModel] × KVCache batch nHeads (dModel / nHeads) :=
+  let headDim : UInt64 := dModel / nHeads
+  let q0 : T #[batch, 1, dModel] := affine3d x m.qProjWeight m.qProjBias
+  let k0 : T #[batch, 1, dModel] := affine3d x m.kProjWeight m.kProjBias
+  let v0 : T #[batch, 1, dModel] := affine3d x m.vProjWeight m.vProjBias
+
+  let q : T #[batch, 1, nHeads, headDim] := reshape q0 #[batch, 1, nHeads, headDim]
+  let k : T #[batch, 1, nHeads, headDim] := reshape k0 #[batch, 1, nHeads, headDim]
+  let v : T #[batch, 1, nHeads, headDim] := reshape v0 #[batch, 1, nHeads, headDim]
+
+  let qh : T #[batch, nHeads, 1, headDim] := nn.transpose_for_attention q
+  let kNew : T #[batch, nHeads, 1, headDim] := nn.transpose_for_attention k
+  let vNew : T #[batch, nHeads, 1, headDim] := nn.transpose_for_attention v
+
+  let kStore : T #[batch, nHeads, cache.maxLen, headDim] :=
+    reshape cache.kStoreDyn #[batch, nHeads, cache.maxLen, headDim]
+  let vStore : T #[batch, nHeads, cache.maxLen, headDim] :=
+    reshape cache.vStoreDyn #[batch, nHeads, cache.maxLen, headDim]
+
+  if cache.seq < cache.maxLen then
+    let kStore' : T #[batch, nHeads, cache.maxLen, headDim] :=
+      data.sliceScatter kStore 2 cache.seq kNew
+    let vStore' : T #[batch, nHeads, cache.maxLen, headDim] :=
+      data.sliceScatter vStore 2 cache.seq vNew
+    let kvLen : UInt64 := cache.seq + 1
+    let kAll : T #[batch, nHeads, kvLen, headDim] := data.slice kStore' 2 0 kvLen
+    let vAll : T #[batch, nHeads, kvLen, headDim] := data.slice vStore' 2 0 kvLen
+    let attn : T #[batch, nHeads, 1, headDim] :=
+      nn.scaledDotProductAttentionGQAQKV
+        (n_kv_head := nHeads)
+        qh
+        kAll
+        vAll
+        0.0
+        false
+        true
+    let out : T #[batch, 1, nHeads, headDim] := nn.transpose_from_attention attn
+    let out : T #[batch, 1, dModel] := reshape out #[batch, 1, dModel]
+    let out : T #[batch, 1, dModel] := affine3d out m.outProjWeight m.outProjBias
+    let cache' : KVCache batch nHeads headDim := {
+      kStoreDyn := nn.eraseShape kStore'
+      vStoreDyn := nn.eraseShape vStore'
+      seq := kvLen
+      maxLen := cache.maxLen
+    }
+    (out, cache')
+  else
+    let writePos : UInt64 := if cache.maxLen == 0 then 0 else cache.maxLen - 1
+    let kStore' : T #[batch, nHeads, cache.maxLen, headDim] :=
+      data.sliceScatter kStore 2 writePos kNew
+    let vStore' : T #[batch, nHeads, cache.maxLen, headDim] :=
+      data.sliceScatter vStore 2 writePos vNew
+    let kvLen : UInt64 := cache.maxLen
+    let kAll : T #[batch, nHeads, kvLen, headDim] := data.slice kStore' 2 0 kvLen
+    let vAll : T #[batch, nHeads, kvLen, headDim] := data.slice vStore' 2 0 kvLen
+    let attn : T #[batch, nHeads, 1, headDim] :=
+      nn.scaledDotProductAttentionGQAQKV
+        (n_kv_head := nHeads)
+        qh
+        kAll
+        vAll
+        0.0
+        false
+        true
+    let out : T #[batch, 1, nHeads, headDim] := nn.transpose_from_attention attn
+    let out : T #[batch, 1, dModel] := reshape out #[batch, 1, dModel]
+    let out : T #[batch, 1, dModel] := affine3d out m.outProjWeight m.outProjBias
+    let cache' : KVCache batch nHeads headDim := {
+      kStoreDyn := nn.eraseShape kStore'
+      vStoreDyn := nn.eraseShape vStore'
+      seq := cache.maxLen
+      maxLen := cache.maxLen
+    }
+    (out, cache')
 
 end WhisperAttention
 
@@ -180,6 +293,26 @@ def forward {batch seq encSeq : UInt64}
   let h6 := activate cfg.activationFunction h5
   let h7 : T #[batch, seq, cfg.dModel] := affine3d h6 m.fc2Weight m.fc2Bias
   x2 + h7
+
+/-- One-token decoder layer step with incremental self KV cache and precomputed cross KV. -/
+def forwardStepCached {batch encSeq : UInt64}
+    (m : WhisperDecoderLayer cfg)
+    (x : T #[batch, 1, cfg.dModel])
+    (crossK : T #[batch, cfg.decoderAttentionHeads, encSeq, cfg.dModel / cfg.decoderAttentionHeads])
+    (crossV : T #[batch, cfg.decoderAttentionHeads, encSeq, cfg.dModel / cfg.decoderAttentionHeads])
+    (selfCache : WhisperAttention.KVCache batch cfg.decoderAttentionHeads (cfg.dModel / cfg.decoderAttentionHeads))
+    : T #[batch, 1, cfg.dModel] × WhisperAttention.KVCache batch cfg.decoderAttentionHeads (cfg.dModel / cfg.decoderAttentionHeads) :=
+  let h0 := m.selfAttnLayerNorm.forward3d x
+  let (h1a, selfCache') := m.selfAttn.forwardSelfStep h0 selfCache
+  let x1 := x + h1a
+  let h2 := m.encoderAttnLayerNorm.forward3d x1
+  let h3 := m.encoderAttn.forwardWithProjectedKV h2 crossK crossV (isCausal := false)
+  let x2 := x1 + h3
+  let h4 := m.finalLayerNorm.forward3d x2
+  let h5 : T #[batch, 1, cfg.decoderFfnDim] := affine3d h4 m.fc1Weight m.fc1Bias
+  let h6 := activate cfg.activationFunction h5
+  let h7 : T #[batch, 1, cfg.dModel] := affine3d h6 m.fc2Weight m.fc2Bias
+  (x2 + h7, selfCache')
 
 end WhisperDecoderLayer
 
@@ -287,6 +420,15 @@ structure WhisperForConditionalGeneration (cfg : WhisperConfig) where
 
 namespace WhisperForConditionalGeneration
 
+/-- Per-layer precomputed cross-attention K/V for one encoded audio chunk. -/
+structure LayerCrossCache (cfg : WhisperConfig) where
+  kDyn : T #[]
+  vDyn : T #[]
+
+/-- Per-layer self-attention KV cache for decoder incremental decode. -/
+abbrev LayerKVCache (cfg : WhisperConfig) (batch : UInt64) :=
+  WhisperAttention.KVCache batch cfg.decoderAttentionHeads (cfg.dModel / cfg.decoderAttentionHeads)
+
 def init (cfg : WhisperConfig) : IO (WhisperForConditionalGeneration cfg) := do
   let model ← WhisperModel.init cfg
   let projOut ← initWeight #[cfg.vocabSize, cfg.dModel] cfg.dModel
@@ -305,6 +447,73 @@ def decode {batch seq encSeq : UInt64}
     : IO (T #[batch, seq, cfg.vocabSize]) := do
   let hidden ← m.model.decode inputIds encoderHidden
   pure (linear3d hidden m.projOut)
+
+/-- Initialize one self-attention KV cache per decoder layer. -/
+def initLayerKVCaches {batch : UInt64}
+    (m : WhisperForConditionalGeneration cfg)
+    (maxLen : UInt64)
+    (device : Device)
+    : Array (LayerKVCache cfg batch) :=
+  m.model.decoderLayers.map (fun _ =>
+    WhisperAttention.initKVCache
+      maxLen
+      (batch := batch)
+      (nHeads := cfg.decoderAttentionHeads)
+      (headDim := cfg.dModel / cfg.decoderAttentionHeads)
+      device)
+
+/-- Precompute cross-attention K/V once per decoder layer for an encoded chunk. -/
+def precomputeCrossCaches {batch encSeq : UInt64}
+    (m : WhisperForConditionalGeneration cfg)
+    (encoderHidden : T #[batch, encSeq, cfg.dModel])
+    : IO (Array (LayerCrossCache cfg)) := do
+  let mut out : Array (LayerCrossCache cfg) := #[]
+  for layer in m.model.decoderLayers do
+    let (k, v) := layer.encoderAttn.projectKV encoderHidden
+    out := out.push { kDyn := nn.eraseShape k, vDyn := nn.eraseShape v }
+  pure out
+
+/-- Decode one token step using static self KV caches and precomputed cross K/V. -/
+def decodeStepWithCache {batch encSeq : UInt64}
+    (m : WhisperForConditionalGeneration cfg)
+    (tokenIds : T #[batch, 1])
+    (position : UInt64)
+    (crossCaches : Array (LayerCrossCache cfg))
+    (selfCaches : Array (LayerKVCache cfg batch))
+    : IO (T #[batch, cfg.vocabSize] × Array (LayerKVCache cfg batch)) := do
+  if position >= cfg.maxTargetPositions then
+    throw <| IO.userError
+      s!"Whisper decoder position {position} exceeds max_target_positions {cfg.maxTargetPositions}"
+  let tokEmb : T #[batch, 1, cfg.dModel] := nn.embedding tokenIds m.model.decoderTokenEmbedding
+  let pos : T #[1, cfg.dModel] := data.slice m.model.decoderPositionalEmbedding 0 position 1
+  let posB : T #[batch, 1, cfg.dModel] :=
+    nn.expand (reshape pos #[1, 1, cfg.dModel]) #[batch, 1, cfg.dModel]
+  let mut h : T #[batch, 1, cfg.dModel] := tokEmb + posB
+  let mut nextCaches := selfCaches
+  for i in [:m.model.decoderLayers.size] do
+    let layer ←
+      match m.model.decoderLayers[i]? with
+      | some l => pure l
+      | none => throw <| IO.userError s!"missing Whisper decoder layer at index {i}"
+    let selfCache ←
+      match nextCaches[i]? with
+      | some c => pure c
+      | none => throw <| IO.userError s!"missing Whisper self KV cache at index {i}"
+    let crossCache ←
+      match crossCaches[i]? with
+      | some c => pure c
+      | none => throw <| IO.userError s!"missing Whisper cross KV cache at index {i}"
+    let crossK : T #[batch, cfg.decoderAttentionHeads, encSeq, cfg.dModel / cfg.decoderAttentionHeads] :=
+      reshape crossCache.kDyn #[batch, cfg.decoderAttentionHeads, encSeq, cfg.dModel / cfg.decoderAttentionHeads]
+    let crossV : T #[batch, cfg.decoderAttentionHeads, encSeq, cfg.dModel / cfg.decoderAttentionHeads] :=
+      reshape crossCache.vDyn #[batch, cfg.decoderAttentionHeads, encSeq, cfg.dModel / cfg.decoderAttentionHeads]
+    let (hNext, cacheNext) := layer.forwardStepCached h crossK crossV selfCache
+    h := hNext
+    nextCaches := nextCaches.set! i cacheNext
+  let hiddenNorm : T #[batch, 1, cfg.dModel] := m.model.decoderLayerNorm.forward3d h
+  let logits3 : T #[batch, 1, cfg.vocabSize] := linear3d hiddenNorm m.projOut
+  let logits2 : T #[batch, cfg.vocabSize] := reshape logits3 #[batch, cfg.vocabSize]
+  pure (logits2, nextCaches)
 
 end WhisperForConditionalGeneration
 

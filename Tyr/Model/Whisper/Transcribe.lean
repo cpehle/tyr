@@ -60,7 +60,7 @@ private structure DecodeState where
   measuredNoSpeech : Bool := false
   deriving Inhabited
 
-private structure BeamState where
+private structure BeamState (cfg : WhisperConfig) where
   allIds : Array UInt32
   generated : Array UInt32 := #[]
   sumLogprob : Float := 0.0
@@ -68,6 +68,9 @@ private structure BeamState where
   noSpeechProb : Float := 0.0
   measuredNoSpeech : Bool := false
   finished : Bool := false
+  caches : Array (WhisperForConditionalGeneration.LayerKVCache cfg 1) := #[]
+  lastLogits? : Option (T #[1, cfg.vocabSize]) := none
+  nextPos : UInt64 := 0
   deriving Inhabited
 
 private structure WhisperDecodeCandidate where
@@ -416,21 +419,16 @@ private def isNoSpeechChunk (opts : WhisperDecodeOptions) (cand : WhisperDecodeC
   cand.noSpeechProb > opts.noSpeechThreshold &&
     cand.avgLogprob < opts.logprobThreshold
 
-private def buildInputIdsOnDevice
-    (ids : Array UInt32)
+private def buildSingleTokenOnDevice
+    (id : UInt32)
     (device : Device)
-    : IO (Sigma (fun seq => T #[1, seq])) := do
-  let seq : UInt64 := ids.size.toUInt64
-  if seq == 0 then
-    throw <| IO.userError "Whisper decode prompt is empty"
-  let idsVals : Array Int64 := ids.map (fun id => Int64.ofNat id.toNat)
-  let inputIdsCpu : T #[1, seq] := reshape (data.fromInt64Array idsVals) #[1, seq]
-  let inputIds : T #[1, seq] :=
-    if inputIdsCpu.device == device then
-      inputIdsCpu
-    else
-      inputIdsCpu.to device
-  pure ⟨seq, inputIds⟩
+    : T #[1, 1] :=
+  let idsVals : Array Int64 := #[Int64.ofNat id.toNat]
+  let inputIdsCpu : T #[1, 1] := reshape (data.fromInt64Array idsVals) #[1, 1]
+  if inputIdsCpu.device == device then
+    inputIdsCpu
+  else
+    inputIdsCpu.to device
 
 private def isForbiddenToken (rules : DecodeTokenRules) (id : UInt32) : Bool :=
   rules.forbidden.contains id
@@ -547,11 +545,36 @@ private def sampleTokenFromLogits {vocab : UInt64}
     tries := tries + 1
   argmaxTokenFromLogits logits fallback rules
 
-private partial def decodeLoop
+private def prefillPromptCaches
     {cfg : WhisperConfig}
     {encSeq : UInt64}
     (model : WhisperForConditionalGeneration cfg)
-    (encoderHidden : T #[1, encSeq, cfg.dModel])
+    (device : Device)
+    (crossCaches : Array (WhisperForConditionalGeneration.LayerCrossCache cfg))
+    (promptIds : Array UInt32)
+    : IO (T #[1, cfg.vocabSize] × Array (WhisperForConditionalGeneration.LayerKVCache cfg 1) × UInt64) := do
+  if promptIds.isEmpty then
+    throw <| IO.userError "Whisper cached decode prompt is empty"
+  let mut caches : Array (WhisperForConditionalGeneration.LayerKVCache cfg 1) :=
+    model.initLayerKVCaches cfg.maxTargetPositions device
+  let mut last? : Option (T #[1, cfg.vocabSize]) := none
+  let mut pos : UInt64 := 0
+  for i in [:promptIds.size] do
+    let tok := buildSingleTokenOnDevice promptIds[i]! device
+    let (logits, caches') ←
+      model.decodeStepWithCache (encSeq := encSeq) tok i.toUInt64 crossCaches caches
+    caches := caches'
+    last? := some logits
+    pos := i.toUInt64 + 1
+  match last? with
+  | some last => pure (last, caches, pos)
+  | none => throw <| IO.userError "Whisper cached decode failed to prefill prompt"
+
+private partial def decodeLoopCached
+    {cfg : WhisperConfig}
+    {encSeq : UInt64}
+    (model : WhisperForConditionalGeneration cfg)
+    (crossCaches : Array (WhisperForConditionalGeneration.LayerCrossCache cfg))
     (noSpeechTokenId : Option UInt32)
     (rules : DecodeTokenRules)
     (eosTokenId : UInt64)
@@ -561,152 +584,174 @@ private partial def decodeLoop
     (sample : Bool)
     (remaining : Nat)
     (state : DecodeState)
+    (caches : Array (WhisperForConditionalGeneration.LayerKVCache cfg 1))
+    (lastLogits : T #[1, cfg.vocabSize])
+    (nextPos : UInt64)
     : IO DecodeState := do
   if remaining == 0 then
     pure state
   else
-    match (← buildInputIdsOnDevice state.allIds encoderHidden.device) with
-    | ⟨seq, inputIds⟩ =>
-      let seqNat := seq.toNat
-      if seqNat == 0 then
-        pure state
+    let noSpeechProb ←
+      if state.measuredNoSpeech then
+        pure state.noSpeechProb
       else
-        let logits ← model.decode inputIds encoderHidden
-        let last : T #[1, cfg.vocabSize] :=
-          reshape (data.slice logits 1 (seq - 1) 1) #[1, cfg.vocabSize]
-        let noSpeechProb ←
-          if state.measuredNoSpeech then
-            pure state.noSpeechProb
-          else
-            match noSpeechTokenId with
-            | none => pure 0.0
-            | some tid => tokenProbFromLogits last tid
-        let distLogits :=
-          if sample then
-            filteredSamplingLogits last temperature topK topP
-          else
-            last
-        let stepRules :=
-          if state.tokenCount == 0 then
-            let forb := (rules.forbidden ++ rules.beginSuppress).push eosTokenId.toUInt32
-            { forbidden := forb, beginSuppress := #[] }
-          else
-            rules
-        let nextId ←
-          if sample then
-            sampleTokenFromLogits distLogits stepRules eosTokenId
-          else
-            argmaxTokenFromLogits last eosTokenId stepRules
-        let tokLogprob ← tokenLogProbFromLogits distLogits nextId
-        let nextIdU64 := nextId.toUInt64
-        let generated' :=
-          if nextIdU64 == eosTokenId then state.generated else state.generated.push nextId
-        let tokenCount' :=
-          if nextIdU64 == eosTokenId then state.tokenCount else state.tokenCount + 1
-        let sumLogprob' :=
-          if nextIdU64 == eosTokenId then state.sumLogprob else state.sumLogprob + tokLogprob
-        let state' : DecodeState := {
-          allIds := state.allIds.push nextId
-          generated := generated'
-          sumLogprob := sumLogprob'
-          tokenCount := tokenCount'
-          noSpeechProb := noSpeechProb
-          measuredNoSpeech := true
-        }
-        if nextIdU64 == eosTokenId then
-          pure state'
-        else
-          decodeLoop
-            model
-            encoderHidden
-            noSpeechTokenId
-            rules
-            eosTokenId
-            temperature
-            topK
-            topP
-            sample
-            (remaining - 1)
-            state'
+        match noSpeechTokenId with
+        | none => pure 0.0
+        | some tid => tokenProbFromLogits lastLogits tid
+    let distLogits :=
+      if sample then
+        filteredSamplingLogits lastLogits temperature topK topP
+      else
+        lastLogits
+    let stepRules :=
+      if state.tokenCount == 0 then
+        let forb := (rules.forbidden ++ rules.beginSuppress).push eosTokenId.toUInt32
+        { forbidden := forb, beginSuppress := #[] }
+      else
+        rules
+    let nextId ←
+      if sample then
+        sampleTokenFromLogits distLogits stepRules eosTokenId
+      else
+        argmaxTokenFromLogits lastLogits eosTokenId stepRules
+    let tokLogprob ← tokenLogProbFromLogits distLogits nextId
+    let nextIdU64 := nextId.toUInt64
+    let generated' :=
+      if nextIdU64 == eosTokenId then state.generated else state.generated.push nextId
+    let tokenCount' :=
+      if nextIdU64 == eosTokenId then state.tokenCount else state.tokenCount + 1
+    let sumLogprob' :=
+      if nextIdU64 == eosTokenId then state.sumLogprob else state.sumLogprob + tokLogprob
+    let state' : DecodeState := {
+      allIds := state.allIds.push nextId
+      generated := generated'
+      sumLogprob := sumLogprob'
+      tokenCount := tokenCount'
+      noSpeechProb := noSpeechProb
+      measuredNoSpeech := true
+    }
+    if nextIdU64 == eosTokenId then
+      pure state'
+    else
+      let tokenIds := buildSingleTokenOnDevice nextId lastLogits.device
+      let (nextLogits, caches') ←
+        model.decodeStepWithCache (encSeq := encSeq) tokenIds nextPos crossCaches caches
+      decodeLoopCached
+        (encSeq := encSeq)
+        model
+        crossCaches
+        noSpeechTokenId
+        rules
+        eosTokenId
+        temperature
+        topK
+        topP
+        sample
+        (remaining - 1)
+        state'
+        caches'
+        nextLogits
+        (nextPos + 1)
 
-private def beamRankScore (beam : BeamState) : Float :=
+private def beamRankScore {cfg : WhisperConfig} (beam : BeamState cfg) : Float :=
   if beam.tokenCount == 0 then
     -100.0
   else
     beam.sumLogprob / beam.tokenCount.toFloat
 
-private def chooseBetterBeam (a b : BeamState) : BeamState :=
+private def chooseBetterBeam {cfg : WhisperConfig} (a b : BeamState cfg) : BeamState cfg :=
   if beamRankScore b > beamRankScore a then b else a
 
-private def expandBeam
+private def expandBeamCached
     {cfg : WhisperConfig}
     {encSeq : UInt64}
     (model : WhisperForConditionalGeneration cfg)
-    (encoderHidden : T #[1, encSeq, cfg.dModel])
+    (crossCaches : Array (WhisperForConditionalGeneration.LayerCrossCache cfg))
     (noSpeechTokenId : Option UInt32)
     (rules : DecodeTokenRules)
     (eosTokenId : UInt64)
     (beamWidth : UInt64)
-    (beam : BeamState)
-    : IO (Array BeamState) := do
-  match (← buildInputIdsOnDevice beam.allIds encoderHidden.device) with
-  | ⟨seq, inputIds⟩ =>
-    let logits ← model.decode inputIds encoderHidden
-    let last : T #[1, cfg.vocabSize] :=
-      reshape (data.slice logits 1 (seq - 1) 1) #[1, cfg.vocabSize]
-    let noSpeechProb ←
-      if beam.measuredNoSpeech then
-        pure beam.noSpeechProb
-      else
-        match noSpeechTokenId with
-        | none => pure 0.0
-        | some tid => tokenProbFromLogits last tid
-    let kNat := Nat.max 1 (Nat.min beamWidth.toNat cfg.vocabSize.toNat)
-    let logitsArr ← data.tensorToFloatArray' (nn.eraseShape last)
-    let logProbs := logProbsFromLogitsArray logitsArr
-    let topPairs := topKLogProbPairs logProbs kNat
-    let stepRules :=
-      if beam.tokenCount == 0 then
-        let forb := (rules.forbidden ++ rules.beginSuppress).push eosTokenId.toUInt32
-        { forbidden := forb, beginSuppress := #[] }
-      else
-        rules
-    let mut out : Array BeamState := #[]
-    for p in topPairs do
-      let nextIdU64 := p.1.toUInt64
-      let nextId := nextIdU64.toUInt32
-      if isForbiddenToken stepRules nextId then
-        continue
-      let lp := p.2
-      let generated' :=
-        if nextIdU64 == eosTokenId then beam.generated else beam.generated.push nextId
-      let tokenCount' :=
-        if nextIdU64 == eosTokenId then beam.tokenCount else beam.tokenCount + 1
-      let sumLogprob' :=
-        if nextIdU64 == eosTokenId then beam.sumLogprob else beam.sumLogprob + lp
-      out := out.push {
-        allIds := beam.allIds.push nextId
-        generated := generated'
-        sumLogprob := sumLogprob'
-        tokenCount := tokenCount'
-        noSpeechProb := noSpeechProb
-        measuredNoSpeech := true
-        finished := nextIdU64 == eosTokenId
-      }
-    pure out
+    (beam : BeamState cfg)
+    : IO (Array (BeamState cfg)) := do
+  if beam.finished then
+    pure #[beam]
+  else
+    match beam.lastLogits? with
+    | none => pure #[{ beam with finished := true }]
+    | some last =>
+      let noSpeechProb ←
+        if beam.measuredNoSpeech then
+          pure beam.noSpeechProb
+        else
+          match noSpeechTokenId with
+          | none => pure 0.0
+          | some tid => tokenProbFromLogits last tid
+      let kNat := Nat.max 1 (Nat.min beamWidth.toNat cfg.vocabSize.toNat)
+      let logitsArr ← data.tensorToFloatArray' (nn.eraseShape last)
+      let logProbs := logProbsFromLogitsArray logitsArr
+      let topPairs := topKLogProbPairs logProbs kNat
+      let stepRules :=
+        if beam.tokenCount == 0 then
+          let forb := (rules.forbidden ++ rules.beginSuppress).push eosTokenId.toUInt32
+          { forbidden := forb, beginSuppress := #[] }
+        else
+          rules
+      let mut out : Array (BeamState cfg) := #[]
+      for p in topPairs do
+        let nextIdU64 := p.1.toUInt64
+        let nextId := nextIdU64.toUInt32
+        if isForbiddenToken stepRules nextId then
+          continue
+        let lp := p.2
+        let generated' :=
+          if nextIdU64 == eosTokenId then beam.generated else beam.generated.push nextId
+        let tokenCount' :=
+          if nextIdU64 == eosTokenId then beam.tokenCount else beam.tokenCount + 1
+        let sumLogprob' :=
+          if nextIdU64 == eosTokenId then beam.sumLogprob else beam.sumLogprob + lp
+        if nextIdU64 == eosTokenId then
+          out := out.push {
+            allIds := beam.allIds.push nextId
+            generated := generated'
+            sumLogprob := sumLogprob'
+            tokenCount := tokenCount'
+            noSpeechProb := noSpeechProb
+            measuredNoSpeech := true
+            finished := true
+            caches := beam.caches
+            lastLogits? := none
+            nextPos := beam.nextPos
+          }
+        else
+          let tokenIds := buildSingleTokenOnDevice nextId last.device
+          let (nextLogits, caches') ←
+            model.decodeStepWithCache (encSeq := encSeq) tokenIds beam.nextPos crossCaches beam.caches
+          out := out.push {
+            allIds := beam.allIds.push nextId
+            generated := generated'
+            sumLogprob := sumLogprob'
+            tokenCount := tokenCount'
+            noSpeechProb := noSpeechProb
+            measuredNoSpeech := true
+            finished := false
+            caches := caches'
+            lastLogits? := some nextLogits
+            nextPos := beam.nextPos + 1
+          }
+      pure out
 
-private partial def beamDecodeLoop
+private partial def beamDecodeLoopCached
     {cfg : WhisperConfig}
     {encSeq : UInt64}
     (model : WhisperForConditionalGeneration cfg)
-    (encoderHidden : T #[1, encSeq, cfg.dModel])
+    (crossCaches : Array (WhisperForConditionalGeneration.LayerCrossCache cfg))
     (noSpeechTokenId : Option UInt32)
     (rules : DecodeTokenRules)
     (eosTokenId : UInt64)
     (beamWidth : UInt64)
     (remaining : Nat)
-    (beams : Array BeamState)
-    : IO (Array BeamState) := do
+    (beams : Array (BeamState cfg))
+    : IO (Array (BeamState cfg)) := do
   if remaining == 0 then
     pure beams
   else
@@ -717,20 +762,30 @@ private partial def beamDecodeLoop
     if allFinished then
       pure beams
     else
-      let mut expanded : Array BeamState := #[]
+      let mut expanded : Array (BeamState cfg) := #[]
       for beam in beams do
         if beam.finished then
           expanded := expanded.push beam
         else
-          expanded := expanded ++ (← expandBeam model encoderHidden noSpeechTokenId rules eosTokenId beamWidth beam)
+          expanded := expanded ++
+            (← expandBeamCached
+              (encSeq := encSeq)
+              model
+              crossCaches
+              noSpeechTokenId
+              rules
+              eosTokenId
+              beamWidth
+              beam)
       if expanded.isEmpty then
         pure beams
       else
         let sorted := expanded.qsort (fun a b => beamRankScore a > beamRankScore b)
         let keep := Nat.max 1 (Nat.min sorted.size beamWidth.toNat)
-        beamDecodeLoop
+        beamDecodeLoopCached
+          (encSeq := encSeq)
           model
-          encoderHidden
+          crossCaches
           noSpeechTokenId
           rules
           eosTokenId
@@ -738,11 +793,12 @@ private partial def beamDecodeLoop
           (remaining - 1)
           (sorted.extract 0 keep)
 
-private def decodeBeam
+private def decodeBeamCached
     {cfg : WhisperConfig}
     {encSeq : UInt64}
     (model : WhisperForConditionalGeneration cfg)
     (encoderHidden : T #[1, encSeq, cfg.dModel])
+    (crossCaches : Array (WhisperForConditionalGeneration.LayerCrossCache cfg))
     (promptIds : Array UInt32)
     (noSpeechTokenId : Option UInt32)
     (rules : DecodeTokenRules)
@@ -750,11 +806,19 @@ private def decodeBeam
     (beamWidth : UInt64)
     (remaining : Nat)
     : IO DecodeState := do
-  let initBeam : BeamState := { allIds := promptIds }
+  let (firstLogits, caches0, nextPos0) ←
+    prefillPromptCaches (encSeq := encSeq) model encoderHidden.device crossCaches promptIds
+  let initBeam : BeamState cfg := {
+    allIds := promptIds
+    caches := caches0
+    lastLogits? := some firstLogits
+    nextPos := nextPos0
+  }
   let beams ←
-    beamDecodeLoop
+    beamDecodeLoopCached
+      (encSeq := encSeq)
       model
-      encoderHidden
+      crossCaches
       noSpeechTokenId
       rules
       eosTokenId
@@ -808,6 +872,7 @@ private def decodeAtTemperature
     (model : WhisperForConditionalGeneration cfg)
     (tok : tokenizer.qwen3.QwenTokenizer)
     (encoderHidden : T #[1, encSeq, cfg.dModel])
+    (crossCaches : Array (WhisperForConditionalGeneration.LayerCrossCache cfg))
     (promptIds : Array UInt32)
     (noSpeechTokenId : Option UInt32)
     (rules : DecodeTokenRules)
@@ -816,12 +881,15 @@ private def decodeAtTemperature
     (opts : WhisperDecodeOptions)
     (temperature : Float)
     : IO WhisperDecodeCandidate := do
+  let (firstLogits, caches0, nextPos0) ←
+    prefillPromptCaches (encSeq := encSeq) model encoderHidden.device crossCaches promptIds
   if temperature <= 0.0 then
     let st ←
       if opts.beamSize > 1 then
-        decodeBeam
+        decodeBeamCached
           model
           encoderHidden
+          crossCaches
           promptIds
           noSpeechTokenId
           rules
@@ -829,9 +897,10 @@ private def decodeAtTemperature
           opts.beamSize
           maxNewTokens
       else
-        decodeLoop
+        decodeLoopCached
+          (encSeq := encSeq)
           model
-          encoderHidden
+          crossCaches
           noSpeechTokenId
           rules
           eosTokenId
@@ -841,15 +910,19 @@ private def decodeAtTemperature
           false
           maxNewTokens
           { allIds := promptIds }
+          caches0
+          firstLogits
+          nextPos0
     pure (toDecodeCandidate tok st temperature)
   else
     let runs := Nat.max 1 opts.bestOf.toNat
     let mut best? : Option WhisperDecodeCandidate := none
     for _ in [:runs] do
       let st ←
-        decodeLoop
+        decodeLoopCached
+          (encSeq := encSeq)
           model
-          encoderHidden
+          crossCaches
           noSpeechTokenId
           rules
           eosTokenId
@@ -859,6 +932,9 @@ private def decodeAtTemperature
           true
           maxNewTokens
           { allIds := promptIds }
+          caches0
+          firstLogits
+          nextPos0
       let cand := toDecodeCandidate tok st temperature
       best? :=
         match best? with
@@ -872,6 +948,7 @@ private partial def decodeWithFallbackLoop
     (model : WhisperForConditionalGeneration cfg)
     (tok : tokenizer.qwen3.QwenTokenizer)
     (encoderHidden : T #[1, encSeq, cfg.dModel])
+    (crossCaches : Array (WhisperForConditionalGeneration.LayerCrossCache cfg))
     (promptIds : Array UInt32)
     (promptIdsFallback : Array UInt32)
     (noSpeechTokenId : Option UInt32)
@@ -889,6 +966,7 @@ private partial def decodeWithFallbackLoop
       model
       tok
       encoderHidden
+      crossCaches
       (if idx > 0 && opts.resetContextOnFallback then promptIdsFallback else promptIds)
       noSpeechTokenId
       rules
@@ -904,6 +982,7 @@ private partial def decodeWithFallbackLoop
       model
       tok
       encoderHidden
+      crossCaches
       promptIds
       promptIdsFallback
       noSpeechTokenId
@@ -931,11 +1010,13 @@ private def decodeWithFallback
     (maxNewTokens : Nat)
     (opts : WhisperDecodeOptions)
     : IO (WhisperDecodeCandidate × Bool) := do
+  let crossCaches ← model.precomputeCrossCaches encoderHidden
   let temperatures := decodeTemperatures opts
   decodeWithFallbackLoop
     model
     tok
     encoderHidden
+    crossCaches
     promptIds
     promptIdsFallback
     noSpeechTokenId

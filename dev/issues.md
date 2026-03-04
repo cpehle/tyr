@@ -1,6 +1,6 @@
 # Tyr Code Review Tracker
 
-Last updated: 2026-03-03
+Last updated: 2026-03-04
 Scope: broad static review across `Tyr/`, `cc/src/`, `Examples/`, `Tests/`, CI/workflows, hooks, and scripts.
 
 Status legend:
@@ -57,6 +57,7 @@ Status legend:
 - [x] `H30` Eliminate prompt-ID host→device rebuild each streaming hop by introducing device-resident prompt token buffers and append-only device assembly.
 - [ ] `H31` Eliminate per-hop generated-token host pull/decode in hot path by supporting deferred text decode or token-level streaming buffers.
 - [x] `H32` Run dynamic ASR frontend on model device (MPS/CUDA) with CPU fallback, and wire streaming/offline/align callsites to avoid default-CPU extraction.
+- [x] `H33` Whisper decoder now uses incremental self KV cache + precomputed cross-attention K/V for token-step generation (replaces full-sequence decoder recompute each token).
 
 ## Open Issues
 
@@ -91,6 +92,8 @@ Status legend:
   Refs: `Tyr/Model/Qwen3ASR/Streaming.lean`, `Tyr/Model/Qwen3ASR/Transcribe.lean`
 - [x] `H32` Move dynamic ASR frontend compute (STFT/power/mel/log) onto model device, with CPU fallback for unsupported kernels/backends.
   Refs: `Tyr/Model/Qwen3ASR/Frontend.lean`, `Tyr/Model/Qwen3ASR/Streaming.lean`, `Tyr/Model/Qwen3ASR/Transcribe.lean`
+- [x] `H33` Whisper decode now uses incremental decoder KV caching plus per-chunk cross-attention KV precompute to avoid per-step full-sequence decoder passes.
+  Refs: `Tyr/Model/Whisper/Model.lean`, `Tyr/Model/Whisper/Transcribe.lean`, `Examples/Whisper/Transcribe.lean`
 
 
 ### Medium
@@ -238,6 +241,8 @@ Status legend:
   Refs: `Tyr/Model/Qwen3ASR/Streaming.lean`
 - [x] `H32` Dynamic ASR frontend now supports explicit target device execution (MPS/CUDA/CPU), uses tensor-native power-spectrum computation, falls back to CPU when device kernels fail, and is wired through streaming/offline/align callsites.
   Refs: `Tyr/Model/Qwen3ASR/Frontend.lean`, `Tyr/Model/Qwen3ASR/Streaming.lean`, `Tyr/Model/Qwen3ASR/Transcribe.lean`
+- [x] `H33` Whisper decoder now caches per-layer self-attention K/V incrementally and precomputes cross-attention K/V once per chunk, replacing full-sequence decoder recompute in greedy/beam/sampling decode loops.
+  Refs: `Tyr/Model/Whisper/Model.lean`, `Tyr/Model/Whisper/Transcribe.lean`
 - [x] `H28` Streaming decode now replaces audio placeholders via contiguous token-span slice composition, removing full-sequence boolean-mask `masked_scatter` in the hot path.
   Refs: `Tyr/Model/Qwen3ASR/Streaming.lean`
 - [x] `H29` Prompt-cache reuse now relies on prompt token-prefix and capacity invariants (removed per-hop embed-prefix tensor diff reduction).
