@@ -81,7 +81,8 @@ private structure WhisperDecodeCandidate where
   deriving Inhabited
 
 private structure DecodeTokenRules where
-  forbiddenSpecial : Array UInt32 := #[]
+  forbidden : Array UInt32 := #[]
+  beginSuppress : Array UInt32 := #[]
   deriving Inhabited
 
 private structure AudioChunk where
@@ -118,6 +119,9 @@ private def tokenIdByText? (tok : tokenizer.qwen3.QwenTokenizer) (text : String)
 private def isTimestampSpecialToken (text : String) : Bool :=
   text.startsWith "<|" && text.endsWith "|>" && text.contains '.'
 
+private def pushUniqueId (xs : Array UInt32) (id : UInt32) : Array UInt32 :=
+  if xs.contains id then xs else xs.push id
+
 private def buildDecodeTokenRules
     (tok : tokenizer.qwen3.QwenTokenizer)
     (cfg : WhisperConfig)
@@ -131,8 +135,15 @@ private def buildDecodeTokenRules
       let allowSpecial :=
         isEos || (!noTimestamps && isTimestamp)
       if !allowSpecial then
-        forbidden := forbidden.push id
-    { forbiddenSpecial := forbidden }
+        forbidden := pushUniqueId forbidden id
+    for id64 in cfg.suppressTokens do
+      if id64 < cfg.vocabSize then
+        forbidden := pushUniqueId forbidden id64.toUInt32
+    let mut beginSuppress : Array UInt32 := #[]
+    for id64 in cfg.beginSuppressTokens do
+      if id64 < cfg.vocabSize then
+        beginSuppress := pushUniqueId beginSuppress id64.toUInt32
+    { forbidden := forbidden, beginSuppress := beginSuppress }
 
 private def buildPromptIds
     (cfg : WhisperConfig)
@@ -391,7 +402,7 @@ private def buildInputIdsOnDevice
   pure ⟨seq, inputIds⟩
 
 private def isForbiddenToken (rules : DecodeTokenRules) (id : UInt32) : Bool :=
-  rules.forbiddenSpecial.contains id
+  rules.forbidden.contains id
 
 private def logProbsFromLogitsArray (logits : Array Float) : Array Float :=
   if logits.isEmpty then
@@ -546,7 +557,8 @@ private partial def decodeLoop
             last
         let stepRules :=
           if state.tokenCount == 0 then
-            { forbiddenSpecial := rules.forbiddenSpecial.push eosTokenId.toUInt32 }
+            let forb := (rules.forbidden ++ rules.beginSuppress).push eosTokenId.toUInt32
+            { forbidden := forb, beginSuppress := #[] }
           else
             rules
         let nextId ←
@@ -624,7 +636,8 @@ private def expandBeam
     let topPairs := topKLogProbPairs logProbs kNat
     let stepRules :=
       if beam.tokenCount == 0 then
-        { forbiddenSpecial := rules.forbiddenSpecial.push eosTokenId.toUInt32 }
+        let forb := (rules.forbidden ++ rules.beginSuppress).push eosTokenId.toUInt32
+        { forbidden := forb, beginSuppress := #[] }
       else
         rules
     let mut out : Array BeamState := #[]
@@ -939,18 +952,16 @@ def transcribeWav
   if maxTarget <= basePrompt.size + 1 then
     throw <| IO.userError
       s!"Whisper max_target_positions={cfg.maxTargetPositions} is too small for base prompt size={basePrompt.size}"
-  let maxNewCap := maxTarget - basePrompt.size - 1
-  let requestedMaxNew := if maxNewTokens == 0 then maxNewCap else maxNewTokens.toNat
-  let maxNewNat := Nat.max 1 (Nat.min requestedMaxNew maxNewCap)
-  let promptMaxLen := maxTarget - maxNewNat - 1
+  let requestedMaxNew := if maxNewTokens == 0 then maxTarget else maxNewTokens.toNat
   let modelContextLimit := maxTarget / 2
   let userContextLimit :=
     if decodeOpts.maxContextTokens == 0 then
       modelContextLimit
     else
-      decodeOpts.maxContextTokens.toNat
-  let contextBudget := if promptMaxLen > basePrompt.size then promptMaxLen - basePrompt.size else 0
-  let contextLimit := Nat.min contextBudget userContextLimit
+      Nat.min decodeOpts.maxContextTokens.toNat modelContextLimit
+  let contextLimit := userContextLimit
+  let promptExtraBudget := if decodeOpts.conditionOnPreviousText then contextLimit + 1 else 0
+  let promptMaxLen := Nat.min maxTarget (basePrompt.size + promptExtraBudget)
   let noSpeechTokenId := tokenIdByText? tok "<|nospeech|>"
   let prevTokenId := tokenIdByText? tok "<|startofprev|>"
   let cfgCapSec := whisperMaxChunkSeconds cfg pre
@@ -1008,6 +1019,12 @@ def transcribeWav
           prevTokenId
       let promptIdsFallback :=
         if decodeOpts.resetContextOnFallback then basePrompt else promptIds
+      let maxNewCapPrompt :=
+        if maxTarget <= promptIds.size + 1 then
+          1
+        else
+          maxTarget - promptIds.size - 1
+      let maxNewNatChunk := Nat.max 1 (Nat.min requestedMaxNew maxNewCapPrompt)
       let (cand, usedFallback) ←
         decodeWithFallback
           model
@@ -1018,7 +1035,7 @@ def transcribeWav
           noSpeechTokenId
           rules
           cfg.eosTokenId
-          maxNewNat
+          maxNewNatChunk
           decodeOpts
       let silent := isNoSpeechChunk decodeOpts cand
       if !silent then
