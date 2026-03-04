@@ -32,8 +32,8 @@ structure WhisperBundle where
   preprocessor : PreprocessorConfig
 
 structure WhisperDecodeOptions where
-  beamSize : UInt64 := 5
-  bestOf : UInt64 := 5
+  beamSize : UInt64 := 1
+  bestOf : UInt64 := 1
   temperature : Float := 0.0
   temperatureInc : Float := 0.2
   maxTemperature : Float := 1.0
@@ -86,6 +86,8 @@ private structure WhisperDecodeCandidate where
 private structure DecodeTokenRules where
   forbidden : Array UInt32 := #[]
   beginSuppress : Array UInt32 := #[]
+  timestampBeginId : Option UInt32 := none
+  maxInitialTimestampTokens : Nat := 0
   deriving Inhabited
 
 private structure AudioChunk where
@@ -146,7 +148,17 @@ private def buildDecodeTokenRules
     for id64 in cfg.beginSuppressTokens do
       if id64 < cfg.vocabSize then
         beginSuppress := pushUniqueId beginSuppress id64.toUInt32
-    { forbidden := forbidden, beginSuppress := beginSuppress }
+    let timestampBeginId :=
+      if noTimestamps then none else tokenIdByText? tok "<|0.00|>"
+    let maxInitialTimestampTokens :=
+      -- whisper.cpp default: max_initial_ts = 1.0s, 0.02s timestamp precision => 50 bins.
+      if noTimestamps then 0 else 50
+    {
+      forbidden := forbidden
+      beginSuppress := beginSuppress
+      timestampBeginId := timestampBeginId
+      maxInitialTimestampTokens := maxInitialTimestampTokens
+    }
 
 private def buildPromptIds
     (cfg : WhisperConfig)
@@ -433,6 +445,61 @@ private def buildSingleTokenOnDevice
 private def isForbiddenToken (rules : DecodeTokenRules) (id : UInt32) : Bool :=
   rules.forbidden.contains id
 
+private def applyInitialTimestampCap
+    {cfg : WhisperConfig}
+    (rules : DecodeTokenRules)
+    : DecodeTokenRules :=
+  match rules.timestampBeginId with
+  | none => rules
+  | some ts =>
+      if rules.maxInitialTimestampTokens == 0 then
+        rules
+      else
+        let start := ts.toNat + rules.maxInitialTimestampTokens + 1
+        if start >= cfg.vocabSize.toNat then
+          rules
+        else
+          Id.run do
+            let mut forb := rules.forbidden
+            for i in [start:cfg.vocabSize.toNat] do
+              forb := pushUniqueId forb i.toUInt32
+            { rules with forbidden := forb }
+
+private def applyTimestampPairMask
+    {cfg : WhisperConfig}
+    (rules : DecodeTokenRules)
+    (generated : Array UInt32)
+    (eosTokenId : UInt64)
+    : DecodeTokenRules :=
+  match rules.timestampBeginId with
+  | none => rules
+  | some tsBegin =>
+      if generated.isEmpty then
+        rules
+      else
+        let last := generated[generated.size - 1]!
+        if last.toUInt64 < tsBegin.toUInt64 then
+          rules
+        else
+          let penultimateWasTimestamp :=
+            if generated.size < 2 then
+              true
+            else
+              generated[generated.size - 2]!.toUInt64 >= tsBegin.toUInt64
+          Id.run do
+            let mut forb := rules.forbidden
+            if penultimateWasTimestamp then
+              -- Two consecutive timestamps are not allowed; force next token to text (or EOT).
+              for i in [tsBegin.toNat:cfg.vocabSize.toNat] do
+                forb := pushUniqueId forb i.toUInt32
+            else
+              -- After text->timestamp, next must be timestamp (or EOT).
+              for i in [:tsBegin.toNat] do
+                let tok := i.toUInt32
+                if tok.toUInt64 != eosTokenId then
+                  forb := pushUniqueId forb tok
+            { rules with forbidden := forb }
+
 private def logProbsFromLogitsArray (logits : Array Float) : Array Float :=
   if logits.isEmpty then
     #[]
@@ -606,9 +673,10 @@ private partial def decodeLoopCached
     let stepRules :=
       if state.tokenCount == 0 then
         let forb := (rules.forbidden ++ rules.beginSuppress).push eosTokenId.toUInt32
-        { forbidden := forb, beginSuppress := #[] }
+        applyInitialTimestampCap (cfg := cfg) { rules with forbidden := forb, beginSuppress := #[] }
       else
         rules
+    let stepRules := applyTimestampPairMask (cfg := cfg) stepRules state.generated eosTokenId
     let nextId ←
       if sample then
         sampleTokenFromLogits distLogits stepRules eosTokenId
@@ -693,9 +761,10 @@ private def expandBeamCached
       let stepRules :=
         if beam.tokenCount == 0 then
           let forb := (rules.forbidden ++ rules.beginSuppress).push eosTokenId.toUInt32
-          { forbidden := forb, beginSuppress := #[] }
+          applyInitialTimestampCap (cfg := cfg) { rules with forbidden := forb, beginSuppress := #[] }
         else
           rules
+      let stepRules := applyTimestampPairMask (cfg := cfg) stepRules beam.generated eosTokenId
       let mut out : Array (BeamState cfg) := #[]
       for p in topPairs do
         let nextIdU64 := p.1.toUInt64
@@ -1179,7 +1248,7 @@ def transcribeWav
           rollingContext := takeLast (rollingContext ++ cand.generated) contextLimit
       let mut advance := Nat.min chunk.size defaultAdvance
       if !noTimestamps then
-        -- Keep runtime bounded on Tyr's full-sequence decode path.
+        -- Keep runtime bounded while preserving overlap when explicit timestamp advance is absent.
         let minTimestampAdvance := Nat.max 1 (Nat.min chunk.size (sr.toNat * 5))
         let tsAdvance :=
           timestampAdvanceSamples
@@ -1190,7 +1259,7 @@ def transcribeWav
         if tsAdvance > 0 then
           advance := Nat.max minTimestampAdvance tsAdvance
         else
-          advance := chunk.size
+          advance := Nat.max minTimestampAdvance (Nat.min chunk.size defaultAdvance)
         if cand.generated.size > 1 then
           let last := cand.generated[cand.generated.size - 1]!
           let prev := cand.generated[cand.generated.size - 2]!

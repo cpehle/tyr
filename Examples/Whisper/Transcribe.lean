@@ -9,9 +9,9 @@ structure Args where
   wavPath : String := "MLKDream.wav"
   language : String := "en"
   maxNewTokens : UInt64 := 0
-  noTimestamps : Bool := false
-  beamSize : UInt64 := 5
-  bestOf : UInt64 := 5
+  noTimestamps : Bool := true
+  beamSize : UInt64 := 1
+  bestOf : UInt64 := 1
   temperature : Float := 0.0
   temperatureInc : Float := 0.2
   noFallback : Bool := false
@@ -104,6 +104,8 @@ private partial def parseArgsLoop (xs : List String) (acc : Args) : IO Args := d
       parseArgsLoop rest { acc with chunkOverlapSec := (← parseFloatArg "--chunk-overlap-sec" v) }
   | "--no-timestamps" :: rest =>
       parseArgsLoop rest { acc with noTimestamps := true }
+  | "--timestamps" :: rest =>
+      parseArgsLoop rest { acc with noTimestamps := false }
   | "--help" :: _ =>
       IO.println "Usage: lake exe WhisperTranscribe [options]"
       IO.println "  --model-dir <path>       Whisper model directory (HF layout with config/tokenizer/safetensors)"
@@ -111,8 +113,8 @@ private partial def parseArgsLoop (xs : List String) (acc : Args) : IO Args := d
       IO.println "  --wav-path <path>        WAV file path"
       IO.println "  --language <code>        Language code/name (default: en)"
       IO.println "  --max-new-tokens <n>     Max generated decoder tokens (default: 0 = model max)"
-      IO.println "  --beam-size <n>          Beam size at temperature=0 (default: 5)"
-      IO.println "  --best-of <n>            Best-of samples at temperature>0 (default: 5)"
+      IO.println "  --beam-size <n>          Beam size at temperature=0 (default: 1)"
+      IO.println "  --best-of <n>            Best-of samples at temperature>0 (default: 1)"
       IO.println "  --temperature <x>        Initial decoding temperature (default: 0.0)"
       IO.println "  --temperature-inc <x>    Temperature fallback increment (default: 0.2)"
       IO.println "  --no-fallback            Disable temperature fallback retries"
@@ -124,7 +126,8 @@ private partial def parseArgsLoop (xs : List String) (acc : Args) : IO Args := d
       IO.println "  --no-context             Disable rolling prompt context carry across chunks"
       IO.println "  --max-context <n>        Max carried context tokens (default: auto)"
       IO.println "  --chunk-overlap-sec <x>  Overlap between adjacent audio chunks in seconds (default: 2.0)"
-      IO.println "  --no-timestamps          Use <|notimestamps|> decoding prompt token"
+      IO.println "  --no-timestamps          Use <|notimestamps|> decoding prompt token (default: true)"
+      IO.println "  --timestamps             Enable timestamp-token decoding (experimental)"
       throw <| IO.userError ""
   | x :: _ =>
       throw <| IO.userError s!"Unknown argument: {x}"

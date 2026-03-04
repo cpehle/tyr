@@ -58,6 +58,7 @@ Status legend:
 - [ ] `H31` Eliminate per-hop generated-token host pull/decode in hot path by supporting deferred text decode or token-level streaming buffers.
 - [x] `H32` Run dynamic ASR frontend on model device (MPS/CUDA) with CPU fallback, and wire streaming/offline/align callsites to avoid default-CPU extraction.
 - [x] `H33` Whisper decoder now uses incremental self KV cache + precomputed cross-attention K/V for token-step generation (replaces full-sequence decoder recompute each token).
+- [ ] `H34` Whisper beam/timestamp decode parity gap: `beam_size > 1` and timestamp-token mode still show start-truncation/repetition/punctuation regressions versus `whisper.cpp`; keep stable defaults on greedy + no-timestamps until constrained decode parity is implemented.
 
 ## Open Issues
 
@@ -94,6 +95,8 @@ Status legend:
   Refs: `Tyr/Model/Qwen3ASR/Frontend.lean`, `Tyr/Model/Qwen3ASR/Streaming.lean`, `Tyr/Model/Qwen3ASR/Transcribe.lean`
 - [x] `H33` Whisper decode now uses incremental decoder KV caching plus per-chunk cross-attention KV precompute to avoid per-step full-sequence decoder passes.
   Refs: `Tyr/Model/Whisper/Model.lean`, `Tyr/Model/Whisper/Transcribe.lean`, `Examples/Whisper/Transcribe.lean`
+- [ ] `H34` Restore Whisper beam/timestamp constrained-decoding parity (`max_initial_ts`, timestamp pairing/ordering/logprob gating, segment window logic) so default `whisper.cpp`-style settings do not degrade opening coverage or punctuation.
+  Refs: `Tyr/Model/Whisper/Transcribe.lean`, `../whisper.cpp/src/whisper.cpp`
 
 
 ### Medium
