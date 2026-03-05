@@ -39,7 +39,7 @@ Status legend:
 - [x] `M15` CI commit-subject lint no longer truncates first-push checks to `~50`.
 - [x] `M14` Optional Qwen3TTS regressions now use explicit CI gates with skip/fail semantics (no success masking via `continue-on-error`).
 - [x] `F02` Qwen3TTS regression coverage expanded with instruct-path, zero-frame, and explicit error-path tests.
-- [x] `F01` `lean_args` migration evaluated and deferred for now (see `dev/f01_lean_args_evaluation.md`).
+- [x] `F01` `lean_args` migration evaluated and deferred for now.
 - [x] `L01` TODO/FIXME and `sorry` lint scope expanded beyond `Tyr/` to include `Examples/` and `Tests/`.
 - [x] `L02` Lake/Bazel parity checker now reports drift in both directions.
 - [x] `H15` Qwen3TTS decode no longer hard-fails on non-16 code groups; decode now auto-falls back to Python bridge in both offline and true-streaming paths.
@@ -259,7 +259,7 @@ Status legend:
 
 ### Feature Backlog
 
-- [x] `F01` Evaluate switching CLI parsing to `lean_args`: deferred this pass; see `dev/f01_lean_args_evaluation.md`.
+- [x] `F01` Evaluate switching CLI parsing to `lean_args`: deferred this pass.
 - [x] `F02` Expand Qwen3TTS regression test coverage beyond current suite.
 
 ### Historical Completed Items

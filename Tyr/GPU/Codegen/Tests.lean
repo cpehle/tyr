@@ -56,7 +56,7 @@ using namespace kittens;
 #if defined(KITTENS_HOPPER)
 __global__ void multi_tile(/* TODO: params */) {
   rt<bf16, 64, 64, row_l> v0;
-  __shared__ st<float, 32, 64, col_l> v1;
+  __shared__ st<float, 32, 64> v1;
   rv<float, 64> v2;
   __shared__ sv<bf16, 128> v3;
 }
@@ -84,7 +84,7 @@ __global__ void mma_ab(/* TODO: params */) {
   rt<bf16, 64, 64, row_l> v0;
   rt<bf16, 64, 64, col_l> v1;
   rt<float, 64, 64, row_l> v2;
-  warp::zero(v2, v2);
+  warp::zero(v2);
   warp::mma_AB(v2, v0, v1, v2);
 }
 #endif
@@ -109,7 +109,7 @@ __global__ void mma_abt(/* TODO: params */) {
   rt<bf16, 64, 64, row_l> v0;
   rt<bf16, 64, 64, row_l> v1;
   rt<float, 64, 64, row_l> v2;
-  warp::zero(v2, v2);
+  warp::zero(v2);
   warp::mma_ABt(v2, v0, v1, v2);
 }
 #endif
@@ -311,11 +311,11 @@ __device__ inline void store_add(Dst &dst, const Src &src, const Offset &offset)
 #if defined(KITTENS_HOPPER)
 __global__ void memory_ops(/* TODO: params */) {
   rt<bf16, 64, 64, row_l> v0;
-  __shared__ st<bf16, 64, 64, row_l> v1;
+  __shared__ st<bf16, 64, 64> v1;
   warp::load(v0, v1);
   warp::store(v1, v0);
   rt<float, 64, 64, row_l> v2;
-  __shared__ st<float, 64, 64, row_l> v3;
+  __shared__ st<float, 64, 64> v3;
   store_add(v3, v2);
 }
 #endif
@@ -339,7 +339,7 @@ info: #include <kittens.cuh>
 using namespace kittens;
 
 #if defined(KITTENS_HOPPER)
-__global__ void with_params(bf16* x_ptr, float* y_ptr, float n) {
+__global__ void with_params(gl<bf16, 1, 1, -1, -1> v0, gl<float, 1, 1, -1, -1> v1, uint64_t v2) {
   rt<bf16, 64, 64, row_l> v3;
 }
 #endif
@@ -392,23 +392,23 @@ info: #include <kittens.cuh>
 using namespace kittens;
 
 #if defined(KITTENS_HOPPER)
-__global__ void mini_flash_attn(bf16* Q, bf16* K, bf16* V, bf16* O) {
+__global__ void mini_flash_attn(gl<bf16, 1, 1, -1, -1> v0, gl<bf16, 1, 1, -1, -1> v1, gl<bf16, 1, 1, -1, -1> v2, gl<bf16, 1, 1, -1, -1> v3) {
   // Tiles
   rt<bf16, 64, 64, row_l> v4;
   rt<bf16, 64, 64, row_l> v5;
   rt<bf16, 64, 64, col_l> v6;
   rt<float, 64, 64, row_l> v7;
   rt<float, 64, 64, row_l> v8;
-  warp::zero(v8, v8);
+  warp::zero(v8);
   rt<bf16, 64, 64, row_l> v9;
   // Vectors
   rv<float, 64, ducks::rv_layout::ortho> v10;
-  warp::neg_infty(v10, v10);
+  warp::neg_infty(v10);
   rv<float, 64, ducks::rv_layout::ortho> v11;
   // Shared
-  __shared__ st<bf16, 64, 64, row_l> v12;
-  __shared__ st<bf16, 64, 64, row_l> v13;
-  __shared__ st<bf16, 64, 64, col_l> v14;
+  __shared__ st<bf16, 64, 64> v12;
+  __shared__ st<bf16, 64, 64> v13;
+  __shared__ st<bf16, 64, 64> v14;
   warp::load(v4, v12);
   for (int v15 = 0; v15 < 4; v15++) {
     warp::load(v5, v13);
@@ -507,12 +507,12 @@ info: #include <kittens.cuh>
 using namespace kittens;
 
 #if defined(KITTENS_AMPERE)
-__global__ void examplePolyMatmul_SM80(bf16* A, bf16* B, bf16* C) {
+__global__ void examplePolyMatmul_SM80(gl<bf16, 1, 1, -1, -1> v0, gl<bf16, 1, 1, -1, -1> v1, gl<bf16, 1, 1, -1, -1> v2) {
   // Tile: 16x16, TMA: false, WGMMA: false
   rt<bf16, 64, 64, row_l> v3;
   rt<bf16, 64, 64, col_l> v4;
   rt<float, 64, 64, row_l> v5;
-  warp::zero(v5, v5);
+  warp::zero(v5);
   warp::mma_AB(v5, v3, v4, v5);
   warp::sync(0);
 }
@@ -537,12 +537,12 @@ info: #include <kittens.cuh>
 using namespace kittens;
 
 #if defined(KITTENS_HOPPER)
-__global__ void examplePolyMatmul_SM90(bf16* A, bf16* B, bf16* C) {
+__global__ void examplePolyMatmul_SM90(gl<bf16, 1, 1, -1, -1> v0, gl<bf16, 1, 1, -1, -1> v1, gl<bf16, 1, 1, -1, -1> v2) {
   // Tile: 64x64, TMA: true, WGMMA: true
   rt<bf16, 64, 64, row_l> v3;
   rt<bf16, 64, 64, col_l> v4;
   rt<float, 64, 64, row_l> v5;
-  warp::zero(v5, v5);
+  warp::zero(v5);
   warpgroup::mma_fence(v5);
   warp::mma_AB(v5, v3, v4, v5);
   warpgroup::mma_commit_group();
@@ -569,12 +569,12 @@ info: #include <kittens.cuh>
 using namespace kittens;
 
 #if defined(KITTENS_BLACKWELL)
-__global__ void examplePolyMatmul_SM100(bf16* A, bf16* B, bf16* C) {
+__global__ void examplePolyMatmul_SM100(gl<bf16, 1, 1, -1, -1> v0, gl<bf16, 1, 1, -1, -1> v1, gl<bf16, 1, 1, -1, -1> v2) {
   // Tile: 64x64, TMA: true, WGMMA: true
   rt<bf16, 64, 64, row_l> v3;
   rt<bf16, 64, 64, col_l> v4;
   rt<float, 64, 64, row_l> v5;
-  warp::zero(v5, v5);
+  warp::zero(v5);
   warpgroup::mma_fence(v5);
   warp::mma_AB(v5, v3, v4, v5);
   warpgroup::mma_commit_group();
