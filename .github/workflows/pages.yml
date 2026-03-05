@@ -22,8 +22,10 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
+
+      - name: Initialize required submodules
+        run: |
+          git submodule update --init --depth 1 external/soxr
 
       - name: Install elan
         run: |
