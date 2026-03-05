@@ -72,6 +72,7 @@ jobs:
       - name: Create docbuild package
         run: |
           mkdir -p docbuild
+          cp lean-toolchain docbuild/lean-toolchain
           cat > docbuild/lakefile.toml <<'EOF'
           name = "docbuild"
           reservoir = false
