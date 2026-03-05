@@ -1,5 +1,6 @@
 external/
 .lake/
+docbuild/
 BranchingFlows.jl/
 diffrax/
 *.o
