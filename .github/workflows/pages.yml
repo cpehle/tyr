@@ -69,6 +69,24 @@ jobs:
             git clone --depth 1 https://github.com/leanprover/doc-gen4.git "$GITHUB_WORKSPACE/../doc-gen4"
           fi
 
+      - name: Create docbuild package
+        run: |
+          mkdir -p docbuild
+          cat > docbuild/lakefile.toml <<'EOF'
+          name = "docbuild"
+          reservoir = false
+          version = "0.1.0"
+          packagesDir = "../.lake/packages"
+
+          [[require]]
+          name = "tyr"
+          path = "../"
+
+          [[require]]
+          name = "doc-gen4"
+          path = "../../doc-gen4"
+          EOF
+
       - name: Build docs
         run: |
           lean_prefix="$(lean --print-prefix)"
