@@ -2,6 +2,17 @@ import Lake
 open Lake DSL
 open System (FilePath)
 
+def tyrLeanSharedLibRPath : String := run_io do
+  let out ← IO.Process.output {
+    cmd := "lean"
+    args := #["--print-prefix"]
+  }
+  let leanPrefix := out.stdout.trimAscii.toString
+  if out.exitCode == 0 && !leanPrefix.isEmpty then
+    pure s!"{leanPrefix}/lib"
+  else
+    pure "@loader_path"
+
 def linuxSystemLinkDirs : Array String :=
   #[
     "-L/usr/lib/x86_64-linux-gnu",
@@ -110,7 +121,7 @@ def packageLinkArgs : Array String :=
       "-Wl,-rpath,@loader_path/../../external/libtorch/lib",
       "-Wl,-rpath,/opt/homebrew/opt/libomp/lib",
       "-Wl,-rpath,/opt/homebrew/lib",
-      s!"-Wl,-rpath,{leanSharedLibRPath}"
+      s!"-Wl,-rpath,{tyrLeanSharedLibRPath}"
     ]
   else
     #[
