@@ -101,14 +101,18 @@ def macOSFrameworkArgs : Array String :=
     "-framework", "AudioToolbox"
   ]
 
+/-- Prefer the locally built libsoxr from submodule source. -/
+def soxrLinkArgs : Array String :=
+  #["-Lcc/build/soxr/src", "-lsoxr"]
+
 def packageLinkArgs : Array String :=
   if System.Platform.isOSX then
     #[
       "-Lexternal/libtorch/lib",
       "-ltorch", "-ltorch_cpu", "-lc10",
       "-L/opt/homebrew/opt/libomp/lib", "-lomp",
-      "-L/opt/homebrew/lib", "-larrow", "-lparquet", "-lsoxr"
-    ] ++ macOSSDKLinkArgs ++ macOSDeploymentLinkArgs ++ macOSFrameworkArgs ++ #[
+      "-L/opt/homebrew/lib", "-larrow", "-lparquet"
+    ] ++ soxrLinkArgs ++ macOSSDKLinkArgs ++ macOSDeploymentLinkArgs ++ macOSFrameworkArgs ++ #[
       "-Wl,-rpath,@loader_path/../../external/libtorch/lib",
       "-Wl,-rpath,/opt/homebrew/opt/libomp/lib",
       "-Wl,-rpath,/opt/homebrew/lib",
@@ -118,9 +122,9 @@ def packageLinkArgs : Array String :=
     #[
       "-Lexternal/libtorch/lib",
       "-ltorch", "-ltorch_cpu", "-lc10"
-    ] ++ linuxSystemLinkDirs ++ #[
+    ] ++ linuxSystemLinkDirs ++ soxrLinkArgs ++ #[
       "-l:libgomp.so.1", "-l:libstdc++.so.6",
-      "-larrow", "-lparquet", "-lsoxr",
+      "-larrow", "-lparquet",
       "-Wl,-rpath,$ORIGIN/../../../external/libtorch/lib"
     ]
 
@@ -131,8 +135,8 @@ def commonLinkArgs : Array String :=
       "-Lexternal/libtorch/lib",
       "-ltorch", "-ltorch_cpu", "-lc10",
       "-L/opt/homebrew/opt/libomp/lib", "-lomp",
-      "-L/opt/homebrew/lib", "-larrow", "-lparquet", "-lsoxr"
-    ] ++ macOSSDKLinkArgs ++ macOSDeploymentLinkArgs ++ macOSFrameworkArgs ++ #[
+      "-L/opt/homebrew/lib", "-larrow", "-lparquet"
+    ] ++ soxrLinkArgs ++ macOSSDKLinkArgs ++ macOSDeploymentLinkArgs ++ macOSFrameworkArgs ++ #[
       "-Wl,-rpath,@executable_path/../../../external/libtorch/lib",
       "-Wl,-rpath,/opt/homebrew/opt/libomp/lib",
       "-Wl,-rpath,/opt/homebrew/lib",
@@ -143,9 +147,9 @@ def commonLinkArgs : Array String :=
       "-Lcc/build", "-lTyrC",
       "-Lexternal/libtorch/lib",
       "-ltorch", "-ltorch_cpu", "-lc10"
-    ] ++ linuxSystemLinkDirs ++ #[
+    ] ++ linuxSystemLinkDirs ++ soxrLinkArgs ++ #[
       "-l:libgomp.so.1", "-l:libstdc++.so.6",
-      "-larrow", "-lparquet", "-lsoxr",
+      "-larrow", "-lparquet",
       "-Wl,-rpath,$ORIGIN/../../../external/libtorch/lib"
     ]
 

@@ -17,6 +17,16 @@ TORCH_INC_FLAGS=-I$(TORCHDIR)/include -I$(TORCHDIR)/include/torch/csrc/api/inclu
 TORCH_LIBPATH=$(TORCHDIR)/lib
 TKDIR=../thirdparty/ThunderKittens
 TK_INC_FLAGS=-I$(TKDIR)/include -I$(TKDIR)/prototype
+SOXR_DIR=../external/soxr
+SOXR_BUILD_DIR=build/soxr
+SOXR_INC_FLAGS=-I$(SOXR_DIR)/src -I$(SOXR_BUILD_DIR)
+SOXR_LIBPATH=$(SOXR_BUILD_DIR)/src
+SOXR_LIB=$(SOXR_LIBPATH)/libsoxr.a
+SOXR_OBJ_DIR=$(SOXR_BUILD_DIR)/obj
+SOXR_CONFIG=$(SOXR_BUILD_DIR)/soxr-config.h
+SOXR_SRCS := soxr data-io dbesi0 filter fft4g64 cr cr32 fft4g32 cr64 vr32
+SOXR_OBJS := $(addprefix $(SOXR_OBJ_DIR)/,$(addsuffix .o,$(SOXR_SRCS)))
+SOXR_CFLAGS := -std=gnu89 -O3 -fPIC -I$(SOXR_DIR)/src -I$(SOXR_BUILD_DIR) -DSOXR_LIB
 
 # ARROW/PARQUET FLAGS
 # Apache Arrow installed via: brew install apache-arrow (macOS) or apt install libarrow-dev libparquet-dev (Linux)
@@ -45,6 +55,7 @@ MKPATH := mkdir -p
 RMPATH := rm -rf
 
 AR := ar
+CC := gcc
 CXX := c++
 NVCC ?= nvcc
 HAS_NVCC := $(shell command -v $(NVCC) >/dev/null 2>&1 && echo 1 || echo 0)
@@ -145,7 +156,8 @@ LEAN_LIB := $(LEAN_HOME)/lib/lean
 # Shared library link flags
 DYLIB_LINK_FLAGS := -L$(LEAN_LIB) -lleanshared \
 	-L$(TORCH_LIBPATH) -ltorch -ltorch_cpu -lc10 $(TORCH_CUDA_LINK_FLAGS) \
-	-L$(ARROW_LIBPATH) -larrow -lparquet -lsoxr \
+	-L$(ARROW_LIBPATH) -larrow -lparquet \
+	-L$(SOXR_LIBPATH) -lsoxr \
 	-Wl,-rpath,$(LEAN_LIB) \
 	-Wl,-rpath,$(abspath $(TORCH_LIBPATH)) \
 	-Wl,-rpath,$(ARROW_LIBPATH) \
@@ -155,9 +167,47 @@ DYLIB_LINK_FLAGS := -L$(LEAN_LIB) -lleanshared \
 
 all: lib dylib
 
-lib: $(OUT_DIR)/$(LIB)
+lib: soxr $(OUT_DIR)/$(LIB)
 
-dylib: $(OUT_DIR)/$(DYLIB)
+dylib: soxr $(OUT_DIR)/$(DYLIB)
+
+soxr: $(SOXR_LIB)
+
+$(SOXR_LIB): $(SOXR_OBJS)
+	@if [ ! -f "$(SOXR_DIR)/CMakeLists.txt" ]; then \
+		echo "Missing $(SOXR_DIR). Initialize submodules: git submodule update --init --recursive"; \
+		exit 1; \
+	fi
+	$(MKPATH) $(SOXR_LIBPATH)
+	$(RMPATH) $@
+	$(AR) rcs $@ $(SOXR_OBJS)
+
+$(SOXR_CONFIG):
+	$(MKPATH) $(SOXR_BUILD_DIR)
+	@printf '%s\n' \
+		'#if !defined soxr_config_included' \
+		'#define soxr_config_included' \
+		'#define AVCODEC_FOUND 0' \
+		'#define AVUTIL_FOUND 0' \
+		'#define WITH_PFFFT 0' \
+		'#define HAVE_FENV_H 1' \
+		'#define HAVE_STDBOOL_H 1' \
+		'#define HAVE_STDINT_H 1' \
+		'#define HAVE_LRINT 1' \
+		'#define HAVE_BIGENDIAN 0' \
+		'#define WITH_CR32 1' \
+		'#define WITH_CR32S 0' \
+		'#define WITH_CR64 1' \
+		'#define WITH_CR64S 0' \
+		'#define WITH_VR32 1' \
+		'#define WITH_HI_PREC_CLOCK 1' \
+		'#define WITH_FLOAT_STD_PREC_CLOCK 0' \
+		'#define WITH_DEV_TRACE 0' \
+		'#endif' > $@
+
+$(SOXR_OBJ_DIR)/%.o: $(SOXR_DIR)/src/%.c $(SOXR_CONFIG)
+	$(MKPATH) $(SOXR_OBJ_DIR)
+	$(CC) -o $@ -c $< $(SOXR_CFLAGS)
 
 $(OUT_DIR):
 	$(MKPATH) $@
@@ -170,10 +220,10 @@ $(OUT_DIR)/$(DYLIB) : $(OBJ_FILES) | $(OUT_DIR)
 	$(CXX) $(SHARED_FLAG) -o $@ $^ $(DYLIB_LINK_FLAGS)
 
 $(OUT_DIR)/%.o : $(SRC_DIR)/%.cpp $(HDR_FILES) | $(OUT_DIR)
-	$(CXX) $(CXX_STD_FLAG) -o $@ -c $< -I$(HDR_DIR) -I$(LEAN_INCLUDE) $(TORCH_INC_FLAGS) $(XLA_INC_FLAGS) $(ARROW_INC_FLAGS) $(EXTRA_CXX_FLAGS) -fPIC -rdynamic
+	$(CXX) $(CXX_STD_FLAG) -o $@ -c $< -I$(HDR_DIR) -I$(LEAN_INCLUDE) $(TORCH_INC_FLAGS) $(XLA_INC_FLAGS) $(ARROW_INC_FLAGS) $(SOXR_INC_FLAGS) $(EXTRA_CXX_FLAGS) -fPIC -rdynamic
 
 $(OUT_DIR)/%.o : $(SRC_DIR)/%.mm $(HDR_FILES) | $(OUT_DIR)
-	$(CXX) -x objective-c++ $(CXX_STD_FLAG) -o $@ -c $< -I$(HDR_DIR) -I$(LEAN_INCLUDE) $(TORCH_INC_FLAGS) $(XLA_INC_FLAGS) $(ARROW_INC_FLAGS) $(EXTRA_CXX_FLAGS) -fPIC -fobjc-arc
+	$(CXX) -x objective-c++ $(CXX_STD_FLAG) -o $@ -c $< -I$(HDR_DIR) -I$(LEAN_INCLUDE) $(TORCH_INC_FLAGS) $(XLA_INC_FLAGS) $(ARROW_INC_FLAGS) $(SOXR_INC_FLAGS) $(EXTRA_CXX_FLAGS) -fPIC -fobjc-arc
 
 $(OUT_DIR)/%.o : $(SRC_DIR)/%.cu $(HDR_FILES) | $(OUT_DIR)
 	@mkdir -p $(dir $@)
@@ -181,3 +231,4 @@ $(OUT_DIR)/%.o : $(SRC_DIR)/%.cu $(HDR_FILES) | $(OUT_DIR)
 
 clean:
 	$(RMPATH) $(OUT_DIR)
+	$(RMPATH) $(SOXR_BUILD_DIR)
