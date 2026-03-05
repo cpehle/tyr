@@ -77,6 +77,8 @@ jobs:
         run: |
           mkdir -p docbuild
           cp lean-toolchain docbuild/lean-toolchain
+          ln -sfn ../external docbuild/external
+          ln -sfn ../cc docbuild/cc
           cat > docbuild/lakefile.toml <<'EOF'
           name = "docbuild"
           reservoir = false
