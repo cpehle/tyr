@@ -52,21 +52,21 @@ if ! [[ "$trials" =~ ^[0-9]+$ ]] || [[ "$trials" -lt 1 ]]; then
 fi
 
 echo "[1/6] Build Lean kernel + generator (${label})"
-lake --quiet build GenerateGpuKernels "$kernel_module" "${extra_build_targets[@]}"
+lake -R --quiet build GenerateGpuKernels "$kernel_module" "${extra_build_targets[@]}"
 
 echo "[2/6] Generate CUDA translation unit (${label})"
-lake env ./.lake/build/bin/GenerateGpuKernels "$kernel_module" --out-dir cc/src/generated
+lake -R env ./.lake/build/bin/GenerateGpuKernels "$kernel_module" --out-dir cc/src/generated
 
 echo "[3/6] Build C++/CUDA runtime library"
 make -C cc -j"$(cpu_count)"
 
 echo "[4/6] Build Lean executable (${runner_exe})"
-lake --quiet build "$runner_exe"
+lake -R --quiet build "$runner_exe"
 
 for i in $(seq 1 "$trials"); do
   echo "[5/6] (${i}/${trials}) Regenerate fixture tensors (${label})"
-  lake env ./.lake/build/bin/"${runner_exe}" --gen-only --regen
+  lake -R env ./.lake/build/bin/"${runner_exe}" --gen-only --regen
 
   echo "[6/6] (${i}/${trials}) Run end-to-end check (${label})"
-  lake env ./.lake/build/bin/"${runner_exe}"
+  lake -R env ./.lake/build/bin/"${runner_exe}"
 done

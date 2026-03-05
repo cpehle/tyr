@@ -3473,7 +3473,7 @@ lean_object* lean_torch_stft_1d(
 // 1D RFFT returning real/imag packed in the last dimension.
 lean_object* lean_torch_rfft_1d(uint64_t /*n*/, b_lean_obj_arg input) {
   auto input_ = borrowTensor(input);
-  auto complex_ = at::fft_rfft(input_, std::nullopt, -1, std::nullopt);
+  auto complex_ = at::fft_rfft(input_, c10::nullopt, -1, c10::nullopt);
   auto packed_ = torch::view_as_real(complex_);
   return fromTorchTensor(packed_);
 }

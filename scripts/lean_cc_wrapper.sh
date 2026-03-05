@@ -105,6 +105,9 @@ if [[ "$is_compile" -eq 0 ]]; then
       if [[ -f "${torch_lib_dir}/libc10_cuda.so" ]]; then
         cuda_link_args+=("-lc10_cuda")
       fi
+      if compgen -G "${torch_lib_dir}/libcudart*.so*" >/dev/null 2>&1; then
+        cuda_link_args+=("-lcudart")
+      fi
     fi
   fi
 fi
