@@ -1123,6 +1123,80 @@ private def decodeWithFallback
     0
     false
 
+private def maybeAppendTailRescue
+    {cfg : WhisperConfig}
+    (model : WhisperForConditionalGeneration cfg)
+    (tok : tokenizer.qwen3.QwenTokenizer)
+    (pre : PreprocessorConfig)
+    (wav16k : Array Float)
+    (basePrompt : Array UInt32)
+    (noSpeechTokenId : Option UInt32)
+    (rules : DecodeTokenRules)
+    (decodeOpts : WhisperDecodeOptions)
+    (chunkSeconds : Float)
+    (requestedMaxNew : Nat)
+    (maxTarget : Nat)
+    (currentText : String)
+    : IO String := do
+  if wav16k.isEmpty then
+    pure currentText
+  else
+    let targetSamples := ((chunkSeconds * pre.samplingRate.toFloat) + 0.5).toUInt64.toNat
+    let tailSpan := Nat.max 1 (Nat.min wav16k.size targetSamples)
+    let tail := wav16k.extract (wav16k.size - tailSpan) wav16k.size
+    let pack ←
+      waveformToWhisperFeaturesDynamic
+        pre
+        tail
+        (minSeconds := 0.05)
+        (maxSeconds := some chunkSeconds)
+        (device := model.model.decoderTokenEmbedding.device)
+    match pack with
+    | ⟨frames, out⟩ =>
+      let inputFeatures : T #[1, cfg.numMelBins, frames] :=
+        reshape (nn.eraseShape out.inputFeatures) #[1, cfg.numMelBins, frames]
+      let encoderHidden : T #[1, WhisperConfig.conv2OutputSeq frames, cfg.dModel] ←
+        model.encode (frames := frames) inputFeatures
+      let maxNewCapPrompt :=
+        if maxTarget <= basePrompt.size + 1 then
+          1
+        else
+          maxTarget - basePrompt.size - 1
+      let maxNewNat := Nat.max 1 (Nat.min requestedMaxNew maxNewCapPrompt)
+      let rescueOpts : WhisperDecodeOptions := {
+        decodeOpts with
+          beamSize := if decodeOpts.beamSize < 5 then 5 else decodeOpts.beamSize
+          bestOf := if decodeOpts.bestOf < 5 then 5 else decodeOpts.bestOf
+          noFallback := false
+          conditionOnPreviousText := false
+          maxContextTokens := 0
+      }
+      let (cand, _) ←
+        decodeWithFallback
+          model
+          tok
+          encoderHidden
+          basePrompt
+          basePrompt
+          noSpeechTokenId
+          rules
+          cfg.eosTokenId
+          maxNewNat
+          rescueOpts
+      let tailText := cand.text.trimAscii.toString
+      if tailText.isEmpty then
+        pure currentText
+      else if cand.avgLogprob < (-2.5) then
+        pure currentText
+      else
+        let cur := currentText.trimAscii.toString
+        let curLower := cur.toLower
+        let tailLower := tailText.toLower
+        if curLower.contains tailLower then
+          pure cur
+        else
+          pure ((cur ++ " " ++ tailText).trimAscii.toString)
+
 def loadFromPretrainedDir (modelDir : String) : IO WhisperBundle := do
   let cfg ← WhisperConfig.loadFromPretrainedDir modelDir {}
   let tok ← tokenizer.qwen3.loadTokenizer modelDir
@@ -1314,7 +1388,24 @@ def transcribeWav
   let stitchedText := decodeGeneratedText tok allTokenIds
   let mergedText := mergeChunkTexts texts
   let finalTextRaw := if stitchedText.isEmpty then mergedText else stitchedText
-  let finalText := trimDanglingTailAfterPeriod finalTextRaw
+  let finalText0 := trimDanglingTailAfterPeriod finalTextRaw
+  let finalText ←
+    if noTimestamps then
+      maybeAppendTailRescue
+        model
+        tok
+        pre
+        wav16k
+        basePrompt
+        noSpeechTokenId
+        rules
+        decodeOpts
+        chunkSeconds
+        requestedMaxNew
+        maxTarget
+        finalText0
+    else
+      pure finalText0
   pure {
     language := normalizeLanguageCode language
     text := finalText
