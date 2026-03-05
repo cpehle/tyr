@@ -15,6 +15,11 @@ Important distinction:
 - The emitted `forLoop` statement executes on device at kernel runtime.
 
 This module is the bridge between ergonomic loop syntax and explicit IR control flow.
+
+For canonical loop usage inside full-input example kernels, see:
+
+- `Tyr.GPU.Kernels.Examples.simpleGemm`
+- `Tyr.GPU.Kernels.Examples.flashAttnFwd`
 -/
 
 namespace Tyr.GPU.Codegen
@@ -65,9 +70,16 @@ The loop body receives a KIdx that can be used in coordinate calculations.
 
 Example:
 ```lean
-for kvIdx in krange 0 numKvBlocks do
-  let coord := { b := batchId, d := headId, r := kvIdx.id, c := zeroId : RTileCoord }
-  loadGlobalCoord sK K_ptr coord.b coord.d coord.r coord.c
+@[gpu_kernel .SM90]
+def kLoopExample
+    (kPtr : GPtr GpuFloat.BFloat16)
+    (sPtr : GPtr GpuFloat.BFloat16)
+    (_n : KVal UInt64) : KernelM Unit := do
+  let base ← blockCoord2D
+  let sK : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
+  for kvIdx in krange 0 4 do
+    loadGlobal sK kPtr (base.withRow kvIdx.id)
+  storeGlobal sPtr sK base
 ```
 -/
 

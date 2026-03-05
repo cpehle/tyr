@@ -18,6 +18,67 @@ while preserving the same type guarantees as the primitive API.
 
 Semantically, these helpers still emit the same IR statements; they are syntax
 and convenience, not a separate backend.
+
+## Scope Activation
+
+Most operator sugar in this module is declared with `scoped`, so consumers should
+enable the namespace scope:
+
+```lean
+open Tyr.GPU.Codegen
+open scoped Tyr.GPU.Codegen
+```
+
+Without `open scoped Tyr.GPU.Codegen`, core primitive ops still work (`mma`,
+`add`, `mul`, ...), but infix sugar like `⬝` and `+` on tiles is not available.
+
+## What "Sugar" Means Here
+
+- `matmul`, `matmulAccum`, `matmulT`, ...:
+  allocate destination tiles internally and return results.
+- Symbolic matrix operators:
+  `a ⬝ b` and `a ⬝ᵀ b`.
+- Tile arithmetic instances:
+  `let c ← a + b`, `let d ← c * 0.5`, etc.
+- Broadcast/reduction convenience:
+  helpers like `subBroadcastCol`, `reduceRowMax`, and `expTile`.
+
+All of these lower to the same `KStmt` forms as `Ops`; they only reduce
+boilerplate in kernel authoring.
+
+## Works with Parameterized Kernels
+
+Yes, notation sugar works with kernels that take real inputs (`GPtr`, `KVal`)
+and do global-memory I/O. A typical pattern is:
+
+```lean
+@[gpu_kernel .SM90]
+def addKernel
+    (xPtr : GPtr GpuFloat.Float32)
+    (yPtr : GPtr GpuFloat.Float32)
+    (outPtr : GPtr GpuFloat.Float32)
+    (n : KVal UInt64) : KernelM Unit := do
+  let _ := n
+  let coord ← blockCoord2D
+  let xS : ST GpuFloat.Float32 64 64 ← allocST .Float32 64 64
+  let yS : ST GpuFloat.Float32 64 64 ← allocST .Float32 64 64
+  let oS : ST GpuFloat.Float32 64 64 ← allocST .Float32 64 64
+  loadGlobal xS xPtr coord
+  loadGlobal yS yPtr coord
+  sync
+  let x : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
+  let y : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
+  load x xS
+  load y yS
+  let o ← x + y
+  store oS o
+  storeGlobal outPtr oS coord
+```
+
+Canonical declaration references:
+
+- `Tyr.GPU.Kernels.Examples.simpleGemm`
+- `Tyr.GPU.Kernels.Examples.flashAttnFwd`
 -/
 
 namespace Tyr.GPU.Codegen

@@ -1,11 +1,3 @@
-/-
-  Tyr/GPU/Kernels/Examples.lean
-
-  Example GPU kernels demonstrating the native Lean4 DSL syntax:
-  - @[gpu_kernel] attribute for kernel registration
-  - for _ in [lo:hi] loop syntax
-  - Type-safe tile operations
--/
 import Tyr.GPU.Types
 import Tyr.GPU.Codegen.Var
 import Tyr.GPU.Codegen.TileTypes
@@ -17,248 +9,252 @@ import Tyr.GPU.Codegen.Loop
 import Tyr.GPU.Codegen.GlobalLayout
 import Tyr.GPU.Codegen.EmitNew
 import Tyr.GPU.Codegen.Attribute
-import Tyr.GPU.Codegen.ArchConfig
 import Tyr.GPU.Codegen.Arch
+
+/-!
+# Tyr.GPU.Kernels.Examples
+
+Canonical `@[gpu_kernel]` examples for the Tyr GPU DSL.
+
+This module is the single source of truth for example kernel declarations used by
+docs and IDE navigation. Kernels here follow the full integration pattern:
+
+- explicit kernel inputs (`GPtr`, `KVal`),
+- explicit global-memory I/O (`loadGlobal`, `storeGlobal`),
+- explicit runtime coordinates (`blockCoord2D`, `KIdx` with `krange`).
+
+If you are looking for minimal lowering-only snippets, use `Tyr.GPU.Codegen.Tests`.
+-/
 
 namespace Tyr.GPU.Kernels.Examples
 
-open Tyr.GPU
 open Tyr.GPU.Codegen
 
-/-! ## Example 1: Simple GEMM with for loop syntax -/
+abbrev GpuFloat := Tyr.GPU.GpuFloat
+abbrev TileLayout := Tyr.GPU.TileLayout
 
-/-- Simple GEMM using the new for loop syntax -/
-@[gpu_kernel .SM90]
-def simpleGemm : KernelM Unit := do
-  comment "=== Simple GEMM ==="
+abbrev RT (dtype : GpuFloat) (rows cols : Nat) (layout : TileLayout := .Row) :=
+  Tyr.GPU.Codegen.RT dtype rows cols layout
+
+abbrev ST (dtype : GpuFloat) (rows cols : Nat) (layout : TileLayout := .Row) :=
+  Tyr.GPU.Codegen.ST dtype rows cols layout
+
+abbrev RV (dtype : GpuFloat) (len : Nat) := Tyr.GPU.Codegen.RV dtype len
+
+abbrev GPtr (dtype : GpuFloat) := Tyr.GPU.Codegen.GPtr dtype
+abbrev KVal (T : Type) := Tyr.GPU.Codegen.KVal T
+abbrev KernelM := Tyr.GPU.Codegen.KernelM
+
+private def gemmMainLoop (numKBlocks : Nat)
+    (aPtr : GPtr GpuFloat.BFloat16)
+    (bPtr : GPtr GpuFloat.BFloat16)
+    (cPtr : GPtr GpuFloat.Float32)
+    (m : KVal UInt64) (n : KVal UInt64) (k : KVal UInt64)
+    : KernelM Unit := do
+  let _ := m
+  let _ := n
+  let _ := k
+  let coord ← blockCoord2D
 
   let a : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
   let b : RT GpuFloat.BFloat16 64 64 .Col ← allocRT .BFloat16 64 64 .Col
   let c : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
 
-  let aShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
-  let bShared : ST GpuFloat.BFloat16 64 64 .Col ← allocST .BFloat16 64 64 .Col
+  let aS : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
+  let bS : ST GpuFloat.BFloat16 64 64 .Col ← allocST .BFloat16 64 64 .Col
+  let cS : ST GpuFloat.Float32 64 64 ← allocST .Float32 64 64
 
-  -- Using for..in krange for iteration
-  for blkIdx in krange 0 8 do
-    load a aShared
-    load b bShared
+  for kBlk in krange 0 numKBlocks do
+    loadGlobal aS aPtr (coord.withCol kBlk.id)
+    loadGlobal bS bPtr (coord.withRow kBlk.id)
+    sync
+    load a aS
+    load b bS
     mma c a b c
     sync
 
-/-! ## Example 1a: Simple GEMM with Dimension Constraints -/
+  store cS c
+  storeGlobal cPtr cS coord
 
-/-- Simple GEMM using constrained MMA to enforce multiples of 16 at compile time. -/
+/-! ## Canonical GEMM Examples -/
+
+/-- Hopper (SM90) GEMM example with full kernel inputs and global-memory I/O. -/
 @[gpu_kernel .SM90]
-def simpleGemmConstrained : KernelM Unit := do
-  comment "=== Simple GEMM (Constrained) ==="
+def simpleGemm
+    (aPtr : GPtr GpuFloat.BFloat16)
+    (bPtr : GPtr GpuFloat.BFloat16)
+    (cPtr : GPtr GpuFloat.Float32)
+    (m : KVal UInt64) (n : KVal UInt64) (k : KVal UInt64)
+    : KernelM Unit := do
+  comment "=== Example GEMM (SM90) ==="
+  gemmMainLoop 8 aPtr bPtr cPtr m n k
 
-  let a : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-  let b : RT GpuFloat.BFloat16 64 64 .Col ← allocRT .BFloat16 64 64 .Col
-  let c : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
+/-- Ampere (SM80) variant of the canonical GEMM example. -/
+@[gpu_kernel .SM80]
+def ampereGemm
+    (aPtr : GPtr GpuFloat.BFloat16)
+    (bPtr : GPtr GpuFloat.BFloat16)
+    (cPtr : GPtr GpuFloat.Float32)
+    (m : KVal UInt64) (n : KVal UInt64) (k : KVal UInt64)
+    : KernelM Unit := do
+  comment "=== Example GEMM (SM80) ==="
+  gemmMainLoop 4 aPtr bPtr cPtr m n k
 
-  let aShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
-  let bShared : ST GpuFloat.BFloat16 64 64 .Col ← allocST .BFloat16 64 64 .Col
+/-- Blackwell (SM100) variant of the canonical GEMM example. -/
+@[gpu_kernel .SM100]
+def blackwellGemm
+    (aPtr : GPtr GpuFloat.BFloat16)
+    (bPtr : GPtr GpuFloat.BFloat16)
+    (cPtr : GPtr GpuFloat.Float32)
+    (m : KVal UInt64) (n : KVal UInt64) (k : KVal UInt64)
+    : KernelM Unit := do
+  comment "=== Example GEMM (SM100) ==="
+  gemmMainLoop 8 aPtr bPtr cPtr m n k
 
-  for blkIdx in krange 0 8 do
-    load a aShared
-    load b bShared
-    mmaConstrained c a b c
-    sync
+/-! ## Canonical Attention Example -/
 
-/-! ## Example 1b: Polymorphic GEMM using ArchKernelM -/
-
-/-- Simple GEMM using architecture-dispatched MMA (polymorphic). -/
-@[gpu_kernel]
-def simpleGemmPoly (arch : ArchLevel) : ArchKernelM arch Unit := do
-  archComment s!"=== Simple GEMM (Poly, {arch}) ==="
-
-  let a ← ArchKernelM.liftPortable (allocRT .BFloat16 64 64)
-  let b ← ArchKernelM.liftPortable (allocRT .BFloat16 64 64 .Col)
-  let c ← ArchKernelM.liftPortable (zeroRT .Float32 64 64)
-
-  smartMMA c a b c
-  archSync
-
--- Verify auto-generated kernel
-#check simpleGemm.kernel
-#check simpleGemm.launch
-
-/-! ## Example 2: FlashAttention with attribute -/
-
-/-- FlashAttention forward kernel -/
+/-- FlashAttention-style forward example with explicit `GPtr`/`KVal` inputs. -/
 @[gpu_kernel .SM90]
-def flashAttnFwd : KernelM Unit := do
-  comment "=== FlashAttention Forward ==="
+def flashAttnFwd
+    (qPtr : GPtr GpuFloat.BFloat16)
+    (kPtr : GPtr GpuFloat.BFloat16)
+    (vPtr : GPtr GpuFloat.BFloat16)
+    (oPtr : GPtr GpuFloat.BFloat16)
+    (seqLen : KVal UInt64)
+    (headDim : KVal UInt64)
+    : KernelM Unit := do
+  let _ := seqLen
+  let _ := headDim
+  let coord ← blockCoord2D
+  let numKvBlocks : Nat := 4
 
-  -- Register tiles
   let q : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
   let k : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
   let v : RT GpuFloat.BFloat16 64 64 .Col ← allocRT .BFloat16 64 64 .Col
   let s : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
+  let p : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
   let o : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
-
-  -- Row-wise softmax tracking
   let rowMax : RV GpuFloat.Float32 64 ← negInftyRV .Float32 64
   let rowSum : RV GpuFloat.Float32 64 ← allocRV .Float32 64
 
-  -- Shared memory
-  let qShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
-  let kShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
-  let vShared : ST GpuFloat.BFloat16 64 64 .Col ← allocST .BFloat16 64 64 .Col
+  let qS : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
+  let kS : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
+  let vS : ST GpuFloat.BFloat16 64 64 .Col ← allocST .BFloat16 64 64 .Col
+  let oS : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
 
-  -- Load Q (long-resident)
-  load q qShared
+  loadGlobal qS qPtr coord
+  sync
+  load q qS
 
-  -- Main loop over K, V blocks
-  for kvBlkIdx in krange 0 4 do
-    -- Load K, V
-    load k kShared
-    load v vShared
-
-    -- Attention scores: S = Q @ K^T
+  for kvBlk in krange 0 numKvBlocks do
+    loadGlobal kS kPtr (coord.withRow kvBlk.id)
+    loadGlobal vS vPtr (coord.withRow kvBlk.id)
+    sync
+    load k kS
+    load v vS
     mmaT s q k s
-
-    -- Causal mask
     makeCausal s s (some (-1e10))
-
-    -- Online softmax
     rowMaxAccum rowMax s rowMax
     subCol s s rowMax
     exp s s
     rowSumAccum rowSum s rowSum
-
-    -- Convert and accumulate output
-    let p : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
     convert p s
     mma o p v o
-
     sync
 
-  -- Final normalization
   divCol o o rowSum
+  let oBf16 : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
+  convert oBf16 o
+  store oS oBf16
+  storeGlobal oPtr oS coord
 
--- Verify auto-generated kernel
-#check flashAttnFwd.kernel
-#check flashAttnFwd.launch
+/-! ## Canonical Normalization Example -/
 
-/-! ## Example 3: Ampere (SM80) kernel -/
-
-/-- Simple kernel targeting Ampere A100 -/
-@[gpu_kernel .SM80]
-def ampereGemm : KernelM Unit := do
-  comment "=== Ampere GEMM (SM80) ==="
-
-  let a : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-  let b : RT GpuFloat.BFloat16 64 64 .Col ← allocRT .BFloat16 64 64 .Col
-  let c : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
-
-  let aShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
-  let bShared : ST GpuFloat.BFloat16 64 64 .Col ← allocST .BFloat16 64 64 .Col
-
-  -- SM80 uses smaller pipeline stages
-  for blkIdx in krange 0 4 do
-    load a aShared
-    load b bShared
-    mma c a b c
-    sync
-
--- Verify auto-generated kernel
-#check ampereGemm.kernel
-#check ampereGemm.launch
-
-/-! ## Example 4: Blackwell (SM100) kernel -/
-
-/-- Kernel targeting Blackwell B200 -/
-@[gpu_kernel .SM100]
-def blackwellGemm : KernelM Unit := do
-  comment "=== Blackwell GEMM (SM100) ==="
-
-  let a : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-  let b : RT GpuFloat.BFloat16 64 64 .Col ← allocRT .BFloat16 64 64 .Col
-  let c : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
-
-  let aShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
-  let bShared : ST GpuFloat.BFloat16 64 64 .Col ← allocST .BFloat16 64 64 .Col
-
-  -- SM100 can handle deeper pipelines
-  for blkIdx in krange 0 8 do
-    load a aShared
-    load b bShared
-    mma c a b c
-    sync
-
--- Verify auto-generated kernel
-#check blackwellGemm.kernel
-#check blackwellGemm.launch
-
-/-! ## Example 5: LayerNorm with loop syntax -/
-
-/-- LayerNorm kernel -/
+/-- LayerNorm-style example with explicit pointer/scalar inputs. -/
 @[gpu_kernel .SM90]
-def layerNorm : KernelM Unit := do
-  comment "=== LayerNorm ==="
+def layerNorm
+    (xPtr : GPtr GpuFloat.BFloat16)
+    (weightPtr : GPtr GpuFloat.BFloat16)
+    (biasPtr : GPtr GpuFloat.BFloat16)
+    (outPtr : GPtr GpuFloat.BFloat16)
+    (n : KVal UInt64)
+    : KernelM Unit := do
+  let _ := n
+  let coord ← blockCoord2D
 
   let x : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-  let xf : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
-  let temp : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
-
+  let xF : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
+  let centered : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
+  let varTmp : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
+  let w : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
+  let b : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
+  let wF : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
+  let bF : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
   let mean : RV GpuFloat.Float32 64 ← allocRV .Float32 64
   let var : RV GpuFloat.Float32 64 ← allocRV .Float32 64
 
-  let weight : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-  let bias : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
+  let xS : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
+  let wS : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
+  let bS : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
+  let outS : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
 
-  let xShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
-  let weightShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
-  let biasShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
+  loadGlobal xS xPtr coord
+  loadGlobal wS weightPtr coord
+  loadGlobal bS biasPtr coord
+  sync
 
-  -- Load weight and bias (long-resident)
-  load weight weightShared
-  load bias biasShared
+  load x xS
+  load w wS
+  load b bS
+  convert xF x
+  rowSum mean xF
+  subCol centered xF mean
+  mul varTmp centered centered
+  rowSum var varTmp
+  convert wF w
+  convert bF b
+  mul centered centered wF
+  add centered centered bF
 
-  for blkIdx in krange 0 16 do
-    -- Load input
-    load x xShared
+  let out : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
+  convert out centered
+  store outS out
+  storeGlobal outPtr outS coord
 
-    -- Convert to float32
-    convert xf x
+/-! ## Compatibility Aliases -/
 
-    -- Compute mean
-    rowSum mean xf
+/-- Deprecated compatibility shim for older architecture-polymorphic examples. -/
+@[deprecated simpleGemm (since := "2026-03-05")]
+def simpleGemmPoly (arch : ArchLevel) [HasMMA arch] : ArchKernelM arch Unit := do
+  archComment "Deprecated: use full-input example kernels in this module."
+  let a ← Arch.ArchKernelM.liftPortable (allocRT .BFloat16 64 64)
+  let b ← Arch.ArchKernelM.liftPortable (allocRT .BFloat16 64 64 .Col)
+  let c ← Arch.ArchKernelM.liftPortable (zeroRT .Float32 64 64)
+  smartMMA c a b c
+  archSync
 
-    -- Subtract mean
-    subCol temp xf mean
+/-- Deprecated alias kept for older docs and external references. -/
+@[deprecated simpleGemm (since := "2026-03-05")]
+abbrev simpleGemmConstrained := simpleGemm
 
-    -- Compute variance
-    mul xf temp temp
-    rowSum var xf
+/-- Deprecated alias kept for older docs and external references. -/
+@[deprecated simpleGemm (since := "2026-03-05")]
+abbrev simpleGemmNew := simpleGemm
 
-    -- Scale and shift
-    let weightF : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
-    let biasF : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
-    convert weightF weight
-    convert biasF bias
-    mul temp temp weightF
-    add temp temp biasF
+/-- Deprecated alias kept for older docs and external references. -/
+@[deprecated flashAttnFwd (since := "2026-03-05")]
+abbrev flashAttnFwdNew := flashAttnFwd
 
-    -- Convert back and store
-    convert x temp
-    store xShared x
-
-    sync
-
--- Verify auto-generated kernel
+-- Verify generated companion declarations on canonical examples.
+#check simpleGemm.kernel
+#check simpleGemm.launch
+#check flashAttnFwd.kernel
+#check flashAttnFwd.launch
+#check ampereGemm.kernel
+#check ampereGemm.launch
+#check blackwellGemm.kernel
+#check blackwellGemm.launch
 #check layerNorm.kernel
 #check layerNorm.launch
-
-/-! ## Generated Code Output -/
-
--- Print generated kernels
-#eval IO.println "=== Simple GEMM ===" *> IO.println (generateKernel simpleGemm.kernel)
-#eval IO.println "\n=== FlashAttention ===" *> IO.println (generateKernel flashAttnFwd.kernel)
-#eval IO.println "\n=== Ampere GEMM (SM80) ===" *> IO.println (generateKernel ampereGemm.kernel)
-#eval IO.println "\n=== Blackwell GEMM (SM100) ===" *> IO.println (generateKernel blackwellGemm.kernel)
-#eval IO.println "\n=== LayerNorm ===" *> IO.println (generateKernel layerNorm.kernel)
 
 end Tyr.GPU.Kernels.Examples

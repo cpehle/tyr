@@ -8,6 +8,7 @@ import Tyr.GPU.Codegen.Monad
 import Tyr.GPU.Codegen.Loop
 import Tyr.GPU.Codegen.GlobalLayout
 import Tyr.GPU.Codegen.EmitNew
+import Tyr.GPU.Kernels.Examples
 
 /-!
 # Tyr.GPU
@@ -31,21 +32,59 @@ the final generated code remains close to hand-written GPU kernels.
 
 ## Quick Workflow
 
-1. Allocate typed tiles/vectors (`RT`, `ST`, `RV`, `SV`).
-2. Compose operations in `KernelM` (`load`, `mma`, reductions, async I/O).
-3. Build a `Kernel` with `buildKernelM`.
-4. Emit backend code with `generateKernel`.
+1. Define parameterized kernels with explicit inputs (`GPtr`, `KVal`).
+2. Compute runtime tile coordinates (`blockCoord2D`, loop indices).
+3. Move data via global/shared/register tiles (`loadGlobal`, `load`, `storeGlobal`).
+4. Build/emit backend code through `@[gpu_kernel]` + `generateKernel`.
 
-Example sketch:
+Preferred example shape:
 
 ```lean
-def toy : Kernel :=
-  buildKernelM "toy" .SM90 #[] do
-    let a ← allocRT .BFloat16 16 16 .Row
-    let b ← allocRT .BFloat16 16 16 .Col
-    let c ← zeroRT .Float32 16 16 .Row
-    mma c a b c
+@[gpu_kernel .SM90]
+def addKernel
+    (xPtr : GPtr GpuFloat.Float32)
+    (yPtr : GPtr GpuFloat.Float32)
+    (outPtr : GPtr GpuFloat.Float32)
+    (n : KVal UInt64) : KernelM Unit := do
+  let _ := n
+  let coord ← blockCoord2D
+  let xS : ST GpuFloat.Float32 64 64 ← allocST .Float32 64 64
+  let yS : ST GpuFloat.Float32 64 64 ← allocST .Float32 64 64
+  let oS : ST GpuFloat.Float32 64 64 ← allocST .Float32 64 64
+  loadGlobal xS xPtr coord
+  loadGlobal yS yPtr coord
+  sync
+  let x : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
+  let y : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
+  load x xS
+  load y yS
+  add x x y
+  store oS x
+  storeGlobal outPtr oS coord
 ```
+
+## Canonical Example Declarations
+
+Use `Tyr.GPU.Kernels.Examples` as the documentation entrypoint for concrete
+`@[gpu_kernel]` declarations:
+
+- `Tyr.GPU.Kernels.Examples.simpleGemm`
+- `Tyr.GPU.Kernels.Examples.flashAttnFwd`
+- `Tyr.GPU.Kernels.Examples.layerNorm`
+- `Tyr.GPU.Kernels.Examples.ampereGemm`
+- `Tyr.GPU.Kernels.Examples.blackwellGemm`
+
+## On Input-Free Kernels
+
+Input-free kernels still exist in the codebase, but mostly as:
+
+- IR/lowering smoke tests,
+- focused examples of one operation family,
+- architecture-dispatch micro examples.
+
+They are useful for compiler development and diagnostics, but they are not the
+best reference for real model integration. For end-to-end usage, prefer kernels
+with explicit pointer/scalar inputs and global-memory I/O.
 
 ## Major Components
 
