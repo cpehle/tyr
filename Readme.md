@@ -222,7 +222,7 @@ Two patterns for different use cases:
 let iter := SequentialBatchIterator.new loader 8 256
 let (batch, iter') := iter.next  -- Returns T #[8, 256]
 
--- Dynamic dimensions (modded-nanogpt style):
+-- Dynamic dimensions:
 let iter := BatchIterator.new shard 8 256
 let (batch, iter') ← iter.next   -- Returns T #[] (erased)
 ```

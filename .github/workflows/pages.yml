@@ -78,10 +78,12 @@ jobs:
           cp lean-toolchain docbuild/lean-toolchain
           ln -sfn ../external docbuild/external
           ln -sfn ../cc docbuild/cc
+          ln -sfn ../docs docbuild/docs
           cat > docbuild/lakefile.toml <<'EOF'
           name = "docbuild"
           reservoir = false
           version = "0.1.0"
+          srcDir = "."
           packagesDir = "../.lake/packages"
 
           [[require]]

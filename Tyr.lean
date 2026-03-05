@@ -36,7 +36,7 @@ import Tyr.Pipeline
 -- Metrics
 import Tyr.Metrics
 
--- GPU kernel abstraction (ThunderKittens)
+-- GPU kernel abstraction
 import Tyr.GPU
 import Tyr.GPU.AD
 import Tyr.GPU.AutoGrad
