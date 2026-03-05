@@ -70,7 +70,10 @@ jobs:
       - name: Prepare doc-gen4 path dependency
         run: |
           if [ ! -d "$GITHUB_WORKSPACE/../doc-gen4/.git" ]; then
-            git clone --depth 1 https://github.com/leanprover/doc-gen4.git "$GITHUB_WORKSPACE/../doc-gen4"
+            git clone --depth 1 --branch v4.27.0 https://github.com/leanprover/doc-gen4.git "$GITHUB_WORKSPACE/../doc-gen4"
+          else
+            git -C "$GITHUB_WORKSPACE/../doc-gen4" fetch --depth 1 origin v4.27.0
+            git -C "$GITHUB_WORKSPACE/../doc-gen4" checkout v4.27.0
           fi
 
       - name: Create docbuild package
