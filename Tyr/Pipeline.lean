@@ -1,45 +1,30 @@
-/-
-  Tyr/Pipeline.lean
-
-  Multi-stage training pipeline orchestration.
-
-  Models the bash/shell orchestration pattern from nanochat's speedrun.sh:
-  - Sequential stages with dependencies
-  - Background tasks with async await
-  - Distributed coordination (master-only logging)
-  - Markdown report generation
-  - Checkpointing and resume
-  - Failure recovery with retry and resume
-
-  Example:
-  ```lean
-  def trainingPipeline : Pipeline PipelineState := do
-    -- Stage 1: Tokenizer
-    stage "tokenizer" do
-      tokenizerTraining
-      tokenizerEval
-
-    -- Stage 2: Pretraining (can spawn background task)
-    let dataDownload ← background do
-      downloadMoreData 240
-
-    stage "pretrain" do
-      baseModelTraining
-      await dataDownload  -- Wait for background download
-      baseModelEval
-
-    -- Stage 3: Fine-tuning
-    stage "sft" do
-      supervisedFineTuning
-      chatEval "sft"
-  ```
--/
 import Tyr.Torch
 import Tyr.Distributed
 import Lean.Data.Json.Basic
 import Lean.Data.Json.Parser
 import Lean.Data.Json.Printer
 import Lean.Data.Json.FromToJson
+
+/-!
+# Tyr.Pipeline
+
+`Tyr.Pipeline` provides multi-stage training/evaluation orchestration utilities.
+It models sequential stages, background task coordination, checkpoint/resume behavior,
+and report generation in a typed Lean API.
+
+## Major Components
+
+- Stage lifecycle/status tracking (`StageStatus`, `StageInfo`).
+- Retry policy/backoff configuration (`RetryPolicy`).
+- Background task handles and await helpers.
+- Markdown report accumulation/output (`Report`, `ReportSection`).
+- Pipeline checkpoint persistence for resume flows.
+
+## Scope
+
+This module focuses on orchestration and observability of long-running workflows.
+Core model math/optimizer logic should remain in model/optim modules and be invoked here.
+-/
 
 namespace torch.Pipeline
 

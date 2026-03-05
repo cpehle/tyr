@@ -1,15 +1,24 @@
-/-
-  Tyr/GPU/Codegen/EmitNew.lean
-
-  C++ code generation from VarId-based kernel IR.
-  Produces ThunderKittens-compatible CUDA code.
--/
 import Std.Data.HashMap
 import Std.Data.HashSet
 import Tyr.GPU.Types
 import Tyr.GPU.Codegen.Var
 import Tyr.GPU.Codegen.IR
 import Tyr.GPU.Codegen.AST
+
+/-!
+# Tyr.GPU.Codegen.EmitNew
+
+`Tyr.GPU.Codegen.EmitNew` lowers `Kernel` IR into backend CUDA/C++ source.
+
+Responsibilities include:
+
+- deterministic naming and declaration ordering,
+- operation-specific code templates (mma, reductions, async I/O, etc.),
+- helper synthesis and layout bookkeeping needed by emitted kernels.
+
+This is the final translation stage after typed kernel construction.
+If `Ops`/`Notation` are "authoring-time DSL", this module is the backend compiler.
+-/
 
 namespace Tyr.GPU.Codegen
 

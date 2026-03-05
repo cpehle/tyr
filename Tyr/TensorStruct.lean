@@ -1,5 +1,127 @@
 import Tyr.Torch
 
+/-!
+# Tyr.TensorStruct
+
+`Tyr.TensorStruct` defines Tyr's tensor-tree abstraction: a uniform way to traverse,
+transform, and combine nested parameter/state structures that contain tensors.
+Conceptually, it is similar to JAX PyTrees, specialized for Tyr's shape-indexed `T s`.
+
+In practice, this is the foundation that lets training, checkpointing, optimizers,
+and model utilities operate generically over arbitrary model parameter types.
+
+## Why This Exists
+
+Real models are not single tensors: they are nested structures of tensors plus metadata
+(configuration, counters, cached values, optional branches, arrays/lists of blocks, etc.).
+`TensorStruct` gives one common interface for these structures so higher-level code can be
+written once and reused across many models.
+
+## Major Components
+
+- `TensorStruct`: typeclass with four core operations over tensor leaves:
+  `map`, `mapM`, `zipWith`, and `fold`.
+- `Static α`: marks non-tensor metadata that should be skipped during traversal.
+- `Frozen s`: marks tensor fields that should remain in the structure but are typically
+  treated as non-trainable.
+- `Vector n α`: length-indexed container for compile-time-safe `zipWith`.
+- `TensorStruct` utilities: `count`, `grads`, `zeroGrads`, `detach`,
+  `requiresGrad`, `makeLeafParams`, `scale`, `add`, `sub`.
+
+## Traversal Semantics
+
+At a high level:
+
+- `map` applies a pure tensor-to-tensor transform at every tensor leaf.
+- `mapM` is the monadic form, useful for device moves and IO-backed transforms.
+- `zipWith` combines two structures with the same shape-of-structure.
+- `fold` reduces all tensor leaves into a summary value.
+
+Wrapper behavior:
+
+- `Static α` is ignored by tensor transforms (passed through unchanged).
+- `Frozen s` still traverses as a tensor leaf, but can be treated specially by your logic.
+
+## Examples
+
+### 1) Define TensorStruct-aware model parameters
+
+```lean
+import Tyr.Module.Derive
+
+open torch
+
+structure LinearParams (inDim outDim : UInt64) where
+  weight : T #[outDim, inDim]
+  bias : T #[outDim]
+  name : Static String
+  runningMean : Frozen #[outDim]
+  deriving Repr, TensorStruct
+```
+
+### 2) Generic transformations over nested parameter trees
+
+```lean
+open torch
+
+def moveTo [TensorStruct α] (device : Device) (x : α) : α :=
+  TensorStruct.map (fun t => t.to device) x
+
+def moveToM [TensorStruct α] (device : Device) (x : α) : IO α :=
+  TensorStruct.mapM (fun t => pure (t.to device)) x
+
+def prepareForTraining [TensorStruct α] (x : α) : α :=
+  TensorStruct.zeroGrads (TensorStruct.makeLeafParams x)
+
+def tensorLeafCount [TensorStruct α] (x : α) : Nat :=
+  TensorStruct.count x
+```
+
+### 3) Summarize parameter trees with `fold`
+
+```lean
+open torch
+
+-- Total number of scalar elements across all tensor leaves.
+def numScalars [TensorStruct α] (x : α) : Nat :=
+  TensorStruct.fold (fun {s} _ acc => acc + s.foldl (· * ·) 1) 0 x
+```
+
+### 4) Combine structures elementwise
+
+```lean
+open torch
+
+def averageParams [TensorStruct α] (a b : α) : α :=
+  TensorStruct.scale (TensorStruct.add a b) 0.5
+```
+
+### 5) Prefer `Vector` for type-safe `zipWith`
+
+```lean
+open torch
+
+def blendVec {n : Nat} [TensorStruct α] (a b : Vector n α) : Vector n α :=
+  TensorStruct.zipWith (fun x y => x + y) a b
+```
+
+Unlike `Array`/`List`, `Vector n α` encodes length in the type, so mismatched zip sizes
+are rejected by typing instead of failing at runtime.
+
+## Safety Notes
+
+`TensorStruct` instances for `Array` and `List` perform runtime length checks in `zipWith`.
+If lengths differ, they panic. Use `Vector n α` when you want static guarantees that a zip
+cannot mismatch.
+
+## Scope
+
+This module provides the core traversal semantics and foundational container instances.
+Higher-level model code should usually depend on these abstractions (often via `import Tyr`)
+rather than writing tensor-tree plumbing by hand. This is the layer that enables model-agnostic
+training loops, optimizer state transforms, and checkpoint load/save pipelines.
+-/
+
 namespace torch
 
 /-! ## Static and Frozen Wrappers

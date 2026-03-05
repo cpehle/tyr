@@ -1,11 +1,21 @@
-/-
-  Tyr/GPU/Tile.lean
-
-  Tile typeclasses and concrete tile types mapping to ThunderKittens
-  rt<T, rows, cols, layout>, st<T, rows, cols, layout>, etc.
--/
 import Tyr.GPU.Types
 import Tyr.GPU.Capabilities
+
+/-!
+# Tyr.GPU.Tile
+
+`Tyr.GPU.Tile` defines the abstract tile model used by the DSL.
+It separates:
+
+- **concepts** (`Tile`, `RegisterTile`, `SharedTile`) from
+- **concrete carriers** (`RT`, `ST`, `RV`, `SV`, `GL`).
+
+These structures are primarily type-level handles. In codegen workflows they
+represent declarations and constraints, not host-side tensor data.
+
+The goal is to preserve compile-time shape/layout information so downstream
+operations can reject invalid combinations early.
+-/
 
 namespace Tyr.GPU
 

@@ -1,7 +1,29 @@
--- XLA (Accelerated Linear Algebra) interface for Lean
--- Provides JIT compilation capabilities for tensor operations
-
 import Tyr.Basic
+
+/-!
+# Tyr.XLA
+
+`Tyr.XLA` exposes an FFI interface to XLA builder/client APIs from Lean.
+It provides opaque handles and operation constructors for building, compiling,
+and executing XLA computations.
+
+## Major Components
+
+- Opaque XLA handle types (`XlaBuilder`, `XlaOp`, `XlaShape`, `XlaClient`, etc.).
+- Builder/computation construction APIs (parameters, constants, arithmetic, dot).
+- Client and compilation entrypoints (`getHostClient`, `getGpuClient`, `compile`).
+- Execution and buffer inspection helpers.
+
+## Scope
+
+This module is a low-level binding surface.
+Higher-level tensor semantics and model APIs remain in `Tyr.Torch` and related modules.
+
+## Status
+
+These bindings are currently incomplete and are not intended for general use yet.
+Treat this module as experimental scaffolding under active development.
+-/
 
 namespace xla
 

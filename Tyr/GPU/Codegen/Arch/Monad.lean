@@ -1,12 +1,22 @@
-/-
-  Tyr/GPU/Codegen/Arch/Monad.lean
-
-  Architecture-indexed kernel monad for type-safe multi-architecture kernel generation.
-  Operations are tagged with their minimum required architecture level.
--/
 import Tyr.GPU.Codegen.Arch.Level
 import Tyr.GPU.Codegen.Monad
 import Tyr.GPU.Codegen.IR
+
+/-!
+# Tyr.GPU.Codegen.Arch.Monad
+
+`Tyr.GPU.Codegen.Arch.Monad` extends `KernelM` with a type index tracking
+minimum required architecture capabilities.
+
+`ArchKernelM minArch α` means: this computation is valid on `minArch` and any
+stronger architecture.
+
+This enables composition patterns like:
+
+- write portable code at `.Ampere`,
+- require stronger features for selected blocks,
+- lift compatible code into `.Hopper` / `.Blackwell` targets with proofs.
+-/
 
 namespace Tyr.GPU.Codegen.Arch
 

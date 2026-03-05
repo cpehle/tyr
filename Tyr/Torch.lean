@@ -1,5 +1,35 @@
 import Tyr.Basic
 
+/-!
+# Tyr.Torch
+
+`Tyr.Torch` is the core tensor runtime layer for Tyr.
+It exposes shape-aware Lean declarations backed by native libtorch bindings and
+provides the low-level operations used by higher-level model, optimizer, and training code.
+
+## Major Components
+
+- Tensor creation and basic arithmetic (`zeros`, `ones`, `rand`, scalar/tensor ops).
+- Device/runtime interop (CPU/CUDA/MPS selection, stream access, synchronization).
+- Shape-indexed tensor transforms (`reshape`, `permute`, slicing, concatenation, expansion).
+- Core numerics (matrix multiplication, reductions, pooling/convolution shape helpers).
+- `torch.autograd`: gradient queries, graph control (`no_grad`), and differentiation utilities.
+- `torch.nn`: neural network functional operators and loss primitives.
+- `torch.data` and `torch.signal`: data and signal-processing helpers.
+- `torch.safetensors`: tensor checkpoint loading/saving, including sharded loading.
+- Specialized helpers in submodules such as `torch.rotary`, `torch.nanoproof`, and `torch.linalg`.
+
+## Scope
+
+This module is intentionally close to the runtime/FFI boundary, but it is also a
+primary direct import surface for model and training code.
+In this repository, many `Examples` and `Tyr.Model` modules import `Tyr.Torch`
+directly to work in the `torch` namespace and use tensor/autograd/device primitives
+without pulling the full top-level aggregation.
+Use `import Tyr` for convenience; use `import Tyr.Torch` when you want explicit,
+lower-level control and a narrower dependency surface.
+-/
+
 namespace torch
 
 -- | Tensor Creation API

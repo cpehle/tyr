@@ -41,3 +41,22 @@ import Tyr.DiffEq.Solver.LeapfrogMidpoint
 import Tyr.DiffEq.StepSizeController
 import Tyr.DiffEq.Integrate
 import Tyr.DiffEq.Adjoint
+
+/-!
+# Tyr.DiffEq
+
+`Tyr.DiffEq` is the umbrella import for Tyr's differential-equation stack
+(ODEs, SDEs, and adjoint-based differentiation workflows).
+
+## Major Components
+
+- Core problem representation: types, terms, paths, Brownian processes.
+- Numerical infrastructure: interpolation, saving rules, root finding, step control.
+- Solver families: explicit, implicit, adaptive, stochastic, and symplectic variants.
+- Integration and adjoint backends for end-to-end differentiable simulation.
+
+## Scope
+
+Use this as the canonical entrypoint when you need the full DiffEq toolbox.
+Specialized projects may import solver submodules directly for tighter dependencies.
+-/

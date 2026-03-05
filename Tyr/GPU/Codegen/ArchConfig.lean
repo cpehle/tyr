@@ -1,9 +1,3 @@
-/-
-  Tyr/GPU/Codegen/ArchConfig.lean
-
-  Architecture-specific configuration for GPU kernel generation.
-  Supports specialized kernels for SM80 (Ampere), SM90 (Hopper), SM100 (Blackwell).
--/
 import Tyr.GPU.Types
 import Tyr.GPU.Codegen.Var
 import Tyr.GPU.Codegen.TileTypes
@@ -12,6 +6,23 @@ import Tyr.GPU.Codegen.Monad
 import Tyr.GPU.Codegen.Ops
 import Tyr.GPU.Codegen.Loop
 import Tyr.GPU.Codegen.EmitNew
+
+/-!
+# Tyr.GPU.Codegen.ArchConfig
+
+`Tyr.GPU.Codegen.ArchConfig` contains architecture-parameterized kernel
+configuration helpers for SM80/SM90/SM100 targets.
+
+This module focuses on practical per-arch knobs and convenience builders:
+
+- capability records and lookup,
+- default kernel tuning settings,
+- architecture-conditional operation selection,
+- generation helpers for multi-variant kernels.
+
+It is a configuration-oriented companion to the stricter type-indexed
+`Codegen.Arch.*` stack.
+-/
 
 namespace Tyr.GPU
 

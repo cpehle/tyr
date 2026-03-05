@@ -1,10 +1,21 @@
-/-
-  Tyr/GPU/Codegen/Arch/Capabilities.lean
-
-  Architecture configuration typeclass providing compile-time constants
-  for each GPU architecture level.
--/
 import Tyr.GPU.Codegen.Arch.Level
+
+/-!
+# Tyr.GPU.Codegen.Arch.Capabilities
+
+`Tyr.GPU.Codegen.Arch.Capabilities` attaches concrete tuning/configuration data
+to each `ArchLevel`.
+
+Compared with `Tyr.GPU.Capabilities` (feature gating by `GpuArch`), this layer
+focuses on kernel-generation policy values such as:
+
+- default tile sizes,
+- shared-memory budgets,
+- default block/pipeline settings,
+- feature flags used by arch-specific dispatch.
+
+These records are consumed by polymorphic builders and smart operation selection.
+-/
 
 namespace Tyr.GPU.Codegen.Arch
 

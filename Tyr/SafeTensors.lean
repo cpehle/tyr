@@ -1,9 +1,20 @@
-/-
-  Tyr/SafeTensors.lean
-
-  SafeTensors helpers:
-  - runtime schema introspection
-  - elaboration-time type provider
--/
 import Tyr.SafeTensors.Schema
 import Tyr.SafeTensors.TypeProvider
+
+/-!
+# Tyr.SafeTensors
+
+`Tyr.SafeTensors` is the umbrella import for SafeTensors integration in Tyr.
+It combines runtime schema/metadata support with elaboration-time type-provider tooling.
+
+## Major Components
+
+- `Tyr.SafeTensors.Schema`: runtime schema parsing and typed metadata surface.
+- `Tyr.SafeTensors.TypeProvider`: compile-time/type-provider integration for
+  generated typed loaders/accessors.
+
+## Scope
+
+Use this module when working with checkpoint schema introspection and typed loading.
+Low-level tensor runtime operations remain in `Tyr.Torch`.
+-/

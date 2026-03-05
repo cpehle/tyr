@@ -1,10 +1,19 @@
-/-
-  Tyr/GPU/Types.lean
-
-  Core types for ThunderKittens GPU kernel abstraction.
-  These types map directly to ThunderKittens C++ template parameters.
--/
 import Lean.ToExpr
+
+/-!
+# Tyr.GPU.Types
+
+`Tyr.GPU.Types` defines the foundational enums and configuration types used
+throughout Tyr's GPU DSL. These values are shared by:
+
+- type-level kernel APIs (`TileLayout`, `GpuFloat`, `GpuArch`),
+- capability checks and architecture dispatch,
+- C++ emission (`toCpp`, guard names, byte sizes).
+
+Most definitions here are intentionally "small but central": they are the
+common language between Lean-side kernel construction and emitted
+ThunderKittens/CUDA code.
+-/
 
 namespace Tyr.GPU
 

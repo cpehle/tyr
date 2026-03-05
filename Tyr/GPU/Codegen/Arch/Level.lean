@@ -1,10 +1,20 @@
-/-
-  Tyr/GPU/Codegen/Arch/Level.lean
-
-  Architecture capability levels forming a hierarchy with ordering proofs.
-  SM80 (Ampere) ⊆ SM90 (Hopper) ⊆ SM100 (Blackwell)
--/
 import Tyr.GPU.Types
+
+/-!
+# Tyr.GPU.Codegen.Arch.Level
+
+`Tyr.GPU.Codegen.Arch.Level` defines the capability hierarchy used by
+architecture-polymorphic kernels.
+
+It models:
+
+- named levels (`Ampere`, `Hopper`, `Blackwell`),
+- a proof-oriented preorder (`ArchLe`) for "capability inclusion",
+- conversions to/from `GpuArch`.
+
+Other arch-aware modules use these proofs to safely lift portable operations
+to stronger targets.
+-/
 
 namespace Tyr.GPU.Codegen.Arch
 

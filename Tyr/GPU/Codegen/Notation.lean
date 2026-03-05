@@ -1,9 +1,3 @@
-/-
-  Tyr/GPU/Codegen/Notation.lean
-
-  Expression-level DSL notation for GPU kernel operations.
-  Provides symbolic operators (@, @ᵀ, +=, etc.) alongside named function equivalents.
--/
 import Tyr.GPU.Types
 import Tyr.GPU.Codegen.Var
 import Tyr.GPU.Codegen.TileTypes
@@ -11,6 +5,20 @@ import Tyr.GPU.Codegen.IR
 import Tyr.GPU.Codegen.Monad
 import Tyr.GPU.Codegen.AST
 import Tyr.GPU.Codegen.Ops
+
+/-!
+# Tyr.GPU.Codegen.Notation
+
+`Tyr.GPU.Codegen.Notation` adds expression-style syntax on top of
+`Tyr.GPU.Codegen.Ops`.
+
+Use this module when you want concise kernel authoring with operators
+and fluent combinators (for example matrix product and elementwise pipelines),
+while preserving the same type guarantees as the primitive API.
+
+Semantically, these helpers still emit the same IR statements; they are syntax
+and convenience, not a separate backend.
+-/
 
 namespace Tyr.GPU.Codegen
 

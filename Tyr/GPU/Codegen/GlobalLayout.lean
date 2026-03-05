@@ -1,14 +1,23 @@
-/-
-  Tyr/GPU/Codegen/GlobalLayout.lean
-
-  Global memory layout abstractions following ThunderKittens patterns.
-  Provides GlobalLayout (gl) and TileCoord types for memory access.
--/
 import Tyr.GPU.Types
 import Tyr.GPU.Codegen.Var
 import Tyr.GPU.Codegen.TileTypes
 import Tyr.GPU.Codegen.IR
 import Tyr.GPU.Codegen.Monad
+
+/-!
+# Tyr.GPU.Codegen.GlobalLayout
+
+`Tyr.GPU.Codegen.GlobalLayout` models global-memory tensor layouts and tile
+coordinates for load/store operations.
+
+It provides both:
+
+- static coordinates (`TileCoord`) for compile-time indexing patterns, and
+- runtime coordinates (`RTileCoord`) for block/thread/loop-derived indices.
+
+The abstractions here keep address calculations explicit in IR while preserving
+shape information in types (`GL`, `GL2`, `GL3`, `GL4`).
+-/
 
 namespace Tyr.GPU.Codegen
 

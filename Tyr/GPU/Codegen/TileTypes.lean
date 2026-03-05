@@ -1,13 +1,22 @@
-/-
-  Tyr/GPU/Codegen/TileTypes.lean
-
-  Dependent types for GPU tiles with dimensions embedded in types.
-  Enables compile-time checking of dimension compatibility for operations.
--/
 import Tyr.GPU.Types
 import Tyr.GPU.Tile
 import Tyr.GPU.Codegen.Var
 import Tyr.Basic
+
+/-!
+# Tyr.GPU.Codegen.TileTypes
+
+`Tyr.GPU.Codegen.TileTypes` defines typed handles used during kernel construction.
+Each handle wraps a `VarId` but carries rich phantom information:
+
+- dtype (`GpuFloat`),
+- dimensions (`rows`, `cols`, `len`),
+- layout/location (`Row`/`Col`, register/shared/global).
+
+These wrappers are what make many DSL operations type-safe: mismatched matrix
+shapes or incompatible layouts are rejected by Lean's typechecker before IR
+emission.
+-/
 
 namespace Tyr.GPU.Codegen
 

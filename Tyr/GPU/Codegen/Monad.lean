@@ -1,12 +1,23 @@
-/-
-  Tyr/GPU/Codegen/Monad.lean
-
-  Kernel builder monad using standard StateM.
-  Enables do-notation for natural kernel construction.
--/
 import Tyr.GPU.Types
 import Tyr.GPU.Codegen.Var
 import Tyr.GPU.Codegen.IR
+
+/-!
+# Tyr.GPU.Codegen.Monad
+
+`Tyr.GPU.Codegen.Monad` provides the stateful kernel-construction API.
+`KernelM` accumulates IR statements while tracking fresh variable IDs,
+target architecture, and shared-memory usage.
+
+This layer turns imperative-looking `do` notation into immutable IR:
+
+- `freshVar` allocates symbolic names,
+- `emit` appends `KStmt`,
+- `buildKernelM` seals the final `Kernel`.
+
+Most user-facing DSL functions in `Ops` and `Notation` are thin wrappers over
+this monad.
+-/
 
 namespace Tyr.GPU.Codegen
 

@@ -1,16 +1,25 @@
-/-
-  Tyr/Metrics.lean
-
-  Evaluation metrics for neural network training.
-  Provides accuracy, precision, recall, F1 score, and other common metrics.
-
-  Includes BPB (bits-per-byte) evaluation from nanochat's loss_eval.py:
-  - Vocab-size-independent metric
-  - Uses TokenBytes mapping for byte counts
-  - Lower is better (English text approaches ~0.8)
--/
 import Tyr.Torch
 import Tyr.Tokenizer.TokenBytes
+
+/-!
+# Tyr.Metrics
+
+`Tyr.Metrics` provides evaluation metrics used across Tyr training/eval workflows.
+It includes common classification metrics and language-model metrics such as perplexity
+and bits-per-byte (BPB).
+
+## Major Components
+
+- Classification metrics: accuracy and top-k accuracy.
+- Binary metrics: precision, recall, F1, and F-beta.
+- Language-model metrics: perplexity, BPC, and BPB.
+- BPB accumulation utilities for streaming batch-wise evaluation.
+
+## Scope
+
+This module focuses on metric computation utilities, not training control flow.
+It is designed to be lightweight and reusable across examples, benchmarks, and tests.
+-/
 
 namespace torch.metrics
 

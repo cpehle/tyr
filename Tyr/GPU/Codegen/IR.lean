@@ -1,12 +1,24 @@
-/-
-  Tyr/GPU/Codegen/IR.lean
-
-  Kernel IR using VarId for type-safe code generation.
-  Replaces string-based KExpr with proper variable tracking.
--/
 import Tyr.GPU.Types
 import Tyr.GPU.Codegen.Var
 import Tyr.GPU.Codegen.AST
+
+/-!
+# Tyr.GPU.Codegen.IR
+
+`Tyr.GPU.Codegen.IR` is the central intermediate representation for Tyr GPU kernels.
+It models kernels as `KStmt` programs over `VarId`s and operation tags from
+`Codegen.AST`.
+
+Key pieces:
+
+- `KScalarType`: scalar parameter kinds used at kernel boundaries.
+- `KStmt`: declarative instruction set for allocation, memory, mma, control flow.
+- `KParam`: typed kernel signature parameters.
+- `Kernel`: complete lowered kernel record consumed by emitters.
+
+Higher-level modules (`Ops`, `Notation`, `Arch`) construct this IR; emitters
+(`EmitNew`) serialize it to target-specific CUDA/C++.
+-/
 
 namespace Tyr.GPU.Codegen
 

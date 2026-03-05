@@ -1,36 +1,39 @@
-/-
-  Tyr/GPU/Codegen/Arch.lean
-
-  Multi-architecture kernel generation for ThunderKittens.
-  This module re-exports all architecture-related functionality.
-
-  Architecture Hierarchy:
-    SM80 (Ampere)  ⊂  SM90 (Hopper)  ⊂  SM100 (Blackwell)
-       └─ warp mma      └─ + WGMMA        └─ + tcgen05
-       └─ cp.async      └─ + TMA          └─ + 2-CTA MMA
-       └─ 164KB smem    └─ + 228KB smem   └─ + 256KB smem
-
-  Usage:
-    -- Import this module to get all architecture functionality
-    import Tyr.GPU.Codegen.Arch
-
-    -- Define a polymorphic kernel
-    def myKernel : PolyKernel := mkPolyKernelWithConfig "my_kernel"
-      #[{ name := "input", dtype := .BFloat16, isPointer := true }]
-      fun arch cfg => do
-        comment s!"Using tile size: {cfg.mmaTileSize}"
-        -- Kernel body uses smart operations that auto-dispatch
-        ...
-
-    -- Compile for all architectures
-    #eval IO.println (myKernel.compile.cppSource)
--/
-
 import Tyr.GPU.Codegen.Arch.Level
 import Tyr.GPU.Codegen.Arch.Monad
 import Tyr.GPU.Codegen.Arch.Capabilities
 import Tyr.GPU.Codegen.Arch.Ops
 import Tyr.GPU.Codegen.Arch.Polymorphic
+
+/-!
+# Tyr.GPU.Codegen.Arch
+
+`Tyr.GPU.Codegen.Arch` is the architecture-polymorphic facade for GPU kernel generation.
+It re-exports the hierarchy, typed monad, capability records, dispatch operations,
+and polymorphic compilation utilities.
+
+## Why This Layer Exists
+
+The base DSL can emit kernels for a chosen `GpuArch`, but many kernels need one
+source definition with architecture-specific lowering choices (Ampere vs Hopper vs
+Blackwell). This module provides that bridge.
+
+## Architecture Hierarchy
+
+```text
+SM80 (Ampere)  <  SM90 (Hopper)  <  SM100 (Blackwell)
+   - warp mma      - + WGMMA         - + tcgen05
+   - cp.async      - + TMA           - + 2-CTA MMA
+   - 164KB smem    - + 228KB smem    - + 256KB smem
+```
+
+## Typical Use
+
+1. Build kernels in `ArchKernelM` with architecture-aware helpers.
+2. Use `smart*` operations (`smartMMA`, `smartLoadAsync`, etc.).
+3. Compile a `PolyKernel` for one or many architecture targets.
+
+This keeps kernel intent centralized while still generating tuned backend code.
+-/
 
 namespace Tyr.GPU.Codegen
 

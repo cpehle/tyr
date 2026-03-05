@@ -1,10 +1,19 @@
-/-
-  Tyr/GPU/Codegen/AST.lean
-
-  Kernel operation types matching ThunderKittens operations.
-  These enums are used by the VarId-based IR (IR.lean).
--/
 import Tyr.GPU.Types
+
+/-!
+# Tyr.GPU.Codegen.AST
+
+`Tyr.GPU.Codegen.AST` defines the operation vocabulary used by kernel IR.
+These enums capture *what* an operation is (mma mode, reduction kind,
+broadcast axis, mask policy, etc.) without tying it to a specific variable.
+
+`IR.lean` then combines these tags with `VarId` operands inside `KStmt`.
+This separation keeps the operation set reusable across:
+
+- kernel builders,
+- architecture-aware dispatch,
+- backend emission.
+-/
 
 namespace Tyr.GPU.Codegen
 

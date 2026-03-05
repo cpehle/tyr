@@ -1,25 +1,3 @@
-/-
-  Tyr.lean
-
-  Root module for Tyr - a deep learning library for Lean 4.
-
-  This module exports the core general-purpose infrastructure:
-  - Tensor operations (Torch bindings)
-  - Neural network modules
-  - Optimizers (AdamW, Muon, DistAdam)
-  - Distributed training (DDP, reduce-scatter, sharding)
-  - Data loading
-  - Tokenization
-  - Checkpointing
-  - Metrics
-
-  Model-specific implementations are in Examples/:
-  - Examples/GPT/ - Simple GPT training
-  - Examples/NanoChat/ - NanoChat (modded GPT with tools)
-  - Examples/NanoProof/ - Theorem-proving transformer
-  - Examples/Diffusion/ - Diffusion models
--/
-
 -- Core infrastructure
 import Tyr.Basic
 import Tyr.Torch
@@ -62,3 +40,50 @@ import Tyr.Metrics
 import Tyr.GPU
 import Tyr.GPU.AD
 import Tyr.GPU.AutoGrad
+
+/-!
+# Tyr
+
+`Tyr` is a dependently typed deep learning library for Lean 4.
+Its central goal is to make tensor programs safer by tracking key invariants
+(especially shapes) in types while still exposing practical training and inference tooling.
+
+## Major Components
+
+This root module re-exports the core, general-purpose surface area:
+
+- `Tyr.Basic`: foundational tensor aliases and shared utilities.
+- `Tyr.Torch`: low-level tensor operations and libtorch bindings.
+- `Tyr.SafeTensors`: typed SafeTensors schema and loading support.
+- `Tyr.TensorStruct`: generic traversal/mapping over tensor-containing structures.
+- `Tyr.Mctx`: Monte Carlo tree search infrastructure.
+- `Tyr.AutoGrad`: JAX-style automatic differentiation over Tyr IR.
+- `Tyr.Module`: neural network module abstractions and layers.
+- `Tyr.Optim` (+ scheduler/dist variants): optimizers and learning-rate scheduling.
+- `Tyr.Distributed` and `Tyr.Sharding`: distributed training and partitioning utilities.
+- `Tyr.Data`, `Tyr.DataLoader`, `Tyr.Tokenizer`: data ingestion, batching, and tokenization.
+- `Tyr.Checkpoint`: model/optimizer checkpoint save and restore.
+- `Tyr.Pipeline`: training/inference orchestration helpers.
+- `Tyr.Metrics`: metric definitions and reporting helpers.
+- `Tyr.GPU` (+ `Tyr.GPU.AD`, `Tyr.GPU.AutoGrad`): GPU kernel abstractions and AD support.
+
+## Example
+
+```lean
+import Tyr
+
+open torch
+
+def toyForward : T #[2, 4] :=
+  let x : T #[2, 8] := zeros #[2, 8]
+  let w : T #[4, 8] := zeros #[4, 8]
+  linear x w
+```
+
+`import Tyr` gives a batteries-included entrypoint; shapes remain encoded in types.
+
+## Scope
+
+This file is intentionally a stable import surface for common Tyr workflows.
+Task- and model-specific code lives in dedicated modules (for example `Examples` and `Tyr.Model`).
+-/

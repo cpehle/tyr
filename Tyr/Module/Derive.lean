@@ -13,9 +13,20 @@ namespace torch
 
 /-! ## TensorStruct Instance Generation
 
-For now, we provide manual instance templates and helper macros.
-A full deriving handler requires complex metaprogramming; this simpler
-approach works for most cases.
+This module provides an automatic `deriving` handler for `torch.TensorStruct` on
+structure types.
+
+What it handles well:
+
+- field-wise traversal for structures,
+- parametric structures (it generates binders for type/shape parameters),
+- recursive use of existing `TensorStruct` instances on fields.
+
+Current limits:
+
+- it is not a fully customizable deriving framework,
+- it assumes each field already has a suitable `TensorStruct` instance,
+- non-structure or highly custom traversal policies still require manual instances.
 
 ### Field Type Handling
 

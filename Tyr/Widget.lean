@@ -7,6 +7,86 @@ import Lean.Elab.Deriving
 import Tyr.Basic
 import Tyr.TensorStruct
 
+/-!
+# Tyr.Widget
+
+`Tyr.Widget` provides interactive Lean infoview widgets for tensor/module inspection.
+It includes frontend + RPC structures for tensor heatmaps and hierarchical module trees,
+plus deriving support for module display conversion.
+
+## Major Components
+
+- Widget data models (`TensorDisplayProps`, `ModuleNode`, `ModuleDisplayProps`).
+- `TensorWidget` frontend module for interactive visualization.
+- Tensor-structure to display-tree conversion helpers.
+- Deriving/registration support for `ToModuleDisplay`.
+
+## Scope
+
+This module is focused on developer ergonomics and visualization in the Lean UI.
+It complements, but does not replace, runtime/model computation modules.
+
+## VS Code Quick Start
+
+Widgets render in the Lean infoview when you place your cursor on a line containing
+`#tensor ...` or `#module ...`.
+
+1. Open a `.lean` file in VS Code with the Lean 4 extension enabled.
+2. Add `import Tyr.Widget` (or import a module that already pulls it in).
+3. Write `#tensor` / `#module` commands.
+4. Place cursor on those lines to open the interactive panel.
+
+```lean
+import Tyr.Widget
+
+open torch
+
+#tensor (zeros #[8, 8])
+#tensor (torch.randn #[16, 32])   -- IO tensor expression also works
+```
+
+For module trees, pass `ModuleDisplayProps` (or `IO ModuleDisplayProps`):
+
+```lean
+import Tyr.Module.Linear
+import Tyr.Widget
+
+open torch
+
+def demoModule : IO ModuleDisplayProps := do
+  let lin ← Linear.init 16 32
+  pure (toModuleDisplayProps lin "Linear(16->32)")
+
+#module demoModule
+```
+
+## Deriving Support
+
+You can derive `ToModuleDisplay` for your own structures, then call
+`toModuleDisplayProps` and inspect the result with `#module`.
+
+```lean
+import Tyr.Module.Linear
+import Tyr.Widget
+
+open torch
+
+structure TinyMLP where
+  fc1 : Linear 8 16
+  fc2 : Linear 16 4
+  note : Static String
+  deriving ToModuleDisplay
+
+def tinyTree : IO ModuleDisplayProps := do
+  let fc1 ← Linear.init 8 16
+  let fc2 ← Linear.init 16 4
+  let m : TinyMLP := { fc1, fc2, note := "demo" }
+  pure (toModuleDisplayProps m "TinyMLP")
+
+#module tinyTree
+```
+-/
+
 namespace torch
 
 open Lean Widget Server Elab Command
@@ -688,8 +768,17 @@ private unsafe def evalModuleProps (e : Expr) : TermElabM ModuleDisplayProps := 
 private opaque evalModulePropsSafe (e : Expr) : TermElabM ModuleDisplayProps
 
 /-- Command to visualize a tensor in the infoview.
-    Works with both `T s` and `IO (T s)` expressions.
-    Usage: `#tensor torch.randn #[3, 4]` or `#tensor myConstantTensor` -/
+
+Works with both pure tensors and `IO` tensor expressions.
+
+Examples:
+```lean
+#tensor (zeros #[4, 4])
+#tensor (torch.randn #[3, 8])
+```
+
+Tip: place your cursor on the `#tensor` line in VS Code to show the widget panel.
+-/
 elab "#tensor " t:term : command => do
   let props ← liftTermElabM do
     -- First elaborate the term to check its type
@@ -711,8 +800,21 @@ elab "#tensor " t:term : command => do
   liftCoreM <| Widget.savePanelWidgetInfo (hash TensorWidget.javascript) propsJson t
 
 /-- Command to visualize a module tree in the infoview.
-    Works with both `ModuleDisplayProps` and `IO ModuleDisplayProps` expressions.
-    Usage: `#module myModuleTree` -/
+
+Works with `ModuleDisplayProps` and `IO ModuleDisplayProps` expressions.
+Most model structs use `deriving ToModuleDisplay`, then `toModuleDisplayProps`.
+
+Examples:
+```lean
+def linTree : IO ModuleDisplayProps := do
+  let lin ← Linear.init 8 16
+  pure (toModuleDisplayProps lin "Linear(8->16)")
+
+#module linTree
+```
+
+Tip: place your cursor on the `#module` line in VS Code to show the widget panel.
+-/
 elab "#module " t:term : command => do
   let props ← liftTermElabM do
     let e ← Term.elabTerm t none

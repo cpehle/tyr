@@ -1,9 +1,3 @@
-/-
-  Tyr/GPU/Codegen/Attribute.lean
-
-  @[gpu_kernel] attribute for marking GPU kernel functions.
-  Provides automatic parameter extraction and kernel registration.
--/
 import Lean
 import Tyr.GPU.Types
 import Tyr.GPU.Codegen.Var
@@ -12,6 +6,20 @@ import Tyr.GPU.Codegen.IR
 import Tyr.GPU.Codegen.Monad
 import Tyr.GPU.Codegen.EmitNew
 import Tyr.GPU.Codegen.Arch.Level
+
+/-!
+# Tyr.GPU.Codegen.Attribute
+
+`Tyr.GPU.Codegen.Attribute` implements the `@[gpu_kernel]` registration pipeline.
+It connects Lean declarations to generated kernel artifacts by:
+
+- extracting kernel parameter metadata from Lean signatures,
+- storing registrations in environment extensions,
+- materializing backend C++ snippets and launcher wrappers.
+
+This is the main metaprogramming entry point for turning annotated Lean kernels
+into discoverable build-time codegen assets.
+-/
 
 namespace Tyr.GPU.Codegen
 

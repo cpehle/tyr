@@ -1,13 +1,25 @@
 import Std
 
-namespace torch
-
 /-!
-  PRNG utilities (JAX-style key splitting).
+# Tyr.PRNG
 
-  This is a lightweight, deterministic PRNG for CPU-side sampling used by
-  DiffEq utilities (e.g. Brownian paths). It is *not* cryptographically secure.
+`Tyr.PRNG` provides lightweight deterministic PRNG utilities in a JAX-style key API.
+It is intended for CPU-side stochastic utilities where reproducibility and explicit key
+threading are more important than cryptographic guarantees.
+
+## Major Components
+
+- `PRNGKey` state carrier.
+- Key operations: `fromUInt64`, `foldIn`, and `split`.
+- Sampling utility: `normal01` (Box-Muller from deterministic uniforms).
+
+## Scope
+
+This module is for deterministic experiment/simulation randomness (for example DiffEq paths).
+It is explicitly not cryptographically secure.
 -/
+
+namespace torch
 
 structure PRNGKey where
   state : UInt64

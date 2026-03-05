@@ -1,10 +1,25 @@
-/-
-  General Checkpoint System
-
-  Provides model-agnostic save/load functionality using TensorStruct.
-  Enables training resumption and model export for any model type.
--/
 import Tyr.TensorStruct
+
+/-!
+# Tyr.Checkpoint
+
+`Tyr.Checkpoint` provides model-agnostic checkpoint persistence based on `TensorStruct`.
+It enables saving and restoring parameter trees (and mirrored optimizer trees) without
+model-specific serialization code.
+
+## Major Components
+
+- `CheckpointMeta`: iteration/loss metadata persisted with checkpoints.
+- Generic tensor-tree save/load via `saveParams` and `loadParams`.
+- Full checkpoint helpers (`saveCheckpoint`, `loadCheckpoint`).
+- Optimizer-state variants that reuse the same TensorStruct traversal patterns.
+
+## Scope
+
+This module targets straightforward local checkpoint persistence for training workflows.
+It prioritizes generic structure traversal and reproducible load/save behavior over
+custom binary formats or distributed snapshot orchestration.
+-/
 
 namespace torch.checkpoint
 

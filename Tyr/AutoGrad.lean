@@ -1,9 +1,3 @@
-/-
-  Tyr/AutoGrad.lean
-
-  Automatic differentiation for Lean IR.
-  Manifold implementations are in Tyr/Manifolds/.
--/
 import Lean.Compiler.IR.Basic
 import Lean.Compiler.IR.FreeVars
 import Lean.Compiler.IR.NormIds
@@ -12,6 +6,26 @@ import Lean.Compiler.IR.CompilerM
 import Tyr.GPU.Codegen.IR
 import Tyr.GPU.Codegen.Var
 import Tyr.Manifolds
+
+/-!
+# Tyr.AutoGrad
+
+`Tyr.AutoGrad` implements automatic differentiation utilities over Lean IR for Tyr.
+It provides IR-level transformation machinery used to build differentiable programs,
+including handling for differentiable, static, and frozen parameters.
+
+## Major Components
+
+- Lean IR rewriting helpers (`replaceArg`, `replaceExpr`, `replaceVar`).
+- AD state/context management (`ADContext`, `ADM`) for tangent/cotangent bookkeeping.
+- Parameter participation control via `ParamKind` (`diff`, `static`, `frozen`).
+- Integration points with Tyr GPU codegen IR/variables and manifold abstractions.
+
+## Scope
+
+This is a backend/compiler-facing module used by AD and transformation infrastructure.
+Most model code should consume higher-level APIs rather than manipulating this layer directly.
+-/
 
 namespace Tyr.AD
 

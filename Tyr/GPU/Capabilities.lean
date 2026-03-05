@@ -1,10 +1,21 @@
-/-
-  Tyr/GPU/Capabilities.lean
-
-  Architecture capability system for compile-time feature gating.
-  Operations unavailable on older GPUs won't compile.
--/
 import Tyr.GPU.Types
+
+/-!
+# Tyr.GPU.Capabilities
+
+`Tyr.GPU.Capabilities` encodes hardware feature availability by architecture.
+The central design is to make unsupported operations fail at typeclass resolution
+time instead of at runtime.
+
+This module provides:
+
+- per-architecture capability records (`GpuCapabilities` instances),
+- proof-style feature gates (`RequiresTMA`, `RequiresWGMMA`),
+- helper queries for dtype and shared-memory feasibility.
+
+Higher-level DSL layers consume these constraints to select legal kernels for
+SM80/SM90/SM100 targets.
+-/
 
 namespace Tyr.GPU
 

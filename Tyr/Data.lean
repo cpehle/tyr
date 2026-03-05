@@ -1,19 +1,25 @@
-/-
-  Tyr/Data.lean
-
-  Data loading and pipeline infrastructure.
-
-  Exports:
-  - Task: Task-based data loading for instruction tuning
-  - Tasks: Concrete task implementations (identity, math, spelling, etc.)
-  - Pipeline: Multi-stage training configuration
-  - Pretraining: Streaming data loader for pretraining
-
-  Note: LLM-specific tasks (ARC, MMLU, GSM8K, HumanEval, etc.) are in Tyr.Tasks.LLM
--/
-
 import Tyr.Data.Task
 import Tyr.Data.TaskClass
 import Tyr.Data.Tasks
 import Tyr.Data.Pipeline
 import Tyr.Data.Pretraining
+
+/-!
+# Tyr.Data
+
+`Tyr.Data` is the umbrella import for Tyr's task/data pipeline surface.
+It re-exports task abstractions, task registries, and pretraining pipeline utilities.
+
+## Major Components
+
+- `Tyr.Data.Task`: core task abstractions.
+- `Tyr.Data.TaskClass`: shared task typing/evaluation contracts.
+- `Tyr.Data.Tasks`: concrete built-in tasks.
+- `Tyr.Data.Pipeline`: pipeline-level data orchestration helpers.
+- `Tyr.Data.Pretraining`: streaming pretraining data support.
+
+## Scope
+
+Use this module when you want the standard data/task stack through one import.
+Domain-specific suites can still live in separate modules and be composed on top.
+-/

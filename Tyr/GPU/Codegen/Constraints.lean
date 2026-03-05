@@ -1,9 +1,3 @@
-/-
-  Tyr/GPU/Codegen/Constraints.lean
-
-  Type-level constraints for GPU kernel operations.
-  Enables compile-time checking of dimension requirements.
--/
 import Tyr.GPU.Types
 import Tyr.GPU.Codegen.Var
 import Tyr.GPU.Codegen.TileTypes
@@ -11,6 +5,22 @@ import Tyr.GPU.Codegen.IR
 import Tyr.GPU.Codegen.Monad
 import Tyr.GPU.Codegen.AST
 import Tyr.GPU.Codegen.Ops
+
+/-!
+# Tyr.GPU.Codegen.Constraints
+
+`Tyr.GPU.Codegen.Constraints` provides proof-level constraints and constrained
+helpers for kernel authoring.
+
+This module is where you express requirements such as:
+
+- divisibility/multiplicity of dimensions,
+- architecture feature availability,
+- optional resource-budget checks.
+
+The constrained wrappers are useful when you want invalid kernel shapes to fail
+as type errors rather than silently lowering to unsupported operations.
+-/
 
 namespace Tyr.GPU.Codegen
 

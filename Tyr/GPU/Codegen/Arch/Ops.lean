@@ -1,16 +1,26 @@
-/-
-  Tyr/GPU/Codegen/Arch/Ops.lean
-
-  Operation dispatch typeclasses for architecture-polymorphic operations.
-  Each operation typeclass has instances for different architectures that
-  emit the optimal code for that architecture.
--/
 import Tyr.GPU.Codegen.Arch.Level
 import Tyr.GPU.Codegen.Arch.Monad
 import Tyr.GPU.Codegen.Arch.Capabilities
 import Tyr.GPU.Codegen.TileTypes
 import Tyr.GPU.Codegen.IR
 import Tyr.GPU.Codegen.Ops
+
+/-!
+# Tyr.GPU.Codegen.Arch.Ops
+
+`Tyr.GPU.Codegen.Arch.Ops` provides architecture-dispatched operation classes.
+Instead of one fixed implementation per op, each architecture level can supply
+its own lowering strategy (for example cp.async vs TMA paths).
+
+The module defines:
+
+- dispatch typeclasses (`HasMMA`, `HasAsyncLoad`, `HasAsyncStore`, ...),
+- per-architecture instances,
+- high-level helpers (`smartMMA`, `whenTMA`, `whenHopper`, ...).
+
+This is the main adaptation layer from architecture-agnostic kernel intent to
+architecture-specific IR emission.
+-/
 
 namespace Tyr.GPU.Codegen.Arch
 

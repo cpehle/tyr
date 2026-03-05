@@ -1,14 +1,22 @@
-/-
-  Tyr/GPU/Codegen/FFI.lean
-
-  FFI code generation for GPU kernels.
-  Generates Lean @[extern] declarations and C++ launcher wrappers.
--/
 import Lean
 import Tyr.GPU.Types
 import Tyr.GPU.Codegen.IR
 import Tyr.GPU.Codegen.Attribute
 import Tyr.GPU.Codegen.EmitNew
+
+/-!
+# Tyr.GPU.Codegen.FFI
+
+`Tyr.GPU.Codegen.FFI` generates the interop layer between Lean and emitted GPU kernels.
+
+It covers both directions:
+
+- Lean-side `@[extern]` declarations and call signatures,
+- C++ launcher wrappers that marshal runtime tensors/scalars.
+
+This module sits after kernel registration/emission and before integration into
+the runtime library build.
+-/
 
 namespace Tyr.GPU.Codegen
 

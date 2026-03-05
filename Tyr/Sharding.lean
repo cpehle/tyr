@@ -1,37 +1,32 @@
-/-
-  Tyr/Sharding.lean
-
-  Type-safe distributed parameter sharding for data-parallel training.
-
-  Key design decisions:
-  1. **Type-level sharding** - ShardedTensor encodes rank and worldSize in the type,
-     ensuring operations preserve sharding semantics
-  2. **Automatic gather/scatter** - Operations that need the full tensor trigger
-     implicit all-gather, and gradient updates use reduce-scatter
-  3. **Zero-copy sharding** - ShardSpec allows computing shard boundaries without copying
-  4. **Proof-carrying shards** - Proofs ensure rank < worldSize
-
-  This enables modded-nanogpt's DistAdam pattern:
-  - Reduce-scatter gradients (each rank updates its shard)
-  - All-gather parameters after update
-
-  Example:
-  ```lean
-  -- Full embedding: [vocab, dim]
-  -- Each rank owns [vocab/worldSize, dim]
-  let shardedEmbed : ShardedTensor #[vocabSize, dim] rank worldSize := ...
-
-  -- Forward: need full tensor, triggers all-gather
-  let fullEmbed ← shardedEmbed.gather
-  let output := nn.embedding tokens fullEmbed
-
-  -- Backward: gradients are reduced, each rank updates its shard
-  let gradShard ← shardedEmbed.scatterGrad fullGrad
-  ```
--/
 import Tyr.Torch
 import Tyr.TensorStruct
 import Tyr.Distributed
+
+/-!
+# Tyr.Sharding
+
+`Tyr.Sharding` provides type-aware tensor sharding for distributed data-parallel training.
+It models local shards and full-tensor reconstruction with explicit rank/world information,
+so sharding behavior is encoded in types and helper APIs.
+
+## Major Components
+
+- `ShardSpec`/`ShardDim` and shard-size/offset computation helpers.
+- Type-level shape projection (`shardedShape`) for local shard tensors.
+- `ShardedTensor` structure with cache/gather/scatter semantics.
+- Validation helpers (`ValidShard`) and tensor-structure integration.
+
+## Design Intent
+
+- Keep sharding semantics explicit in the type/domain model.
+- Support reduce-scatter/all-gather optimizer patterns efficiently.
+- Enable local-shard update workflows with controlled full-tensor materialization.
+
+## Scope
+
+This module defines sharding data structures and core operations.
+Distributed orchestration and optimizer policy should compose this with `Tyr.Distributed`.
+-/
 
 namespace torch.Sharding
 

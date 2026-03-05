@@ -1,3 +1,23 @@
+/-!
+# Tyr.Basic
+
+`Tyr.Basic` defines Tyr's foundational tensor-level types and pure shape logic.
+It is the lowest-level shared layer used across runtime bindings, model code, and utilities.
+
+## Major Components
+
+- Core aliases/types: `Shape`, `DType`, `Device`, and opaque tensor carrier `T`.
+- DType parsing/normalization helpers for PyTorch and SafeTensors metadata.
+- Pure shape-transform utilities (`unsqueezeShape`, `squeezeShape`, `transposeShape`,
+  `reduceShape`, `replaceAtDim`, `matmulShape`, and broadcast helpers).
+- Tensor metadata extraction hooks (`runtimeShape`, dtype/device introspection, stats/values).
+
+## Scope
+
+This module is intentionally kernel-agnostic and mostly pure.
+Numerical tensor operations and backend FFI bindings live in `Tyr.Torch`.
+-/
+
 namespace torch
 
 abbrev Shape := Array UInt64

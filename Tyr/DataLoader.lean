@@ -1,16 +1,25 @@
-/-
-  Tyr/DataLoader.lean
-
-  General purpose data loading infrastructure for Tyr.
-  
-  Provides:
-  - Configuration and metadata tracking
-  - BOS (Beginning Of Sequence) tracking for document boundaries
-  - Distributed sharding logic
-  - Dynamic batch and sequence sizing support
--/
 import Tyr.Torch
 import Tyr.Distributed
+
+/-!
+# Tyr.DataLoader
+
+`Tyr.DataLoader` implements Tyr's low-level token/shard loading pipeline.
+It handles shard discovery, BOS-aware batching, and distributed rank-aware iteration
+for language-model style training corpora.
+
+## Major Components
+
+- Loader configuration (`Config`) and shard-kind routing.
+- Path resolution helpers for file, directory, and prefix-based shard specs.
+- BOS-aware batch extraction (`BOSFinder`) for document boundary handling.
+- Iteration and sharding utilities for distributed training setups.
+
+## Scope
+
+This module focuses on data movement and batch construction mechanics.
+Higher-level training/evaluation orchestration belongs in pipeline/task modules.
+-/
 
 namespace torch.DataLoader
 

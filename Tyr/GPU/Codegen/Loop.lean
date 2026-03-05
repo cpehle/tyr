@@ -1,15 +1,21 @@
-/-
-  Tyr/GPU/Codegen/Loop.lean
-
-  ForIn instance for GPU kernel loops using Lean's standard for syntax.
-
-  Provides two loop styles:
-  1. `for i in krange lo hi do ...` - standard Lean4 for syntax with VarId access
-  2. `forLoop lo hi do ...` - simple loop without index access (legacy)
--/
 import Tyr.GPU.Codegen.Var
 import Tyr.GPU.Codegen.IR
 import Tyr.GPU.Codegen.Monad
+
+/-!
+# Tyr.GPU.Codegen.Loop
+
+`Tyr.GPU.Codegen.Loop` provides loop construction for kernel IR.
+The main feature is a `ForIn` instance so Lean's `for` syntax can emit
+runtime GPU loops instead of host-side iteration.
+
+Important distinction:
+
+- Lean executes the loop body once to capture IR statements.
+- The emitted `forLoop` statement executes on device at kernel runtime.
+
+This module is the bridge between ergonomic loop syntax and explicit IR control flow.
+-/
 
 namespace Tyr.GPU.Codegen
 

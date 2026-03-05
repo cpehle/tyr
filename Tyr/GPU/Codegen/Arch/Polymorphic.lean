@@ -1,14 +1,24 @@
-/-
-  Tyr/GPU/Codegen/Arch/Polymorphic.lean
-
-  Polymorphic kernel generation that compiles one kernel definition
-  to multiple architecture targets with automatic optimization.
--/
 import Tyr.GPU.Codegen.Arch.Level
 import Tyr.GPU.Codegen.Arch.Monad
 import Tyr.GPU.Codegen.Arch.Capabilities
 import Tyr.GPU.Codegen.Arch.Ops
 import Tyr.GPU.Codegen.EmitNew
+
+/-!
+# Tyr.GPU.Codegen.Arch.Polymorphic
+
+`Tyr.GPU.Codegen.Arch.Polymorphic` defines the "single source, many targets"
+kernel workflow.
+
+`PolyKernel` captures one abstract kernel body and can be materialized for:
+
+- a single architecture,
+- a selected subset,
+- or all supported architecture levels with guarded C++ output.
+
+This module is the integration point between arch-aware DSL code and final
+multi-architecture artifact generation.
+-/
 
 namespace Tyr.GPU.Codegen.Arch
 

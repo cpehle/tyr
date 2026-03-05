@@ -1,20 +1,22 @@
-/-
-  Tyr/Modular.lean
-
-  Re-exports all modular norm components.
-
-  The modular norm provides a principled way to normalize optimizer updates
-  so that learning rates transfer across network width and depth.
-
-  Based on "Scalable Optimization in the Modular Norm" (NeurIPS 2024).
-  https://arxiv.org/abs/2405.14813
-
-  Available components:
-  - NormedModule: Typeclass for modules with norms on weight spaces
-  - Atomic instances: Linear, Embedding, LayerNorm
-  - Composition rules: Sequential, parallel (product), arrays
--/
-
 import Tyr.Modular.Norm
 import Tyr.Modular.Atomic
 import Tyr.Modular.Compose
+
+/-!
+# Tyr.Modular
+
+`Tyr.Modular` is the umbrella import for modular-norm abstractions in Tyr.
+It re-exports the components used to define normed modules and compose them in a way
+that supports width/depth-robust optimization scaling.
+
+## Major Components
+
+- `Norm`: foundational modular-norm abstractions.
+- `Atomic`: atomic module instances (for example linear/layer-style primitives).
+- `Compose`: composition rules for sequential/product/container module structures.
+
+## Scope
+
+This module collects the modular-norm stack behind one import.
+It targets optimizer/module scaling workflows rather than general tensor math.
+-/

@@ -1,15 +1,25 @@
-/-
-  Tyr/Optim.lean
-
-  Optax-style gradient transformation library for composable optimizers.
-  Based on https://optax.readthedocs.io/en/latest/
-
-  Key concepts:
-  - GradientTransformation: transforms gradients, returns (updates, new_state)
-  - Composable via `chain`: stack multiple transformations
-  - Stateless functions: all state passed explicitly
--/
 import Tyr.TensorStruct
+
+/-!
+# Tyr.Optim
+
+`Tyr.Optim` implements composable Optax-style gradient transformations for Tyr.
+Optimizers are modeled as explicit state transitions over tensor structures, enabling
+flexible composition and reusable update logic.
+
+## Major Components
+
+- `GradientTransformation`: `(params, grads, state) -> (updates, newState)`.
+- Core optimizer states (`EmptyState`, `ScaleByAdamState`, `TraceState`, `ChainState`).
+- Primitive transforms (`scale`, `scale_by_adam`, `add_decayed_weights`, `trace`).
+- Composition (`chain`) and built-in optimizers (`adamw`, `sgd`, `sgd_momentum`).
+- Update application helpers (`apply_updates`, `step`).
+
+## Scope
+
+This module defines optimizer math/state mechanics.
+Schedulers, distributed wrappers, and training-loop policy are layered above it.
+-/
 
 namespace torch.Optim
 

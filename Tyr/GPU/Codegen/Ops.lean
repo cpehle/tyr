@@ -1,15 +1,26 @@
-/-
-  Tyr/GPU/Codegen/Ops.lean
-
-  Type-safe GPU kernel operations.
-  Dimensions are checked at Lean compile time via dependent types.
--/
 import Tyr.GPU.Types
 import Tyr.GPU.Codegen.Var
 import Tyr.GPU.Codegen.TileTypes
 import Tyr.GPU.Codegen.IR
 import Tyr.GPU.Codegen.Monad
 import Tyr.GPU.Codegen.AST
+
+/-!
+# Tyr.GPU.Codegen.Ops
+
+`Tyr.GPU.Codegen.Ops` is the core primitive DSL for building kernels.
+Functions in this module are strongly typed wrappers around `KStmt` emission.
+
+Highlights:
+
+- allocation helpers (`allocRT`, `allocST`, vectors, semaphores),
+- memory operations (shared/global/TMA-style),
+- tensor-core math (`mm`, `mma`, async variants),
+- reductions, broadcasts, masking, synchronization, and control flow helpers.
+
+Most operations enforce dimension/layout compatibility in types, so invalid
+kernels fail during Lean elaboration rather than codegen/runtime.
+-/
 
 namespace Tyr.GPU.Codegen
 

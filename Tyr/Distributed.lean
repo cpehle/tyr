@@ -1,11 +1,25 @@
-/-
-  Tyr/Distributed.lean
-
-  Distributed training primitives for multi-GPU training.
-  Provides Lean bindings to PyTorch's distributed communication backend.
--/
 import Tyr.Torch
 import Tyr.TensorStruct
+
+/-!
+# Tyr.Distributed
+
+`Tyr.Distributed` provides Lean bindings and helpers for multi-process training.
+It wraps core PyTorch distributed collectives and process-group lifecycle operations,
+plus utilities for tensor-tree synchronization patterns.
+
+## Major Components
+
+- Process-group lifecycle (`initProcessGroup`, rank/world queries, barriers, teardown).
+- Collective communication (`allReduce`, broadcast, reduce-scatter, all-gather, gather/scatter).
+- Async operation handles (`WorkHandle`) and wait semantics.
+- TensorStruct-aware helpers for synchronizing nested parameter/gradient structures.
+
+## Scope
+
+This module exposes communication primitives and synchronization building blocks.
+Higher-level distributed training logic (optimizer/pipeline policies) should compose this layer.
+-/
 
 namespace torch.dist
 

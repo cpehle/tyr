@@ -1,11 +1,20 @@
-/-
-  Tyr/GPU/Codegen/Var.lean
-
-  Variable identifier for GPU kernel code generation.
-  Follows Lean4 IR convention of using index-based identifiers.
--/
 import Std.Data.HashMap
 import Lean.ToExpr
+
+/-!
+# Tyr.GPU.Codegen.Var
+
+`Tyr.GPU.Codegen.Var` defines `VarId`, the stable identifier used across the
+kernel IR.
+
+Instead of string-based names, the DSL uses index-based IDs:
+
+- easier alpha-renaming and deterministic emission,
+- simpler maps/sets during optimization and codegen passes,
+- direct conversion to backend symbols (`v0`, `v1`, ...).
+
+This mirrors how Lean's own internal IR tracks local bindings.
+-/
 
 namespace Tyr.GPU.Codegen
 
