@@ -24,6 +24,18 @@ private def normalizeSaveTs (ts : Option (Array Time)) : Option (Array Time) :=
   | some xs => if xs.size == 0 then none else some xs
   | none => none
 
+private def isMonotoneInSolveDirection (t0 t1 : Time) (ts : Array Time) : Bool := Id.run do
+  if ts.size <= 1 then
+    return true
+  let forward := t1 >= t0
+  let mut ok := true
+  for i in [:ts.size - 1] do
+    let lhs := ts[i]!
+    let rhs := ts[i + 1]!
+    let monotone := if forward then rhs >= lhs else rhs <= lhs
+    ok := ok && monotone
+  return ok
+
 private def constantInterpolation [DiffEqSpace Y] (y : Y) : DenseInterpolation Y := {
   evaluate := fun _t0 t1 _left =>
     match t1 with
@@ -303,7 +315,11 @@ def diffeqsolve {Term Y VF Control Args Controller : Type}
         let tmin := if t0 <= t1 then t0 else t1
         let tmax := if t0 <= t1 then t1 else t0
         ts.foldl (init := false) (fun acc t => acc || t < tmin || t > tmax)
-  if outOfRange then
+  let badDirection :=
+    match saveatTs with
+    | none => false
+    | some ts => !(isMonotoneInSolveDirection t0 t1 ts)
+  if outOfRange || badDirection then
     exact maybeThrowOnFailure throwOnFailure {
       t0 := t0
       t1 := t1
