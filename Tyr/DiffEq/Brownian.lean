@@ -264,8 +264,8 @@ private def incrementSpaceTimeTime [BrownianSample BM] (path : UnsafeBrownianPat
 def toAbstractFloat (path : UnsafeBrownianPath Float) : AbstractBrownianPath Float :=
   toAbstract path
 
-def toAbstractSpaceTime (path : UnsafeBrownianPath Float) :
-    AbstractBrownianPath (SpaceTimeLevyArea Time Float) :=
+def toAbstractSpaceTime [BrownianSample BM] (path : UnsafeBrownianPath BM) :
+    AbstractBrownianPath (SpaceTimeLevyArea Time BM) :=
   {
     t0 := path.t0
     t1 := path.t1
@@ -273,8 +273,8 @@ def toAbstractSpaceTime (path : UnsafeBrownianPath Float) :
     increment := fun t0 t1 => { dt := t1 - t0, W := incrementSpaceTime path t0 t1 }
   }
 
-def toAbstractSpaceTimeTime (path : UnsafeBrownianPath Float) :
-    AbstractBrownianPath (SpaceTimeTimeLevyArea Time Float) :=
+def toAbstractSpaceTimeTime [BrownianSample BM] (path : UnsafeBrownianPath BM) :
+    AbstractBrownianPath (SpaceTimeTimeLevyArea Time BM) :=
   {
     t0 := path.t0
     t1 := path.t1
@@ -332,26 +332,16 @@ private def valueAux (seed : UInt64) (t0 t1 : Time) (w0 w1 : Float) (tol : Time)
           else
             valueAux seed mid t1 wMid w1 tol depth t
 
-def value (path : VirtualBrownianTree Float) (t : Time) : Float :=
+private def valueFloatCore (path : VirtualBrownianTree Float) (t : Time) : Float :=
   let w0 := 0.0
   let w1 := rootValue path.seed path.t0 path.t1
   valueAux path.seed path.t0 path.t1 w0 w1 path.tol path.maxDepth t
 
-def increment (path : VirtualBrownianTree Float) (t0 t1 : Time) : BrownianIncrement Time Float :=
-  let w0 := value path t0
-  let w1 := value path t1
+private def incrementFloatCore (path : VirtualBrownianTree Float) (t0 t1 : Time) :
+    BrownianIncrement Time Float :=
+  let w0 := valueFloatCore path t0
+  let w1 := valueFloatCore path t1
   { dt := t1 - t0, W := w1 - w0 }
-
-def evaluate (path : VirtualBrownianTree Float) (t0 t1 : Time) (_left : Bool := true) : Float :=
-  (increment path t0 t1).W
-
-def toAbstractFloat (path : VirtualBrownianTree Float) : AbstractBrownianPath Float :=
-  {
-    t0 := path.t0
-    t1 := path.t1
-    evaluate := fun t0 t1 left => evaluate path t0 t1 left
-    increment := fun t0 t1 => increment path t0 t1
-  }
 
 private def pow2neg (n : Nat) : Float :=
   1.0 / Float.ofNat (Nat.pow 2 n)
@@ -781,7 +771,7 @@ private def scaleK (len : Time) (inc : SpaceTimeTimeLevyArea Time Float) :
 private def normalizeTime (path : VirtualBrownianTree Float) (t : Time) : Time :=
   (t - path.t0) / (path.t1 - path.t0)
 
-def incrementSpaceTime (path : VirtualBrownianTree Float) (t0 t1 : Time) :
+private def incrementSpaceTimeFloatCore (path : VirtualBrownianTree Float) (t0 t1 : Time) :
     SpaceTimeLevyArea Time Float :=
   if t0 == t1 then
     { dt := 0.0, W := 0.0, H := 0.0 }
@@ -797,7 +787,7 @@ def incrementSpaceTime (path : VirtualBrownianTree Float) (t0 t1 : Time) :
     let inc := scaleH len (diffH v0 v1)
     if forward then inc else { dt := -inc.dt, W := -inc.W, H := -inc.H }
 
-def incrementSpaceTimeTime (path : VirtualBrownianTree Float) (t0 t1 : Time) :
+private def incrementSpaceTimeTimeFloatCore (path : VirtualBrownianTree Float) (t0 t1 : Time) :
     SpaceTimeTimeLevyArea Time Float :=
   if t0 == t1 then
     { dt := 0.0, W := 0.0, H := 0.0, K := 0.0 }
@@ -813,8 +803,129 @@ def incrementSpaceTimeTime (path : VirtualBrownianTree Float) (t0 t1 : Time) :
     let inc := scaleK len (diffK v0 v1)
     if forward then inc else { dt := -inc.dt, W := -inc.W, H := -inc.H, K := -inc.K }
 
-def toAbstractSpaceTime (path : VirtualBrownianTree Float) :
-    AbstractBrownianPath (SpaceTimeLevyArea Time Float) :=
+class VirtualBrownianTreeOps (BM : Type) where
+  increment : VirtualBrownianTree BM → Time → Time → BrownianIncrement Time BM
+  incrementSpaceTime : VirtualBrownianTree BM → Time → Time → SpaceTimeLevyArea Time BM
+  incrementSpaceTimeTime :
+    VirtualBrownianTree BM → Time → Time → SpaceTimeTimeLevyArea Time BM
+
+private def mkChildPath (path : VirtualBrownianTree BM) (seed : UInt64) (shape : BM') :
+    VirtualBrownianTree BM' :=
+  {
+    t0 := path.t0
+    t1 := path.t1
+    tol := path.tol
+    maxDepth := path.maxDepth
+    seed := seed
+    shape := shape
+  }
+
+private def splitPair (path : VirtualBrownianTree (BM1 × BM2)) :
+    VirtualBrownianTree BM1 × VirtualBrownianTree BM2 :=
+  let root := baseKey path.seed
+  let leftSeed := (PRNGKey.foldIn root 0x5654424c).state
+  let rightSeed := (PRNGKey.foldIn root 0x56544252).state
+  (mkChildPath path leftSeed path.shape.1, mkChildPath path rightSeed path.shape.2)
+
+private def splitFin (path : VirtualBrownianTree (Fin n → BM)) (i : Fin n) :
+    VirtualBrownianTree BM :=
+  let root := PRNGKey.foldIn (baseKey path.seed) 0x5654464e
+  let idx : UInt32 := UInt32.ofNat i.1
+  let childSeed := (PRNGKey.foldIn root idx).state
+  mkChildPath path childSeed (path.shape i)
+
+instance : VirtualBrownianTreeOps Float where
+  increment := incrementFloatCore
+  incrementSpaceTime := incrementSpaceTimeFloatCore
+  incrementSpaceTimeTime := incrementSpaceTimeTimeFloatCore
+
+instance [VirtualBrownianTreeOps BM1] [VirtualBrownianTreeOps BM2] :
+    VirtualBrownianTreeOps (BM1 × BM2) where
+  increment path t0 t1 :=
+    let (leftPath, rightPath) := splitPair path
+    let leftInc := VirtualBrownianTreeOps.increment (BM := BM1) leftPath t0 t1
+    let rightInc := VirtualBrownianTreeOps.increment (BM := BM2) rightPath t0 t1
+    { dt := leftInc.dt, W := (leftInc.W, rightInc.W) }
+  incrementSpaceTime path t0 t1 :=
+    let (leftPath, rightPath) := splitPair path
+    let leftInc := VirtualBrownianTreeOps.incrementSpaceTime (BM := BM1) leftPath t0 t1
+    let rightInc := VirtualBrownianTreeOps.incrementSpaceTime (BM := BM2) rightPath t0 t1
+    { dt := leftInc.dt, W := (leftInc.W, rightInc.W), H := (leftInc.H, rightInc.H) }
+  incrementSpaceTimeTime path t0 t1 :=
+    let (leftPath, rightPath) := splitPair path
+    let leftInc := VirtualBrownianTreeOps.incrementSpaceTimeTime (BM := BM1) leftPath t0 t1
+    let rightInc := VirtualBrownianTreeOps.incrementSpaceTimeTime (BM := BM2) rightPath t0 t1
+    { dt := leftInc.dt, W := (leftInc.W, rightInc.W), H := (leftInc.H, rightInc.H),
+      K := (leftInc.K, rightInc.K) }
+
+instance [VirtualBrownianTreeOps BM] : VirtualBrownianTreeOps (Fin n → BM) where
+  increment path t0 t1 :=
+    {
+      dt := t1 - t0
+      W := fun i =>
+        let childPath := splitFin path i
+        let childInc := VirtualBrownianTreeOps.increment (BM := BM) childPath t0 t1
+        childInc.W
+    }
+  incrementSpaceTime path t0 t1 :=
+    {
+      dt := t1 - t0
+      W := fun i =>
+        let childPath := splitFin path i
+        let childInc := VirtualBrownianTreeOps.incrementSpaceTime (BM := BM) childPath t0 t1
+        childInc.W
+      H := fun i =>
+        let childPath := splitFin path i
+        let childInc := VirtualBrownianTreeOps.incrementSpaceTime (BM := BM) childPath t0 t1
+        childInc.H
+    }
+  incrementSpaceTimeTime path t0 t1 :=
+    {
+      dt := t1 - t0
+      W := fun i =>
+        let childPath := splitFin path i
+        let childInc := VirtualBrownianTreeOps.incrementSpaceTimeTime (BM := BM) childPath t0 t1
+        childInc.W
+      H := fun i =>
+        let childPath := splitFin path i
+        let childInc := VirtualBrownianTreeOps.incrementSpaceTimeTime (BM := BM) childPath t0 t1
+        childInc.H
+      K := fun i =>
+        let childPath := splitFin path i
+        let childInc := VirtualBrownianTreeOps.incrementSpaceTimeTime (BM := BM) childPath t0 t1
+        childInc.K
+    }
+
+def increment [VirtualBrownianTreeOps BM] (path : VirtualBrownianTree BM) (t0 t1 : Time) :
+    BrownianIncrement Time BM :=
+  VirtualBrownianTreeOps.increment path t0 t1
+
+def incrementSpaceTime [VirtualBrownianTreeOps BM] (path : VirtualBrownianTree BM) (t0 t1 : Time) :
+    SpaceTimeLevyArea Time BM :=
+  VirtualBrownianTreeOps.incrementSpaceTime path t0 t1
+
+def incrementSpaceTimeTime [VirtualBrownianTreeOps BM]
+    (path : VirtualBrownianTree BM) (t0 t1 : Time) : SpaceTimeTimeLevyArea Time BM :=
+  VirtualBrownianTreeOps.incrementSpaceTimeTime path t0 t1
+
+def value [VirtualBrownianTreeOps BM] (path : VirtualBrownianTree BM) (t : Time) : BM :=
+  (increment path path.t0 t).W
+
+def evaluate [VirtualBrownianTreeOps BM] (path : VirtualBrownianTree BM) (t0 t1 : Time)
+    (_left : Bool := true) : BM :=
+  (increment path t0 t1).W
+
+def toAbstract [VirtualBrownianTreeOps BM] (path : VirtualBrownianTree BM) :
+    AbstractBrownianPath BM :=
+  {
+    t0 := path.t0
+    t1 := path.t1
+    evaluate := fun t0 t1 left => evaluate path t0 t1 left
+    increment := fun t0 t1 => increment path t0 t1
+  }
+
+def toAbstractSpaceTime [VirtualBrownianTreeOps BM] (path : VirtualBrownianTree BM) :
+    AbstractBrownianPath (SpaceTimeLevyArea Time BM) :=
   {
     t0 := path.t0
     t1 := path.t1
@@ -822,8 +933,8 @@ def toAbstractSpaceTime (path : VirtualBrownianTree Float) :
     increment := fun t0 t1 => { dt := t1 - t0, W := incrementSpaceTime path t0 t1 }
   }
 
-def toAbstractSpaceTimeTime (path : VirtualBrownianTree Float) :
-    AbstractBrownianPath (SpaceTimeTimeLevyArea Time Float) :=
+def toAbstractSpaceTimeTime [VirtualBrownianTreeOps BM] (path : VirtualBrownianTree BM) :
+    AbstractBrownianPath (SpaceTimeTimeLevyArea Time BM) :=
   {
     t0 := path.t0
     t1 := path.t1
@@ -831,87 +942,39 @@ def toAbstractSpaceTimeTime (path : VirtualBrownianTree Float) :
     increment := fun t0 t1 => { dt := t1 - t0, W := incrementSpaceTimeTime path t0 t1 }
   }
 
-private def splitFloatPair (path : VirtualBrownianTree (Float × Float)) :
-    VirtualBrownianTree Float × VirtualBrownianTree Float :=
-  let root := baseKey path.seed
-  let leftSeed := (PRNGKey.foldIn root 0x5654424c).state
-  let rightSeed := (PRNGKey.foldIn root 0x56544252).state
-  (
-    {
-      t0 := path.t0
-      t1 := path.t1
-      tol := path.tol
-      maxDepth := path.maxDepth
-      seed := leftSeed
-      shape := path.shape.1
-    },
-    {
-      t0 := path.t0
-      t1 := path.t1
-      tol := path.tol
-      maxDepth := path.maxDepth
-      seed := rightSeed
-      shape := path.shape.2
-    }
-  )
+def toAbstractFloat (path : VirtualBrownianTree Float) : AbstractBrownianPath Float :=
+  toAbstract path
 
 def valueFloatPair (path : VirtualBrownianTree (Float × Float)) (t : Time) : Float × Float :=
-  let (leftPath, rightPath) := splitFloatPair path
-  (value leftPath t, value rightPath t)
+  value path t
 
 def incrementFloatPair (path : VirtualBrownianTree (Float × Float)) (t0 t1 : Time) :
     BrownianIncrement Time (Float × Float) :=
-  let (leftPath, rightPath) := splitFloatPair path
-  let leftInc := increment leftPath t0 t1
-  let rightInc := increment rightPath t0 t1
-  { dt := leftInc.dt, W := (leftInc.W, rightInc.W) }
+  increment path t0 t1
 
 def evaluateFloatPair (path : VirtualBrownianTree (Float × Float)) (t0 t1 : Time)
     (_left : Bool := true) : Float × Float :=
-  (incrementFloatPair path t0 t1).W
+  evaluate path t0 t1
 
 def toAbstractFloatPair (path : VirtualBrownianTree (Float × Float)) :
     AbstractBrownianPath (Float × Float) :=
-  {
-    t0 := path.t0
-    t1 := path.t1
-    evaluate := fun t0 t1 left => evaluateFloatPair path t0 t1 left
-    increment := fun t0 t1 => incrementFloatPair path t0 t1
-  }
+  toAbstract path
 
 def incrementSpaceTimeFloatPair (path : VirtualBrownianTree (Float × Float)) (t0 t1 : Time) :
     SpaceTimeLevyArea Time (Float × Float) :=
-  let (leftPath, rightPath) := splitFloatPair path
-  let leftInc := incrementSpaceTime leftPath t0 t1
-  let rightInc := incrementSpaceTime rightPath t0 t1
-  { dt := leftInc.dt, W := (leftInc.W, rightInc.W), H := (leftInc.H, rightInc.H) }
+  incrementSpaceTime path t0 t1
 
 def incrementSpaceTimeTimeFloatPair (path : VirtualBrownianTree (Float × Float)) (t0 t1 : Time) :
     SpaceTimeTimeLevyArea Time (Float × Float) :=
-  let (leftPath, rightPath) := splitFloatPair path
-  let leftInc := incrementSpaceTimeTime leftPath t0 t1
-  let rightInc := incrementSpaceTimeTime rightPath t0 t1
-  { dt := leftInc.dt, W := (leftInc.W, rightInc.W), H := (leftInc.H, rightInc.H),
-    K := (leftInc.K, rightInc.K) }
+  incrementSpaceTimeTime path t0 t1
 
 def toAbstractSpaceTimeFloatPair (path : VirtualBrownianTree (Float × Float)) :
     AbstractBrownianPath (SpaceTimeLevyArea Time (Float × Float)) :=
-  {
-    t0 := path.t0
-    t1 := path.t1
-    evaluate := fun t0 t1 _left => incrementSpaceTimeFloatPair path t0 t1
-    increment := fun t0 t1 => { dt := t1 - t0, W := incrementSpaceTimeFloatPair path t0 t1 }
-  }
+  toAbstractSpaceTime path
 
 def toAbstractSpaceTimeTimeFloatPair (path : VirtualBrownianTree (Float × Float)) :
     AbstractBrownianPath (SpaceTimeTimeLevyArea Time (Float × Float)) :=
-  {
-    t0 := path.t0
-    t1 := path.t1
-    evaluate := fun t0 t1 _left => incrementSpaceTimeTimeFloatPair path t0 t1
-    increment := fun t0 t1 =>
-      { dt := t1 - t0, W := incrementSpaceTimeTimeFloatPair path t0 t1 }
-  }
+  toAbstractSpaceTimeTime path
 
 end VirtualBrownianTree
 
