@@ -8,10 +8,12 @@ namespace DiffEq
 structure Dopri8 where
   deriving Inhabited
 
+def dopri8DenseKind : ExplicitRKDenseKind := .hermite
+
 def Dopri8.solver {Term Y VF Args : Type}
     [TermLike Term Y VF Time Args]
     [DiffEqSpace Y] : AbstractSolver Term Y VF Time Args :=
-  ExplicitRK.solver { tableau := dopri8Tableau }
+  ExplicitRK.solver { tableau := dopri8Tableau, denseKind := dopri8DenseKind }
 
 instance : ExplicitSolver Dopri8 := ⟨True.intro⟩
 instance : AdaptiveSolver Dopri8 := ⟨True.intro⟩

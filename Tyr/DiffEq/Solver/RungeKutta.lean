@@ -5,12 +5,9 @@ namespace DiffEq
 
 /-! ## Explicit Runge–Kutta Infrastructure -/
 
-local instance (priority := 5) [DiffEqSpace α] : HAdd α α α :=
-  _root_.torch.DiffEq.DiffEqArithmetic.hAddInst
-local instance (priority := 5) [DiffEqSpace α] : HSub α α α :=
-  _root_.torch.DiffEq.DiffEqArithmetic.hSubInst
-local instance (priority := 5) [DiffEqSpace α] : HMul Scalar α α :=
-  _root_.torch.DiffEq.DiffEqArithmetic.hMulInst
+attribute [local instance] _root_.torch.DiffEq.DiffEqArithmetic.hAddInst
+attribute [local instance] _root_.torch.DiffEq.DiffEqArithmetic.hSubInst
+attribute [local instance] _root_.torch.DiffEq.DiffEqArithmetic.hMulInst
 
 structure ButcherTableau (s : Nat) where
   a : Vector s (Array Time)
@@ -19,8 +16,14 @@ structure ButcherTableau (s : Nat) where
   bErr : Option (Vector s Time) := none
   order : Nat := 1
 
+inductive ExplicitRKDenseKind where
+  | hermite
+  | splitAtStage (stage : Nat) (tag : String)
+  deriving Repr, BEq, Inhabited
+
 structure ExplicitRK (s : Nat) where
   tableau : ButcherTableau s
+  denseKind : ExplicitRKDenseKind := .hermite
 
 namespace ExplicitRK
 
@@ -36,6 +39,46 @@ private def weightedSum {s : Nat} [DiffEqSpace Y] (coeffs : Vector s Time)
     let kj := ks.getD j (zeroLike y0)
     acc := acc + a * kj
   return acc
+
+private def stageState {s : Nat} [DiffEqSpace Y] (rk : ExplicitRK s)
+    (ks : Array Y) (y0 : Y) (stage : Nat) : Y := Id.run do
+  let zero := zeroLike y0
+  let rows := rk.tableau.a.toArray
+  let row := rows.getD stage #[]
+  let mut sum := zero
+  for j in [:stage] do
+    let aij := row.getD j 0.0
+    let kj := ks.getD j zero
+    sum := sum + aij * kj
+  return y0 + sum
+
+private def denseInfo {s : Nat} [DiffEqSpace Y] (rk : ExplicitRK s)
+    (t0 t1 : Time) (y0 y1 : Y) (dt : Time) (ks : Array Y) (m0 m1 : Y) :
+    LocalHermiteDenseInfo Y :=
+  let base : LocalHermiteDenseInfo Y := {
+    t0 := t0
+    t1 := t1
+    y0 := y0
+    y1 := y1
+    m0 := m0
+    m1 := m1
+  }
+  match rk.denseKind with
+  | .hermite => base
+  | .splitAtStage stage tag =>
+      let cs := rk.tableau.c.toArray
+      if hStage : stage < cs.size then
+        let c := cs[stage]'hStage
+        if c <= 0.0 || c >= 1.0 then
+          base
+        else
+          let zero := zeroLike y0
+          let tSplit := t0 + c * dt
+          let ySplit := stageState rk ks y0 stage
+          let mSplit := ks.getD stage zero
+          { base with split? := some (tSplit, ySplit, mSplit), splitKind? := some tag }
+      else
+        base
 
 def solver {s : Nat} {Term Y VF Args : Type}
     [TermLike Term Y VF Time Args]
@@ -77,7 +120,7 @@ def solver {s : Nat} {Term Y VF Args : Type}
     -- dt-scaled endpoint tangents used by cubic Hermite dense output.
     let m0 := ks.getD 0 zero
     let m1 := inst.vf_prod term t1 y1 args dt
-    let dense := { t0 := t0, t1 := t1, y0 := y0, y1 := y1, m0 := m0, m1 := m1 }
+    let dense := denseInfo rk t0 t1 y0 y1 dt ks m0 m1
     {
       y1 := y1
       yError := yErr

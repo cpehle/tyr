@@ -56,6 +56,8 @@ structure LocalHermiteDenseInfo (Y : Type) where
   y1 : Y
   m0 : Y
   m1 : Y
+  split? : Option (Time × Y × Y) := none
+  splitKind? : Option String := none
 
 namespace LocalHermiteDenseInfo
 
@@ -84,27 +86,84 @@ private def derivTheta [DiffEqSpace Y] (info : LocalHermiteDenseInfo Y) (theta :
   let a3 := DiffEqSpace.scale dh11 info.m1
   DiffEqSpace.add (DiffEqSpace.add a0 a1) (DiffEqSpace.add a2 a3)
 
-def toInterpolation [DiffEqSpace Y] (info : LocalHermiteDenseInfo Y) :
-    DenseInterpolation Y := by
-  let evalAt := fun (t : Time) =>
-    if info.t0 == info.t1 then
-      info.y0
-    else
-      let theta := (t - info.t0) / (info.t1 - info.t0)
-      evalTheta info theta
-  exact {
-    evaluate := fun t0 t1 _left =>
-      match t1 with
-      | none => evalAt t0
-      | some t1 => DiffEqSpace.sub (evalAt t1) (evalAt t0)
-    derivative := fun t _left =>
+private def evalPoint [DiffEqSpace Y] (info : LocalHermiteDenseInfo Y) (t : Time) : Y :=
+  if info.t0 == info.t1 then
+    info.y0
+  else
+    let theta := (t - info.t0) / (info.t1 - info.t0)
+    evalTheta info theta
+
+private def derivPoint [DiffEqSpace Y] (info : LocalHermiteDenseInfo Y) (t : Time) : Y :=
+  if info.t0 == info.t1 then
+    DiffEqSpace.scale 0.0 info.m0
+  else
+    let h := info.t1 - info.t0
+    let theta := (t - info.t0) / h
+    let dTheta := derivTheta info theta
+    DiffEqSpace.scale (1.0 / h) dTheta
+
+private def splitInfos? [DiffEqSpace Y] (info : LocalHermiteDenseInfo Y) :
+    Option (Time × LocalHermiteDenseInfo Y × LocalHermiteDenseInfo Y) :=
+  match info.split? with
+  | none => none
+  | some (tSplit, ySplit, mSplit) =>
       if info.t0 == info.t1 then
-        DiffEqSpace.scale 0.0 info.m0
+        none
       else
         let h := info.t1 - info.t0
-        let theta := (t - info.t0) / h
-        let dTheta := derivTheta info theta
-        DiffEqSpace.scale (1.0 / h) dTheta
+        let alpha := (tSplit - info.t0) / h
+        if alpha <= 0.0 || alpha >= 1.0 then
+          none
+        else
+          let beta := 1.0 - alpha
+          let left : LocalHermiteDenseInfo Y := {
+            t0 := info.t0
+            t1 := tSplit
+            y0 := info.y0
+            y1 := ySplit
+            m0 := DiffEqSpace.scale alpha info.m0
+            m1 := DiffEqSpace.scale alpha mSplit
+            split? := none
+            splitKind? := info.splitKind?
+          }
+          let right : LocalHermiteDenseInfo Y := {
+            t0 := tSplit
+            t1 := info.t1
+            y0 := ySplit
+            y1 := info.y1
+            m0 := DiffEqSpace.scale beta mSplit
+            m1 := DiffEqSpace.scale beta info.m1
+            split? := none
+            splitKind? := info.splitKind?
+          }
+          some (tSplit, left, right)
+
+private def selectSegment [DiffEqSpace Y] (info : LocalHermiteDenseInfo Y)
+    (t : Time) (left : Bool) : LocalHermiteDenseInfo Y :=
+  match splitInfos? info with
+  | none => info
+  | some (tSplit, leftSeg, rightSeg) =>
+      if t < tSplit then
+        leftSeg
+      else if t > tSplit then
+        rightSeg
+      else if left then
+        leftSeg
+      else
+        rightSeg
+
+def toInterpolation [DiffEqSpace Y] (info : LocalHermiteDenseInfo Y) :
+    DenseInterpolation Y := by
+  exact {
+    evaluate := fun t0 t1 left =>
+      let y0 := evalPoint (selectSegment info t0 left) t0
+      match t1 with
+      | none => y0
+      | some t1 =>
+          let y1 := evalPoint (selectSegment info t1 left) t1
+          DiffEqSpace.sub y1 y0
+    derivative := fun t left =>
+      derivPoint (selectSegment info t left) t
   }
 
 end LocalHermiteDenseInfo
