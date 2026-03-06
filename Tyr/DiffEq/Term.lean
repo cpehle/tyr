@@ -186,12 +186,35 @@ namespace ControlTerm
 def toAbstract (term : ControlTerm Y VF Control Args) : AbstractTerm Y VF Control Args :=
   AbstractTerm.ofTermLike term
 
+def ofTermLike {τ Y VF Control Args : Type} [TermLike τ Y VF Control Args] (term : τ)
+    (controlDerivative? : Option (Time → Bool → Control) := none) :
+    ControlTerm Y VF Control Args :=
+  {
+    vectorField := (inferInstance : TermLike τ Y VF Control Args).vf term
+    control := (inferInstance : TermLike τ Y VF Control Args).contr term
+    prod := (inferInstance : TermLike τ Y VF Control Args).prod term
+    controlDerivative? := controlDerivative?
+  }
+
+def ofAbstract (term : AbstractTerm Y VF Control Args)
+    (controlDerivative? : Option (Time → Bool → Control) := none) :
+    ControlTerm Y VF Control Args :=
+  ofTermLike term controlDerivative?
+
 def withControlDerivative (term : ControlTerm Y VF Control Args)
     (controlDerivative : Time → Bool → Control) : ControlTerm Y VF Control Args :=
   { term with controlDerivative? := some controlDerivative }
 
 def clearControlDerivative (term : ControlTerm Y VF Control Args) : ControlTerm Y VF Control Args :=
   { term with controlDerivative? := none }
+
+def withPath (term : ControlTerm Y VF Control Args) (path : AbstractPath Control)
+    (left : Bool := true) : ControlTerm Y VF Control Args :=
+  {
+    term with
+      control := fun t0 t1 => path.evaluate t0 (some t1) left
+      controlDerivative? := path.derivativeFn?
+  }
 
 def toODEWithDerivative (term : ControlTerm Y VF Control Args)
     (controlDerivative : Time → Bool → Control) (left : Bool := true) :
@@ -207,19 +230,29 @@ def toODE? (term : ControlTerm Y VF Control Args) (left : Bool := true) :
   | some controlDerivative => some (toODEWithDerivative term controlDerivative left)
   | none => none
 
-def ofPath (vectorField : Time → Y → Args → VF) (path : AbstractPath Control)
-    (prod : VF → Control → Y) : ControlTerm Y VF Control Args :=
+def ofPathWithSide (vectorField : Time → Y → Args → VF) (path : AbstractPath Control)
+    (prod : VF → Control → Y) (left : Bool := true) : ControlTerm Y VF Control Args :=
   {
     vectorField := vectorField
-    control := fun t0 t1 => path.evaluate t0 (some t1) true
+    control := fun t0 t1 => path.evaluate t0 (some t1) left
     prod := prod
     controlDerivative? := path.derivativeFn?
   }
 
+def ofPath (vectorField : Time → Y → Args → VF) (path : AbstractPath Control)
+    (prod : VF → Control → Y) : ControlTerm Y VF Control Args :=
+  ofPathWithSide vectorField path prod true
+
+def ofDifferentiablePathWithSide (vectorField : Time → Y → Args → VF) (path : AbstractPath Control)
+    (prod : VF → Control → Y) (controlDerivative : Time → Bool → Control)
+    (left : Bool := true) :
+    ControlTerm Y VF Control Args :=
+  withControlDerivative (ofPathWithSide vectorField path prod left) controlDerivative
+
 def ofDifferentiablePath (vectorField : Time → Y → Args → VF) (path : AbstractPath Control)
     (prod : VF → Control → Y) (controlDerivative : Time → Bool → Control) :
     ControlTerm Y VF Control Args :=
-  withControlDerivative (ofPath vectorField path prod) controlDerivative
+  ofDifferentiablePathWithSide vectorField path prod controlDerivative true
 
 def derivativeAware? (term : ControlTerm Y VF Control Args) : Bool :=
   term.controlDerivative?.isSome
