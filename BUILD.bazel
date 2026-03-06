@@ -104,6 +104,13 @@ lean_binary(
 )
 
 lean_binary(
+    name = "WhisperTranscribe",
+    srcs = ["Examples/Whisper/Transcribe.lean"],
+    deps = [":Examples"],
+    cc_deps = ["//cc:TyrC"],
+)
+
+lean_binary(
     name = "Qwen35RunHF",
     srcs = ["Examples/Qwen35/RunHF.lean"],
     deps = [":Examples"],
