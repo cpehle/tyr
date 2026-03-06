@@ -9,12 +9,9 @@ namespace DiffEq
 Minimal SRK infrastructure for additive-noise SDEs using space-time Levy areas.
 -/
 
-local instance (priority := 5) [DiffEqSpace α] : HAdd α α α :=
-  _root_.torch.DiffEq.DiffEqArithmetic.hAddInst
-local instance (priority := 5) [DiffEqSpace α] : HSub α α α :=
-  _root_.torch.DiffEq.DiffEqArithmetic.hSubInst
-local instance (priority := 5) [DiffEqSpace α] : HMul Scalar α α :=
-  _root_.torch.DiffEq.DiffEqArithmetic.hMulInst
+attribute [local instance] _root_.torch.DiffEq.DiffEqArithmetic.hAddInst
+attribute [local instance] _root_.torch.DiffEq.DiffEqArithmetic.hSubInst
+attribute [local instance] _root_.torch.DiffEq.DiffEqArithmetic.hMulInst
 
 structure AdditiveCoeffs (s : Nat) where
   a : Vector s Time

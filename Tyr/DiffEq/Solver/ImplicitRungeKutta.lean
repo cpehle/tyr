@@ -7,12 +7,9 @@ namespace DiffEq
 
 /-! ## Implicit Runge--Kutta Infrastructure -/
 
-local instance (priority := 5) [DiffEqSpace α] : HAdd α α α :=
-  _root_.torch.DiffEq.DiffEqArithmetic.hAddInst
-local instance (priority := 5) [DiffEqSpace α] : HSub α α α :=
-  _root_.torch.DiffEq.DiffEqArithmetic.hSubInst
-local instance (priority := 5) [DiffEqSpace α] : HMul Scalar α α :=
-  _root_.torch.DiffEq.DiffEqArithmetic.hMulInst
+attribute [local instance] _root_.torch.DiffEq.DiffEqArithmetic.hAddInst
+attribute [local instance] _root_.torch.DiffEq.DiffEqArithmetic.hSubInst
+attribute [local instance] _root_.torch.DiffEq.DiffEqArithmetic.hMulInst
 
 structure ImplicitRK (s : Nat) where
   tableau : ButcherTableau s
