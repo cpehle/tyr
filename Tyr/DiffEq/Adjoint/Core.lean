@@ -177,6 +177,11 @@ structure ImplicitAdjoint where
   If `false`, this mode returns an explicit unsupported message.
   -/
   useBacksolveFallback : Bool := true
+  /--
+  Optional recursive-checkpoint configuration for implicit adjoints.
+  This strategy still requires `useBacksolveFallback := true`.
+  -/
+  recursiveCheckpoint : Option RecursiveCheckpointAdjoint := none
   deriving Inhabited
 
 /-! ## Backsolve Adjoint Wrapper -/
@@ -843,12 +848,31 @@ def diffeqsolveImplicitAdjoint
     (maxSteps : Nat := 4096)
     (controller : Controller := default) :
     AdjointSolveWithReport Y solver.SolverState
-      (StepSizeController.State (C := Controller)) Args :=
-  diffeqsolveBacksolveAdjointWithReportCore
-    (Controller := Controller)
-    term solver adjoint t0 t1 dt0 y0 args adjY1 saveat maxSteps controller
-    "unsupported_implicit_adjoint"
-    (implicitAdjointUnsupportedReason mode)
+      (StepSizeController.State (C := Controller)) Args := by
+  match implicitAdjointUnsupportedReason mode with
+  | some msg =>
+      exact
+        mkAdjointFailure
+          (Y := Y)
+          (SolverState := solver.SolverState)
+          (ControllerState := StepSizeController.State (C := Controller))
+          (Args := Args)
+          t0 t1 "unsupported_implicit_adjoint" msg
+  | none =>
+      match mode.recursiveCheckpoint with
+      | some recursiveMode =>
+          exact
+            diffeqsolveRecursiveCheckpointAdjoint
+              (Controller := Controller)
+              recursiveMode term solver adjoint t0 t1 dt0 y0 args adjY1 saveat maxSteps
+              controller
+      | none =>
+          exact
+            diffeqsolveBacksolveAdjointWithReportCore
+              (Controller := Controller)
+              term solver adjoint t0 t1 dt0 y0 args adjY1 saveat maxSteps controller
+              "unsupported_implicit_adjoint"
+              none
 
 end DiffEq
 end torch
