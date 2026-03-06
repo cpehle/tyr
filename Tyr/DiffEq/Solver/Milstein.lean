@@ -6,6 +6,13 @@ namespace DiffEq
 
 /-! ## Milstein SDE Solver (Ito) -/
 
+local instance (priority := 5) [DiffEqSpace α] : HAdd α α α :=
+  _root_.torch.DiffEq.DiffEqArithmetic.hAddInst
+local instance (priority := 5) [DiffEqSpace α] : HSub α α α :=
+  _root_.torch.DiffEq.DiffEqArithmetic.hSubInst
+local instance (priority := 5) [DiffEqSpace α] : HMul Scalar α α :=
+  _root_.torch.DiffEq.DiffEqArithmetic.hMulInst
+
 structure Milstein where
   deriving Inhabited
 
@@ -99,9 +106,9 @@ private def finiteDiffJacobianFromVF {Diffusion Y Control Args : Type}
   let inst := (inferInstance : TermLike Diffusion Y Y Control Args)
   let eps := sanitizeFiniteDiffEpsilon epsilon
   let g0 := inst.vf term t y args
-  let yPert := DiffEqSpace.add y (DiffEqSpace.scale eps g0)
+  let yPert := y + eps * g0
   let g1 := inst.vf term t yPert args
-  DiffEqSpace.scale (1.0 / eps) (DiffEqSpace.sub g1 g0)
+  (1.0 / eps) * (g1 - g0)
 
 private def finiteDiffJacobianFromVfProd {Diffusion Y VF Control Args : Type}
     [TermLike Diffusion Y VF Control Args] [DiffEqSpace Y] [MilsteinControl Control]
@@ -110,12 +117,12 @@ private def finiteDiffJacobianFromVfProd {Diffusion Y VF Control Args : Type}
   let inst := (inferInstance : TermLike Diffusion Y VF Control Args)
   let eps := sanitizeFiniteDiffEpsilon epsilon
   let g0 := inst.vf_prod term t y args control
-  let yPert := DiffEqSpace.add y (DiffEqSpace.scale eps g0)
+  let yPert := y + eps * g0
   let g1 := inst.vf_prod term t yPert args control
-  let jvpScaled := DiffEqSpace.scale (1.0 / eps) (DiffEqSpace.sub g1 g0)
+  let jvpScaled := (1.0 / eps) * (g1 - g0)
   let qv := MilsteinControl.quadraticVariation control
   let qvSafe := safeQuadraticVariationDenom qv qvFloor
-  DiffEqSpace.scale (1.0 / qvSafe) jvpScaled
+  (1.0 / qvSafe) * jvpScaled
 
 instance {Diffusion Y VF Control Args : Type} [TermLike Diffusion Y VF Control Args] :
     TermLike (FiniteDiffJacobianDiffusion Diffusion) Y VF Control Args where
@@ -207,8 +214,8 @@ def Milstein.solver {Drift Diffusion Y VFd VFg Control Args : Type}
     let g0 := diffInst.vf_prod diffusion t0 y0 args dControl
     let gg0 := diffDerivInst.jacobianProd diffusion t0 y0 args dControl
     let qv := MilsteinControl.quadraticVariation dControl
-    let corr := DiffEqSpace.scale (0.5 * (qv - dt)) gg0
-    let y1 := DiffEqSpace.add y0 (DiffEqSpace.add f0 (DiffEqSpace.add g0 corr))
+    let corr := (0.5 * (qv - dt)) * gg0
+    let y1 := y0 + (f0 + (g0 + corr))
     let dense := { t0 := t0, t1 := t1, y0 := y0, y1 := y1 }
     {
       y1 := y1

@@ -158,7 +158,7 @@ Reviewed: 2026-03-06 (`Tyr/DiffEq/*` vs `../diffrax/diffrax/*`, `../diffrax/docs
   Refs: `Tyr/DiffEq/Path.lean`, `Tyr/DiffEq/Term.lean`, `Tyr/DiffEq/Interpolation.lean`, `../diffrax/diffrax/_path.py`, `../diffrax/diffrax/_global_interpolation.py`, `../diffrax/diffrax/_term.py`
 - [x] `DX12` [Low] Added solve diagnostics (`num_accepted_steps`, `num_rejected_steps`) and optional throw-on-failure behavior (`throwOnFailure`) while preserving default non-throwing behavior.
   Refs: `Tyr/DiffEq/Integrate.lean`, `Tyr/DiffEq/Solution.lean`, `../diffrax/diffrax/_integrate.py`, `../diffrax/diffrax/_solution.py`
-- [~] `DX13` [Low] Extended term-structure metadata and higher-arity combinators (`MultiTerm5`/`MultiTerm6`, `TermShape`, inferred solver structure metadata), but full PyTree term-structure parity is still pending.
+- [x] `DX13` [Low] Added recursive PyTree term-structure parity via native product-term (`T1 × T2`) support, `TermTree` metadata propagation, and solver-side inferred tree/depth/leaf metadata.
   Refs: `Tyr/DiffEq/Term.lean`, `Tyr/DiffEq/Solver/Base.lean`, `../diffrax/diffrax/_term.py`, `../diffrax/diffrax/_solver/base.py`
 
 

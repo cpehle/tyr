@@ -23,6 +23,26 @@ class DiffEqSpace (α : Type) where
   sub : α → α → α
   scale : Scalar → α → α
 
+namespace DiffEqArithmetic
+
+/-- `+` operator instance derived from `DiffEqSpace`. Use via `local instance`. -/
+def hAddInst [DiffEqSpace α] : HAdd α α α where
+  hAdd := DiffEqSpace.add
+
+/-- `-` operator instance derived from `DiffEqSpace`. Use via `local instance`. -/
+def hSubInst [DiffEqSpace α] : HSub α α α where
+  hSub := DiffEqSpace.sub
+
+/-- Left scalar multiplication `a * x` derived from `DiffEqSpace.scale`. -/
+def hMulInst [DiffEqSpace α] : HMul Scalar α α where
+  hMul := DiffEqSpace.scale
+
+/-- SMul (`a • x`) instance derived from `DiffEqSpace.scale`. -/
+def smulInst [DiffEqSpace α] : SMul Scalar α where
+  smul := DiffEqSpace.scale
+
+end DiffEqArithmetic
+
 /-! Optional seminorm used by adaptive controllers and error estimates. -/
 class DiffEqSeminorm (α : Type) where
   rms : α → Scalar

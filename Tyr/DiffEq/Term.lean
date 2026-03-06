@@ -28,10 +28,19 @@ class TermLike (τ : Type) (Y VF Control Args : Type) where
 class DiffusionTermLike (τ : Type) (Y VF Control Args : Type) where
   jacobian_prod : τ → Time → Y → Args → Y
 
+/-- Recursive structural metadata for PyTree-style term layouts. -/
+inductive TermTree where
+  | leaf (arity? : Option Nat)
+  | pair (left right : TermTree)
+  | array (size : Nat) (element : TermTree)
+  deriving Repr, BEq
+
 /-- Optional structural metadata for terms (arity/layout hints). -/
 class TermShape (τ : Type) where
   arity? : τ → Option Nat
   layoutTag? : τ → Option String := fun _ => none
+  partitionArities? : τ → Option (Array Nat) := fun _ => none
+  tree? : τ → Option TermTree := fun _ => none
 
 namespace TermShape
 
@@ -40,7 +49,69 @@ def combineArity (lhs rhs : Option Nat) : Option Nat :=
   | some n1, some n2 => some (n1 + n2)
   | _, _ => none
 
+def pairPartition (lhs rhs : Option Nat) : Option (Array Nat) :=
+  match lhs, rhs with
+  | some n1, some n2 => some #[n1, n2]
+  | _, _ => none
+
+def leafTreeFromArity? (arity? : Option Nat) : TermTree :=
+  .leaf arity?
+
+def treeOrLeaf (tree? : Option TermTree) (arity? : Option Nat) : TermTree :=
+  tree?.getD (leafTreeFromArity? arity?)
+
 end TermShape
+
+namespace TermTree
+
+def single : TermTree := .leaf (some 1)
+
+def arity? : TermTree → Option Nat
+  | .leaf arity? => arity?
+  | .pair left right => TermShape.combineArity (arity? left) (arity? right)
+  | .array size element =>
+      match arity? element with
+      | some elementArity => some (size * elementArity)
+      | none => none
+
+def partitionArities? : TermTree → Option (Array Nat)
+  | .leaf _ => none
+  | .pair left right => TermShape.pairPartition (arity? left) (arity? right)
+  | .array size element =>
+      match arity? element with
+      | some elementArity => some (Array.replicate size elementArity)
+      | none => none
+
+def depth : TermTree → Nat
+  | .leaf _ => 1
+  | .pair left right => Nat.succ (Nat.max (depth left) (depth right))
+  | .array _ element => Nat.succ (depth element)
+
+def leafArities? : TermTree → Option (Array Nat)
+  | .leaf arity? =>
+      match arity? with
+      | some n => some #[n]
+      | none => none
+  | .pair left right =>
+      match leafArities? left, leafArities? right with
+      | some leftArities, some rightArities => some (leftArities ++ rightArities)
+      | _, _ => none
+  | .array size element =>
+      match leafArities? element with
+      | some elementArities =>
+          Id.run do
+            let mut acc := #[]
+            for _ in [:size] do
+              acc := acc ++ elementArities
+            some acc
+      | none => none
+
+def layoutTag : TermTree → String
+  | .leaf _ => "single"
+  | .pair _ _ => "pair"
+  | .array _ _ => "array"
+
+end TermTree
 
 instance : TermLike (AbstractTerm Y VF Control Args) Y VF Control Args where
   vf term := term.vf
@@ -52,6 +123,7 @@ instance : TermLike (AbstractTerm Y VF Control Args) Y VF Control Args where
 instance : TermShape (AbstractTerm Y VF Control Args) where
   arity? _ := some 1
   layoutTag? _ := some "single"
+  tree? _ := some TermTree.single
 
 namespace AbstractTerm
 
@@ -81,6 +153,7 @@ instance [DiffEqSpace Y] : TermLike (ODETerm Y Args) Y Y Time Args where
 instance : TermShape (ODETerm Y Args) where
   arity? _ := some 1
   layoutTag? _ := some "single"
+  tree? _ := some TermTree.single
 
 namespace ODETerm
 
@@ -106,6 +179,7 @@ instance : TermLike (ControlTerm Y VF Control Args) Y VF Control Args where
 instance : TermShape (ControlTerm Y VF Control Args) where
   arity? _ := some 1
   layoutTag? _ := some "single"
+  tree? _ := some TermTree.single
 
 namespace ControlTerm
 
@@ -172,6 +246,7 @@ instance : DiffusionTermLike (DiffusionTerm Y VF Control Args) Y VF Control Args
 instance : TermShape (DiffusionTerm Y VF Control Args) where
   arity? _ := some 1
   layoutTag? _ := some "single"
+  tree? _ := some TermTree.single
 
 namespace DiffusionTerm
 
@@ -209,6 +284,8 @@ instance {Term Y VF Control Args : Type} [DiffusionTermLike Term Y VF Control Ar
 instance {Term : Type} [TermShape Term] : TermShape (WrapTerm Term) where
   arity? t := (inferInstance : TermShape Term).arity? t.term
   layoutTag? t := (inferInstance : TermShape Term).layoutTag? t.term
+  partitionArities? t := (inferInstance : TermShape Term).partitionArities? t.term
+  tree? t := (inferInstance : TermShape Term).tree? t.term
 
 namespace WrapTerm
 
@@ -218,6 +295,48 @@ def toAbstract {Term Y VF Control Args : Type} [TermLike Term Y VF Control Args]
   AbstractTerm.ofTermLike term
 
 end WrapTerm
+
+/-- Native product terms behave additively and can nest recursively like PyTrees. -/
+instance {T1 T2 Y VF1 VF2 C1 C2 Args : Type}
+    [TermLike T1 Y VF1 C1 Args] [TermLike T2 Y VF2 C2 Args]
+    [DiffEqSpace Y] :
+    TermLike (T1 × T2) Y (VF1 × VF2) (C1 × C2) Args where
+  vf term t y args :=
+    ((inferInstance : TermLike T1 Y VF1 C1 Args).vf term.1 t y args,
+     (inferInstance : TermLike T2 Y VF2 C2 Args).vf term.2 t y args)
+  contr term t0 t1 :=
+    ((inferInstance : TermLike T1 Y VF1 C1 Args).contr term.1 t0 t1,
+     (inferInstance : TermLike T2 Y VF2 C2 Args).contr term.2 t0 t1)
+  prod term vf control :=
+    let y1 := (inferInstance : TermLike T1 Y VF1 C1 Args).prod term.1 vf.1 control.1
+    let y2 := (inferInstance : TermLike T2 Y VF2 C2 Args).prod term.2 vf.2 control.2
+    DiffEqSpace.add y1 y2
+  vf_prod term t y args control :=
+    let y1 := (inferInstance : TermLike T1 Y VF1 C1 Args).vf_prod term.1 t y args control.1
+    let y2 := (inferInstance : TermLike T2 Y VF2 C2 Args).vf_prod term.2 t y args control.2
+    DiffEqSpace.add y1 y2
+  is_vf_expensive term t0 t1 y args :=
+    (inferInstance : TermLike T1 Y VF1 C1 Args).is_vf_expensive term.1 t0 t1 y args ||
+    (inferInstance : TermLike T2 Y VF2 C2 Args).is_vf_expensive term.2 t0 t1 y args
+
+instance {T1 T2 : Type} [TermShape T1] [TermShape T2] : TermShape (T1 × T2) where
+  arity? term :=
+    TermShape.combineArity
+      ((inferInstance : TermShape T1).arity? term.1)
+      ((inferInstance : TermShape T2).arity? term.2)
+  layoutTag? _ := some "pair"
+  partitionArities? term :=
+    TermShape.pairPartition
+      ((inferInstance : TermShape T1).arity? term.1)
+      ((inferInstance : TermShape T2).arity? term.2)
+  tree? term :=
+    let shape1 := (inferInstance : TermShape T1)
+    let shape2 := (inferInstance : TermShape T2)
+    let tree1 :=
+      TermShape.treeOrLeaf (shape1.tree? term.1) (shape1.arity? term.1)
+    let tree2 :=
+      TermShape.treeOrLeaf (shape2.tree? term.2) (shape2.arity? term.2)
+    some (.pair tree1 tree2)
 
 /-- Additive combination of two terms (pair version). -/
 structure MultiTerm (T1 T2 : Type) where
@@ -264,6 +383,18 @@ instance {T1 T2 : Type} [TermShape T1] [TermShape T2] : TermShape (MultiTerm T1 
       ((inferInstance : TermShape T1).arity? term.term1)
       ((inferInstance : TermShape T2).arity? term.term2)
   layoutTag? _ := some "pair"
+  partitionArities? term :=
+    TermShape.pairPartition
+      ((inferInstance : TermShape T1).arity? term.term1)
+      ((inferInstance : TermShape T2).arity? term.term2)
+  tree? term :=
+    let shape1 := (inferInstance : TermShape T1)
+    let shape2 := (inferInstance : TermShape T2)
+    let tree1 :=
+      TermShape.treeOrLeaf (shape1.tree? term.term1) (shape1.arity? term.term1)
+    let tree2 :=
+      TermShape.treeOrLeaf (shape2.tree? term.term2) (shape2.arity? term.term2)
+    some (.pair tree1 tree2)
 
 namespace MultiTerm
 
@@ -272,6 +403,18 @@ def toAbstract {T1 T2 Y VF1 VF2 C1 C2 Args : Type}
     (term : MultiTerm T1 T2) :
     AbstractTerm Y (VF1 × VF2) (C1 × C2) Args :=
   AbstractTerm.ofTermLike term
+
+def ofProd (term : T1 × T2) : MultiTerm T1 T2 :=
+  { term1 := term.1, term2 := term.2 }
+
+def toProd (term : MultiTerm T1 T2) : T1 × T2 :=
+  (term.term1, term.term2)
+
+def ofProd3 (term : (T1 × T2) × T3) : MultiTerm3 T1 T2 T3 :=
+  { term1 := ofProd term.1, term2 := term.2 }
+
+def toProd3 (term : MultiTerm3 T1 T2 T3) : (T1 × T2) × T3 :=
+  (toProd term.term1, term.term2)
 
 def append (term : MultiTerm T1 T2) (term3 : T3) : MultiTerm3 T1 T2 T3 :=
   { term1 := term, term2 := term3 }
@@ -371,6 +514,8 @@ instance {Term Y VF Control Args : Type}
 instance {Term : Type} : TermShape (MultiTermArray Term) where
   arity? terms := some (terms.tail.size + 1)
   layoutTag? _ := some "array"
+  partitionArities? terms := some (Array.replicate (terms.tail.size + 1) 1)
+  tree? terms := some (.array (terms.tail.size + 1) TermTree.single)
 
 namespace MultiTermArray
 

@@ -33,6 +33,9 @@ structure TermStructureMeta where
   arity? : Option Nat := none
   layoutTag? : Option String := none
   partitionArities? : Option (Array Nat) := none
+  tree? : Option torch.DiffEq.TermTree := none
+  treeDepth? : Option Nat := none
+  leafArities? : Option (Array Nat) := none
   deriving Repr, BEq
 
 namespace TermStructureMeta
@@ -41,6 +44,9 @@ def single : TermStructureMeta :=
   {
     arity? := some 1
     layoutTag? := some "single"
+    tree? := some TermTree.single
+    treeDepth? := some 1
+    leafArities? := some #[1]
   }
 
 def pair : TermStructureMeta :=
@@ -48,18 +54,99 @@ def pair : TermStructureMeta :=
     arity? := some 2
     layoutTag? := some "pair"
     partitionArities? := some #[1, 1]
+    tree? := some (.pair TermTree.single TermTree.single)
+    treeDepth? := some 2
+    leafArities? := some #[1, 1]
   }
 
 def array (arity : Nat) : TermStructureMeta :=
   {
     arity? := some arity
     layoutTag? := some "array"
+    partitionArities? := some (Array.replicate arity 1)
+    tree? := some (.array arity TermTree.single)
+    treeDepth? := some 2
+    leafArities? := some (Array.replicate arity 1)
   }
 
+def effectiveArity? (structureMeta : TermStructureMeta) : Option Nat :=
+  match structureMeta.arity? with
+  | some arity => some arity
+  | none =>
+      match structureMeta.tree? with
+      | some tree => TermTree.arity? tree
+      | none => none
+
+def effectiveLayoutTag? (structureMeta : TermStructureMeta) : Option String :=
+  match structureMeta.layoutTag? with
+  | some tag => some tag
+  | none =>
+      match structureMeta.tree? with
+      | some tree => some (TermTree.layoutTag tree)
+      | none => none
+
+def effectivePartitionArities? (structureMeta : TermStructureMeta) : Option (Array Nat) :=
+  match structureMeta.partitionArities? with
+  | some partitionArities => some partitionArities
+  | none =>
+      match structureMeta.tree? with
+      | some tree => TermTree.partitionArities? tree
+      | none => none
+
+def effectiveTreeDepth? (structureMeta : TermStructureMeta) : Option Nat :=
+  match structureMeta.treeDepth? with
+  | some depth => some depth
+  | none =>
+      match structureMeta.tree? with
+      | some tree => some (TermTree.depth tree)
+      | none => none
+
+def effectiveLeafArities? (structureMeta : TermStructureMeta) : Option (Array Nat) :=
+  match structureMeta.leafArities? with
+  | some leafArities => some leafArities
+  | none =>
+      match structureMeta.tree? with
+      | some tree => TermTree.leafArities? tree
+      | none => none
+
 def ofTerm {Term : Type} [torch.DiffEq.TermShape Term] (term : Term) : TermStructureMeta :=
+  let shape := (inferInstance : torch.DiffEq.TermShape Term)
+  let arity? := shape.arity? term
+  let tree? :=
+    match shape.tree? term with
+    | some tree => some tree
+    | none =>
+        match arity? with
+        | some _ => some (.leaf arity?)
+        | none => none
+  let inferredArity? :=
+    match arity? with
+    | some arity => some arity
+    | none =>
+        match tree? with
+        | some tree => TermTree.arity? tree
+        | none => none
+  let inferredLayoutTag? :=
+    match shape.layoutTag? term with
+    | some layoutTag => some layoutTag
+    | none =>
+        match tree? with
+        | some tree => some (TermTree.layoutTag tree)
+        | none => none
+  let inferredPartitionArities? :=
+    match shape.partitionArities? term with
+    | some partitionArities => some partitionArities
+    | none =>
+        match tree? with
+        | some tree => TermTree.partitionArities? tree
+        | none => none
   {
-    arity? := (inferInstance : torch.DiffEq.TermShape Term).arity? term
-    layoutTag? := (inferInstance : torch.DiffEq.TermShape Term).layoutTag? term
+    arity? := inferredArity?
+    layoutTag? := inferredLayoutTag?
+    partitionArities? := inferredPartitionArities?
+    tree? := tree?
+    treeDepth? := tree?.map TermTree.depth
+    leafArities? := tree?.bind TermTree.leafArities?
   }
 
 end TermStructureMeta
@@ -91,14 +178,34 @@ namespace AbstractSolver
 def termArity? (solver : AbstractSolver Term Y VF Control Args) : Option Nat :=
   match solver.termStructureMeta with
   | some structureMeta =>
-      match structureMeta.arity? with
+      match structureMeta.effectiveArity? with
       | some arity => some arity
       | none => TermStructure.arity? solver.termStructure
   | none => TermStructure.arity? solver.termStructure
 
 def termLayoutTag? (solver : AbstractSolver Term Y VF Control Args) : Option String :=
   match solver.termStructureMeta with
-  | some structureMeta => structureMeta.layoutTag?
+  | some structureMeta => structureMeta.effectiveLayoutTag?
+  | none => none
+
+def termPartitionArities? (solver : AbstractSolver Term Y VF Control Args) : Option (Array Nat) :=
+  match solver.termStructureMeta with
+  | some structureMeta => structureMeta.effectivePartitionArities?
+  | none => none
+
+def termTree? (solver : AbstractSolver Term Y VF Control Args) : Option TermTree :=
+  match solver.termStructureMeta with
+  | some structureMeta => structureMeta.tree?
+  | none => none
+
+def termTreeDepth? (solver : AbstractSolver Term Y VF Control Args) : Option Nat :=
+  match solver.termStructureMeta with
+  | some structureMeta => structureMeta.effectiveTreeDepth?
+  | none => none
+
+def termLeafArities? (solver : AbstractSolver Term Y VF Control Args) : Option (Array Nat) :=
+  match solver.termStructureMeta with
+  | some structureMeta => structureMeta.effectiveLeafArities?
   | none => none
 
 def termStructureKind (solver : AbstractSolver Term Y VF Control Args) : TermStructure :=
@@ -106,9 +213,10 @@ def termStructureKind (solver : AbstractSolver Term Y VF Control Args) : TermStr
 
 def withTermStructureMeta (solver : AbstractSolver Term Y VF Control Args)
     (structureMeta : TermStructureMeta) : AbstractSolver Term Y VF Control Args :=
+  let arity? := structureMeta.effectiveArity?
   {
     solver with
-    termStructure := TermStructure.ofArity? structureMeta.arity?
+    termStructure := TermStructure.ofArity? arity?
     termStructureMeta := some structureMeta
   }
 
