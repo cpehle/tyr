@@ -40,6 +40,9 @@ structure SubSaveAt where
   ts : Option (Array Time) := none
   steps : StepCadence := (0 : Nat)
   dense : Bool := false
+  solverState : Bool := false
+  controllerState : Bool := false
+  madeJump : Bool := false
   subs : Array SubSaveAt := #[]
   deriving Inhabited
 
@@ -121,6 +124,15 @@ def effectiveTs (saveat : SaveAt) : Option (Array Time) :=
 
 def effectiveDense (saveat : SaveAt) : Bool :=
   saveat.dense || (allSubs saveat).any (fun sub => sub.dense)
+
+def effectiveSolverState (saveat : SaveAt) : Bool :=
+  saveat.solverState || (allSubs saveat).any (fun sub => sub.solverState)
+
+def effectiveControllerState (saveat : SaveAt) : Bool :=
+  saveat.controllerState || (allSubs saveat).any (fun sub => sub.controllerState)
+
+def effectiveMadeJump (saveat : SaveAt) : Bool :=
+  saveat.madeJump || (allSubs saveat).any (fun sub => sub.madeJump)
 
 end SaveAt
 

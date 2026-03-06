@@ -52,6 +52,7 @@ structure Solution (Y SolverState ControllerState : Type) where
   controllerState : Option ControllerState
   madeJump : Option Bool
   eventMask : Option (Array Bool)
+  eventMaskLast : Option (Array Bool) := none
   deriving Inhabited
 
 namespace Solution
