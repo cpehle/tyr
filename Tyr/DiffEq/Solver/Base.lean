@@ -12,6 +12,23 @@ inductive TermStructure where
   | multi
   deriving Repr, BEq
 
+namespace TermStructure
+
+def arity? : TermStructure → Option Nat
+  | .single => some 1
+  | .pair => some 2
+  | .multi => none
+
+def ofArity (arity : Nat) : TermStructure :=
+  if arity <= 1 then .single else if arity == 2 then .pair else .multi
+
+end TermStructure
+
+structure TermStructureMeta where
+  arity? : Option Nat := none
+  layoutTag? : Option String := none
+  deriving Repr, BEq
+
 structure StepOutput (Y DenseInfo SolverState : Type) where
   y1 : Y
   yError : Option Y
@@ -23,6 +40,7 @@ structure AbstractSolver (Term Y VF Control Args : Type) where
   SolverState : Type
   DenseInfo : Type
   termStructure : TermStructure := TermStructure.single
+  termStructureMeta : Option TermStructureMeta := none
   order : Term → Nat := fun _ => 1
   strongOrder : Term → Float := fun _ => 0.0
   errorOrder : Term → Float := fun term =>
@@ -32,6 +50,26 @@ structure AbstractSolver (Term Y VF Control Args : Type) where
   step : Term → Time → Time → Y → Args → SolverState → Bool → StepOutput Y DenseInfo SolverState
   func : Term → Time → Y → Args → VF
   interpolation : DenseInfo → DenseInterpolation Y
+
+namespace AbstractSolver
+
+def termArity? (solver : AbstractSolver Term Y VF Control Args) : Option Nat :=
+  match solver.termStructureMeta with
+  | some structureMeta =>
+      match structureMeta.arity? with
+      | some arity => some arity
+      | none => TermStructure.arity? solver.termStructure
+  | none => TermStructure.arity? solver.termStructure
+
+def termLayoutTag? (solver : AbstractSolver Term Y VF Control Args) : Option String :=
+  match solver.termStructureMeta with
+  | some structureMeta => structureMeta.layoutTag?
+  | none => none
+
+def termStructureKind (solver : AbstractSolver Term Y VF Control Args) : TermStructure :=
+  solver.termStructure
+
+end AbstractSolver
 
 /-! ## Marker Traits -/
 

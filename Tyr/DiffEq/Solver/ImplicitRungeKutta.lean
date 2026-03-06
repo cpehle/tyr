@@ -10,11 +10,19 @@ namespace DiffEq
 structure ImplicitRK (s : Nat) where
   tableau : ButcherTableau s
   rootFinder : FixedPoint := {}
+  rootMethod : Option RootFindMethod := none
+  rootRtol : Option Float := none
+  rootAtol : Option Float := none
+  rootMaxIters : Option Nat := none
 
 structure IMEXRK (s : Nat) where
   explicit : ButcherTableau s
   implicit : ButcherTableau s
   rootFinder : FixedPoint := {}
+  rootMethod : Option RootFindMethod := none
+  rootRtol : Option Float := none
+  rootAtol : Option Float := none
+  rootMaxIters : Option Nat := none
 
 namespace ImplicitRK
 
@@ -30,6 +38,10 @@ private def weightedSum {s : Nat} [DiffEqSpace Y] (coeffs : Vector s Time)
       let kj := ks.getD j (zeroLike y0)
       DiffEqSpace.add acc (DiffEqSpace.scale a kj))
     (zeroLike y0)
+
+private def effectiveRootMethod {s : Nat} (rk : ImplicitRK s) : RootFindMethod :=
+  let base : RootFindMethod := rk.rootMethod.getD (RootFindMethod.fixedPoint rk.rootFinder)
+  RootFindMethod.withTolerances base rk.rootRtol rk.rootAtol rk.rootMaxIters
 
 def solver {s : Nat} {Term Y VF Args : Type}
     [TermLike Term Y VF Time Args]
@@ -68,7 +80,8 @@ def solver {s : Nat} {Term Y VF Args : Type}
             else
               let stepFn := fun y =>
                 DiffEqSpace.add base (DiffEqSpace.scale aii (inst.vf_prod term ti y args dt))
-              let sol := RootFinder.solve rk.rootFinder stepFn base
+              let rootMethod : RootFindMethod := effectiveRootMethod rk
+              let sol := RootFinder.solve (R := RootFindMethod) rootMethod stepFn base
               (sol.value, ok && sol.converged)
           let ki := inst.vf_prod term ti yi args dt
           (ks.push ki, ok))
@@ -111,6 +124,10 @@ private def weightedSum {s : Nat} [DiffEqSpace Y] (coeffs : Vector s Time)
       let kj := ks.getD j (zeroLike y0)
       DiffEqSpace.add acc (DiffEqSpace.scale a kj))
     (zeroLike y0)
+
+private def effectiveRootMethod {s : Nat} (rk : IMEXRK s) : RootFindMethod :=
+  let base : RootFindMethod := rk.rootMethod.getD (RootFindMethod.fixedPoint rk.rootFinder)
+  RootFindMethod.withTolerances base rk.rootRtol rk.rootAtol rk.rootMaxIters
 
 def solver {s : Nat} {ExplicitTerm ImplicitTerm Y VFe VFi Args : Type}
     [TermLike ExplicitTerm Y VFe Time Args]
@@ -160,7 +177,8 @@ def solver {s : Nat} {ExplicitTerm ImplicitTerm Y VFe VFi Args : Type}
             else
               let stepFn := fun y =>
                 DiffEqSpace.add base (DiffEqSpace.scale aii (impInst.vf_prod implicit ti y args dt))
-              let sol := RootFinder.solve rk.rootFinder stepFn base
+              let rootMethod : RootFindMethod := effectiveRootMethod rk
+              let sol := RootFinder.solve (R := RootFindMethod) rootMethod stepFn base
               (sol.value, ok && sol.converged)
           let kE := expInst.vf_prod explicit ti yi args dt
           let kI := impInst.vf_prod implicit ti yi args dt

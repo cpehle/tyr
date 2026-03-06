@@ -85,18 +85,98 @@ def backsolveAdjointSupported {Y Args : Type}
     (saveat : SaveAt) : Bool :=
   solver.termStructure == TermStructure.single && !saveat.steps && !saveat.dense
 
-/-! ## Adjoint Method Placeholders (Diffrax parity) -/
+private def saveAtTsOutOfRange (t0 t1 : Time) (saveat : SaveAt) : Bool :=
+  match saveat.ts with
+  | none => false
+  | some ts =>
+      if ts.size == 0 then
+        false
+      else
+        let tmin := if t0 <= t1 then t0 else t1
+        let tmax := if t0 <= t1 then t1 else t0
+        ts.foldl (init := false) (fun acc t => acc || t < tmin || t > tmax)
+
+def backsolveAdjointUnsupportedReason {Y Args : Type}
+    (solver : AbstractSolver (ODETerm Y Args) Y Y Time Args)
+    (t0 t1 : Time)
+    (saveat : SaveAt) : Option String :=
+  if saveAtTsOutOfRange t0 t1 saveat then
+    some "Adjoint solve failed: `saveat.ts` contains values outside [t0, t1]."
+  else if solver.termStructure != TermStructure.single then
+    some "Adjoint solve failed: only single-term ODE solvers are supported; multi-term structures (for example SDE drift+diffusion) are not yet supported."
+  else if saveat.steps then
+    some "Adjoint solve failed: backsolve-style adjoints do not support `saveat.steps := true`."
+  else if saveat.dense then
+    some "Adjoint solve failed: backsolve-style adjoints do not support `saveat.dense := true`."
+  else
+    none
+
+def directAdjointUnsupportedReason (dt0 : Option Time) : Option String :=
+  if dt0.isNone then
+    some "Adjoint solve failed: direct/forward mode currently requires `dt0` (constant-step solve)."
+  else
+    none
+
+private def mkAdjointInternalErrorSolution {Y SolverState ControllerState : Type}
+    (t0 t1 : Time)
+    (stats : List (String × Nat) := []) :
+    Solution Y SolverState ControllerState := {
+      t0 := t0
+      t1 := t1
+      ts := none
+      ys := none
+      interpolation := none
+      stats := stats
+      result := Result.internalError
+      solverState := none
+      controllerState := none
+      madeJump := none
+      eventMask := none
+    }
+
+private def mkAdjointFailure
+    {Y SolverState ControllerState Args : Type}
+    (t0 t1 : Time)
+    (tag : String)
+    (msg : String) :
+    (Solution Y SolverState ControllerState × Option (AdjointResult Y Args) × Option String) :=
+  let sol :=
+    mkAdjointInternalErrorSolution (Y := Y) (SolverState := SolverState)
+      (ControllerState := ControllerState) t0 t1
+      [("adjoint_error", 1), (tag, 1)]
+  (sol, none, some msg)
+
+abbrev AdjointSolveWithReport (Y SolverState ControllerState Args : Type) :=
+  (Solution Y SolverState ControllerState × Option (AdjointResult Y Args) × Option String)
+
+/-! ## Adjoint Method Modes -/
 
 structure DirectAdjoint where
+  /-- Keep parity with the current direct-adjoint implementation contract. -/
+  requireDt0 : Bool := true
   deriving Inhabited
 
 structure RecursiveCheckpointAdjoint where
+  /-- Number of primal steps per checkpoint chunk (`0` is normalized to `1`). -/
+  checkpointEvery : Nat := 64
+  /--
+  Recompute each checkpoint chunk before backpropagating through it.
+  When `false`, this mode reduces to regular full-trajectory backsolve.
+  -/
+  recomputeSegments : Bool := true
   deriving Inhabited
 
 structure ForwardMode where
+  /-- Keep parity with the current forward-mode implementation contract. -/
+  requireDt0 : Bool := true
   deriving Inhabited
 
 structure ImplicitAdjoint where
+  /--
+  Use the current backsolve-based fallback for implicit adjoints.
+  If `false`, this mode returns an explicit unsupported message.
+  -/
+  useBacksolveFallback : Bool := true
   deriving Inhabited
 
 /-! ## Backsolve Adjoint Wrapper -/
@@ -384,6 +464,233 @@ def diffeqsolveBacksolveAdjoint
     (Solution Y solver.SolverState (StepSizeController.State (C := Controller)) ×
       Option (AdjointResult Y Args)) :=
   diffeqsolveAdjoint term solver adjoint.adjSolver t0 t1 dt0 y0 args adjY1 saveat maxSteps controller
+
+def recursiveCheckpointChunkSize (mode : RecursiveCheckpointAdjoint) : Nat :=
+  if mode.checkpointEvery == 0 then 1 else mode.checkpointEvery
+
+def recursiveCheckpointAdjointUnsupportedReason
+    (mode : RecursiveCheckpointAdjoint) : Option String :=
+  if mode.recomputeSegments then
+    let chunkSize := recursiveCheckpointChunkSize mode
+    some
+      s!"Adjoint solve failed: `RecursiveCheckpointAdjoint` recomputation (checkpointEvery := {chunkSize}) is not implemented yet; set `recomputeSegments := false` to use full-trajectory backsolve."
+  else
+    none
+
+def directModeUnsupportedReason
+    (mode : DirectAdjoint)
+    (dt0 : Option Time) : Option String :=
+  if dt0.isNone then
+    if mode.requireDt0 then
+      directAdjointUnsupportedReason dt0
+    else
+      some "Adjoint solve failed: `DirectAdjoint` without `dt0` is not implemented yet."
+  else
+    none
+
+def forwardModeUnsupportedReason
+    (mode : ForwardMode)
+    (dt0 : Option Time) : Option String :=
+  if dt0.isNone then
+    if mode.requireDt0 then
+      directAdjointUnsupportedReason dt0
+    else
+      some "Adjoint solve failed: `ForwardMode` without `dt0` is not implemented yet."
+  else
+    none
+
+def implicitAdjointUnsupportedReason
+    (mode : ImplicitAdjoint) : Option String :=
+  if mode.useBacksolveFallback then
+    none
+  else
+    some "Adjoint solve failed: `ImplicitAdjoint` without backsolve fallback is not implemented yet."
+
+private def diffeqsolveDirectAdjointWithReportCore
+    {Y Args : Type}
+    [DiffEqSpace Y] [DiffEqSpace Args]
+    [DiffEqSeminorm Y] [DiffEqElem Y]
+    [AdjointFnBackend Y Args]
+    [Inhabited Y] [Inhabited Args]
+    (term : ODETerm Y Args)
+    (solver : AbstractSolver (ODETerm Y Args) Y Y Time Args)
+    (t0 t1 : Time)
+    (dt0 : Option Time)
+    (y0 : Y)
+    (args : Args)
+    (adjY1 : Y)
+    (saveat : SaveAt := {})
+    (maxSteps : Nat := 4096)
+    (controller : ConstantStepSize := default)
+    (unsupportedTag : String)
+    (unsupportedReason : Option String) :
+    AdjointSolveWithReport Y solver.SolverState
+      (StepSizeController.State (C := ConstantStepSize)) Args := by
+  match unsupportedReason with
+  | some msg =>
+      exact
+        mkAdjointFailure
+          (Y := Y)
+          (SolverState := solver.SolverState)
+          (ControllerState := StepSizeController.State (C := ConstantStepSize))
+          (Args := Args)
+          t0 t1 unsupportedTag msg
+  | none =>
+      let (sol, adj) :=
+        diffeqsolveDirectAdjoint
+          term solver t0 t1 dt0 y0 args adjY1 saveat maxSteps controller
+      exact (sol, adj, none)
+
+private def diffeqsolveBacksolveAdjointWithReportCore
+    {Y Args Controller : Type}
+    [DiffEqSpace Y] [DiffEqSpace Args]
+    [DiffEqSeminorm Y] [DiffEqSeminorm Args]
+    [DiffEqElem Y] [DiffEqElem Args]
+    [AdjointBackend Y Args]
+    [Inhabited Y] [Inhabited Args]
+    [StepSizeController Controller] [Inhabited Controller]
+    (term : ODETerm Y Args)
+    (solver : AbstractSolver (ODETerm Y Args) Y Y Time Args)
+    (adjoint : BacksolveAdjoint Y Args)
+    (t0 t1 : Time)
+    (dt0 : Option Time)
+    (y0 : Y)
+    (args : Args)
+    (adjY1 : Y)
+    (saveat : SaveAt := {})
+    (maxSteps : Nat := 4096)
+    (controller : Controller := default)
+    (unsupportedTag : String)
+    (unsupportedReason : Option String) :
+    AdjointSolveWithReport Y solver.SolverState
+      (StepSizeController.State (C := Controller)) Args := by
+  match unsupportedReason with
+  | some msg =>
+      exact
+        mkAdjointFailure
+          (Y := Y)
+          (SolverState := solver.SolverState)
+          (ControllerState := StepSizeController.State (C := Controller))
+          (Args := Args)
+          t0 t1 unsupportedTag msg
+  | none =>
+      match backsolveAdjointUnsupportedReason solver t0 t1 saveat with
+      | some msg =>
+          exact
+            mkAdjointFailure
+              (Y := Y)
+              (SolverState := solver.SolverState)
+              (ControllerState := StepSizeController.State (C := Controller))
+              (Args := Args)
+              t0 t1 "unsupported_backsolve_adjoint" msg
+      | none =>
+          let (sol, adj) :=
+            diffeqsolveBacksolveAdjoint
+              (Controller := Controller)
+              term solver adjoint t0 t1 dt0 y0 args adjY1 saveat maxSteps controller
+          exact (sol, adj, none)
+
+def diffeqsolveDirectAdjointMode
+    {Y Args : Type}
+    [DiffEqSpace Y] [DiffEqSpace Args]
+    [DiffEqSeminorm Y] [DiffEqElem Y]
+    [AdjointFnBackend Y Args]
+    [Inhabited Y] [Inhabited Args]
+    (mode : DirectAdjoint := {})
+    (term : ODETerm Y Args)
+    (solver : AbstractSolver (ODETerm Y Args) Y Y Time Args)
+    (t0 t1 : Time)
+    (dt0 : Option Time)
+    (y0 : Y)
+    (args : Args)
+    (adjY1 : Y)
+    (saveat : SaveAt := {})
+    (maxSteps : Nat := 4096)
+    (controller : ConstantStepSize := default) :
+    AdjointSolveWithReport Y solver.SolverState
+      (StepSizeController.State (C := ConstantStepSize)) Args :=
+  diffeqsolveDirectAdjointWithReportCore
+    term solver t0 t1 dt0 y0 args adjY1 saveat maxSteps controller
+    "unsupported_direct_adjoint_mode" (directModeUnsupportedReason mode dt0)
+
+def diffeqsolveForwardMode
+    {Y Args : Type}
+    [DiffEqSpace Y] [DiffEqSpace Args]
+    [DiffEqSeminorm Y] [DiffEqElem Y]
+    [AdjointFnBackend Y Args]
+    [Inhabited Y] [Inhabited Args]
+    (mode : ForwardMode := {})
+    (term : ODETerm Y Args)
+    (solver : AbstractSolver (ODETerm Y Args) Y Y Time Args)
+    (t0 t1 : Time)
+    (dt0 : Option Time)
+    (y0 : Y)
+    (args : Args)
+    (adjY1 : Y)
+    (saveat : SaveAt := {})
+    (maxSteps : Nat := 4096)
+    (controller : ConstantStepSize := default) :
+    AdjointSolveWithReport Y solver.SolverState
+      (StepSizeController.State (C := ConstantStepSize)) Args :=
+  diffeqsolveDirectAdjointWithReportCore
+    term solver t0 t1 dt0 y0 args adjY1 saveat maxSteps controller
+    "unsupported_forward_mode" (forwardModeUnsupportedReason mode dt0)
+
+def diffeqsolveRecursiveCheckpointAdjoint
+    {Y Args Controller : Type}
+    [DiffEqSpace Y] [DiffEqSpace Args]
+    [DiffEqSeminorm Y] [DiffEqSeminorm Args]
+    [DiffEqElem Y] [DiffEqElem Args]
+    [AdjointBackend Y Args]
+    [Inhabited Y] [Inhabited Args]
+    [StepSizeController Controller] [Inhabited Controller]
+    (mode : RecursiveCheckpointAdjoint := {})
+    (term : ODETerm Y Args)
+    (solver : AbstractSolver (ODETerm Y Args) Y Y Time Args)
+    (adjoint : BacksolveAdjoint Y Args)
+    (t0 t1 : Time)
+    (dt0 : Option Time)
+    (y0 : Y)
+    (args : Args)
+    (adjY1 : Y)
+    (saveat : SaveAt := {})
+    (maxSteps : Nat := 4096)
+    (controller : Controller := default) :
+    AdjointSolveWithReport Y solver.SolverState
+      (StepSizeController.State (C := Controller)) Args :=
+  diffeqsolveBacksolveAdjointWithReportCore
+    (Controller := Controller)
+    term solver adjoint t0 t1 dt0 y0 args adjY1 saveat maxSteps controller
+    "unsupported_recursive_checkpoint_adjoint"
+    (recursiveCheckpointAdjointUnsupportedReason mode)
+
+def diffeqsolveImplicitAdjoint
+    {Y Args Controller : Type}
+    [DiffEqSpace Y] [DiffEqSpace Args]
+    [DiffEqSeminorm Y] [DiffEqSeminorm Args]
+    [DiffEqElem Y] [DiffEqElem Args]
+    [AdjointBackend Y Args]
+    [Inhabited Y] [Inhabited Args]
+    [StepSizeController Controller] [Inhabited Controller]
+    (mode : ImplicitAdjoint := {})
+    (term : ODETerm Y Args)
+    (solver : AbstractSolver (ODETerm Y Args) Y Y Time Args)
+    (adjoint : BacksolveAdjoint Y Args)
+    (t0 t1 : Time)
+    (dt0 : Option Time)
+    (y0 : Y)
+    (args : Args)
+    (adjY1 : Y)
+    (saveat : SaveAt := {})
+    (maxSteps : Nat := 4096)
+    (controller : Controller := default) :
+    AdjointSolveWithReport Y solver.SolverState
+      (StepSizeController.State (C := Controller)) Args :=
+  diffeqsolveBacksolveAdjointWithReportCore
+    (Controller := Controller)
+    term solver adjoint t0 t1 dt0 y0 args adjY1 saveat maxSteps controller
+    "unsupported_implicit_adjoint"
+    (implicitAdjointUnsupportedReason mode)
 
 end DiffEq
 end torch

@@ -17,6 +17,7 @@ structure StepSizeDecision (State : Type) where
   dt : Time
   state : State
   result : Result
+  madeJump : Bool := false
 
 class InitialStepSelector (Term Y VF Args : Type) where
   select : Term → Time → Y → Args → (Term → Time → Y → Args → VF) →
@@ -201,28 +202,126 @@ instance : StepSizeController StepTo where
     else
       { accept := true, dt := state.dt, state := state.state, result := Result.successful }
 
-structure ClipStepSizeController where
-  dt_min : Time := 1.0e-6
-  dt_max : Time := 1.0
+structure ClipStepSizeControllerState (BaseState : Type) where
+  baseState : BaseState
+  forward : Bool
+  rejectedTs : Array Time := #[]
   deriving Inhabited
 
-instance : StepSizeController ClipStepSizeController where
-  State := Unit
-  init ctrl _terms _t0 _t1 _y0 _args dt0 _func _errorOrder :=
-    match dt0 with
-    | none => panic! "ClipStepSizeController requires dt0; pass `dt0 := some ...`."
-    | some dt0 =>
-        let dt :=
-          if dt0 < ctrl.dt_min then ctrl.dt_min
-          else if dt0 > ctrl.dt_max then ctrl.dt_max
-          else dt0
-        { dt := dt, state := () }
-  adapt ctrl state _t0 _t1 _y0 _y1 _yError _errorOrder :=
-    let dt :=
-      if state.dt < ctrl.dt_min then ctrl.dt_min
-      else if state.dt > ctrl.dt_max then ctrl.dt_max
-      else state.dt
-    { accept := true, dt := dt, state := state.state, result := Result.successful }
+structure ClipStepSizeController (Base : Type := PIDController) [Inhabited Base] where
+  controller : Base := default
+  dt_min : Time := 1.0e-6
+  dt_max : Time := 1.0
+  step_ts : Option (Array Time) := none
+  jump_ts : Option (Array Time) := none
+  store_rejected_steps : Option Nat := none
+  deriving Inhabited
+
+private def clampSignedDtBounds (dt dtMin dtMax : Time) : Time :=
+  let sign := if dt < 0.0 then -1.0 else 1.0
+  let absDt := if dt < 0.0 then -dt else dt
+  let absDt := if absDt < dtMin then dtMin else absDt
+  let absDt := if absDt > dtMax then dtMax else absDt
+  sign * absDt
+
+private def signedDtForDirection (forward : Bool) (dt : Time) : Time :=
+  let absDt := if dt < 0.0 then -dt else dt
+  if forward then absDt else -absDt
+
+private def isAheadInDirection (forward : Bool) (start t : Time) : Bool :=
+  if forward then t > start else t < start
+
+private def betterTarget (forward : Bool) (current candidate : Time) : Time :=
+  if forward then
+    if candidate < current then candidate else current
+  else
+    if candidate > current then candidate else current
+
+private def clipTargetToTimes (forward : Bool) (start target : Time) (times : Array Time) : Time :=
+  times.foldl
+    (fun best t =>
+      if isAheadInDirection forward start t then
+        betterTarget forward best t
+      else
+        best)
+    target
+
+private def touchesTime (t : Time) (times : Option (Array Time)) : Bool :=
+  match times with
+  | none => false
+  | some ts => ts.any (fun x => x == t)
+
+instance [Inhabited Base] [StepSizeController Base] : StepSizeController (ClipStepSizeController Base) where
+  State := ClipStepSizeControllerState (StepSizeController.State (C := Base))
+  init ctrl terms t0 t1 y0 args dt0 func errorOrder :=
+    let baseInit := StepSizeController.init ctrl.controller terms t0 t1 y0 args dt0 func errorOrder
+    let forward := t1 >= t0
+    let dtSigned := signedDtForDirection forward baseInit.dt
+    let dtBounded := clampSignedDtBounds dtSigned ctrl.dt_min ctrl.dt_max
+    let target0 := t0 + dtBounded
+    let target1 :=
+      match ctrl.step_ts with
+      | none => target0
+      | some ts => clipTargetToTimes forward t0 target0 ts
+    let target2 :=
+      match ctrl.jump_ts with
+      | none => target1
+      | some ts => clipTargetToTimes forward t0 target1 ts
+    { dt := target2 - t0
+      state := {
+        baseState := baseInit.state
+        forward := forward
+        rejectedTs := #[]
+      } }
+  adapt ctrl state t0 t1 y0 y1 yError errorOrder :=
+    let baseState : StepSizeState (StepSizeController.State (C := Base)) := {
+      dt := state.dt
+      state := state.state.baseState
+    }
+    let baseDecision :=
+      StepSizeController.adapt ctrl.controller baseState t0 t1 y0 y1 yError errorOrder
+    let forward := state.state.forward
+    let startNext := if baseDecision.accept then t1 else t0
+    let dtSigned := signedDtForDirection forward baseDecision.dt
+    let dtBounded := clampSignedDtBounds dtSigned ctrl.dt_min ctrl.dt_max
+    let target0 := startNext + dtBounded
+    let target1 :=
+      match ctrl.step_ts with
+      | none => target0
+      | some ts => clipTargetToTimes forward startNext target0 ts
+    let target2 :=
+      match ctrl.jump_ts with
+      | none => target1
+      | some ts => clipTargetToTimes forward startNext target1 ts
+    let rejectCleared := state.state.rejectedTs.filter (fun tr => tr != t1)
+    let rejectUpdated :=
+      if baseDecision.accept then rejectCleared else rejectCleared.push t1
+    let rejectPruned := rejectUpdated.filter (fun tr => isAheadInDirection forward startNext tr)
+    let overflow :=
+      match ctrl.store_rejected_steps with
+      | none => false
+      | some maxCount => rejectPruned.size > maxCount
+    let target3 :=
+      if ctrl.store_rejected_steps.isSome then
+        clipTargetToTimes forward startNext target2 rejectPruned
+      else
+        target2
+    let result :=
+      if overflow && baseDecision.result == Result.successful then
+        Result.maxStepsRejected
+      else
+        baseDecision.result
+    {
+      accept := baseDecision.accept
+      dt := target3 - startNext
+      state := {
+        baseState := baseDecision.state
+        forward := forward
+        rejectedTs := if ctrl.store_rejected_steps.isSome then rejectPruned else #[]
+      }
+      result := result
+      madeJump := if baseDecision.accept then touchesTime t1 ctrl.jump_ts else false
+    }
 
 end DiffEq
 end torch

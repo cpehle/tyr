@@ -48,6 +48,71 @@ def toInterpolation [DiffEqSpace Y] (info : LocalLinearDenseInfo Y) :
 
 end LocalLinearDenseInfo
 
+/-- Piecewise dense interpolation assembled from per-step solver interpolation data. -/
+structure PiecewiseDenseInterpolation (Y : Type) where
+  ts : Array Time
+  segments : Array (DenseInterpolation Y)
+
+namespace PiecewiseDenseInterpolation
+
+private def clampIndex (n : Nat) (i : Nat) : Nat :=
+  if i < n then i else if n == 0 then 0 else n - 1
+
+private def findBracket (ts : Array Time) (t : Time) : Nat :=
+  let n := ts.size
+  if n <= 1 then
+    0
+  else
+    let rec go (i : Nat) : Nat :=
+      if h : i + 1 < n then
+        let t1 := ts[i + 1]!
+        if t <= t1 then i else go (i + 1)
+      else
+        n - 2
+    go 0
+
+private def evalAt [DiffEqSpace Y] [Inhabited Y]
+    (interp : PiecewiseDenseInterpolation Y) (t : Time) (left : Bool) : Y :=
+  if hzero : interp.segments.size = 0 then
+    panic! "PiecewiseDenseInterpolation requires at least one segment."
+  else
+    let hpos : 0 < interp.segments.size := Nat.pos_of_ne_zero hzero
+    let defaultSeg := interp.segments[0]'hpos
+    let idx :=
+      if interp.ts.size <= 1 then
+        0
+      else
+        clampIndex interp.segments.size (findBracket interp.ts t)
+    let seg := interp.segments.getD idx defaultSeg
+    seg.evaluate t none left
+
+def toDense [DiffEqSpace Y] [Inhabited Y]
+    (interp : PiecewiseDenseInterpolation Y) : DenseInterpolation Y := by
+  exact {
+    evaluate := fun t0 t1 left =>
+      let y0 := evalAt interp t0 left
+      match t1 with
+      | none => y0
+      | some t1 =>
+          let y1 := evalAt interp t1 left
+          DiffEqSpace.sub y1 y0
+    derivative := fun t left =>
+      if hzero : interp.segments.size = 0 then
+        panic! "PiecewiseDenseInterpolation requires at least one segment."
+      else
+        let hpos : 0 < interp.segments.size := Nat.pos_of_ne_zero hzero
+        let defaultSeg := interp.segments[0]'hpos
+        let idx :=
+          if interp.ts.size <= 1 then
+            0
+          else
+            clampIndex interp.segments.size (findBracket interp.ts t)
+        let seg := interp.segments.getD idx defaultSeg
+        seg.derivative t left
+  }
+
+end PiecewiseDenseInterpolation
+
 /-- Piecewise-linear interpolation over saved step points. -/
 structure LinearInterpolation (Y : Type) where
   ts : Array Time

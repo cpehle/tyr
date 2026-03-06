@@ -72,6 +72,7 @@ structure ControlTerm (Y VF Control Args : Type) where
   vectorField : Time → Y → Args → VF
   control : Time → Time → Control
   prod : VF → Control → Y
+  controlDerivative? : Option (Time → Bool → Control) := none
 
 instance : TermLike (ControlTerm Y VF Control Args) Y VF Control Args where
   vf term := term.vectorField
@@ -85,12 +86,34 @@ namespace ControlTerm
 def toAbstract (term : ControlTerm Y VF Control Args) : AbstractTerm Y VF Control Args :=
   AbstractTerm.ofTermLike term
 
+def withControlDerivative (term : ControlTerm Y VF Control Args)
+    (controlDerivative : Time → Bool → Control) : ControlTerm Y VF Control Args :=
+  { term with controlDerivative? := some controlDerivative }
+
+def clearControlDerivative (term : ControlTerm Y VF Control Args) : ControlTerm Y VF Control Args :=
+  { term with controlDerivative? := none }
+
+def toODEWithDerivative (term : ControlTerm Y VF Control Args)
+    (controlDerivative : Time → Bool → Control) (left : Bool := true) :
+    ODETerm Y Args :=
+  {
+    vectorField := fun t y args =>
+      term.prod (term.vectorField t y args) (controlDerivative t left)
+  }
+
+def toODE? (term : ControlTerm Y VF Control Args) (left : Bool := true) :
+    Option (ODETerm Y Args) :=
+  match term.controlDerivative? with
+  | some controlDerivative => some (toODEWithDerivative term controlDerivative left)
+  | none => none
+
 def ofPath (vectorField : Time → Y → Args → VF) (path : AbstractPath Control)
     (prod : VF → Control → Y) : ControlTerm Y VF Control Args :=
   {
     vectorField := vectorField
     control := fun t0 t1 => path.evaluate t0 (some t1) true
     prod := prod
+    controlDerivative? := path.derivativeFn?
   }
 
 end ControlTerm
@@ -159,6 +182,12 @@ structure MultiTerm (T1 T2 : Type) where
   term1 : T1
   term2 : T2
 
+abbrev MultiTerm3 (T1 T2 T3 : Type) : Type :=
+  MultiTerm (MultiTerm T1 T2) T3
+
+abbrev MultiTerm4 (T1 T2 T3 T4 : Type) : Type :=
+  MultiTerm (MultiTerm3 T1 T2 T3) T4
+
 instance {T1 T2 Y VF1 VF2 C1 C2 Args : Type}
     [TermLike T1 Y VF1 C1 Args] [TermLike T2 Y VF2 C2 Args]
     [DiffEqSpace Y] :
@@ -189,7 +218,95 @@ def toAbstract {T1 T2 Y VF1 VF2 C1 C2 Args : Type}
     AbstractTerm Y (VF1 × VF2) (C1 × C2) Args :=
   AbstractTerm.ofTermLike term
 
+def append (term : MultiTerm T1 T2) (term3 : T3) : MultiTerm3 T1 T2 T3 :=
+  { term1 := term, term2 := term3 }
+
+def prepend (term0 : T0) (term : MultiTerm T1 T2) : MultiTerm3 T0 T1 T2 :=
+  { term1 := { term1 := term0, term2 := term.term1 }, term2 := term.term2 }
+
+def of3 (term1 : T1) (term2 : T2) (term3 : T3) : MultiTerm3 T1 T2 T3 :=
+  append { term1 := term1, term2 := term2 } term3
+
+def of4 (term1 : T1) (term2 : T2) (term3 : T3) (term4 : T4) : MultiTerm4 T1 T2 T3 T4 :=
+  append (of3 term1 term2 term3) term4
+
 end MultiTerm
+
+/-- Homogeneous additive combination of 1+ terms (array-like version). -/
+structure MultiTermArray (Term : Type) where
+  head : Term
+  tail : Array Term := #[]
+
+instance {Term Y VF Control Args : Type}
+    [TermLike Term Y VF Control Args] [DiffEqSpace Y]
+    [Inhabited Term] [Inhabited VF] [Inhabited Control] :
+    TermLike (MultiTermArray Term) Y (Array VF) (Array Control) Args where
+  vf terms t y args :=
+    let termLike := (inferInstance : TermLike Term Y VF Control Args)
+    (#[terms.head] ++ terms.tail).map (fun term => termLike.vf term t y args)
+  contr terms t0 t1 :=
+    let termLike := (inferInstance : TermLike Term Y VF Control Args)
+    (#[terms.head] ++ terms.tail).map (fun term => termLike.contr term t0 t1)
+  prod terms vf control :=
+    let termLike := (inferInstance : TermLike Term Y VF Control Args)
+    let allTerms := #[terms.head] ++ terms.tail
+    let y0 := termLike.prod allTerms[0]! vf[0]! control[0]!
+    Id.run do
+      let mut acc := y0
+      for i in [1:allTerms.size] do
+        let yi := termLike.prod allTerms[i]! vf[i]! control[i]!
+        acc := DiffEqSpace.add acc yi
+      acc
+  vf_prod terms t y args control :=
+    let termLike := (inferInstance : TermLike Term Y VF Control Args)
+    let allTerms := #[terms.head] ++ terms.tail
+    let y0 := termLike.vf_prod allTerms[0]! t y args control[0]!
+    Id.run do
+      let mut acc := y0
+      for i in [1:allTerms.size] do
+        let yi := termLike.vf_prod allTerms[i]! t y args control[i]!
+        acc := DiffEqSpace.add acc yi
+      acc
+  is_vf_expensive terms t0 t1 y args :=
+    let termLike := (inferInstance : TermLike Term Y VF Control Args)
+    Id.run do
+      let allTerms := #[terms.head] ++ terms.tail
+      let mut expensive := false
+      for i in [:allTerms.size] do
+        expensive := expensive || termLike.is_vf_expensive allTerms[i]! t0 t1 y args
+      expensive
+
+namespace MultiTermArray
+
+def singleton (term : Term) : MultiTermArray Term :=
+  { head := term }
+
+def toArray (terms : MultiTermArray Term) : Array Term :=
+  #[terms.head] ++ terms.tail
+
+def size (terms : MultiTermArray Term) : Nat :=
+  terms.tail.size + 1
+
+def push (terms : MultiTermArray Term) (term : Term) : MultiTermArray Term :=
+  { terms with tail := terms.tail.push term }
+
+def ofArray? (terms : Array Term) : Option (MultiTermArray Term) :=
+  match terms[0]? with
+  | none => none
+  | some head =>
+      some {
+        head := head
+        tail := terms.extract 1 terms.size
+      }
+
+def toAbstract {Term Y VF Control Args : Type}
+    [TermLike Term Y VF Control Args] [DiffEqSpace Y]
+    [Inhabited Term] [Inhabited VF] [Inhabited Control]
+    (terms : MultiTermArray Term) :
+    AbstractTerm Y (Array VF) (Array Control) Args :=
+  AbstractTerm.ofTermLike terms
+
+end MultiTermArray
 
 end DiffEq
 end torch

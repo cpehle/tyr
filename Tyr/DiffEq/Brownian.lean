@@ -45,6 +45,10 @@ class SpaceTimeLevyAreaBuild (Control BM : Type) where
 class SpaceTimeTimeLevyAreaBuild (Control BM : Type) where
   build : Time → BM → BM → BM → Control
 
+/-- Shape-aware Gaussian sampler used to construct Brownian controls generically. -/
+class BrownianSample (BM : Type) where
+  sampleScaledNormal : PRNGKey → Float → BM
+
 instance : BrownianIncrementLike (BrownianIncrement Time BM) BM where
   dt inc := inc.dt
   W inc := inc.W
@@ -68,6 +72,18 @@ instance : SpaceTimeLevyAreaBuild (SpaceTimeLevyArea Time BM) BM where
 
 instance : SpaceTimeTimeLevyAreaBuild (SpaceTimeTimeLevyArea Time BM) BM where
   build dt w h k := { dt := dt, W := w, H := h, K := k }
+
+instance : BrownianSample Float where
+  sampleScaledNormal key scale := PRNGKey.normal01 key 0 * scale
+
+instance [BrownianSample BM1] [BrownianSample BM2] : BrownianSample (BM1 × BM2) where
+  sampleScaledNormal key scale :=
+    let key1 := PRNGKey.foldIn key 0
+    let key2 := PRNGKey.foldIn key 1
+    (
+      BrownianSample.sampleScaledNormal (BM := BM1) key1 scale,
+      BrownianSample.sampleScaledNormal (BM := BM2) key2 scale
+    )
 
 instance [DiffEqSpace BM] : DiffEqSpace (BrownianIncrement Time BM) where
   add a b := { dt := a.dt + b.dt, W := DiffEqSpace.add a.W b.W }
@@ -120,7 +136,7 @@ structure VirtualBrownianTree (BM : Type) where
   seed : UInt64
   shape : BM
 
-/-! ## Scalar Brownian Motion (Float) -/
+/-! ## Keyed Brownian Sampling Helpers -/
 
 private def timeToUInt32 (t : Time) : UInt32 :=
   (t * 1000000.0).toUInt64.toUInt32
@@ -142,11 +158,38 @@ private def pointKey (seed : UInt64) (t0 t1 t : Time) : PRNGKey :=
   let key := keyFoldTimes (PRNGKey.foldIn (baseKey seed) 0x13198a2e) t0 t1
   PRNGKey.foldIn key (timeToUInt32 t)
 
-private def scalarIncrement (seed : UInt64) (t0 t1 : Time) : BrownianIncrement Time Float :=
+private def buildBrownianIncrement [BrownianSample BM] [BrownianIncrementBuild Control BM]
+    (seed : UInt64) (t0 t1 : Time) : Control :=
   let dt := t1 - t0
   let scale := Float.sqrt (Float.abs dt)
   let key := intervalKey seed t0 t1
-  { dt := dt, W := PRNGKey.normal01 key 0 * scale }
+  let w : BM := BrownianSample.sampleScaledNormal (BM := BM) key scale
+  BrownianIncrementBuild.build (Control := Control) (BM := BM) dt w
+
+private def buildSpaceTimeLevyArea [BrownianSample BM] [SpaceTimeLevyAreaBuild Control BM]
+    (seed : UInt64) (t0 t1 : Time) : Control :=
+  let dt := t1 - t0
+  let scale := Float.sqrt (Float.abs dt)
+  let key := intervalKey seed t0 t1
+  let w : BM := BrownianSample.sampleScaledNormal (BM := BM) (PRNGKey.foldIn key 1) scale
+  let h : BM :=
+    BrownianSample.sampleScaledNormal (BM := BM) (PRNGKey.foldIn key 2) (scale / Float.sqrt 12.0)
+  SpaceTimeLevyAreaBuild.build (Control := Control) (BM := BM) dt w h
+
+private def buildSpaceTimeTimeLevyArea [BrownianSample BM]
+    [SpaceTimeTimeLevyAreaBuild Control BM] (seed : UInt64) (t0 t1 : Time) : Control :=
+  let dt := t1 - t0
+  let scale := Float.sqrt (Float.abs dt)
+  let key := intervalKey seed t0 t1
+  let w : BM := BrownianSample.sampleScaledNormal (BM := BM) (PRNGKey.foldIn key 1) scale
+  let h : BM :=
+    BrownianSample.sampleScaledNormal (BM := BM) (PRNGKey.foldIn key 2) (scale / Float.sqrt 12.0)
+  let k : BM :=
+    BrownianSample.sampleScaledNormal (BM := BM) (PRNGKey.foldIn key 3) (scale / Float.sqrt 720.0)
+  SpaceTimeTimeLevyAreaBuild.build (Control := Control) (BM := BM) dt w h k
+
+private def scalarIncrement (seed : UInt64) (t0 t1 : Time) : BrownianIncrement Time Float :=
+  buildBrownianIncrement (Control := BrownianIncrement Time Float) (BM := Float) seed t0 t1
 
 structure ScalarBrownianPath where
   t0 : Time
@@ -185,27 +228,36 @@ end AbstractBrownianPath
 
 namespace UnsafeBrownianPath
 
-private def incrementSpaceTime (path : UnsafeBrownianPath Float) (t0 t1 : Time) :
-    SpaceTimeLevyArea Time Float :=
-  let dt := t1 - t0
-  let scale := Float.sqrt (Float.abs dt)
-  let key := intervalKey path.seed t0 t1
-  let w := PRNGKey.normal01 (PRNGKey.foldIn key 1) 0 * scale
-  let h := PRNGKey.normal01 (PRNGKey.foldIn key 2) 0 * (scale / Float.sqrt 12.0)
-  { dt := dt, W := w, H := h }
+def increment [BrownianSample BM] (path : UnsafeBrownianPath BM) (t0 t1 : Time) :
+    BrownianIncrement Time BM :=
+  buildBrownianIncrement (Control := BrownianIncrement Time BM) (BM := BM) path.seed t0 t1
 
-private def incrementSpaceTimeTime (path : UnsafeBrownianPath Float) (t0 t1 : Time) :
-    SpaceTimeTimeLevyArea Time Float :=
-  let dt := t1 - t0
-  let scale := Float.sqrt (Float.abs dt)
-  let key := intervalKey path.seed t0 t1
-  let w := PRNGKey.normal01 (PRNGKey.foldIn key 1) 0 * scale
-  let h := PRNGKey.normal01 (PRNGKey.foldIn key 2) 0 * (scale / Float.sqrt 12.0)
-  let k := PRNGKey.normal01 (PRNGKey.foldIn key 3) 0 * (scale / Float.sqrt 720.0)
-  { dt := dt, W := w, H := h, K := k }
+def evaluate [BrownianSample BM] (path : UnsafeBrownianPath BM) (t0 t1 : Time)
+    (_left : Bool := true) : BM :=
+  (increment path t0 t1).W
+
+def toAbstract [BrownianSample BM] (path : UnsafeBrownianPath BM) : AbstractBrownianPath BM :=
+  {
+    t0 := path.t0
+    t1 := path.t1
+    evaluate := fun t0 t1 left => evaluate path t0 t1 left
+    increment := fun t0 t1 => increment path t0 t1
+  }
+
+def toAbstractFloatPair (path : UnsafeBrownianPath (Float × Float)) :
+    AbstractBrownianPath (Float × Float) :=
+  toAbstract path
+
+private def incrementSpaceTime [BrownianSample BM] (path : UnsafeBrownianPath BM) (t0 t1 : Time) :
+    SpaceTimeLevyArea Time BM :=
+  buildSpaceTimeLevyArea (Control := SpaceTimeLevyArea Time BM) (BM := BM) path.seed t0 t1
+
+private def incrementSpaceTimeTime [BrownianSample BM] (path : UnsafeBrownianPath BM) (t0 t1 : Time) :
+    SpaceTimeTimeLevyArea Time BM :=
+  buildSpaceTimeTimeLevyArea (Control := SpaceTimeTimeLevyArea Time BM) (BM := BM) path.seed t0 t1
 
 def toAbstractFloat (path : UnsafeBrownianPath Float) : AbstractBrownianPath Float :=
-  ScalarBrownianPath.toAbstract { t0 := path.t0, t1 := path.t1, seed := path.seed }
+  toAbstract path
 
 def toAbstractSpaceTime (path : UnsafeBrownianPath Float) :
     AbstractBrownianPath (SpaceTimeLevyArea Time Float) :=

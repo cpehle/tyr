@@ -22,6 +22,13 @@ import Tyr.DiffEq.Solver.SEA
 import Tyr.DiffEq.Solver.SRA1
 import Tyr.DiffEq.Solver.ShARK
 import Tyr.DiffEq.Solver.GeneralShARK
+import Tyr.DiffEq.Solver.SemiImplicitEuler
+import Tyr.DiffEq.Solver.SlowRK
+import Tyr.DiffEq.Solver.SPaRK
+import Tyr.DiffEq.Solver.HalfSolver
+import Tyr.DiffEq.Solver.ALIGN
+import Tyr.DiffEq.Solver.ShOULD
+import Tyr.DiffEq.Solver.QUICSORT
 import Tyr.DiffEq.Solver.RungeKutta
 import Tyr.DiffEq.Solver.Ralston
 import Tyr.DiffEq.Solver.Bosh3
