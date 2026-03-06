@@ -6,6 +6,13 @@ namespace DiffEq
 
 /-! ## Implicit Euler Solver -/
 
+local instance (priority := 5) [DiffEqSpace α] : HAdd α α α :=
+  _root_.torch.DiffEq.DiffEqArithmetic.hAddInst
+local instance (priority := 5) [DiffEqSpace α] : HSub α α α :=
+  _root_.torch.DiffEq.DiffEqArithmetic.hSubInst
+local instance (priority := 5) [DiffEqSpace α] : HMul Scalar α α :=
+  _root_.torch.DiffEq.DiffEqArithmetic.hMulInst
+
 structure ImplicitEuler where
   rootFinder : FixedPoint := {}
   deriving Inhabited
@@ -26,11 +33,11 @@ def ImplicitEuler.solver (cfg : ImplicitEuler := {}) {Term Y VF Args : Type}
     let dt := inst.contr term t0 t1
     let k0 := inst.vf_prod term t0 y0 args dt
     let stepFn := fun k =>
-      inst.vf_prod term t1 (DiffEqSpace.add y0 k) args dt
+      inst.vf_prod term t1 (y0 + k) args dt
     let sol := RootFinder.solve cfg.rootFinder stepFn k0
     let k1 := sol.value
-    let y1 := DiffEqSpace.add y0 k1
-    let yErr := DiffEqSpace.scale 0.5 (DiffEqSpace.sub k1 k0)
+    let y1 := y0 + k1
+    let yErr := 0.5 * (k1 - k0)
     let dense := { t0 := t0, t1 := t1, y0 := y0, y1 := y1 }
     {
       y1 := y1

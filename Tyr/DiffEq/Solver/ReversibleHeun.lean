@@ -5,6 +5,13 @@ namespace DiffEq
 
 /-! ## Reversible Heun Solver -/
 
+local instance (priority := 5) [DiffEqSpace α] : HAdd α α α :=
+  _root_.torch.DiffEq.DiffEqArithmetic.hAddInst
+local instance (priority := 5) [DiffEqSpace α] : HSub α α α :=
+  _root_.torch.DiffEq.DiffEqArithmetic.hSubInst
+local instance (priority := 5) [DiffEqSpace α] : HMul Scalar α α :=
+  _root_.torch.DiffEq.DiffEqArithmetic.hMulInst
+
 structure ReversibleHeun where
   deriving Inhabited
 
@@ -28,13 +35,13 @@ def ReversibleHeun.solver {Term Y VF Control Args : Type}
     let control := inst.contr term t0 t1
     let prod0 := inst.prod term vf0 control
     let yhat1 :=
-      DiffEqSpace.add (DiffEqSpace.add y0 (DiffEqSpace.sub y0 yhat0)) prod0
+      (y0 + (y0 - yhat0)) + prod0
     let vf1 := inst.vf term t1 yhat1 args
     let prod1 := inst.prod term vf1 control
     let y1 :=
-      DiffEqSpace.add y0 (DiffEqSpace.scale 0.5 (DiffEqSpace.add prod0 prod1))
+      y0 + (0.5 * (prod0 + prod1))
     let yErr :=
-      DiffEqSpace.scale 0.5 (DiffEqSpace.sub prod1 prod0)
+      0.5 * (prod1 - prod0)
     let dense := { t0 := t0, t1 := t1, y0 := y0, y1 := y1 }
     {
       y1 := y1

@@ -5,6 +5,13 @@ namespace DiffEq
 
 /-! ## Semi-Implicit Euler Solver -/
 
+local instance (priority := 5) [DiffEqSpace α] : HAdd α α α :=
+  _root_.torch.DiffEq.DiffEqArithmetic.hAddInst
+local instance (priority := 5) [DiffEqSpace α] : HSub α α α :=
+  _root_.torch.DiffEq.DiffEqArithmetic.hSubInst
+local instance (priority := 5) [DiffEqSpace α] : HMul Scalar α α :=
+  _root_.torch.DiffEq.DiffEqArithmetic.hMulInst
+
 structure SemiImplicitEuler where
   deriving Inhabited
 
@@ -30,9 +37,9 @@ def SemiImplicitEuler.solver {PositionTerm VelocityTerm Y VFx VFv Cx Cv Args : T
     let controlX := posInst.contr positionTerm t0 t1
     let controlV := velInst.contr velocityTerm t0 t1
     let dx := posInst.vf_prod positionTerm t0 v0 args controlX
-    let x1 := DiffEqSpace.add x0 dx
+    let x1 := x0 + dx
     let dv := velInst.vf_prod velocityTerm t0 x1 args controlV
-    let v1 := DiffEqSpace.add v0 dv
+    let v1 := v0 + dv
     let y1 := (x1, v1)
     let dense := { t0 := t0, t1 := t1, y0 := y0, y1 := y1 }
     {

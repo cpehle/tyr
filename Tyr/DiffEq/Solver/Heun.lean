@@ -5,6 +5,13 @@ namespace DiffEq
 
 /-! ## Heun Solver (Explicit RK2) -/
 
+local instance (priority := 5) [DiffEqSpace α] : HAdd α α α :=
+  _root_.torch.DiffEq.DiffEqArithmetic.hAddInst
+local instance (priority := 5) [DiffEqSpace α] : HSub α α α :=
+  _root_.torch.DiffEq.DiffEqArithmetic.hSubInst
+local instance (priority := 5) [DiffEqSpace α] : HMul Scalar α α :=
+  _root_.torch.DiffEq.DiffEqArithmetic.hMulInst
+
 structure Heun where
   deriving Inhabited
 
@@ -21,10 +28,10 @@ def Heun.solver {Term Y VF Control Args : Type}
     let inst := (inferInstance : TermLike Term Y VF Control Args)
     let dt := inst.contr term t0 t1
     let k1 := inst.vf_prod term t0 y0 args dt
-    let yPred := DiffEqSpace.add y0 k1
+    let yPred := y0 + k1
     let k2 := inst.vf_prod term t1 yPred args dt
     let y1 :=
-      DiffEqSpace.add y0 (DiffEqSpace.scale 0.5 (DiffEqSpace.add k1 k2))
+      y0 + (0.5 * (k1 + k2))
     let dense := { t0 := t0, t1 := t1, y0 := y0, y1 := y1 }
     {
       y1 := y1

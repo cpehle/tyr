@@ -5,6 +5,13 @@ namespace DiffEq
 
 /-! ## Midpoint Solver (Explicit RK2) -/
 
+local instance (priority := 5) [DiffEqSpace α] : HAdd α α α :=
+  _root_.torch.DiffEq.DiffEqArithmetic.hAddInst
+local instance (priority := 5) [DiffEqSpace α] : HSub α α α :=
+  _root_.torch.DiffEq.DiffEqArithmetic.hSubInst
+local instance (priority := 5) [DiffEqSpace α] : HMul Scalar α α :=
+  _root_.torch.DiffEq.DiffEqArithmetic.hMulInst
+
 structure Midpoint where
   deriving Inhabited
 
@@ -21,10 +28,10 @@ def Midpoint.solver {Term Y VF Args : Type}
     let inst := (inferInstance : TermLike Term Y VF Time Args)
     let dt := inst.contr term t0 t1
     let k1 := inst.vf_prod term t0 y0 args dt
-    let yMid := DiffEqSpace.add y0 (DiffEqSpace.scale 0.5 k1)
+    let yMid := y0 + (0.5 * k1)
     let tMid := t0 + dt / 2.0
     let k2 := inst.vf_prod term tMid yMid args dt
-    let y1 := DiffEqSpace.add y0 k2
+    let y1 := y0 + k2
     let dense := { t0 := t0, t1 := t1, y0 := y0, y1 := y1 }
     {
       y1 := y1

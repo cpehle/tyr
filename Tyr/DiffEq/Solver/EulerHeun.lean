@@ -5,6 +5,13 @@ namespace DiffEq
 
 /-! ## Euler-Heun SDE Solver -/
 
+local instance (priority := 5) [DiffEqSpace α] : HAdd α α α :=
+  _root_.torch.DiffEq.DiffEqArithmetic.hAddInst
+local instance (priority := 5) [DiffEqSpace α] : HSub α α α :=
+  _root_.torch.DiffEq.DiffEqArithmetic.hSubInst
+local instance (priority := 5) [DiffEqSpace α] : HMul Scalar α α :=
+  _root_.torch.DiffEq.DiffEqArithmetic.hMulInst
+
 structure EulerHeun where
   deriving Inhabited
 
@@ -28,10 +35,10 @@ def EulerHeun.solver {Drift Diffusion Y VFd VFg Control Args : Type}
     let dW := diffInst.contr diffusion t0 t1
     let f0 := driftInst.vf_prod drift t0 y0 args dt
     let g0 := diffInst.vf_prod diffusion t0 y0 args dW
-    let yPrime := DiffEqSpace.add y0 g0
+    let yPrime := y0 + g0
     let gPrime := diffInst.vf_prod diffusion t0 yPrime args dW
     let y1 :=
-      DiffEqSpace.add y0 (DiffEqSpace.add f0 (DiffEqSpace.scale 0.5 (DiffEqSpace.add g0 gPrime)))
+      y0 + (f0 + (0.5 * (g0 + gPrime)))
     let dense := { t0 := t0, t1 := t1, y0 := y0, y1 := y1 }
     {
       y1 := y1

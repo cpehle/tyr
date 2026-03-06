@@ -5,6 +5,13 @@ namespace DiffEq
 
 /-! ## Euler Solver -/
 
+local instance (priority := 5) [DiffEqSpace α] : HAdd α α α :=
+  _root_.torch.DiffEq.DiffEqArithmetic.hAddInst
+local instance (priority := 5) [DiffEqSpace α] : HSub α α α :=
+  _root_.torch.DiffEq.DiffEqArithmetic.hSubInst
+local instance (priority := 5) [DiffEqSpace α] : HMul Scalar α α :=
+  _root_.torch.DiffEq.DiffEqArithmetic.hMulInst
+
 structure Euler where
   deriving Inhabited
 
@@ -21,7 +28,7 @@ def Euler.solver {Term Y VF Control Args : Type}
     let inst := (inferInstance : TermLike Term Y VF Control Args)
     let control := inst.contr term t0 t1
     let dy := inst.vf_prod term t0 y0 args control
-    let y1 := DiffEqSpace.add y0 dy
+    let y1 := y0 + dy
     let dense := { t0 := t0, t1 := t1, y0 := y0, y1 := y1 }
     {
       y1 := y1

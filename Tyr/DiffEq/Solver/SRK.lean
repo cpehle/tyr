@@ -9,6 +9,13 @@ namespace DiffEq
 Minimal SRK infrastructure for additive-noise SDEs using space-time Levy areas.
 -/
 
+local instance (priority := 5) [DiffEqSpace α] : HAdd α α α :=
+  _root_.torch.DiffEq.DiffEqArithmetic.hAddInst
+local instance (priority := 5) [DiffEqSpace α] : HSub α α α :=
+  _root_.torch.DiffEq.DiffEqArithmetic.hSubInst
+local instance (priority := 5) [DiffEqSpace α] : HMul Scalar α α :=
+  _root_.torch.DiffEq.DiffEqArithmetic.hMulInst
+
 structure AdditiveCoeffs (s : Nat) where
   a : Vector s Time
   bSol : Time
@@ -39,7 +46,7 @@ structure StochasticRK (s : Nat) where
 namespace StochasticRK
 
 private def zeroLike [DiffEqSpace Y] (y0 : Y) : Y :=
-  DiffEqSpace.scale 0.0 y0
+  0.0 * y0
 
 private def weightedSum {s : Nat} [DiffEqSpace Y] (coeffs : Vector s Time)
     (ks : Array Y) (y0 : Y) : Y := Id.run do
@@ -48,7 +55,7 @@ private def weightedSum {s : Nat} [DiffEqSpace Y] (coeffs : Vector s Time)
   for j in [:coeffArr.size] do
     let a := coeffArr.getD j 0.0
     let kj := ks.getD j (zeroLike y0)
-    acc := DiffEqSpace.add acc (DiffEqSpace.scale a kj)
+    acc := acc + a * kj
   return acc
 
 private def weightedSumArray [DiffEqSpace Y] (coeffs : Array Time)
@@ -57,7 +64,7 @@ private def weightedSumArray [DiffEqSpace Y] (coeffs : Array Time)
   for j in [:coeffs.size] do
     let a := coeffs.getD j 0.0
     let kj := ks.getD j zero
-    acc := DiffEqSpace.add acc (DiffEqSpace.scale a kj)
+    acc := acc + a * kj
   return acc
 
 def solver {s : Nat} {Drift Diffusion Y VFg Control Args : Type}
@@ -100,12 +107,12 @@ def solver {s : Nat} {Drift Diffusion Y VFg Control Args : Type}
           let ctrlH := buildInst.build dtControl h 0.0
           let g0 := diffInst.vf diffusion t0 y0 args
           let g1 := diffInst.vf diffusion t1 y0 args
-          let gDelta := DiffEqSpace.scale 0.5 (DiffEqSpace.sub g1 g0)
+          let gDelta := 0.5 * (g1 - g0)
           let wKg := diffInst.prod diffusion g0 ctrlW
           let hKg :=
             match coeffsH with
             | some _ => diffInst.prod diffusion g0 ctrlH
-            | none => DiffEqSpace.scale 0.0 wKg
+            | none => 0.0 * wKg
           let coeffsWArr := coeffsW.a.toArray
           let ks := Id.run do
             let mut ks : Array Y := #[]
@@ -115,16 +122,16 @@ def solver {s : Nat} {Drift Diffusion Y VFg Control Args : Type}
               for i in [:row.size] do
                 let aij := row.getD i 0.0
                 let ki := ks.getD i zero
-                driftSum := DiffEqSpace.add driftSum (DiffEqSpace.scale aij ki)
+                driftSum := driftSum + aij * ki
               let aW := coeffsWArr.getD j 0.0
-              let mut diffSum := DiffEqSpace.scale aW wKg
+              let mut diffSum := aW * wKg
               match coeffsH with
               | some coeffsH =>
                   let aH := coeffsH.a.toArray.getD j 0.0
-                  diffSum := DiffEqSpace.add diffSum (DiffEqSpace.scale aH hKg)
+                  diffSum := diffSum + aH * hKg
               | none => pure ()
               let ti := t0 + cs.getD j 0.0 * dt
-              let zi := DiffEqSpace.add y0 (DiffEqSpace.add driftSum diffSum)
+              let zi := y0 + (driftSum + diffSum)
               let ki := driftInst.vf_prod drift ti zi args dt
               ks := ks.push ki
             return ks
@@ -132,17 +139,15 @@ def solver {s : Nat} {Drift Diffusion Y VFg Control Args : Type}
           let diffResult :=
             match coeffsH with
             | some coeffsH =>
-                let base := DiffEqSpace.add
-                  (DiffEqSpace.scale coeffsW.bSol wKg)
-                  (DiffEqSpace.scale coeffsH.bSol hKg)
+                let base := (coeffsW.bSol * wKg) + (coeffsH.bSol * hKg)
                 let ctrlTime := buildInst.build dtControl (w - 2.0 * h) 0.0
                 let timeVarTerm := diffInst.prod diffusion gDelta ctrlTime
-                DiffEqSpace.add base timeVarTerm
+                base + timeVarTerm
             | none =>
-                let base := DiffEqSpace.scale coeffsW.bSol wKg
+                let base := coeffsW.bSol * wKg
                 let timeVarTerm := diffInst.prod diffusion gDelta ctrlW
-                DiffEqSpace.add base timeVarTerm
-          let y1 := DiffEqSpace.add y0 (DiffEqSpace.add driftResult diffResult)
+                base + timeVarTerm
+          let y1 := y0 + (driftResult + diffResult)
           (y1, none)
       | StochasticCoeffs.general coeffsW =>
           let coeffsH :=
@@ -172,7 +177,7 @@ def solver {s : Nat} {Drift Diffusion Y VFg Control Args : Type}
                     weightedSumArray aHRow ksH zero
                 | none => zero
               let ti := t0 + cs.getD j 0.0 * dt
-              let zi := DiffEqSpace.add y0 (DiffEqSpace.add driftSum (DiffEqSpace.add wSum hSum))
+              let zi := y0 + (driftSum + (wSum + hSum))
               let kf := driftInst.vf_prod drift ti zi args dt
               let kgW := diffInst.vf_prod diffusion ti zi args ctrlW
               let kgH :=
@@ -189,8 +194,8 @@ def solver {s : Nat} {Drift Diffusion Y VFg Control Args : Type}
             match coeffsH with
             | some coeffsH => weightedSum coeffsH.bSol ksH y0
             | none => zero
-          let diffResult := DiffEqSpace.add wResult hResult
-          let y1 := DiffEqSpace.add y0 (DiffEqSpace.add driftResult diffResult)
+          let diffResult := wResult + hResult
+          let y1 := y0 + (driftResult + diffResult)
           let yError :=
             match rk.tableau.bErr with
             | none => none
@@ -207,8 +212,8 @@ def solver {s : Nat} {Drift Diffusion Y VFg Control Args : Type}
                       | some bHErr => weightedSum bHErr ksH y0
                       | none => zero
                   | none => zero
-                let diffErr := DiffEqSpace.add wErr hErr
-                some (DiffEqSpace.add driftErr diffErr)
+                let diffErr := wErr + hErr
+                some (driftErr + diffErr)
           (y1, yError)
     let dense := { t0 := t0, t1 := t1, y0 := y0, y1 := y1 }
     {

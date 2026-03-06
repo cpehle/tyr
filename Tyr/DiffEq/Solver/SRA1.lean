@@ -6,6 +6,13 @@ namespace DiffEq
 
 /-! ## SRA1 Stochastic Runge-Kutta Solver (additive noise, Stratonovich) -/
 
+local instance (priority := 5) [DiffEqSpace α] : HAdd α α α :=
+  _root_.torch.DiffEq.DiffEqArithmetic.hAddInst
+local instance (priority := 5) [DiffEqSpace α] : HSub α α α :=
+  _root_.torch.DiffEq.DiffEqArithmetic.hSubInst
+local instance (priority := 5) [DiffEqSpace α] : HMul Scalar α α :=
+  _root_.torch.DiffEq.DiffEqArithmetic.hMulInst
+
 structure SRA1 where
   deriving Inhabited
 
@@ -35,25 +42,25 @@ def SRA1.solver {Drift Diffusion Y VFg Control Args : Type}
     let w := ctrlInst.W control
     let h := ctrlInst.H control
     let dtControl := ctrlInst.dt control
-    let zero := DiffEqSpace.sub w w
+    let zero := w - w
     let ctrlW := buildInst.build dtControl w zero
     let ctrlH := buildInst.build dtControl h zero
     let g0 := diffInst.vf diffusion t0 y0 args
     let g1 := diffInst.vf diffusion t1 y0 args
-    let g_delta := DiffEqSpace.scale 0.5 (DiffEqSpace.sub g1 g0)
+    let g_delta := 0.5 * (g1 - g0)
     let w_kg := diffInst.prod diffusion g0 ctrlW
     let h_kg := diffInst.prod diffusion g0 ctrlH
     let h_kf0 := driftInst.vf_prod drift t0 y0 args dt
-    let drift1 := DiffEqSpace.scale 0.75 h_kf0
-    let diff1 := DiffEqSpace.add (DiffEqSpace.scale 0.75 w_kg) (DiffEqSpace.scale 1.5 h_kg)
-    let z1 := DiffEqSpace.add y0 (DiffEqSpace.add drift1 diff1)
+    let drift1 := 0.75 * h_kf0
+    let diff1 := (0.75 * w_kg) + (1.5 * h_kg)
+    let z1 := y0 + (drift1 + diff1)
     let h_kf1 := driftInst.vf_prod drift (t0 + 0.75 * dt) z1 args dt
     let drift_result :=
-      DiffEqSpace.add (DiffEqSpace.scale (1.0 / 3.0) h_kf0) (DiffEqSpace.scale (2.0 / 3.0) h_kf1)
+      ((1.0 / 3.0) * h_kf0) + ((2.0 / 3.0) * h_kf1)
     let ctrlTime := buildInst.build dtControl (w - 2.0 * h) zero
     let time_var_term := diffInst.prod diffusion g_delta ctrlTime
-    let diffusion_result := DiffEqSpace.add w_kg time_var_term
-    let y1 := DiffEqSpace.add y0 (DiffEqSpace.add drift_result diffusion_result)
+    let diffusion_result := w_kg + time_var_term
+    let y1 := y0 + (drift_result + diffusion_result)
     let dense := { t0 := t0, t1 := t1, y0 := y0, y1 := y1 }
     {
       y1 := y1

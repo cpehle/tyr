@@ -5,6 +5,13 @@ namespace DiffEq
 
 /-! ## Leapfrog/Midpoint Solver -/
 
+local instance (priority := 5) [DiffEqSpace α] : HAdd α α α :=
+  _root_.torch.DiffEq.DiffEqArithmetic.hAddInst
+local instance (priority := 5) [DiffEqSpace α] : HSub α α α :=
+  _root_.torch.DiffEq.DiffEqArithmetic.hSubInst
+local instance (priority := 5) [DiffEqSpace α] : HMul Scalar α α :=
+  _root_.torch.DiffEq.DiffEqArithmetic.hMulInst
+
 structure LeapfrogMidpoint where
   deriving Inhabited
 
@@ -23,7 +30,7 @@ def LeapfrogMidpoint.solver {Term Y VF Control Args : Type}
     let (tm1, ym1) := state
     let control := inst.contr term tm1 t1
     let incr := inst.vf_prod term t0 y0 args control
-    let y1 := DiffEqSpace.add ym1 incr
+    let y1 := ym1 + incr
     let dense := { t0 := t0, t1 := t1, y0 := y0, y1 := y1 }
     {
       y1 := y1

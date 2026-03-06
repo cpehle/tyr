@@ -5,6 +5,13 @@ namespace DiffEq
 
 /-! ## Explicit Runge–Kutta Infrastructure -/
 
+local instance (priority := 5) [DiffEqSpace α] : HAdd α α α :=
+  _root_.torch.DiffEq.DiffEqArithmetic.hAddInst
+local instance (priority := 5) [DiffEqSpace α] : HSub α α α :=
+  _root_.torch.DiffEq.DiffEqArithmetic.hSubInst
+local instance (priority := 5) [DiffEqSpace α] : HMul Scalar α α :=
+  _root_.torch.DiffEq.DiffEqArithmetic.hMulInst
+
 structure ButcherTableau (s : Nat) where
   a : Vector s (Array Time)
   b : Vector s Time
@@ -18,7 +25,7 @@ structure ExplicitRK (s : Nat) where
 namespace ExplicitRK
 
 private def zeroLike [DiffEqSpace Y] (y0 : Y) : Y :=
-  DiffEqSpace.scale 0.0 y0
+  0.0 * y0
 
 private def weightedSum {s : Nat} [DiffEqSpace Y] (coeffs : Vector s Time)
     (ks : Array Y) (y0 : Y) : Y := Id.run do
@@ -27,7 +34,7 @@ private def weightedSum {s : Nat} [DiffEqSpace Y] (coeffs : Vector s Time)
   for j in [:coeffArr.size] do
     let a := coeffArr.getD j 0.0
     let kj := ks.getD j (zeroLike y0)
-    acc := DiffEqSpace.add acc (DiffEqSpace.scale a kj)
+    acc := acc + a * kj
   return acc
 
 def solver {s : Nat} {Term Y VF Args : Type}
@@ -53,20 +60,20 @@ def solver {s : Nat} {Term Y VF Args : Type}
         for j in [:i] do
           let aij := row.getD j 0.0
           let kj := ks.getD j zero
-          sum := DiffEqSpace.add sum (DiffEqSpace.scale aij kj)
+          sum := sum + aij * kj
         let ti := t0 + cs.getD i 0.0 * dt
-        let yi := DiffEqSpace.add y0 sum
+        let yi := y0 + sum
         let ki := inst.vf_prod term ti yi args dt
         ks := ks.push ki
       return ks
-    let y1 := DiffEqSpace.add y0 (weightedSum rk.tableau.b ks y0)
+    let y1 := y0 + weightedSum rk.tableau.b ks y0
     let yErr :=
       match rk.tableau.bErr with
       | none => none
       | some bErr =>
           let high := weightedSum rk.tableau.b ks y0
           let low := weightedSum bErr ks y0
-          some (DiffEqSpace.sub high low)
+          some (high - low)
     -- dt-scaled endpoint tangents used by cubic Hermite dense output.
     let m0 := ks.getD 0 zero
     let m1 := inst.vf_prod term t1 y1 args dt
