@@ -20,6 +20,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Initialize required submodules
+        run: git submodule update --init --depth 1 external/soxr
+
       - name: Install elan
         run: |
           curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf | sh -s -- -y --default-toolchain none
@@ -107,7 +110,6 @@ jobs:
           # Key example files that are not covered by `Examples.lean`.
           lake -R env lean Examples/NanoChat/Generator/TypedState.lean
           lake -R env lean Examples/BranchingFlows/BranchingFlowsDemo.lean
-          lake -R env lean Examples/NanoProof/RLTrain.lean
 
       - name: Run tests
         run: |

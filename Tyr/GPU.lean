@@ -8,7 +8,6 @@ import Tyr.GPU.Codegen.Monad
 import Tyr.GPU.Codegen.Loop
 import Tyr.GPU.Codegen.GlobalLayout
 import Tyr.GPU.Codegen.EmitNew
-import Tyr.GPU.Kernels.Examples
 
 /-!
 # Tyr.GPU

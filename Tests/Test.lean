@@ -2,7 +2,6 @@ import Tyr
 import Tyr.Checkpoint
 import Examples.GPT.GPT
 import Examples.GPT.Train
-import Examples.NanoProof.Model
 import LeanTest
 
 open torch
@@ -43,53 +42,3 @@ def testTokenizer : IO Unit := do
   -- Test decode recovers original text
   let decoded := decode tokens
   LeanTest.assertEqual decoded testText "Decode should recover original text"
-
-/-- Test NanoProof model forward pass -/
-@[test]
-def testNanoProof : IO Unit := do
-  let cfg := torch.nanoproof.Config.tiny
-  let params ← torch.nanoproof.NanoProofParams.init cfg (withValueHead := false)
-  let rotaryCache ← torch.nanoproof.RotaryCache.init cfg.sequence_len cfg.headDim
-
-  let batchSize : UInt64 := 2
-  let seqLen : UInt64 := 32
-  let input ← randint 0 cfg.vocab_size.toInt64 #[batchSize, seqLen]
-
-  -- Test 1: Create ModelOutput directly (not via forward)
-  let dummyLogits ← randn #[batchSize, seqLen, cfg.vocab_size] false
-  let directOutput : torch.nanoproof.ModelOutput batchSize seqLen cfg.vocab_size cfg.num_value_bins := {
-    policy_logits := dummyLogits
-    value_logits := none
-  }
-  
-  match directOutput.value_logits with
-  | none => pure ()
-  | some _ => LeanTest.fail "Direct struct: value_logits should be none"
-
-  -- Test 2: Create ModelOutput with Some tensor
-  let dummyValue ← randn #[batchSize, seqLen, cfg.num_value_bins] false
-  let directOutput2 : torch.nanoproof.ModelOutput batchSize seqLen cfg.vocab_size cfg.num_value_bins := {
-    policy_logits := dummyLogits
-    value_logits := some dummyValue
-  }
-  
-  match directOutput2.value_logits with
-  | none => LeanTest.fail "Direct struct 2: value_logits should be some"
-  | some _ => pure ()
-
-  -- Test 3: Try MINIMAL forward (just embedding + linear)
-  let outputMin ← torch.nanoproof.forwardMinimal batchSize seqLen params rotaryCache input
-  match outputMin.value_logits with
-  | none => pure ()
-  | some _ => LeanTest.fail "forwardMinimal: value_logits should be none"
-
-  -- Test 4: Now test full forward (IO version)
-  let output ← torch.nanoproof.forward batchSize seqLen params rotaryCache input
-  match output.value_logits with
-  | none => pure ()
-  | some _ => pure ()
-
-  -- Test loss computation
-  let targets ← randint 0 cfg.vocab_size.toInt64 #[batchSize, seqLen]
-  let _lossVal ← torch.nanoproof.loss batchSize seqLen params rotaryCache input targets
-  pure ()

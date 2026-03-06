@@ -586,8 +586,16 @@ def waveformToWhisperFeaturesDynamic
 
   let minSamplesRaw := ((minSeconds * cfg.samplingRate.toFloat) + 0.5).toUInt64
   let minSamples := if minSamplesRaw == 0 then 1 else minSamplesRaw
+  -- `stft(center := true)` reflection-pads by `nFft/2`, so very short inputs must
+  -- still exceed that padding width to avoid a hard runtime exception in libtorch.
+  let minStftSamples := (nFft / 2) + 1
   let waveSamples := wave.size.toUInt64
-  let targetSamples := if waveSamples >= minSamples then waveSamples else minSamples
+  let targetSamplesRaw := if waveSamples >= minSamples then waveSamples else minSamples
+  let targetSamples :=
+    if targetSamplesRaw >= minStftSamples then
+      targetSamplesRaw
+    else
+      minStftSamples
 
   match maxSeconds with
   | none => pure ()
