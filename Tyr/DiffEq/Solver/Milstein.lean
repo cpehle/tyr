@@ -6,12 +6,9 @@ namespace DiffEq
 
 /-! ## Milstein SDE Solver (Ito) -/
 
-local instance (priority := 5) [DiffEqSpace α] : HAdd α α α :=
-  _root_.torch.DiffEq.DiffEqArithmetic.hAddInst
-local instance (priority := 5) [DiffEqSpace α] : HSub α α α :=
-  _root_.torch.DiffEq.DiffEqArithmetic.hSubInst
-local instance (priority := 5) [DiffEqSpace α] : HMul Scalar α α :=
-  _root_.torch.DiffEq.DiffEqArithmetic.hMulInst
+attribute [local instance] _root_.torch.DiffEq.DiffEqArithmetic.hAddInst
+attribute [local instance] _root_.torch.DiffEq.DiffEqArithmetic.hSubInst
+attribute [local instance] _root_.torch.DiffEq.DiffEqArithmetic.hMulInst
 
 structure Milstein where
   deriving Inhabited
@@ -65,6 +62,33 @@ def withAutodiffJacobianProd {Diffusion Y Control Args : Type}
     JacobianProdDiffusion Diffusion Y Control Args :=
   withJacobianProd term jacobianProd
 
+/-- Attach a JVP callback for `vf_prod` and let Milstein derive the correction
+`g' g` term by contracting along the current control increment.
+
+The callback should compute:
+`∂y (vf_prod term t y args control)[tangent]`.
+
+Milstein then evaluates this at `tangent = vf_prod term t y args control` and
+normalizes by quadratic variation. -/
+structure AutodiffJvpJacobianDiffusion (Diffusion Y Control Args : Type) where
+  term : Diffusion
+  jvpVfProd : Time → Y → Args → Control → Y → Y
+  qvFloor : Float := 1.0e-12
+
+def withAutodiffJvpJacobian {Diffusion Y Control Args : Type}
+    (term : Diffusion)
+    (jvpVfProd : Time → Y → Args → Control → Y → Y)
+    (qvFloor : Float := 1.0e-12) :
+    AutodiffJvpJacobianDiffusion Diffusion Y Control Args :=
+  { term := term, jvpVfProd := jvpVfProd, qvFloor := qvFloor }
+
+def withAutodiffJvpJacobianProd {Diffusion Y Control Args : Type}
+    (term : Diffusion)
+    (jvpVfProd : Time → Y → Args → Control → Y → Y)
+    (qvFloor : Float := 1.0e-12) :
+    AutodiffJvpJacobianDiffusion Diffusion Y Control Args :=
+  withAutodiffJvpJacobian term jvpVfProd qvFloor
+
 instance {Diffusion Y VF Control Args : Type} [TermLike Diffusion Y VF Control Args] :
     TermLike (JacobianProdDiffusion Diffusion Y Control Args) Y VF Control Args where
   vf wrapped := (inferInstance : TermLike Diffusion Y VF Control Args).vf wrapped.term
@@ -77,6 +101,15 @@ instance {Diffusion Y VF Control Args : Type} [TermLike Diffusion Y VF Control A
 instance {Diffusion Y VF Control Args : Type} :
     MilsteinJacobianControlLike (JacobianProdDiffusion Diffusion Y Control Args) Y VF Control Args where
   jacobianProd wrapped t y args control := wrapped.jacobianProd t y args control
+
+instance {Diffusion Y VF Control Args : Type} [TermLike Diffusion Y VF Control Args] :
+    TermLike (AutodiffJvpJacobianDiffusion Diffusion Y Control Args) Y VF Control Args where
+  vf wrapped := (inferInstance : TermLike Diffusion Y VF Control Args).vf wrapped.term
+  contr wrapped := (inferInstance : TermLike Diffusion Y VF Control Args).contr wrapped.term
+  prod wrapped := (inferInstance : TermLike Diffusion Y VF Control Args).prod wrapped.term
+  vf_prod wrapped := (inferInstance : TermLike Diffusion Y VF Control Args).vf_prod wrapped.term
+  is_vf_expensive wrapped :=
+    (inferInstance : TermLike Diffusion Y VF Control Args).is_vf_expensive wrapped.term
 
 structure FiniteDiffJacobianDiffusion (Diffusion : Type) where
   term : Diffusion
@@ -123,6 +156,17 @@ private def finiteDiffJacobianFromVfProd {Diffusion Y VF Control Args : Type}
   let qv := MilsteinControl.quadraticVariation control
   let qvSafe := safeQuadraticVariationDenom qv qvFloor
   (1.0 / qvSafe) * jvpScaled
+
+instance {Diffusion Y VF Control Args : Type}
+    [TermLike Diffusion Y VF Control Args] [DiffEqSpace Y] [MilsteinControl Control] :
+    MilsteinJacobianControlLike (AutodiffJvpJacobianDiffusion Diffusion Y Control Args) Y VF Control Args where
+  jacobianProd wrapped t y args control :=
+    let inst := (inferInstance : TermLike Diffusion Y VF Control Args)
+    let g0 := inst.vf_prod wrapped.term t y args control
+    let jvpScaled := wrapped.jvpVfProd t y args control g0
+    let qv := MilsteinControl.quadraticVariation control
+    let qvSafe := safeQuadraticVariationDenom qv wrapped.qvFloor
+    (1.0 / qvSafe) * jvpScaled
 
 instance {Diffusion Y VF Control Args : Type} [TermLike Diffusion Y VF Control Args] :
     TermLike (FiniteDiffJacobianDiffusion Diffusion) Y VF Control Args where
