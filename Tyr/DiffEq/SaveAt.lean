@@ -35,9 +35,13 @@ def shouldSave (c : StepCadence) (acceptedSteps : Nat) : Bool :=
 end StepCadence
 
 structure SubSaveAt where
+  t0 : Bool := false
+  t1 : Bool := false
   ts : Option (Array Time) := none
   steps : StepCadence := (0 : Nat)
   dense : Bool := false
+  subs : Array SubSaveAt := #[]
+  deriving Inhabited
 
 structure SaveAt where
   t0 : Bool := false
@@ -49,35 +53,74 @@ structure SaveAt where
   controllerState : Bool := false
   madeJump : Bool := false
   subs : Array SubSaveAt := #[]
+  deriving Inhabited
 
 namespace SaveAt
 
-def stepCadence (saveat : SaveAt) : Nat :=
+namespace SubSaveAt
+
+def flatten (root : SubSaveAt) : Array SubSaveAt := Id.run do
+  let mut out : Array SubSaveAt := #[]
+  let mut pending : Array SubSaveAt := #[root]
+  while pending.size > 0 do
+    let i := pending.size - 1
+    let node := pending[i]!
+    pending := pending.pop
+    out := out.push node
+    for child in node.subs do
+      pending := pending.push child
+  return out
+
+end SubSaveAt
+
+private def allSubs (saveat : SaveAt) : Array SubSaveAt :=
+  saveat.subs.foldl (init := #[]) (fun acc sub => acc ++ SaveAt.SubSaveAt.flatten sub)
+
+private def appendTs (acc : Array Time) (ts : Option (Array Time)) : Array Time :=
+  match ts with
+  | some xs => acc ++ xs
+  | none => acc
+
+def effectiveT0 (saveat : SaveAt) : Bool :=
+  saveat.t0 || (allSubs saveat).any (fun sub => sub.t0)
+
+def effectiveT1 (saveat : SaveAt) : Bool :=
+  saveat.t1 || (allSubs saveat).any (fun sub => sub.t1)
+
+def stepCadences (saveat : SaveAt) : Array Nat := Id.run do
+  let mut cadences : Array Nat := #[]
   let base : Nat := saveat.steps
   if base != 0 then
-    base
-  else
-    match saveat.subs.find? (fun sub => (sub.steps : Nat) != 0) with
-    | some sub => sub.steps
-    | none => 0
+    cadences := cadences.push base
+  for sub in allSubs saveat do
+    let cadence : Nat := sub.steps
+    if cadence != 0 then
+      cadences := cadences.push cadence
+  return cadences
+
+def stepCadence (saveat : SaveAt) : Nat :=
+  saveat.stepCadences.foldl
+    (init := 0)
+    (fun acc cadence =>
+      if acc == 0 || cadence < acc then cadence else acc)
 
 def stepsEnabled (saveat : SaveAt) : Bool :=
-  saveat.stepCadence != 0
+  saveat.stepCadences.size != 0
 
 def shouldSaveAcceptedStep (saveat : SaveAt) (acceptedSteps : Nat) : Bool :=
-  let cadence := saveat.stepCadence
-  cadence != 0 && acceptedSteps % cadence == 0
+  saveat.stepCadences.any (fun cadence => acceptedSteps % cadence == 0)
 
 def effectiveTs (saveat : SaveAt) : Option (Array Time) :=
-  match saveat.ts with
-  | some ts => some ts
-  | none =>
-      match saveat.subs.find? (fun sub => sub.ts.isSome) with
-      | some sub => sub.ts
-      | none => none
+  let ts := Id.run do
+    let mut out : Array Time := #[]
+    out := appendTs out saveat.ts
+    for sub in allSubs saveat do
+      out := appendTs out sub.ts
+    return out
+  if ts.size == 0 then none else some ts
 
 def effectiveDense (saveat : SaveAt) : Bool :=
-  saveat.dense || saveat.subs.any (fun sub => sub.dense)
+  saveat.dense || (allSubs saveat).any (fun sub => sub.dense)
 
 end SaveAt
 

@@ -470,12 +470,92 @@ def recursiveCheckpointChunkSize (mode : RecursiveCheckpointAdjoint) : Nat :=
 
 def recursiveCheckpointAdjointUnsupportedReason
     (mode : RecursiveCheckpointAdjoint) : Option String :=
-  if mode.recomputeSegments then
-    let chunkSize := recursiveCheckpointChunkSize mode
-    some
-      s!"Adjoint solve failed: `RecursiveCheckpointAdjoint` recomputation (checkpointEvery := {chunkSize}) is not implemented yet; set `recomputeSegments := false` to use full-trajectory backsolve."
-  else
+  let _ := mode
+  none
+
+private def recursiveCheckpointGrid
+    {Y : Type}
+    [Inhabited Y]
+    (ts : Array Time)
+    (ys : Array Y)
+    (chunkSize : Nat) : Option (Array Time × Array Y) :=
+  if ts.size == 0 || ys.size == 0 || ts.size != ys.size then
     none
+  else
+    let stride := if chunkSize == 0 then 1 else chunkSize
+    let last := ts.size - 1
+    Id.run do
+      let mut chkTs : Array Time := #[ts[0]!]
+      let mut chkYs : Array Y := #[ys[0]!]
+      for i in [:ts.size] do
+        if i != 0 then
+          if i % stride == 0 || i == last then
+            chkTs := chkTs.push ts[i]!
+            chkYs := chkYs.push ys[i]!
+      return some (chkTs, chkYs)
+
+private def recursiveCheckpointBackprop
+    {Y Args Controller : Type}
+    [DiffEqSpace Y] [DiffEqSpace Args]
+    [DiffEqSeminorm Y] [DiffEqSeminorm Args]
+    [DiffEqElem Y] [DiffEqElem Args]
+    [AdjointBackend Y Args]
+    [Inhabited Y] [Inhabited Args]
+    [StepSizeController Controller] [Inhabited Controller]
+    (term : ODETerm Y Args)
+    (solver : AbstractSolver (ODETerm Y Args) Y Y Time Args)
+    (adjSolver :
+      AbstractSolver (ODETerm (AdjointState Y Args) Args)
+        (AdjointState Y Args) (AdjointState Y Args) Time Args)
+    (checkTs : Array Time)
+    (checkYs : Array Y)
+    (dt0 : Option Time)
+    (args : Args)
+    (adjY1 : Y)
+    (maxSteps : Nat)
+    (controller : Controller) :
+    (Option (AdjointResult Y Args) × Option String) :=
+  if checkTs.size == 0 || checkYs.size == 0 || checkTs.size != checkYs.size then
+    (none, some "Adjoint solve failed: recursive checkpoint grid is empty or malformed.")
+  else
+    Id.run do
+      let mut adjY := adjY1
+      let mut adjArgs := DiffEqSpace.scale 0.0 args
+      let mut failure : Option String := none
+      let numSegs := checkTs.size - 1
+      for offset in [:numSegs] do
+        if failure.isNone then
+          let i := checkTs.size - 1 - offset
+          let segT0 := checkTs[i - 1]!
+          let segT1 := checkTs[i]!
+          let segY0 := checkYs[i - 1]!
+          let segSol :=
+            diffeqsolve
+              (Term := ODETerm Y Args)
+              (Y := Y)
+              (VF := Y)
+              (Control := Time)
+              (Args := Args)
+              (Controller := Controller)
+              term solver segT0 segT1 dt0 segY0 args (saveat := { steps := true })
+              (maxSteps := maxSteps)
+              (controller := controller)
+          if segSol.result != Result.successful then
+            failure :=
+              some
+                "Adjoint solve failed: recursive checkpoint segment recomputation did not finish successfully."
+          else
+            match backsolveAdjoint term adjSolver segSol args adjY with
+            | none =>
+                failure :=
+                  some
+                    "Adjoint solve failed: recursive checkpoint segment backsolve did not produce an adjoint state."
+            | some segAdj =>
+                adjY := segAdj.adjY0
+                adjArgs := DiffEqSpace.add adjArgs segAdj.adjArgs
+      match failure with
+      | some msg => return (none, some msg)
+      | none => return (some { adjY0 := adjY, adjArgs := adjArgs }, none)
 
 def directModeUnsupportedReason
     (mode : DirectAdjoint)
@@ -657,12 +737,90 @@ def diffeqsolveRecursiveCheckpointAdjoint
     (maxSteps : Nat := 4096)
     (controller : Controller := default) :
     AdjointSolveWithReport Y solver.SolverState
-      (StepSizeController.State (C := Controller)) Args :=
-  diffeqsolveBacksolveAdjointWithReportCore
-    (Controller := Controller)
-    term solver adjoint t0 t1 dt0 y0 args adjY1 saveat maxSteps controller
-    "unsupported_recursive_checkpoint_adjoint"
-    (recursiveCheckpointAdjointUnsupportedReason mode)
+      (StepSizeController.State (C := Controller)) Args := by
+  match recursiveCheckpointAdjointUnsupportedReason mode with
+  | some msg =>
+      exact
+        mkAdjointFailure
+          (Y := Y)
+          (SolverState := solver.SolverState)
+          (ControllerState := StepSizeController.State (C := Controller))
+          (Args := Args)
+          t0 t1 "unsupported_recursive_checkpoint_adjoint" msg
+  | none =>
+      match backsolveAdjointUnsupportedReason solver t0 t1 saveat with
+      | some msg =>
+          exact
+            mkAdjointFailure
+              (Y := Y)
+              (SolverState := solver.SolverState)
+              (ControllerState := StepSizeController.State (C := Controller))
+              (Args := Args)
+              t0 t1 "unsupported_recursive_checkpoint_backsolve_contract" msg
+      | none =>
+          if !mode.recomputeSegments then
+            let (sol, adjRes) :=
+              diffeqsolveBacksolveAdjoint
+                (Controller := Controller)
+                term solver adjoint t0 t1 dt0 y0 args adjY1 saveat maxSteps controller
+            exact (sol, adjRes, none)
+          else
+            let solPrimal :=
+              diffeqsolve
+                (Term := ODETerm Y Args)
+                (Y := Y)
+                (VF := Y)
+                (Control := Time)
+                (Args := Args)
+                (Controller := Controller)
+                term solver t0 t1 dt0 y0 args (saveat := saveat) (maxSteps := maxSteps)
+                (controller := controller)
+            if solPrimal.result != Result.successful then
+              exact
+                (solPrimal, none,
+                  some
+                    "Adjoint solve failed: primal solve did not finish successfully before recursive checkpoint backpropagation.")
+            else
+              let saveatInternal := { saveat with steps := true, ts := none, dense := false }
+              let solSteps :=
+                diffeqsolve
+                  (Term := ODETerm Y Args)
+                  (Y := Y)
+                  (VF := Y)
+                  (Control := Time)
+                  (Args := Args)
+                  (Controller := Controller)
+                  term solver t0 t1 dt0 y0 args (saveat := saveatInternal)
+                  (maxSteps := maxSteps)
+                  (controller := controller)
+              if solSteps.result != Result.successful then
+                exact
+                  (solPrimal, none,
+                    some
+                      "Adjoint solve failed: could not build recursive checkpoint trajectory because the internal step solve did not finish successfully.")
+              else
+                match solSteps.ts, solSteps.ys with
+                | some ts, some ys =>
+                    match recursiveCheckpointGrid ts ys (recursiveCheckpointChunkSize mode) with
+                    | none =>
+                        exact
+                          (solPrimal, none,
+                            some
+                              "Adjoint solve failed: recursive checkpoint grid construction failed.")
+                    | some (chkTs, chkYs) =>
+                        let (adjRes, backpropFailure) :=
+                          recursiveCheckpointBackprop
+                            (Controller := Controller)
+                            term solver adjoint.adjSolver chkTs chkYs dt0 args adjY1 maxSteps
+                            controller
+                        match backpropFailure with
+                        | some msg => exact (solPrimal, none, some msg)
+                        | none => exact (solPrimal, adjRes, none)
+                | _, _ =>
+                    exact
+                      (solPrimal, none,
+                        some
+                          "Adjoint solve failed: internal recursive checkpoint step solve did not return `(ts, ys)`.")
 
 def diffeqsolveImplicitAdjoint
     {Y Args Controller : Type}

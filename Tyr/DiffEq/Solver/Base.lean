@@ -22,12 +22,47 @@ def arity? : TermStructure → Option Nat
 def ofArity (arity : Nat) : TermStructure :=
   if arity <= 1 then .single else if arity == 2 then .pair else .multi
 
+def ofArity? (arity? : Option Nat) : TermStructure :=
+  match arity? with
+  | some arity => ofArity arity
+  | none => .multi
+
 end TermStructure
 
 structure TermStructureMeta where
   arity? : Option Nat := none
   layoutTag? : Option String := none
+  partitionArities? : Option (Array Nat) := none
   deriving Repr, BEq
+
+namespace TermStructureMeta
+
+def single : TermStructureMeta :=
+  {
+    arity? := some 1
+    layoutTag? := some "single"
+  }
+
+def pair : TermStructureMeta :=
+  {
+    arity? := some 2
+    layoutTag? := some "pair"
+    partitionArities? := some #[1, 1]
+  }
+
+def array (arity : Nat) : TermStructureMeta :=
+  {
+    arity? := some arity
+    layoutTag? := some "array"
+  }
+
+def ofTerm {Term : Type} [torch.DiffEq.TermShape Term] (term : Term) : TermStructureMeta :=
+  {
+    arity? := (inferInstance : torch.DiffEq.TermShape Term).arity? term
+    layoutTag? := (inferInstance : torch.DiffEq.TermShape Term).layoutTag? term
+  }
+
+end TermStructureMeta
 
 structure StepOutput (Y DenseInfo SolverState : Type) where
   y1 : Y
@@ -68,6 +103,20 @@ def termLayoutTag? (solver : AbstractSolver Term Y VF Control Args) : Option Str
 
 def termStructureKind (solver : AbstractSolver Term Y VF Control Args) : TermStructure :=
   solver.termStructure
+
+def withTermStructureMeta (solver : AbstractSolver Term Y VF Control Args)
+    (structureMeta : TermStructureMeta) : AbstractSolver Term Y VF Control Args :=
+  {
+    solver with
+    termStructure := TermStructure.ofArity? structureMeta.arity?
+    termStructureMeta := some structureMeta
+  }
+
+def withInferredTermStructure {Term Y VF Control Args : Type}
+    [torch.DiffEq.TermShape Term]
+    (solver : AbstractSolver Term Y VF Control Args)
+    (term : Term) : AbstractSolver Term Y VF Control Args :=
+  withTermStructureMeta solver (TermStructureMeta.ofTerm term)
 
 end AbstractSolver
 

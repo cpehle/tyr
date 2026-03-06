@@ -134,31 +134,31 @@ Status legend:
 ### DiffEq / ODE-SDE Parity (vs `../diffrax`)
 Reviewed: 2026-03-06 (`Tyr/DiffEq/*` vs `../diffrax/diffrax/*`, `../diffrax/docs/*`).
 
-- [~] `DX01` [High] Event parity baseline landed (`event` solve arg, boolean/real conditions, root localization, `eventMask`/`Result.eventOccurred`), but directionality filtering and richer per-event mask behavior remain.
+- [~] `DX01` [High] Event parity advanced with real-condition directionality (`up`/`down`/either), multi-event solve args, and per-event masks; richer event-tree semantics still remain.
   Refs: `Tyr/DiffEq/Integrate.lean`, `Tyr/DiffEq/Solution.lean`, `Tyr/DiffEq/RootFinder.lean`, `../diffrax/diffrax/_event.py`, `../diffrax/diffrax/_integrate.py`
-- [~] `DX02` [High] Replaced global piecewise-linear dense output with per-step solver interpolation assembly; high-order dense formulas (Tsit5/Dopri/Kvaerno/KenCarp) are still pending.
+- [~] `DX02` [High] Replaced global piecewise-linear dense output with per-step interpolation assembly and upgraded RK local dense interpolation to cubic Hermite; solver-specific high-order formulas (Tsit5/Dopri/Kvaerno/KenCarp) are still pending.
   Refs: `Tyr/DiffEq/Integrate.lean`, `Tyr/DiffEq/Interpolation.lean`, `Tyr/DiffEq/Solver/RungeKutta.lean`, `../diffrax/diffrax/_global_interpolation.py`, `../diffrax/diffrax/_local_interpolation.py`, `../diffrax/diffrax/_solver/*`
-- [~] `DX03` [High] Added integer `steps=n` cadence and `SubSaveAt` plumbing, but custom save `fn(t, y, args)` and full `SubSaveAt` tree semantics are still pending.
+- [~] `DX03` [High] Added integer `steps=n`, nested `SubSaveAt` aggregation, and custom save transform support (`saveFn`), but full diffrax-style `SubSaveAt` payload tree parity is still pending.
   Refs: `Tyr/DiffEq/SaveAt.lean`, `Tyr/DiffEq/Integrate.lean`, `../diffrax/diffrax/_saveat.py`, `../diffrax/diffrax/_integrate.py`
 - [x] `DX04` [High] Continuation/manual-stepping parity implemented: `diffeqsolve` now accepts inbound `solver_state`/`controller_state`/`made_jump` and propagates jump markers into solver steps.
   Refs: `Tyr/DiffEq/Integrate.lean`, `Tyr/DiffEq/SaveAt.lean`, `Tyr/DiffEq/Solver/ReversibleHeun.lean`, `../diffrax/diffrax/_integrate.py`
-- [~] `DX05` [High] Added adjoint-mode dispatch APIs (`RecursiveCheckpointAdjoint`/`ForwardMode`/`ImplicitAdjoint`) with explicit unsupported-matrix reporting; full recursive recomputation/forward/implicit implementations remain open.
+- [~] `DX05` [High] Added adjoint-mode dispatch APIs with explicit unsupported-matrix reporting and implemented recursive-checkpoint recomputation/backprop; forward/implicit parity still remains open.
   Refs: `Tyr/DiffEq/Adjoint/Core.lean`, `../diffrax/diffrax/_adjoint.py`
-- [~] `DX06` [Medium] Expanded Brownian support beyond scalar `Float` via shape-aware sampling and pair-valued paths; broader PyTree/Lévy-area generalization is still pending.
+- [~] `DX06` [Medium] Expanded Brownian support beyond scalar `Float` with shape-aware sampling (`Fin n → BM`) and pair-valued `UnsafeBrownianPath`/`VirtualBrownianTree` conveniences; broader PyTree/Lévy-area generalization is still pending.
   Refs: `Tyr/DiffEq/Brownian.lean`, `../diffrax/diffrax/_brownian/path.py`, `../diffrax/diffrax/_brownian/tree.py`, `../diffrax/diffrax/_custom_types.py`
 - [x] `DX07` [Medium] Solver coverage gaps closed with wrappers and umbrella exports for `SemiImplicitEuler`, `SlowRK`, `SPaRK`, `HalfSolver`, `ALIGN`, `ShOULD`, and `QUICSORT`.
   Refs: `Tyr/DiffEq/Solver/*.lean`, `Tyr/DiffEq.lean`, `../diffrax/diffrax/_solver/semi_implicit_euler.py`, `../diffrax/diffrax/_solver/slowrk.py`, `../diffrax/diffrax/_solver/spark.py`, `../diffrax/diffrax/_solver/base.py`, `../diffrax/diffrax/_solver/align.py`, `../diffrax/diffrax/_solver/should.py`, `../diffrax/diffrax/_solver/quicsort.py`
-- [~] `DX08` [Medium] Milstein now supports non-scalar controls and finite-difference Jacobian helpers; autodiff Jacobian-vector-product parity is still pending.
+- [~] `DX08` [Medium] Milstein now supports control-aware Jacobian-product interfaces, user-injected autodiff/JVP-style callbacks, and stronger finite-difference fallbacks for non-scalar controls; full autodiff parity remains pending.
   Refs: `Tyr/DiffEq/Term.lean`, `Tyr/DiffEq/Solver/Milstein.lean`, `Tyr/DiffEq/Solver/StratonovichMilstein.lean`, `../diffrax/diffrax/_solver/milstein.py`
 - [x] `DX09` [Medium] `ClipStepSizeController` now wraps adaptive base controllers with `step_ts`, `jump_ts`, and rejected-step replay handling.
   Refs: `Tyr/DiffEq/StepSizeController.lean`, `../diffrax/diffrax/_step_size_controller/clip.py`
 - [x] `DX10` [Medium] Broadened implicit root-finder support beyond fixed-point with Newton/VeryChord options plus tolerance plumbing.
   Refs: `Tyr/DiffEq/RootFinder.lean`, `Tyr/DiffEq/Solver/ImplicitRungeKutta.lean`, `../diffrax/diffrax/_root_finder/_verychord.py`, `../diffrax/diffrax/_root_finder/_with_tols.py`
-- [~] `DX11` [Low] Added path-derivative support and `ControlTerm.to_ode` conversions; reusable interpolation-path ergonomics (for example linear/cubic path objects) remain.
+- [~] `DX11` [Low] Added path-derivative support, `ControlTerm.to_ode` conversions, and reusable path constructors (linear/cubic Hermite interpolation), plus path composition/restriction helpers; full interpolation-path parity remains.
   Refs: `Tyr/DiffEq/Path.lean`, `Tyr/DiffEq/Term.lean`, `Tyr/DiffEq/Interpolation.lean`, `../diffrax/diffrax/_path.py`, `../diffrax/diffrax/_global_interpolation.py`, `../diffrax/diffrax/_term.py`
-- [~] `DX12` [Low] Added `num_accepted_steps` and `num_rejected_steps` diagnostics; optional throw-on-failure behavior is still open.
+- [x] `DX12` [Low] Added solve diagnostics (`num_accepted_steps`, `num_rejected_steps`) and optional throw-on-failure behavior (`throwOnFailure`) while preserving default non-throwing behavior.
   Refs: `Tyr/DiffEq/Integrate.lean`, `Tyr/DiffEq/Solution.lean`, `../diffrax/diffrax/_integrate.py`, `../diffrax/diffrax/_solution.py`
-- [~] `DX13` [Low] Added multi-term arity metadata and `MultiTerm3`/`MultiTerm4`/array structures; full PyTree term-structure parity is still pending.
+- [~] `DX13` [Low] Extended term-structure metadata and higher-arity combinators (`MultiTerm5`/`MultiTerm6`, `TermShape`, inferred solver structure metadata), but full PyTree term-structure parity is still pending.
   Refs: `Tyr/DiffEq/Term.lean`, `Tyr/DiffEq/Solver/Base.lean`, `../diffrax/diffrax/_term.py`, `../diffrax/diffrax/_solver/base.py`
 
 

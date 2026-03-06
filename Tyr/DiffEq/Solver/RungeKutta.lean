@@ -34,7 +34,7 @@ def solver {s : Nat} {Term Y VF Args : Type}
     [TermLike Term Y VF Time Args]
     [DiffEqSpace Y] (rk : ExplicitRK s) : AbstractSolver Term Y VF Time Args := {
   SolverState := Unit
-  DenseInfo := LocalLinearDenseInfo Y
+  DenseInfo := LocalHermiteDenseInfo Y
   termStructure := TermStructure.single
   order := fun _ => rk.tableau.order
   strongOrder := fun _ => 0.0
@@ -67,7 +67,10 @@ def solver {s : Nat} {Term Y VF Args : Type}
           let high := weightedSum rk.tableau.b ks y0
           let low := weightedSum bErr ks y0
           some (DiffEqSpace.sub high low)
-    let dense := { t0 := t0, t1 := t1, y0 := y0, y1 := y1 }
+    -- dt-scaled endpoint tangents used by cubic Hermite dense output.
+    let m0 := ks.getD 0 zero
+    let m1 := inst.vf_prod term t1 y1 args dt
+    let dense := { t0 := t0, t1 := t1, y0 := y0, y1 := y1, m0 := m0, m1 := m1 }
     {
       y1 := y1
       yError := yErr

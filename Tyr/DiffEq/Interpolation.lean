@@ -48,6 +48,67 @@ def toInterpolation [DiffEqSpace Y] (info : LocalLinearDenseInfo Y) :
 
 end LocalLinearDenseInfo
 
+/-- Per-step cubic Hermite dense output with endpoint tangents in normalized step time. -/
+structure LocalHermiteDenseInfo (Y : Type) where
+  t0 : Time
+  t1 : Time
+  y0 : Y
+  y1 : Y
+  m0 : Y
+  m1 : Y
+
+namespace LocalHermiteDenseInfo
+
+private def evalTheta [DiffEqSpace Y] (info : LocalHermiteDenseInfo Y) (theta : Time) : Y :=
+  let theta2 := theta * theta
+  let theta3 := theta2 * theta
+  let h00 := 2.0 * theta3 - 3.0 * theta2 + 1.0
+  let h10 := theta3 - 2.0 * theta2 + theta
+  let h01 := -2.0 * theta3 + 3.0 * theta2
+  let h11 := theta3 - theta2
+  let a0 := DiffEqSpace.scale h00 info.y0
+  let a1 := DiffEqSpace.scale h10 info.m0
+  let a2 := DiffEqSpace.scale h01 info.y1
+  let a3 := DiffEqSpace.scale h11 info.m1
+  DiffEqSpace.add (DiffEqSpace.add a0 a1) (DiffEqSpace.add a2 a3)
+
+private def derivTheta [DiffEqSpace Y] (info : LocalHermiteDenseInfo Y) (theta : Time) : Y :=
+  let theta2 := theta * theta
+  let dh00 := 6.0 * theta2 - 6.0 * theta
+  let dh10 := 3.0 * theta2 - 4.0 * theta + 1.0
+  let dh01 := -6.0 * theta2 + 6.0 * theta
+  let dh11 := 3.0 * theta2 - 2.0 * theta
+  let a0 := DiffEqSpace.scale dh00 info.y0
+  let a1 := DiffEqSpace.scale dh10 info.m0
+  let a2 := DiffEqSpace.scale dh01 info.y1
+  let a3 := DiffEqSpace.scale dh11 info.m1
+  DiffEqSpace.add (DiffEqSpace.add a0 a1) (DiffEqSpace.add a2 a3)
+
+def toInterpolation [DiffEqSpace Y] (info : LocalHermiteDenseInfo Y) :
+    DenseInterpolation Y := by
+  let evalAt := fun (t : Time) =>
+    if info.t0 == info.t1 then
+      info.y0
+    else
+      let theta := (t - info.t0) / (info.t1 - info.t0)
+      evalTheta info theta
+  exact {
+    evaluate := fun t0 t1 _left =>
+      match t1 with
+      | none => evalAt t0
+      | some t1 => DiffEqSpace.sub (evalAt t1) (evalAt t0)
+    derivative := fun t _left =>
+      if info.t0 == info.t1 then
+        DiffEqSpace.scale 0.0 info.m0
+      else
+        let h := info.t1 - info.t0
+        let theta := (t - info.t0) / h
+        let dTheta := derivTheta info theta
+        DiffEqSpace.scale (1.0 / h) dTheta
+  }
+
+end LocalHermiteDenseInfo
+
 /-- Piecewise dense interpolation assembled from per-step solver interpolation data. -/
 structure PiecewiseDenseInterpolation (Y : Type) where
   ts : Array Time

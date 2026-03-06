@@ -85,6 +85,11 @@ instance [BrownianSample BM1] [BrownianSample BM2] : BrownianSample (BM1 × BM2)
       BrownianSample.sampleScaledNormal (BM := BM2) key2 scale
     )
 
+instance [BrownianSample BM] : BrownianSample (Fin n → BM) where
+  sampleScaledNormal key scale := fun i =>
+    let idx : UInt32 := UInt32.ofNat i.1
+    BrownianSample.sampleScaledNormal (BM := BM) (PRNGKey.foldIn key idx) scale
+
 instance [DiffEqSpace BM] : DiffEqSpace (BrownianIncrement Time BM) where
   add a b := { dt := a.dt + b.dt, W := DiffEqSpace.add a.W b.W }
   sub a b := { dt := a.dt - b.dt, W := DiffEqSpace.sub a.W b.W }
@@ -824,6 +829,88 @@ def toAbstractSpaceTimeTime (path : VirtualBrownianTree Float) :
     t1 := path.t1
     evaluate := fun t0 t1 _left => incrementSpaceTimeTime path t0 t1
     increment := fun t0 t1 => { dt := t1 - t0, W := incrementSpaceTimeTime path t0 t1 }
+  }
+
+private def splitFloatPair (path : VirtualBrownianTree (Float × Float)) :
+    VirtualBrownianTree Float × VirtualBrownianTree Float :=
+  let root := baseKey path.seed
+  let leftSeed := (PRNGKey.foldIn root 0x5654424c).state
+  let rightSeed := (PRNGKey.foldIn root 0x56544252).state
+  (
+    {
+      t0 := path.t0
+      t1 := path.t1
+      tol := path.tol
+      maxDepth := path.maxDepth
+      seed := leftSeed
+      shape := path.shape.1
+    },
+    {
+      t0 := path.t0
+      t1 := path.t1
+      tol := path.tol
+      maxDepth := path.maxDepth
+      seed := rightSeed
+      shape := path.shape.2
+    }
+  )
+
+def valueFloatPair (path : VirtualBrownianTree (Float × Float)) (t : Time) : Float × Float :=
+  let (leftPath, rightPath) := splitFloatPair path
+  (value leftPath t, value rightPath t)
+
+def incrementFloatPair (path : VirtualBrownianTree (Float × Float)) (t0 t1 : Time) :
+    BrownianIncrement Time (Float × Float) :=
+  let (leftPath, rightPath) := splitFloatPair path
+  let leftInc := increment leftPath t0 t1
+  let rightInc := increment rightPath t0 t1
+  { dt := leftInc.dt, W := (leftInc.W, rightInc.W) }
+
+def evaluateFloatPair (path : VirtualBrownianTree (Float × Float)) (t0 t1 : Time)
+    (_left : Bool := true) : Float × Float :=
+  (incrementFloatPair path t0 t1).W
+
+def toAbstractFloatPair (path : VirtualBrownianTree (Float × Float)) :
+    AbstractBrownianPath (Float × Float) :=
+  {
+    t0 := path.t0
+    t1 := path.t1
+    evaluate := fun t0 t1 left => evaluateFloatPair path t0 t1 left
+    increment := fun t0 t1 => incrementFloatPair path t0 t1
+  }
+
+def incrementSpaceTimeFloatPair (path : VirtualBrownianTree (Float × Float)) (t0 t1 : Time) :
+    SpaceTimeLevyArea Time (Float × Float) :=
+  let (leftPath, rightPath) := splitFloatPair path
+  let leftInc := incrementSpaceTime leftPath t0 t1
+  let rightInc := incrementSpaceTime rightPath t0 t1
+  { dt := leftInc.dt, W := (leftInc.W, rightInc.W), H := (leftInc.H, rightInc.H) }
+
+def incrementSpaceTimeTimeFloatPair (path : VirtualBrownianTree (Float × Float)) (t0 t1 : Time) :
+    SpaceTimeTimeLevyArea Time (Float × Float) :=
+  let (leftPath, rightPath) := splitFloatPair path
+  let leftInc := incrementSpaceTimeTime leftPath t0 t1
+  let rightInc := incrementSpaceTimeTime rightPath t0 t1
+  { dt := leftInc.dt, W := (leftInc.W, rightInc.W), H := (leftInc.H, rightInc.H),
+    K := (leftInc.K, rightInc.K) }
+
+def toAbstractSpaceTimeFloatPair (path : VirtualBrownianTree (Float × Float)) :
+    AbstractBrownianPath (SpaceTimeLevyArea Time (Float × Float)) :=
+  {
+    t0 := path.t0
+    t1 := path.t1
+    evaluate := fun t0 t1 _left => incrementSpaceTimeFloatPair path t0 t1
+    increment := fun t0 t1 => { dt := t1 - t0, W := incrementSpaceTimeFloatPair path t0 t1 }
+  }
+
+def toAbstractSpaceTimeTimeFloatPair (path : VirtualBrownianTree (Float × Float)) :
+    AbstractBrownianPath (SpaceTimeTimeLevyArea Time (Float × Float)) :=
+  {
+    t0 := path.t0
+    t1 := path.t1
+    evaluate := fun t0 t1 _left => incrementSpaceTimeTimeFloatPair path t0 t1
+    increment := fun t0 t1 =>
+      { dt := t1 - t0, W := incrementSpaceTimeTimeFloatPair path t0 t1 }
   }
 
 end VirtualBrownianTree

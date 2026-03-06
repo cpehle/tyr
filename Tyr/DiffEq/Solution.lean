@@ -13,7 +13,7 @@ inductive Result where
   | eventOccurred
   | maxStepsRejected
   | internalError
-  deriving Repr, BEq
+  deriving Repr, BEq, Inhabited
 
 namespace Result
 
@@ -25,6 +25,9 @@ def isSuccessful (r : Result) : Bool :=
 
 def isEvent (r : Result) : Bool :=
   r == Result.eventOccurred
+
+def isFailure (r : Result) : Bool :=
+  !r.isOkay
 
 def message (r : Result) : String :=
   match r with
@@ -49,6 +52,7 @@ structure Solution (Y SolverState ControllerState : Type) where
   controllerState : Option ControllerState
   madeJump : Option Bool
   eventMask : Option (Array Bool)
+  deriving Inhabited
 
 namespace Solution
 
@@ -63,6 +67,13 @@ def derivative [Inhabited Y] (sol : Solution Y SolverState ControllerState) (t :
   match sol.interpolation with
   | none => panic! "Dense solution has not been saved; pass SaveAt(dense=True)."
   | some interp => interp.derivative t left
+
+def ensureOkay (sol : Solution Y SolverState ControllerState) :
+    Solution Y SolverState ControllerState :=
+  if sol.result.isOkay then
+    sol
+  else
+    panic! sol.result.message
 
 end Solution
 

@@ -15,6 +15,7 @@ inductive EventCondition (Y Args : Type) where
 structure EventSpec (Y Args : Type) where
   condition : EventCondition Y Args
   terminate : Bool := true
+  direction : Option Bool := none
   rootMaxIters : Nat := 24
   rootTol : Time := 1.0e-6
 
@@ -34,6 +35,85 @@ private def constantInterpolation [DiffEqSpace Y] (y : Y) : DenseInterpolation Y
 
 private def hasSignChange (v0 v1 : Float) : Bool :=
   v0 == 0.0 || v1 == 0.0 || (v0 < 0.0 && v1 > 0.0) || (v0 > 0.0 && v1 < 0.0)
+
+private def hasDirectedSignChange (v0 v1 : Float) (direction : Option Bool) : Bool :=
+  match direction with
+  | none => hasSignChange v0 v1
+  | some true => v0 <= 0.0 && v1 > 0.0
+  | some false => v0 > 0.0 && v1 <= 0.0
+
+private def configuredEvents {Y Args : Type}
+    (event : Option (EventSpec Y Args))
+    (events : Array (EventSpec Y Args)) : Array (EventSpec Y Args) :=
+  match event with
+  | none => events
+  | some ev => #[ev] ++ events
+
+private def eventHitAtStart {Y Args : Type}
+    (ev : EventSpec Y Args)
+    (t0 : Time)
+    (y0 : Y)
+    (args : Args) : Bool :=
+  match ev.condition with
+  | .boolean cond => cond t0 y0 args
+  | .real cond => cond t0 y0 args == 0.0
+
+private def initialEventMask {Y Args : Type}
+    (events : Array (EventSpec Y Args))
+    (t0 : Time)
+    (y0 : Y)
+    (args : Args) : Array Bool :=
+  events.map (fun ev => eventHitAtStart ev t0 y0 args)
+
+private def anyTerminatingEvent {Y Args : Type}
+    (events : Array (EventSpec Y Args))
+    (mask : Array Bool) : Bool := Id.run do
+  let mut hit := false
+  for i in [:events.size] do
+    if mask.getD i false then
+      match events[i]? with
+      | some ev =>
+          if ev.terminate then
+            hit := true
+      | none => pure ()
+  return hit
+
+private def mergeEventMasks (base delta : Array Bool) : Array Bool :=
+  base.mapIdx (fun i seen => seen || delta.getD i false)
+
+private def firstTrueIdx? (mask : Array Bool) : Option Nat := Id.run do
+  let mut out : Option Nat := none
+  for i in [:mask.size] do
+    if out.isNone && mask[i]! then
+      out := some i
+  return out
+
+private def firstTerminatingTrueIdx? {Y Args : Type}
+    (events : Array (EventSpec Y Args))
+    (mask : Array Bool) : Option Nat := Id.run do
+  let mut out : Option Nat := none
+  for i in [:events.size] do
+    if out.isNone && mask.getD i false then
+      match events[i]? with
+      | some ev =>
+          if ev.terminate then
+            out := some i
+      | none => pure ()
+  return out
+
+private def eventMaskOption {Y Args : Type}
+    (events : Array (EventSpec Y Args))
+    (mask : Array Bool) : Option (Array Bool) :=
+  if events.size == 0 then none else some mask
+
+private def maybeThrowOnFailure {Y SolverState ControllerState : Type}
+    (throwOnFailure : Bool)
+    (sol : Solution Y SolverState ControllerState) :
+    Solution Y SolverState ControllerState :=
+  if throwOnFailure && sol.result.isFailure then
+    panic! sol.result.message
+  else
+    sol
 
 private def localizeSignChange {Y Args : Type}
     [DiffEqSpace Y] [Inhabited Y]
@@ -97,22 +177,24 @@ def diffeqsolve {Term Y VF Control Args Controller : Type}
     (initialSolverState : Option solver.SolverState := none)
     (initialControllerState :
       Option (StepSizeController.State (C := Controller)) := none)
-    (initialMadeJump : Bool := false) :
+    (initialMadeJump : Bool := false)
+    (events : Array (EventSpec Y Args) := #[])
+    (saveFn : Option (Time → Y → Args → Y) := none)
+    (throwOnFailure : Bool := false) :
     Solution Y solver.SolverState (StepSizeController.State (C := Controller)) := by
+  let activeEvents := configuredEvents event events
+  let eventMask0 := initialEventMask activeEvents t0 y0 args
+  let terminateAtStart := anyTerminatingEvent activeEvents eventMask0
+  let eventMask0? := eventMaskOption activeEvents eventMask0
   let saveatTs := normalizeSaveTs saveat.effectiveTs
   let saveDense := saveat.effectiveDense
   let saveSteps := saveat.stepsEnabled
-  let eventAtStart :=
-    match event with
-    | none => false
-    | some ev =>
-        match ev.condition with
-        | .boolean cond => cond t0 y0 args
-        | .real cond => cond t0 y0 args == 0.0
-  let terminateAtStart :=
-    match event with
-    | none => false
-    | some ev => ev.terminate && eventAtStart
+  let saveAtT0 := saveat.effectiveT0
+  let saveAtT1 := saveat.effectiveT1
+  let saveValue : Time → Y → Y :=
+    match saveFn with
+    | none => fun _ y => y
+    | some f => fun t y => f t y args
   let stepStats0 : List (String × Nat) :=
     [("num_steps", 0), ("num_accepted_steps", 0), ("num_rejected_steps", 0)]
   let outOfRange :=
@@ -123,7 +205,7 @@ def diffeqsolve {Term Y VF Control Args Controller : Type}
         let tmax := if t0 <= t1 then t1 else t0
         ts.foldl (init := false) (fun acc t => acc || t < tmin || t > tmax)
   if outOfRange then
-    exact {
+    exact maybeThrowOnFailure throwOnFailure {
       t0 := t0
       t1 := t1
       ts := none
@@ -134,10 +216,10 @@ def diffeqsolve {Term Y VF Control Args Controller : Type}
       solverState := none
       controllerState := none
       madeJump := none
-      eventMask := none
+      eventMask := eventMask0?
     }
   else if dt0 == some 0.0 then
-    exact {
+    exact maybeThrowOnFailure throwOnFailure {
       t0 := t0
       t1 := t1
       ts := none
@@ -148,7 +230,7 @@ def diffeqsolve {Term Y VF Control Args Controller : Type}
       solverState := none
       controllerState := none
       madeJump := none
-      eventMask := none
+      eventMask := eventMask0?
     }
   else
     let computeOutputs :=
@@ -161,34 +243,35 @@ def diffeqsolve {Term Y VF Control Args Controller : Type}
                 if lastT == tf then
                   (stepTs, stepYs)
                 else
-                  (stepTs.push tf, stepYs.push yf)
-            | _, _ => (#[t0, tf], #[y0, yf])
+                  (stepTs.push tf, stepYs.push (saveValue tf yf))
+            | _, _ => (#[t0, tf], #[saveValue t0 y0, saveValue tf yf])
           else
             (stepTs, stepYs)
         match saveatTs with
         | some ts =>
             let tsOut :=
-              if saveat.t0 || saveat.t1 then
-                let pre := if saveat.t0 then #[t0] else #[]
-                let post := if saveat.t1 then #[tf] else #[]
+              if saveAtT0 || saveAtT1 then
+                let pre := if saveAtT0 then #[t0] else #[]
+                let post := if saveAtT1 then #[tf] else #[]
                 pre ++ ts ++ post
               else
                 ts
             let ys :=
               match denseInterp with
               | none => #[]
-              | some interp => tsOut.map (fun t => interp.evaluate t none true)
+              | some interp =>
+                  tsOut.map (fun t => saveValue t (interp.evaluate t none true))
             (some tsOut, some ys)
         | none =>
             if saveSteps then
               (some stepTs, some stepYs)
-            else if saveat.t0 || saveat.t1 then
+            else if saveAtT0 || saveAtT1 then
               let ts :=
-                if saveat.t0 && saveat.t1 then #[t0, tf]
-                else if saveat.t0 then #[t0] else #[tf]
+                if saveAtT0 && saveAtT1 then #[t0, tf]
+                else if saveAtT0 then #[t0] else #[tf]
               let ys :=
-                if saveat.t0 && saveat.t1 then #[y0, yf]
-                else if saveat.t0 then #[y0] else #[yf]
+                if saveAtT0 && saveAtT1 then #[saveValue t0 y0, saveValue tf yf]
+                else if saveAtT0 then #[saveValue t0 y0] else #[saveValue tf yf]
               (some ts, some ys)
             else
               (none, none)
@@ -199,9 +282,9 @@ def diffeqsolve {Term Y VF Control Args Controller : Type}
         else
           none
       let stepTs := if saveSteps then #[t0] else #[]
-      let stepYs := if saveSteps then #[y0] else #[]
+      let stepYs := if saveSteps then #[saveValue t0 y0] else #[]
       let (tsOut, ysOut) := computeOutputs t0 y0 stepTs stepYs denseInterp
-      exact {
+      exact maybeThrowOnFailure throwOnFailure {
         t0 := t0
         t1 := t1
         ts := tsOut
@@ -212,14 +295,12 @@ def diffeqsolve {Term Y VF Control Args Controller : Type}
         solverState := if saveat.solverState then initialSolverState else none
         controllerState := if saveat.controllerState then initialControllerState else none
         madeJump := if saveat.madeJump then some initialMadeJump else none
-        eventMask :=
-          match event with
-          | none => none
-          | some _ => some #[eventAtStart]
+        eventMask := eventMask0?
       }
     else
     let errorOrder := solver.errorOrder terms
-    let initCtrlBase := StepSizeController.init controller terms t0 t1 y0 args dt0 solver.func errorOrder
+    let initCtrlBase :=
+      StepSizeController.init controller terms t0 t1 y0 args dt0 solver.func errorOrder
     let dtAbs := if initCtrlBase.dt < 0.0 then -initCtrlBase.dt else initCtrlBase.dt
     let dt := if t1 >= t0 then dtAbs else -dtAbs
     let initCtrlBase := { initCtrlBase with dt := dt }
@@ -238,9 +319,9 @@ def diffeqsolve {Term Y VF Control Args Controller : Type}
         else
           none
       let stepTs := if saveSteps then #[t0] else #[]
-      let stepYs := if saveSteps then #[y0] else #[]
+      let stepYs := if saveSteps then #[saveValue t0 y0] else #[]
       let (tsOut, ysOut) := computeOutputs t0 y0 stepTs stepYs denseInterp
-      exact {
+      exact maybeThrowOnFailure throwOnFailure {
         t0 := t0
         t1 := t0
         ts := tsOut
@@ -251,17 +332,14 @@ def diffeqsolve {Term Y VF Control Args Controller : Type}
         solverState := if saveat.solverState then some initState else none
         controllerState := if saveat.controllerState then some initCtrl.state else none
         madeJump := if saveat.madeJump then some true else none
-        eventMask :=
-          match event with
-          | none => none
-          | some _ => some #[true]
+        eventMask := eventMask0?
       }
     else
     let denseTsInit := #[t0]
     let denseYsInit := #[y0]
     let denseSegsInit : Array (DenseInterpolation Y) := #[]
     let stepTsInit := if saveSteps then #[t0] else #[]
-    let stepYsInit := if saveSteps then #[y0] else #[]
+    let stepYsInit := if saveSteps then #[saveValue t0 y0] else #[]
     let rec loop (attempted : Nat) (accepted : Nat) (rejected : Nat) (t : Time) (y : Y)
         (state : solver.SolverState)
         (ctrlState : StepSizeState (StepSizeController.State (C := Controller)))
@@ -269,23 +347,23 @@ def diffeqsolve {Term Y VF Control Args Controller : Type}
         (denseTs : Array Time) (denseYs : Array Y)
         (denseSegs : Array (DenseInterpolation Y))
         (stepTs : Array Time) (stepYs : Array Y)
-        (eventTriggered : Bool) :
+        (eventMaskAcc : Array Bool) :
         (Time × Y × solver.SolverState ×
           StepSizeState (StepSizeController.State (C := Controller)) ×
           Bool × Array Time × Array Y × Array (DenseInterpolation Y) ×
-          Array Time × Array Y × Result × Nat × Nat × Nat × Bool) :=
+          Array Time × Array Y × Result × Nat × Nat × Nat × Array Bool) :=
       if attempted >= maxSteps then
         (t, y, state, ctrlState, madeJump, denseTs, denseYs, denseSegs, stepTs, stepYs,
-          Result.maxStepsReached, attempted, accepted, rejected, eventTriggered)
+          Result.maxStepsReached, attempted, accepted, rejected, eventMaskAcc)
       else if rejected >= maxSteps then
         (t, y, state, ctrlState, madeJump, denseTs, denseYs, denseSegs, stepTs, stepYs,
-          Result.maxStepsRejected, attempted, accepted, rejected, eventTriggered)
+          Result.maxStepsRejected, attempted, accepted, rejected, eventMaskAcc)
       else
         let dt := ctrlState.dt
         let done := if dt > 0.0 then t >= t1 else t <= t1
         if done then
           (t, y, state, ctrlState, madeJump, denseTs, denseYs, denseSegs, stepTs, stepYs,
-            Result.successful, attempted, accepted, rejected, eventTriggered)
+            Result.successful, attempted, accepted, rejected, eventMaskAcc)
         else
           let tCandidate := t + dt
           let tNext :=
@@ -297,70 +375,85 @@ def diffeqsolve {Term Y VF Control Args Controller : Type}
           let step := solver.step terms t tNext y args state madeJump
           if step.result != Result.successful then
             (tNext, step.y1, step.solverState, ctrlState, madeJump, denseTs, denseYs, denseSegs,
-              stepTs, stepYs, step.result, attemptedNext, accepted, rejected, eventTriggered)
+              stepTs, stepYs, step.result, attemptedNext, accepted, rejected, eventMaskAcc)
           else
-            let decision := StepSizeController.adapt controller ctrlState t tNext y step.y1 step.yError errorOrder
+            let decision :=
+              StepSizeController.adapt controller ctrlState t tNext y step.y1 step.yError errorOrder
             if decision.result != Result.successful then
               (tNext, step.y1, step.solverState, ctrlState, madeJump, denseTs, denseYs, denseSegs,
-                stepTs, stepYs, decision.result, attemptedNext, accepted, rejected, eventTriggered)
+                stepTs, stepYs, decision.result, attemptedNext, accepted, rejected, eventMaskAcc)
             else if decision.accept then
               let ctrlState := { dt := decision.dt, state := decision.state }
               let denseStep := solver.interpolation step.denseInfo
               let madeJumpNext := decision.madeJump
               let acceptedNext := accepted + 1
-              let (eventHit, eventTime, eventY) :=
-                match event with
-                | none => (false, tNext, step.y1)
-                | some ev =>
-                    match ev.condition with
-                    | .boolean cond =>
-                        let c0 := cond t y args
-                        let c1 := cond tNext step.y1 args
-                        if (!c0) && c1 then
-                          (true, tNext, step.y1)
-                        else
-                          (false, tNext, step.y1)
-                    | .real cond =>
-                        let v0 := cond t y args
-                        let v1 := cond tNext step.y1 args
-                        if hasSignChange v0 v1 then
-                          let (te, ye) :=
-                            localizeSignChange denseStep cond args t tNext v0 v1 ev.rootMaxIters ev.rootTol
-                          (true, te, ye)
-                        else
-                          (false, tNext, step.y1)
+              let eventHits :=
+                activeEvents.map (fun ev =>
+                  match ev.condition with
+                  | .boolean cond =>
+                      let c0 := cond t y args
+                      let c1 := cond tNext step.y1 args
+                      (!c0) && c1
+                  | .real cond =>
+                      let v0 := cond t y args
+                      let v1 := cond tNext step.y1 args
+                      hasDirectedSignChange v0 v1 ev.direction)
+              let eventMaskAcc := mergeEventMasks eventMaskAcc eventHits
+              let terminatingHitIdx? := firstTerminatingTrueIdx? activeEvents eventHits
+              let chosenHitIdx? :=
+                match terminatingHitIdx? with
+                | some idx => some idx
+                | none => firstTrueIdx? eventHits
+              let (eventHit, chosenTerminates, eventTime, eventY) :=
+                match chosenHitIdx? with
+                | none => (false, false, tNext, step.y1)
+                | some idx =>
+                    match activeEvents[idx]? with
+                    | none => (false, false, tNext, step.y1)
+                    | some ev =>
+                        let eventTimeY :=
+                          match ev.condition with
+                          | .boolean _ => (tNext, step.y1)
+                          | .real cond =>
+                              let v0 := cond t y args
+                              let v1 := cond tNext step.y1 args
+                              if hasDirectedSignChange v0 v1 ev.direction then
+                                localizeSignChange
+                                  denseStep cond args t tNext v0 v1 ev.rootMaxIters ev.rootTol
+                              else
+                                (tNext, step.y1)
+                        let terminates :=
+                          match terminatingHitIdx? with
+                          | some _ => true
+                          | none => false
+                        (true, terminates, eventTimeY.fst, eventTimeY.snd)
               let denseTs := denseTs.push eventTime
               let denseYs := denseYs.push eventY
               let denseSegs := denseSegs.push denseStep
               let stepSaved := saveat.shouldSaveAcceptedStep acceptedNext
               let (stepTs, stepYs) :=
                 if stepSaved then
-                  (stepTs.push eventTime, stepYs.push eventY)
+                  (stepTs.push eventTime, stepYs.push (saveValue eventTime eventY))
                 else
                   (stepTs, stepYs)
               if eventHit then
-                match event with
-                | none =>
-                    loop attemptedNext acceptedNext 0 eventTime eventY step.solverState ctrlState false
-                      denseTs denseYs denseSegs stepTs stepYs eventTriggered
-                | some ev =>
-                    if ev.terminate then
-                      (eventTime, eventY, step.solverState, ctrlState, true, denseTs, denseYs, denseSegs,
-                        stepTs, stepYs, Result.eventOccurred, attemptedNext, acceptedNext, rejected, true)
-                    else
-                      loop attemptedNext acceptedNext 0 eventTime eventY step.solverState ctrlState true
-                        denseTs denseYs denseSegs stepTs stepYs true
+                if chosenTerminates then
+                  (eventTime, eventY, step.solverState, ctrlState, true, denseTs, denseYs, denseSegs,
+                    stepTs, stepYs, Result.eventOccurred, attemptedNext, acceptedNext, rejected, eventMaskAcc)
+                else
+                  loop attemptedNext acceptedNext 0 eventTime eventY step.solverState ctrlState true
+                    denseTs denseYs denseSegs stepTs stepYs eventMaskAcc
               else
                 loop attemptedNext acceptedNext 0 tNext step.y1 step.solverState ctrlState madeJumpNext
-                  denseTs denseYs denseSegs stepTs stepYs eventTriggered
+                  denseTs denseYs denseSegs stepTs stepYs eventMaskAcc
             else
               let ctrlState := { dt := decision.dt, state := decision.state }
               loop attemptedNext accepted (rejected + 1) t y state ctrlState madeJump
-                denseTs denseYs denseSegs stepTs stepYs eventTriggered
+                denseTs denseYs denseSegs stepTs stepYs eventMaskAcc
     let (tf, yf, statef, ctrlState, madeJumpf, denseTs, denseYs, denseSegs, stepTs, stepYs,
-        result, numSteps, numAcceptedSteps, numRejectedSteps, eventTriggered) :=
+        result, numSteps, numAcceptedSteps, numRejectedSteps, eventMaskF) :=
       loop 0 0 0 t0 y0 initState initCtrl initialMadeJump
-        denseTsInit denseYsInit denseSegsInit stepTsInit stepYsInit false
+        denseTsInit denseYsInit denseSegsInit stepTsInit stepYsInit eventMask0
     let denseInterp :=
       if saveDense || saveatTs.isSome then
         if denseSegs.size > 0 then
@@ -370,7 +463,7 @@ def diffeqsolve {Term Y VF Control Args Controller : Type}
       else
         none
     let (tsOut, ysOut) := computeOutputs tf yf stepTs stepYs denseInterp
-    exact {
+    exact maybeThrowOnFailure throwOnFailure {
       t0 := t0
       t1 := tf
       ts := tsOut
@@ -385,10 +478,7 @@ def diffeqsolve {Term Y VF Control Args Controller : Type}
       solverState := if saveat.solverState then some statef else none
       controllerState := if saveat.controllerState then some ctrlState.state else none
       madeJump := if saveat.madeJump then some madeJumpf else none
-      eventMask :=
-        match event with
-        | none => none
-        | some _ => some #[eventTriggered]
+      eventMask := eventMaskOption activeEvents eventMaskF
     }
 
 end DiffEq
