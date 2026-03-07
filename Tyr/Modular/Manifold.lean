@@ -1,5 +1,6 @@
 import Tyr.Modular.Norm
 import Tyr.Modular.Budget
+import Tyr.Modular.Compose
 import Tyr.Manifolds.Optimizer
 import Tyr.Optim.DualOptimizer
 
@@ -309,6 +310,78 @@ abbrev OrthogonalLinear (dim : UInt64) := ManifoldLinear OrthogonalMatrix dim di
 
 /-- Convenience alias: single hyperbolic vector parameter. -/
 abbrev HyperbolicVector (n : UInt64) := ManifoldVectorParam Hyperbolic n
+
+/--
+Gradient payload for `ManifoldLinear`.
+
+Keeping this as its own structure lets us compose manifold-native updates over
+larger module trees while preserving explicit weight/bias intent.
+-/
+structure ManifoldLinearGrad (in_dim out_dim : UInt64) where
+  weight : T #[out_dim, in_dim]
+  bias : Option (T #[out_dim]) := none
+
+instance (in_dim out_dim : UInt64) : TensorStruct (ManifoldLinearGrad in_dim out_dim) where
+  map f g := { weight := f g.weight, bias := g.bias.map f }
+  mapM f g := do
+    let weight ← f g.weight
+    let bias ← match g.bias with
+      | some b => some <$> f b
+      | none => pure none
+    pure { weight, bias }
+  zipWith f a b := {
+    weight := f a.weight b.weight
+    bias := match a.bias, b.bias with
+      | some x, some y => some (f x y)
+      | _, _ => none
+  }
+  fold f init g :=
+    let acc := f g.weight init
+    match g.bias with
+    | some b => f b acc
+    | none => acc
+
+/--
+Composable manifold-update interface.
+
+This decouples "what manifold-native step to run" from "how modules are nested",
+so product/sequential structures can be updated without dedicated manifold types.
+-/
+class ManifoldUpdatable (P : Type) where
+  Grad : Type
+  applyUpdate : P → Grad → Float → P
+
+namespace ManifoldUpdatable
+
+/-- Apply one manifold-native update step. -/
+def step [ManifoldUpdatable P] (params : P) (grad : ManifoldUpdatable.Grad P) (lr : Float) : P :=
+  ManifoldUpdatable.applyUpdate params grad lr
+
+instance [MatrixManifoldCarrier M] (in_dim out_dim : UInt64)
+    [ShapeFact (MatrixManifoldCarrier.ShapeOK (M := M) out_dim in_dim)] :
+    ManifoldUpdatable (ManifoldLinear M in_dim out_dim) where
+  Grad := ManifoldLinearGrad in_dim out_dim
+  applyUpdate lin g lr := ManifoldLinear.applyDualMapUpdate lin g.weight g.bias lr
+
+instance [VectorManifoldCarrier V] (n : UInt64) :
+    ManifoldUpdatable (ManifoldVectorParam V n) where
+  Grad := T #[(VectorManifoldCarrier.ambientDim (V := V) n)]
+  applyUpdate p g lr := ManifoldVectorParam.applyDualMapUpdate p g lr
+
+instance [ManifoldUpdatable A] [ManifoldUpdatable B] : ManifoldUpdatable (A × B) where
+  Grad := ManifoldUpdatable.Grad A × ManifoldUpdatable.Grad B
+  applyUpdate p g lr :=
+    (ManifoldUpdatable.applyUpdate p.1 g.1 lr, ManifoldUpdatable.applyUpdate p.2 g.2 lr)
+
+instance [ManifoldUpdatable M₁] [ManifoldUpdatable M₂] :
+    ManifoldUpdatable (Sequential M₁ M₂) where
+  Grad := ManifoldUpdatable.Grad M₁ × ManifoldUpdatable.Grad M₂
+  applyUpdate net g lr := {
+    first := ManifoldUpdatable.applyUpdate net.first g.1 lr
+    second := ManifoldUpdatable.applyUpdate net.second g.2 lr
+  }
+
+end ManifoldUpdatable
 
 private def meanOrOne (xs : Array Float) : Float :=
   if xs.isEmpty then 1.0 else xs.foldl (fun acc x => acc + x) 0.0 / xs.size.toFloat

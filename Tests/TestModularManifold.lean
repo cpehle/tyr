@@ -133,4 +133,52 @@ def testHyperbolicVectorBenchmarkPositive : IO Unit := do
   LeanTest.assertTrue (elapsedMs > 0.0)
     s!"Expected positive hyperbolic-vector benchmark elapsed time, got {elapsedMs}"
 
+@[test]
+def testManifoldUpdatableSequentialComposes : IO Unit := do
+  let l1 ← ManifoldLinear.init (M := Tyr.AD.Stiefel) 8 16 true
+  let l2 ← ManifoldLinear.init (M := Tyr.AD.Grassmann) 16 16 true
+  let net : Sequential (StiefelLinear 8 16) (GrassmannLinear 16 16) := Sequential.mk' l1 l2
+
+  let g1w ← randn #[16, 8] false
+  let g1b ← randn #[16] false
+  let g2w ← randn #[16, 16] false
+  let g2b ← randn #[16] false
+  let grad : ManifoldUpdatable.Grad (Sequential (StiefelLinear 8 16) (GrassmannLinear 16 16)) :=
+    ({ weight := g1w, bias := some g1b }, { weight := g2w, bias := some g2b })
+
+  let net' := ManifoldUpdatable.step net grad 0.02
+
+  let w1 := MatrixManifoldCarrier.toMatrix net'.first.weight
+  let w1tW1 := nn.mm (nn.transpose2d w1) w1
+  LeanTest.assertTrue (allclose w1tW1 (eye 8) (rtol := 1e-4) (atol := 1e-5))
+    "Sequential ManifoldUpdatable step should keep Stiefel first layer on manifold"
+
+  let w2 := MatrixManifoldCarrier.toMatrix net'.second.weight
+  let w2tW2 := nn.mm (nn.transpose2d w2) w2
+  LeanTest.assertTrue (allclose w2tW2 (eye 16) (rtol := 1e-4) (atol := 1e-5))
+    "Sequential ManifoldUpdatable step should keep Grassmann second layer representative orthonormal"
+
+@[test]
+def testManifoldUpdatablePairComposes : IO Unit := do
+  let layer ← ManifoldLinear.init (M := Tyr.AD.Stiefel) 6 10 false
+  let vec ← ManifoldVectorParam.init (V := Tyr.AD.Hyperbolic) 5
+  let params : StiefelLinear 6 10 × HyperbolicVector 5 := (layer, vec)
+
+  let gw ← randn #[10, 6] false
+  let gv ← randn #[6] false
+  let grad : ManifoldUpdatable.Grad (StiefelLinear 6 10 × HyperbolicVector 5) :=
+    ({ weight := gw, bias := none }, gv)
+
+  let params' := ManifoldUpdatable.step params grad 0.01
+
+  let w := MatrixManifoldCarrier.toMatrix params'.1.weight
+  let wtW := nn.mm (nn.transpose2d w) w
+  LeanTest.assertTrue (allclose wtW (eye 6) (rtol := 1e-4) (atol := 1e-5))
+    "Pair ManifoldUpdatable step should preserve Stiefel constraint for matrix component"
+
+  let hv := VectorManifoldCarrier.toVector params'.2.value
+  let inner := Tyr.AD.Hyperbolic.minkowskiInner hv hv
+  LeanTest.assertTrue (Float.abs (inner + 1.0) < 1e-4)
+    s!"Pair ManifoldUpdatable step should preserve hyperbolic constraint, got {inner}"
+
 end Tests.ModularManifold
