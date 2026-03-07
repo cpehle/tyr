@@ -88,10 +88,36 @@ section
     | some _ => pure ()
     | none => LeanTest.fail "Expected adjoint result for default implicit saveat config"
 
+  @[test] def testBacksolveAdjointRejectsSubSaveAt : IO Unit := do
+    let term : ODETerm Float Float := { vectorField := fun _t y a => a * y }
+    let solver :=
+      RK4.solver
+        (Term := ODETerm Float Float)
+        (Y := Float)
+        (VF := Float)
+        (Args := Float)
+    let adjSolver :=
+      RK4.solver
+        (Term := ODETerm (AdjointState Float Float) Float)
+        (Y := AdjointState Float Float)
+        (VF := AdjointState Float Float)
+        (Args := Float)
+    let nested : SubSaveAt := { t1 := true }
+    let (sol, adjOpt) :=
+      diffeqsolveAdjoint
+        (Controller := ConstantStepSize)
+        term solver adjSolver 0.0 1.0 (some 0.01) 2.0 0.3 1.0
+        (saveat := { t1 := false, subs := #[nested] })
+    LeanTest.assertTrue (sol.result == Result.internalError)
+      "Backsolve adjoint should reject nested SaveAt.subs payloads"
+    LeanTest.assertTrue adjOpt.isNone
+      "Backsolve adjoint SaveAt.subs contract failure should not return adjoint values"
+
 end
 
 def run : IO Unit := do
   testImplicitAdjointRejectsNonT1SaveAt
   testImplicitAdjointDefaultSaveAtStillWorks
+  testBacksolveAdjointRejectsSubSaveAt
 
 end Tests.DiffEqAdjointParity

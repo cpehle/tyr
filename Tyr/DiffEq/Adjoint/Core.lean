@@ -83,7 +83,13 @@ structure AdjointResult (Y Args : Type) where
 def backsolveAdjointSupported {Y Args : Type}
     (solver : AbstractSolver (ODETerm Y Args) Y Y Time Args)
     (saveat : SaveAt) : Bool :=
-  solver.termStructure == TermStructure.single && !saveat.steps && !saveat.dense
+  solver.termStructure == TermStructure.single &&
+    !saveat.steps &&
+    !saveat.dense &&
+    !saveat.solverState &&
+    !saveat.controllerState &&
+    !saveat.madeJump &&
+    saveat.subs.size == 0
 
 private def saveAtTsOutOfRange (t0 t1 : Time) (saveat : SaveAt) : Bool :=
   match saveat.ts with
@@ -108,6 +114,10 @@ def backsolveAdjointUnsupportedReason {Y Args : Type}
     some "Adjoint solve failed: backsolve-style adjoints do not support `saveat.steps := true`."
   else if saveat.dense then
     some "Adjoint solve failed: backsolve-style adjoints do not support `saveat.dense := true`."
+  else if saveat.solverState || saveat.controllerState || saveat.madeJump then
+    some "Adjoint solve failed: backsolve-style adjoints do not support solver/controller/jump state payload saving."
+  else if saveat.subs.size != 0 then
+    some "Adjoint solve failed: backsolve-style adjoints do not yet support nested `SaveAt.subs` payload trees."
   else
     none
 
