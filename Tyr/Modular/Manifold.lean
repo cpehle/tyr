@@ -8,34 +8,81 @@ namespace Tyr.Modular
 open torch
 open Tyr.AD
 
+/-- Lightweight proposition wrapper for carrying shape-constraint witnesses. -/
+class ShapeFact (p : Prop) : Prop where
+  out : p
+
+instance : ShapeFact True := ⟨trivial⟩
+
 /-- Matrix-manifold carrier interface for manifold-native linear layers. -/
 class MatrixManifoldCarrier (M : UInt64 → UInt64 → Type) where
+  /-- Legal shape predicate for this manifold family. -/
+  ShapeOK : UInt64 → UInt64 → Prop := fun _ _ => True
   /-- Project an ambient matrix to the manifold. -/
-  project : (m n : UInt64) → T #[m, n] → M m n
+  project : {m n : UInt64} → [ShapeFact (ShapeOK m n)] → T #[m, n] → M m n
   /-- Convert manifold value to its ambient matrix representation. -/
-  toMatrix : {m n : UInt64} → M m n → T #[m, n]
+  toMatrix : {m n : UInt64} → [ShapeFact (ShapeOK m n)] → M m n → T #[m, n]
   /-- Wrap an already-valid ambient matrix without re-projecting. -/
-  fromAmbientUnchecked : {m n : UInt64} → T #[m, n] → M m n
+  fromAmbientUnchecked : {m n : UInt64} → [ShapeFact (ShapeOK m n)] → T #[m, n] → M m n
   /-- Take one geometry-aware step and retract on-manifold. -/
-  dualMapStep : {m n : UInt64} → M m n → T #[m, n] → Float → M m n
+  dualMapStep : {m n : UInt64} → [ShapeFact (ShapeOK m n)] → M m n → T #[m, n] → Float → M m n
+
+instance factEqReflUInt64 (n : UInt64) : ShapeFact (n = n) := ⟨rfl⟩
 
 instance : MatrixManifoldCarrier Stiefel where
-  project := Stiefel.project
-  toMatrix := fun x => x.matrix
-  fromAmbientUnchecked := fun x => ⟨x⟩
+  ShapeOK := fun _ _ => True
+  project := fun {_ _} _ x => Stiefel.project _ _ x
+  toMatrix := fun {_ _} _ x => x.matrix
+  fromAmbientUnchecked := fun {_ _} _ x => ⟨x⟩
   dualMapStep := by
-    intro m n x g lr
+    intro m n _ x g lr
     let tg := StiefelTangent.project x g
     exact DualMapGeometry.dualMapStep x tg lr
 
+instance stiefelShapeOKFact (m n : UInt64) :
+    ShapeFact (MatrixManifoldCarrier.ShapeOK (M := Stiefel) m n) := ⟨trivial⟩
+
 instance : MatrixManifoldCarrier Grassmann where
-  project := Grassmann.project
-  toMatrix := fun x => x.matrix
-  fromAmbientUnchecked := fun x => ⟨x⟩
+  ShapeOK := fun _ _ => True
+  project := fun {_ _} _ x => Grassmann.project _ _ x
+  toMatrix := fun {_ _} _ x => x.matrix
+  fromAmbientUnchecked := fun {_ _} _ x => ⟨x⟩
   dualMapStep := by
-    intro m n x g lr
+    intro m n _ x g lr
     let tg := GrassmannTangent.project x g
     exact DualMapGeometry.dualMapStep x tg lr
+
+instance grassmannShapeOKFact (m n : UInt64) :
+    ShapeFact (MatrixManifoldCarrier.ShapeOK (M := Grassmann) m n) := ⟨trivial⟩
+
+/-- Orthogonal manifold viewed in matrix-family form with square-shape legality. -/
+abbrev OrthogonalMatrix (_m n : UInt64) := Orthogonal n
+
+instance : MatrixManifoldCarrier OrthogonalMatrix where
+  ShapeOK := fun m n => m = n
+  project := by
+    intro m n h mat
+    let hmn : m = n := h.out
+    let square : T #[n, n] := by simpa [hmn] using mat
+    exact Orthogonal.project n square
+  toMatrix := by
+    intro m n h x
+    let hmn : m = n := h.out
+    exact (by simpa [hmn] using x.matrix : T #[m, n])
+  fromAmbientUnchecked := by
+    intro m n h mat
+    let hmn : m = n := h.out
+    let square : T #[n, n] := by simpa [hmn] using mat
+    exact ⟨square⟩
+  dualMapStep := by
+    intro m n h x g lr
+    let hmn : m = n := h.out
+    let gSquare : T #[n, n] := by simpa [hmn] using g
+    let tg := OrthogonalTangent.fromAmbient x gSquare
+    exact DualMapGeometry.dualMapStep x tg lr
+
+instance orthogonalShapeOKFact (n : UInt64) :
+    ShapeFact (MatrixManifoldCarrier.ShapeOK (M := OrthogonalMatrix) n n) := ⟨rfl⟩
 
 /-- Vector-manifold carrier interface where ambient dimension may differ from intrinsic one. -/
 class VectorManifoldCarrier (V : UInt64 → Type) where
@@ -74,15 +121,17 @@ structure ManifoldLinear (M : UInt64 → UInt64 → Type) [MatrixManifoldCarrier
 namespace ManifoldLinear
 
 private def makeLeafWeight [MatrixManifoldCarrier M] {in_dim out_dim : UInt64}
+    [ShapeFact (MatrixManifoldCarrier.ShapeOK (M := M) out_dim in_dim)]
     (w : M out_dim in_dim) : M out_dim in_dim :=
   MatrixManifoldCarrier.fromAmbientUnchecked
     (autograd.set_requires_grad (autograd.detach (MatrixManifoldCarrier.toMatrix w)) true)
 
 /-- Initialize manifold-linear weights by projecting a random matrix. -/
 def init [MatrixManifoldCarrier M] (in_dim out_dim : UInt64)
+    [ShapeFact (MatrixManifoldCarrier.ShapeOK (M := M) out_dim in_dim)]
     (withBias : Bool := true) : IO (ManifoldLinear M in_dim out_dim) := do
   let w0 ← randn #[out_dim, in_dim] false
-  let w := MatrixManifoldCarrier.project out_dim in_dim w0
+  let w := MatrixManifoldCarrier.project w0
   let weight := makeLeafWeight w
   let bias ← if withBias then
       let b := autograd.set_requires_grad (zeros #[out_dim]) true
@@ -93,6 +142,7 @@ def init [MatrixManifoldCarrier M] (in_dim out_dim : UInt64)
 
 /-- Forward pass for `[batch, in_dim] -> [batch, out_dim]`. -/
 def forward2d [MatrixManifoldCarrier M] {in_dim out_dim batch : UInt64}
+    [ShapeFact (MatrixManifoldCarrier.ShapeOK (M := M) out_dim in_dim)]
     (lin : ManifoldLinear M in_dim out_dim)
     (x : T #[batch, in_dim]) : T #[batch, out_dim] :=
   let y := linear x (MatrixManifoldCarrier.toMatrix lin.weight)
@@ -102,6 +152,7 @@ def forward2d [MatrixManifoldCarrier M] {in_dim out_dim batch : UInt64}
 
 /-- Apply a manifold-native step to weights and an Euclidean step to bias. -/
 def applyDualMapUpdate [MatrixManifoldCarrier M] {in_dim out_dim : UInt64}
+    [ShapeFact (MatrixManifoldCarrier.ShapeOK (M := M) out_dim in_dim)]
     (lin : ManifoldLinear M in_dim out_dim)
     (weightGrad : T #[out_dim, in_dim])
     (biasGrad? : Option (T #[out_dim]))
@@ -147,7 +198,8 @@ def applyDualMapUpdate [VectorManifoldCarrier V] {n : UInt64}
 
 end ManifoldVectorParam
 
-instance [MatrixManifoldCarrier M] (in_dim out_dim : UInt64) :
+instance [MatrixManifoldCarrier M] (in_dim out_dim : UInt64)
+    [ShapeFact (MatrixManifoldCarrier.ShapeOK (M := M) out_dim in_dim)] :
     TensorStruct (ManifoldLinear M in_dim out_dim) where
   map f lin :=
     let w := MatrixManifoldCarrier.toMatrix lin.weight
@@ -187,7 +239,8 @@ instance [VectorManifoldCarrier V] (n : UInt64) : TensorStruct (ManifoldVectorPa
     { value := VectorManifoldCarrier.fromAmbientUnchecked (f av bv) }
   fold f init p := f (VectorManifoldCarrier.toVector p.value) init
 
-instance [MatrixManifoldCarrier M] (in_dim out_dim : UInt64) :
+instance [MatrixManifoldCarrier M] (in_dim out_dim : UInt64)
+    [ShapeFact (MatrixManifoldCarrier.ShapeOK (M := M) out_dim in_dim)] :
     NormedModule (ManifoldLinear M in_dim out_dim) where
   norm lin :=
     let weightNorm := linalg.spectralNorm (MatrixManifoldCarrier.toMatrix lin.weight)
@@ -205,7 +258,7 @@ instance [MatrixManifoldCarrier M] (in_dim out_dim : UInt64) :
     let w := MatrixManifoldCarrier.toMatrix lin.weight
     let σ := linalg.spectralNorm w
     let w' := if σ == 0.0 then w else mul_scalar w (1.0 / σ)
-    let weight := MatrixManifoldCarrier.project out_dim in_dim w'
+    let weight := MatrixManifoldCarrier.project w'
     let bias :=
       match lin.bias with
       | some b =>
@@ -217,7 +270,7 @@ instance [MatrixManifoldCarrier M] (in_dim out_dim : UInt64) :
     let w := MatrixManifoldCarrier.toMatrix lin.weight
     let fnorm := linalg.frobeniusNorm w
     let w' := if fnorm == 0.0 then w else mul_scalar w (1.0 / fnorm)
-    let weight := MatrixManifoldCarrier.project out_dim in_dim w'
+    let weight := MatrixManifoldCarrier.project w'
     let bias :=
       match lin.bias with
       | some b =>
@@ -250,6 +303,9 @@ abbrev StiefelLinear (in_dim out_dim : UInt64) := ManifoldLinear Stiefel in_dim 
 
 /-- Convenience alias: manifold-linear with Grassmann-constrained weights. -/
 abbrev GrassmannLinear (in_dim out_dim : UInt64) := ManifoldLinear Grassmann in_dim out_dim
+
+/-- Convenience alias: manifold-linear with orthogonal square weights. -/
+abbrev OrthogonalLinear (dim : UInt64) := ManifoldLinear OrthogonalMatrix dim dim
 
 /-- Convenience alias: single hyperbolic vector parameter. -/
 abbrev HyperbolicVector (n : UInt64) := ManifoldVectorParam Hyperbolic n

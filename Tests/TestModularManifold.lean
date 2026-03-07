@@ -53,6 +53,22 @@ def testGrassmannLinearConstraintAfterUpdate : IO Unit := do
     "GrassmannLinear representative should preserve X^T X ≈ I"
 
 @[test]
+def testOrthogonalLinearConstraintAfterUpdate : IO Unit := do
+  let layer : OrthogonalLinear 8 ← ManifoldLinear.init (M := OrthogonalMatrix) 8 8 true
+  let gW ← randn #[8, 8] false
+  let gB ← randn #[8] false
+  let layer' := ManifoldLinear.applyDualMapUpdate layer gW (some gB) 0.02
+
+  let w := MatrixManifoldCarrier.toMatrix layer'.weight
+  let wtW := nn.mm (nn.transpose2d w) w
+  let wwT := nn.mm w (nn.transpose2d w)
+  let I := eye 8
+  LeanTest.assertTrue (allclose wtW I (rtol := 1e-4) (atol := 1e-5))
+    "OrthogonalLinear weight should preserve W^T W ≈ I"
+  LeanTest.assertTrue (allclose wwT I (rtol := 1e-4) (atol := 1e-5))
+    "OrthogonalLinear weight should preserve W W^T ≈ I"
+
+@[test]
 def testModularBudgetBridgeProducesFiniteMultiplier : IO Unit := do
   let l1 ← ManifoldLinear.init (M := Tyr.AD.Stiefel) 8 16 false
   let l2 ← ManifoldLinear.init (M := Tyr.AD.Stiefel) 16 16 false
