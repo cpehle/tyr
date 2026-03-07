@@ -2086,6 +2086,8 @@ lean_object* lean_torch_slice_2d(
 
 // Stack multiple 1D tensors into 2D
 lean_object* lean_torch_stack_1d(
+  uint64_t /*k*/,
+  uint64_t /*n*/,
   lean_obj_arg tensors,
   int64_t dim
 ) {
