@@ -1,5 +1,6 @@
 import Tyr.DiffEq.Types
 import Tyr.DiffEq.Path
+import Tyr.DiffEq.Brownian
 
 namespace torch
 namespace DiffEq
@@ -372,6 +373,8 @@ Noise is injected into the velocity component only.
 -/
 structure UnderdampedLangevinDiffusionTerm (X Args : Type) where
   control : Time → Time → X
+  controlH? : Option (Time → Time → X) := none
+  controlK? : Option (Time → Time → X) := none
   gamma : Time → X → X → Args → Scalar := fun _ _ _ _ => 1.0
   u : Time → X → X → Args → Scalar := fun _ _ _ _ => 1.0
   argsValid : Time → X → X → Args → Bool := fun _ _ _ _ => true
@@ -423,6 +426,34 @@ private def noiseScale (term : UnderdampedLangevinDiffusionTerm X Args)
   let u := term.u t x v args
   Float.sqrt (2.0 * gamma * u)
 
+def controlW (term : UnderdampedLangevinDiffusionTerm X Args) (t0 t1 : Time) : X :=
+  term.control t0 t1
+
+def controlH [DiffEqSpace X] (term : UnderdampedLangevinDiffusionTerm X Args)
+    (t0 t1 : Time) : X :=
+  match term.controlH? with
+  | some h => h t0 t1
+  | none => DiffEqSpace.scale 0.0 (term.control t0 t1)
+
+def controlK [DiffEqSpace X] (term : UnderdampedLangevinDiffusionTerm X Args)
+    (t0 t1 : Time) : X :=
+  match term.controlK? with
+  | some k => k t0 t1
+  | none => DiffEqSpace.scale 0.0 (term.control t0 t1)
+
+def withControlH (term : UnderdampedLangevinDiffusionTerm X Args)
+    (controlH : Time → Time → X) : UnderdampedLangevinDiffusionTerm X Args :=
+  { term with controlH? := some controlH }
+
+def withControlK (term : UnderdampedLangevinDiffusionTerm X Args)
+    (controlK : Time → Time → X) : UnderdampedLangevinDiffusionTerm X Args :=
+  { term with controlK? := some controlK }
+
+def withControlsHK (term : UnderdampedLangevinDiffusionTerm X Args)
+    (controlH : Time → Time → X) (controlK : Time → Time → X) :
+    UnderdampedLangevinDiffusionTerm X Args :=
+  { term with controlH? := some controlH, controlK? := some controlK }
+
 instance [DiffEqSpace X] :
     TermLike (UnderdampedLangevinDiffusionTerm X Args) (X × X) Scalar X Args where
   vf term t y args :=
@@ -456,6 +487,8 @@ def ofPathWithSide (path : AbstractPath X)
     UnderdampedLangevinDiffusionTerm X Args :=
   {
     control := fun t0 t1 => path.evaluate t0 (some t1) left
+    controlH? := none
+    controlK? := none
     gamma := gamma
     u := u
     argsValid := argsValid
@@ -467,6 +500,50 @@ def ofPath (path : AbstractPath X)
     (argsValid : Time → X → X → Args → Bool := fun _ _ _ _ => true) :
     UnderdampedLangevinDiffusionTerm X Args :=
   ofPathWithSide path gamma u argsValid true
+
+def ofSpaceTimePathWithSide (path : AbstractPath (SpaceTimeLevyArea Time X))
+    (gamma : Time → X → X → Args → Scalar := fun _ _ _ _ => 1.0)
+    (u : Time → X → X → Args → Scalar := fun _ _ _ _ => 1.0)
+    (argsValid : Time → X → X → Args → Bool := fun _ _ _ _ => true)
+    (left : Bool := true) :
+    UnderdampedLangevinDiffusionTerm X Args :=
+  {
+    control := fun t0 t1 => (path.evaluate t0 (some t1) left).W
+    controlH? := some (fun t0 t1 => (path.evaluate t0 (some t1) left).H)
+    controlK? := none
+    gamma := gamma
+    u := u
+    argsValid := argsValid
+  }
+
+def ofSpaceTimePath (path : AbstractPath (SpaceTimeLevyArea Time X))
+    (gamma : Time → X → X → Args → Scalar := fun _ _ _ _ => 1.0)
+    (u : Time → X → X → Args → Scalar := fun _ _ _ _ => 1.0)
+    (argsValid : Time → X → X → Args → Bool := fun _ _ _ _ => true) :
+    UnderdampedLangevinDiffusionTerm X Args :=
+  ofSpaceTimePathWithSide path gamma u argsValid true
+
+def ofSpaceTimeTimePathWithSide (path : AbstractPath (SpaceTimeTimeLevyArea Time X))
+    (gamma : Time → X → X → Args → Scalar := fun _ _ _ _ => 1.0)
+    (u : Time → X → X → Args → Scalar := fun _ _ _ _ => 1.0)
+    (argsValid : Time → X → X → Args → Bool := fun _ _ _ _ => true)
+    (left : Bool := true) :
+    UnderdampedLangevinDiffusionTerm X Args :=
+  {
+    control := fun t0 t1 => (path.evaluate t0 (some t1) left).W
+    controlH? := some (fun t0 t1 => (path.evaluate t0 (some t1) left).H)
+    controlK? := some (fun t0 t1 => (path.evaluate t0 (some t1) left).K)
+    gamma := gamma
+    u := u
+    argsValid := argsValid
+  }
+
+def ofSpaceTimeTimePath (path : AbstractPath (SpaceTimeTimeLevyArea Time X))
+    (gamma : Time → X → X → Args → Scalar := fun _ _ _ _ => 1.0)
+    (u : Time → X → X → Args → Scalar := fun _ _ _ _ => 1.0)
+    (argsValid : Time → X → X → Args → Bool := fun _ _ _ _ => true) :
+    UnderdampedLangevinDiffusionTerm X Args :=
+  ofSpaceTimeTimePathWithSide path gamma u argsValid true
 
 end UnderdampedLangevinDiffusionTerm
 

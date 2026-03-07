@@ -140,24 +140,32 @@ def QUICSORT.solver (cfg : QUICSORT := {}) {X Args : Type}
             let rho := Float.sqrt (2.0 * gamma * u)
             let uh := u * h
             let coeffs := quicsortCoeffs h gamma cfg.taylorThreshold
-            let rhoWK := rho * (dW - 12.0 * dK)
-            let vTilde := v0 + rho * (dH + 6.0 * dK)
+            let levyNoise : X := dW - 12.0 * dK
+            let rhoWK : X := rho * levyNoise
+            let levyShift : X := dH + 6.0 * dK
+            let vTilde : X := v0 + rho * levyShift
 
-            let xL := x0 + coeffs.aL * vTilde + coeffs.bL * rhoWK
-            let fLUh := uh * drift.gradPotential (t0 + lCoeff * h) xL args
+            let xLBase : X := x0 + coeffs.aL * vTilde
+            let xL : X := xLBase + coeffs.bL * rhoWK
+            let fLUh : X := uh * drift.gradPotential (t0 + lCoeff * h) xL args
 
-            let xR := x0 + coeffs.aR * vTilde + coeffs.bR * rhoWK - coeffs.aThird * fLUh
-            let fRUh := uh * drift.gradPotential (t0 + rCoeff * h) xR args
+            let xRBase : X := x0 + coeffs.aR * vTilde
+            let xRNoise : X := xRBase + coeffs.bR * rhoWK
+            let xR : X := xRNoise - coeffs.aThird * fLUh
+            let fRUh : X := uh * drift.gradPotential (t0 + rCoeff * h) xR args
 
-            let x1 :=
-              x0 + coeffs.a1 * vTilde + coeffs.b1 * rhoWK -
-              0.5 * (coeffs.aR * fLUh + coeffs.aL * fRUh)
+            let xDrift : X := 0.5 * (coeffs.aR * fLUh + coeffs.aL * fRUh)
+            let x1Base : X := x0 + coeffs.a1 * vTilde
+            let x1Noise : X := x1Base + coeffs.b1 * rhoWK
+            let x1 : X := x1Noise - xDrift
 
-            let vTildeOut :=
-              coeffs.beta1 * vTilde -
-              0.5 * (coeffs.betaR * fLUh + coeffs.betaL * fRUh) +
-              coeffs.aDivH * rhoWK
-            let v1 := vTildeOut - rho * (dH - 6.0 * dK)
+            let vTildeDrift : X := 0.5 * (coeffs.betaR * fLUh + coeffs.betaL * fRUh)
+            let vTildeNoise : X := coeffs.aDivH * rhoWK
+            let vTildeBase : X := coeffs.beta1 * vTilde - vTildeDrift
+            let vTildeOut : X := vTildeBase + vTildeNoise
+            let levyCorrection : X := dH - 6.0 * dK
+            let vCorrection : X := rho * levyCorrection
+            let v1 : X := vTildeOut - vCorrection
 
             let y1 : X × X := (x1, v1)
             let dense := { t0 := t0, t1 := t1, y0 := y0, y1 := y1 }
