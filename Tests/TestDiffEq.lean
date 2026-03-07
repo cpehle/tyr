@@ -2120,6 +2120,77 @@ private def evaluateDenseFloat {S C : Type}
         s!"Stratonovich Milstein JVP wrapper mismatch: expected {yBase}, got {yWrap}"
   | _, _ => LeanTest.fail "Expected ys from both Stratonovich Milstein solves"
 
+@[test] def testMilsteinVectorControlFiniteDiffProdWrapper : IO Unit := do
+  let drift : ODETerm Float Unit := { vectorField := fun _t y _ => -0.4 * y }
+  let c0 : Vector 2 Float := ⟨#[0.0, 0.0], by decide⟩
+  let c1 : Vector 2 Float := ⟨#[1.0, 1.0], by decide⟩
+  let path : AbstractPath (Vector 2 Float) :=
+    AbstractPath.linearInterpolation 0.0 1.0 c0 c1
+  let i0 : Fin 2 := ⟨0, by decide⟩
+  let i1 : Fin 2 := ⟨1, by decide⟩
+  let diffusionBase : ControlTerm Float Float (Vector 2 Float) Unit :=
+    ControlTerm.ofPath
+      (fun _t y _ => y)
+      path
+      (fun vf control => vf * ((control.get i0) + (control.get i1)))
+  let diffusionWrap := withFiniteDiffJacobianProd diffusionBase
+
+  let termsBase : MultiTerm (ODETerm Float Unit) (ControlTerm Float Float (Vector 2 Float) Unit) := {
+    term1 := drift
+    term2 := diffusionBase
+  }
+  let termsWrap :
+      MultiTerm (ODETerm Float Unit) (FiniteDiffProdJacobianDiffusion (ControlTerm Float Float (Vector 2 Float) Unit)) := {
+    term1 := drift
+    term2 := diffusionWrap
+  }
+
+  let solverBase :=
+    Milstein.solver
+      (Drift := ODETerm Float Unit)
+      (Diffusion := ControlTerm Float Float (Vector 2 Float) Unit)
+      (Y := Float)
+      (VFd := Float)
+      (VFg := Float)
+      (Control := Vector 2 Float)
+      (Args := Unit)
+  let solverWrap :=
+    Milstein.solver
+      (Drift := ODETerm Float Unit)
+      (Diffusion := FiniteDiffProdJacobianDiffusion (ControlTerm Float Float (Vector 2 Float) Unit))
+      (Y := Float)
+      (VFd := Float)
+      (VFg := Float)
+      (Control := Vector 2 Float)
+      (Args := Unit)
+
+  let solveBase :=
+    diffeqsolve
+      (Term := MultiTerm (ODETerm Float Unit) (ControlTerm Float Float (Vector 2 Float) Unit))
+      (Y := Float)
+      (VF := (Float × Float))
+      (Control := (Time × Vector 2 Float))
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      termsBase solverBase 0.0 1.0 (some 0.25) (1.0 : Float) ()
+      (saveat := { t1 := true })
+  let solveWrap :=
+    diffeqsolve
+      (Term := MultiTerm (ODETerm Float Unit)
+        (FiniteDiffProdJacobianDiffusion (ControlTerm Float Float (Vector 2 Float) Unit)))
+      (Y := Float)
+      (VF := (Float × Float))
+      (Control := (Time × Vector 2 Float))
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      termsWrap solverWrap 0.0 1.0 (some 0.25) (1.0 : Float) ()
+      (saveat := { t1 := true })
+
+  let yBase ← finalSaved "Milstein vector control base" solveBase
+  let yWrap ← finalSaved "Milstein vector control wrapped" solveWrap
+  LeanTest.assertTrue (approx yWrap yBase 2e-4)
+    s!"Milstein vector-control finite-diff wrapper mismatch: expected {yBase}, got {yWrap}"
+
 @[test] def testControlTermToODEConversion : IO Unit := do
   let path := AbstractPath.linearInterpolation 0.0 1.0 (0.0 : Float) (1.0 : Float)
   let term : ControlTerm Float Float Float Unit :=
@@ -3281,6 +3352,7 @@ def run : IO Unit := do
   testContainerArithmeticInstances
   testMilsteinAutodiffJvpWrapper
   testStratonovichMilsteinAutodiffJvpWrapper
+  testMilsteinVectorControlFiniteDiffProdWrapper
   testControlTermToODEConversion
   testAbstractPathComposeLinear
   testAbstractPathMapAndRestrict
