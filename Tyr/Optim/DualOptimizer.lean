@@ -9,10 +9,13 @@
 -/
 import Tyr.Torch
 import Tyr.TensorStruct
+import Tyr.Distributed
 import Tyr.Optim.NorMuon
 import Tyr.Optim.DistAdam
+import Tyr.Optim.ManifoldMuon
 import Tyr.Optim.Scheduler
 import Tyr.Modular.Budget
+import Tyr.Manifolds.Optimizer
 
 namespace torch.Optim.DualOptimizer
 
@@ -24,6 +27,13 @@ open Tyr.Modular
 inductive MatrixOptimizerKind where
   | norMuon
   | manifoldMuon
+  deriving Repr, BEq, Inhabited
+
+/-- Matrix manifold family for constrained matrix updates. -/
+inductive MatrixManifoldFamily where
+  | stiefel
+  | orthogonal
+  | grassmann
   deriving Repr, BEq, Inhabited
 
 /-- Configuration for dual optimizer setup -/
@@ -40,6 +50,10 @@ structure Config where
   muonMomentum : Float := 0.95
   /-- Muon weight decay -/
   muonWeightDecay : Float := 0.01
+  /-- Newton-Schulz iterations for NorMuon orthogonalization. -/
+  muonNumIters : UInt64 := 5
+  /-- Whether matrix updates run distributed collectives for NorMuon path. -/
+  muonDistributed : Bool := false
   /-- AdamW beta1 -/
   adamBeta1 : Float := 0.9
   /-- AdamW beta2 -/
@@ -56,6 +70,18 @@ structure Config where
   warmupSteps : Nat := 300
   /-- Matrix optimizer backend (default keeps NorMuon behavior). -/
   matrixOptimizer : MatrixOptimizerKind := .norMuon
+  /-- Matrix manifold family used by manifold-backed matrix optimizers. -/
+  matrixManifold : MatrixManifoldFamily := .stiefel
+  /-- Force generic dual-map manifold path even when specialized kernels exist. -/
+  preferGenericManifoldPath : Bool := false
+  /-- Newton-Schulz iterations for specialized manifold-Muon sign approximation. -/
+  manifoldNumIters : UInt64 := 5
+  /-- Dual-ascent steps for specialized manifold-Muon. -/
+  manifoldDualAscentSteps : Nat := 2
+  /-- Dual-ascent learning rate for specialized manifold-Muon. -/
+  manifoldDualAscentLr : Float := 0.1
+  /-- Whether manifold matrix paths use distributed collectives. -/
+  manifoldDistributed : Bool := false
   /-- Enable modular-budget multipliers on group learning rates. -/
   useModularBudget : Bool := false
   /-- Optional groupwise modular budget multipliers. -/
@@ -74,8 +100,8 @@ def toMuonConfig (cfg : Config) : NorMuon.Config := {
   weightDecay := cfg.muonWeightDecay
   momentum := cfg.muonMomentum
   beta2 := 0.95
-  numIters := 5
-  distributed := false
+  numIters := cfg.muonNumIters
+  distributed := cfg.muonDistributed
   worldSize := 1
 }
 
@@ -149,6 +175,12 @@ def groupUsesMuon (group : ParamGroup) : Bool :=
 def usesManifoldMuon (cfg : Config) : Bool :=
   cfg.matrixOptimizer == .manifoldMuon
 
+/-- True when manifold matrix backend should use specialized Stiefel-Muon kernels. -/
+def usesSpecializedStiefelPath (cfg : Config) : Bool :=
+  cfg.matrixOptimizer == .manifoldMuon &&
+    cfg.matrixManifold == .stiefel &&
+    !cfg.preferGenericManifoldPath
+
 /-- Get scheduled momentum for a given step (with warmup/cooldown) -/
 def getScheduledMomentum (cfg : Config) (step : Nat) : Float :=
   NorMuon.getMomentum step cfg.totalSteps cfg.muonMomentum cfg.warmupSteps 50
@@ -176,8 +208,266 @@ def getMuonConfigAtStep (cfg : Config) (step : Nat) : NorMuon.Config :=
   let weightDecay := getScheduledWeightDecay cfg step
   { toMuonConfig cfg with momentum, weightDecay }
 
+/-- Get current manifold-Muon config with scheduled momentum. -/
+def getManifoldMuonConfigAtStep (cfg : Config) (step : Nat) : torch.Optim.ManifoldMuon.Config :=
+  let momentum := getScheduledMomentum cfg step
+  {
+    lr := cfg.matrixLr
+    momentum := momentum
+    numIters := cfg.manifoldNumIters
+    dualAscentSteps := cfg.manifoldDualAscentSteps
+    dualAscentLr := cfg.manifoldDualAscentLr
+    distributed := cfg.manifoldDistributed
+  }
+
 /-- Initialize Muon optimizer state -/
 def initMuonState (cfg : Config) : IO NorMuon.State :=
   NorMuon.State.init (toMuonConfig cfg)
+
+/-- Generic dual-map manifold state for matrix parameters. -/
+structure GenericManifoldState (m n : UInt64) where
+  /-- Momentum buffer used to form Nesterov-like blended gradients. -/
+  momentumBuffer : Option (T #[m, n]) := none
+  /-- Local step count for this parameter. -/
+  step : Nat := 0
+  deriving Repr, Inhabited
+
+/-- Matrix-parameter optimizer state tagged by backend family. -/
+inductive MatrixParamState (m n : UInt64) where
+  | norMuon (state : NorMuon.ParamState #[m, n])
+  | manifoldMuon (state : torch.Optim.ManifoldMuon.ParamState m n)
+  | genericManifold (state : GenericManifoldState m n)
+  deriving Repr
+
+/-- Initialize generic manifold state. -/
+def initGenericManifoldState {m n : UInt64} (_param : T #[m, n]) : GenericManifoldState m n := {}
+
+/-- Initialize matrix state according to the configured matrix backend. -/
+def initMatrixParamState {m n : UInt64} (cfg : Config) (param : T #[m, n]) : MatrixParamState m n :=
+  if cfg.matrixOptimizer == .norMuon then
+    .norMuon (NorMuon.initParamState param)
+  else if usesSpecializedStiefelPath cfg then
+    .manifoldMuon (torch.Optim.ManifoldMuon.initParamState param)
+  else
+    .genericManifold (initGenericManifoldState param)
+
+/-- Extract per-parameter step count from matrix state. -/
+def MatrixParamState.step {m n : UInt64} (st : MatrixParamState m n) : Nat :=
+  match st with
+  | .norMuon s => s.step
+  | .manifoldMuon s => s.step
+  | .genericManifold s => s.step
+
+private def stepOnManifoldFamily {m n : UInt64}
+    (family : MatrixManifoldFamily)
+    (param : T #[m, n])
+    (ambientGrad : T #[m, n])
+    (lr : Float)
+    : T #[m, n] :=
+  match family with
+  | .stiefel =>
+    let x : Tyr.AD.Stiefel m n := ⟨param⟩
+    let g := Tyr.AD.StiefelTangent.project x ambientGrad
+    (Tyr.AD.DualMapGeometry.dualMapStep x g lr).matrix
+  | .orthogonal =>
+    -- Orthogonal is represented through the Stiefel(n,n) style matrix path.
+    let x : Tyr.AD.Stiefel m n := ⟨param⟩
+    let g := Tyr.AD.StiefelTangent.project x ambientGrad
+    (Tyr.AD.DualMapGeometry.dualMapStep x g lr).matrix
+  | .grassmann =>
+    let x : Tyr.AD.Grassmann m n := ⟨param⟩
+    let g := Tyr.AD.GrassmannTangent.project x ambientGrad
+    (Tyr.AD.DualMapGeometry.dualMapStep x g lr).matrix
+
+/--
+Single matrix step for the generic manifold path using `DualMapGeometry`.
+
+This path is intentionally simple and composable:
+- shared momentum blending from NorMuon,
+- manifold-family-specific projection/retraction from `Tyr.Manifolds`,
+- no specialized dual-ascent state.
+-/
+def stepGenericManifoldSingle {m n : UInt64}
+    (param : T #[m, n])
+    (grad : T #[m, n])
+    (state : GenericManifoldState m n)
+    (cfg : Config)
+    (step : Nat)
+    (lrMul : Float := 1.0)
+    : IO (T #[m, n] × GenericManifoldState m n) := do
+  let gRaw := autograd.detach grad
+  let momentum := getScheduledMomentum cfg step
+  let newMomentum := NorMuon.updateMomentum gRaw state.momentumBuffer momentum
+  let nesterovGrad := mul_scalar gRaw (1.0 - momentum) + mul_scalar newMomentum momentum
+  let aspectScale := NorMuon.aspectRatioScale #[m, n]
+  let effectiveLr := cfg.matrixLr * lrMul * aspectScale
+  let updated := stepOnManifoldFamily cfg.matrixManifold param nesterovGrad effectiveLr
+  let newParam := autograd.set_requires_grad (autograd.detach updated) true
+  let newState : GenericManifoldState m n := {
+    momentumBuffer := some newMomentum
+    step := state.step + 1
+  }
+  return (newParam, newState)
+
+/-- Single matrix step that dispatches to the configured matrix backend. -/
+def stepMatrixSingle {m n : UInt64}
+    (param : T #[m, n])
+    (grad : T #[m, n])
+    (state : MatrixParamState m n)
+    (cfg : Config)
+    (step : Nat)
+    (lrMul : Float := 1.0)
+    (wdMul : Float := 1.0)
+    : IO (T #[m, n] × MatrixParamState m n) := do
+  match cfg.matrixOptimizer with
+  | .norMuon =>
+    let st := match state with
+      | .norMuon s => s
+      | _ => NorMuon.initParamState param
+    let muonCfg := getMuonConfigAtStep cfg step
+    let (p', st') ← NorMuon.stepSingle param grad st muonCfg lrMul wdMul
+    return (p', .norMuon st')
+  | .manifoldMuon =>
+    if usesSpecializedStiefelPath cfg then
+      let st := match state with
+        | .manifoldMuon s => s
+        | _ => torch.Optim.ManifoldMuon.initParamState param
+      let manifoldCfg := getManifoldMuonConfigAtStep cfg step
+      let (p', st') ← torch.Optim.ManifoldMuon.stepSingle param grad st manifoldCfg lrMul
+      return (p', .manifoldMuon st')
+    else
+      let st := match state with
+        | .genericManifold s => s
+        | _ => initGenericManifoldState param
+      let (p', st') ← stepGenericManifoldSingle param grad st cfg step lrMul
+      return (p', .genericManifold st')
+
+/-- Local matrix-group step that composes `stepMatrixSingle` over each parameter. -/
+def stepMatrixGroupLocal {m n : UInt64}
+    (params : Array (T #[m, n]))
+    (grads : Array (T #[m, n]))
+    (states : Array (MatrixParamState m n))
+    (cfg : Config)
+    (step : Nat)
+    (lrMul : Float := 1.0)
+    (wdMul : Float := 1.0)
+    : IO (Array (T #[m, n]) × Array (MatrixParamState m n)) := do
+  let mut outParams : Array (T #[m, n]) := #[]
+  let mut outStates : Array (MatrixParamState m n) := #[]
+  for i in [:params.size] do
+    let p := params[i]!
+    let g := grads[i]?.getD (zeros_like p)
+    let st := match states[i]? with
+      | some s => s
+      | none => initMatrixParamState cfg p
+    let (p', st') ← stepMatrixSingle p g st cfg step lrMul wdMul
+    outParams := outParams.push p'
+    outStates := outStates.push st'
+  return (outParams, outStates)
+
+private def allNorMuonStates? {m n : UInt64}
+    (states : Array (MatrixParamState m n)) : Option (Array (NorMuon.ParamState #[m, n])) :=
+  Id.run do
+    let mut out : Array (NorMuon.ParamState #[m, n]) := #[]
+    for st in states do
+      match st with
+      | .norMuon s => out := out.push s
+      | _ => return none
+    return some out
+
+private def allManifoldMuonStates? {m n : UInt64}
+    (states : Array (MatrixParamState m n)) : Option (Array (torch.Optim.ManifoldMuon.ParamState m n)) :=
+  Id.run do
+    let mut out : Array (torch.Optim.ManifoldMuon.ParamState m n) := #[]
+    for st in states do
+      match st with
+      | .manifoldMuon s => out := out.push s
+      | _ => return none
+    return some out
+
+/--
+Distributed matrix-group step with backend-aware dispatch.
+
+Fast-paths:
+- NorMuon uses NorMuon's distributed owner update path.
+- Specialized Stiefel manifold-Muon uses its distributed path.
+
+Fallback:
+- generic manifold path does gradient all-reduce then local per-parameter updates.
+-/
+def stepMatrixGroupDistributed {m n : UInt64}
+    (params : Array (T #[m, n]))
+    (grads : Array (T #[m, n]))
+    (states : Array (MatrixParamState m n))
+    (cfg : Config)
+    (step : Nat)
+    (lrMul : Float := 1.0)
+    (wdMul : Float := 1.0)
+    : IO (Array (T #[m, n]) × Array (MatrixParamState m n)) := do
+  if params.isEmpty then
+    return (params, states)
+
+  match cfg.matrixOptimizer with
+  | .norMuon =>
+    match allNorMuonStates? states with
+    | some st =>
+      let muonCfg := getMuonConfigAtStep cfg step
+      let (params', states') ← NorMuon.stepDistributedGroup params grads st muonCfg lrMul wdMul
+      return (params', states'.map MatrixParamState.norMuon)
+    | none =>
+      stepMatrixGroupLocal params grads states cfg step lrMul wdMul
+  | .manifoldMuon =>
+    if usesSpecializedStiefelPath cfg then
+      match allManifoldMuonStates? states with
+      | some st =>
+        let manifoldCfg := getManifoldMuonConfigAtStep cfg step
+        let (params', states') ← torch.Optim.ManifoldMuon.stepDistributedGroup params grads st manifoldCfg lrMul
+        return (params', states'.map MatrixParamState.manifoldMuon)
+      | none =>
+        stepMatrixGroupLocal params grads states cfg step lrMul wdMul
+    else
+      let isDist ← dist.isInitialized
+      if !cfg.manifoldDistributed || !isDist then
+        stepMatrixGroupLocal params grads states cfg step lrMul wdMul
+      else
+        let worldSize ← dist.getWorldSize
+        if worldSize <= 1 then
+          stepMatrixGroupLocal params grads states cfg step lrMul wdMul
+        else
+          let mut reducedGrads : Array (T #[m, n]) := #[]
+          for i in [:params.size] do
+            let p := params[i]!
+            let g := autograd.detach (grads[i]?.getD (zeros_like p))
+            dist.allReduce g .avg
+            reducedGrads := reducedGrads.push g
+          stepMatrixGroupLocal params reducedGrads states cfg step lrMul wdMul
+
+/-- Composable matrix backend operations for a fixed shape. -/
+structure MatrixBackendOps (m n : UInt64) where
+  initState : T #[m, n] → MatrixParamState m n
+  stepSingle : T #[m, n] → T #[m, n] → MatrixParamState m n →
+    IO (T #[m, n] × MatrixParamState m n)
+  stepGroupLocal : Array (T #[m, n]) → Array (T #[m, n]) → Array (MatrixParamState m n) →
+    IO (Array (T #[m, n]) × Array (MatrixParamState m n))
+  stepGroupDistributed : Array (T #[m, n]) → Array (T #[m, n]) → Array (MatrixParamState m n) →
+    IO (Array (T #[m, n]) × Array (MatrixParamState m n))
+
+/--
+Build a backend operations bundle for a matrix parameter shape.
+
+This keeps optimizer composition explicit: call-sites can choose backend ops once,
+then reuse the same `init/step` closures regardless of matrix backend kind.
+-/
+def matrixBackendOps {m n : UInt64}
+    (cfg : Config)
+    (step : Nat)
+    (lrMul : Float := 1.0)
+    (wdMul : Float := 1.0)
+    : MatrixBackendOps m n := {
+  initState := initMatrixParamState cfg
+  stepSingle := fun p g st => stepMatrixSingle p g st cfg step lrMul wdMul
+  stepGroupLocal := fun ps gs ss => stepMatrixGroupLocal ps gs ss cfg step lrMul wdMul
+  stepGroupDistributed := fun ps gs ss => stepMatrixGroupDistributed ps gs ss cfg step lrMul wdMul
+}
 
 end torch.Optim.DualOptimizer
