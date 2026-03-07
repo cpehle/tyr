@@ -532,14 +532,11 @@ def diffeqsolve {Term Y VF Control Args Controller : Type}
                   subTs := subTs.push tStep
                   subYs := subYs.push (saveValue tStep yStep)
             if sub.t1 then
-              let t1AlreadySavedBySteps :=
-                if sub.steps.enabled then
-                  match subTs.back? with
-                  | some lastT => lastT == tf
-                  | none => false
-                else
-                  false
-              if !t1AlreadySavedBySteps then
+              let t1AlreadySaved :=
+                match subTs.back? with
+                | some lastT => timesWithinTol lastT tf terminalTol
+                | none => false
+              if !t1AlreadySaved then
                 subTs := subTs.push tf
                 subYs := subYs.push (saveValue tf yf)
             outTs := outTs ++ subTs

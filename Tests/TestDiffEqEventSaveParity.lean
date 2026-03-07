@@ -65,6 +65,13 @@ private def getStat (key : String) (stats : List (String × Nat)) : Nat :=
   | some (_, value) => value
   | none => 0
 
+private def countApprox (xs : Array Time) (target tol : Time) : Nat := Id.run do
+  let mut count := 0
+  for x in xs do
+    if approx x target tol then
+      count := count + 1
+  return count
+
 @[test] def testEventSaveTsIgnoresPostEventTimes : IO Unit := do
   let saveat : SaveAt := {
     t1 := false
@@ -81,6 +88,27 @@ private def getStat (key : String) (stats : List (String × Nat)) : Nat :=
         "saveat.ts: expected event terminal time to be represented"
   | none =>
       LeanTest.fail "saveat.ts: expected saved times"
+
+@[test] def testEventSaveTsT1NoDuplicateTerminalWhenTsContainsEvent : IO Unit := do
+  let saveat : SaveAt := {
+    t1 := true
+    ts := some #[1.0, 3.5, 5.5]
+  }
+  let sol := solveLinearEvent saveat
+  assertEventOccurredAndMasked "saveat.ts+t1 no-dup terminal" sol
+  assertNoSavesAfterTerminal "saveat.ts+t1 no-dup terminal" sol
+  match sol.ts, sol.ys with
+  | some ts, some ys =>
+      LeanTest.assertTrue (ts.size == ys.size)
+        s!"saveat.ts+t1 no-dup terminal: ts/ys size mismatch {ts.size}/{ys.size}"
+      LeanTest.assertTrue (ts.any (fun t => approx t 1.0 1.0e-12))
+        "saveat.ts+t1 no-dup terminal: expected pre-event ts=1.0"
+      LeanTest.assertTrue (countApprox ts sol.t1 1.0e-9 == 1)
+        s!"saveat.ts+t1 no-dup terminal: expected exactly one terminal save at {sol.t1}, got {ts}"
+      LeanTest.assertTrue (ts.size == 2)
+        s!"saveat.ts+t1 no-dup terminal: expected exactly [1.0, t_event], got {ts}"
+  | _, _ =>
+      LeanTest.fail "saveat.ts+t1 no-dup terminal: expected ts/ys outputs"
 
 @[test] def testEventSaveStepsStopsAtEvent : IO Unit := do
   let saveat : SaveAt := {
@@ -214,6 +242,7 @@ private def getStat (key : String) (stats : List (String × Nat)) : Nat :=
 
 def run : IO Unit := do
   testEventSaveTsIgnoresPostEventTimes
+  testEventSaveTsT1NoDuplicateTerminalWhenTsContainsEvent
   testEventSaveStepsStopsAtEvent
   testEventSaveStepsCadenceHonorsT1FlagAtEvent
   testEventSaveSubsIgnorePostEventTimes
