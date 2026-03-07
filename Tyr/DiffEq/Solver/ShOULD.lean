@@ -15,6 +15,7 @@ attribute [local instance] _root_.torch.DiffEq.DiffEqArithmetic.hSubInst
 attribute [local instance] _root_.torch.DiffEq.DiffEqArithmetic.hMulInst
 
 structure ShOULD where
+  taylorThreshold : Float := 0.1
   deriving Inhabited
 
 private structure ShOULDCoeffs where
@@ -27,9 +28,9 @@ private structure ShOULDCoeffs where
   aa : Float
   deriving Inhabited
 
-private def shouldCoeffs (h gamma : Float) : ShOULDCoeffs :=
+private def shouldCoeffs (h gamma taylorThreshold : Float) : ShOULDCoeffs :=
   let gh := gamma * h
-  if Float.abs gamma <= 1.0e-12 || Float.abs gh <= 1.0e-6 then
+  if Float.abs gamma <= 1.0e-12 || Float.abs gh < taylorThreshold then
     let gh2 := gh * gh
     {
       betaHalf := 1.0 - 0.5 * gh + 0.125 * gh2
@@ -57,7 +58,7 @@ private def shouldCoeffs (h gamma : Float) : ShOULDCoeffs :=
       aa := if Float.abs h <= 1.0e-12 then 1.0 else a1 / h
     }
 
-def ShOULD.solver {X Args : Type}
+def ShOULD.solver (cfg : ShOULD := {}) {X Args : Type}
     [DiffEqSpace X] :
     AbstractSolver
       (MultiTerm (UnderdampedLangevinDriftTerm X Args) (UnderdampedLangevinDiffusionTerm X Args))
@@ -107,7 +108,7 @@ def ShOULD.solver {X Args : Type}
             let gamma := drift.gamma t0 x0 v0 args
             let u := drift.u t0 x0 v0 args
             let rho := Float.sqrt (2.0 * gamma * u)
-            let coeffs := shouldCoeffs h gamma
+            let coeffs := shouldCoeffs h gamma cfg.taylorThreshold
             let uh := u * h
 
             let f0 := drift.gradPotential t0 x0 args

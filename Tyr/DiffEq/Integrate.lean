@@ -266,14 +266,12 @@ private def maskFromStepHits {Y Args : Type}
 
 private def maskAtEventTime {Y Args : Type}
     (events : Array (EventSpec Y Args))
-    (hits : Array (StepEventHit Y))
+    (_hits : Array (StepEventHit Y))
     (chosen : StepEventHit Y) : Array Bool := Id.run do
   let mut mask := Array.replicate events.size false
-  for hit in hits do
-    let tol := maxTol hit.tol chosen.tol
-    if timesWithinTol hit.time chosen.time tol then
-      if hit.idx < mask.size then
-        mask := mask.set! hit.idx true
+  if chosen.idx < mask.size then
+    -- diffrax-style event_mask semantics: commit only the selected trigger.
+    mask := mask.set! chosen.idx true
   return mask
 
 private def configuredEvents {Y Args : Type}

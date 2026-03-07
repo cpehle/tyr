@@ -15,6 +15,7 @@ attribute [local instance] _root_.torch.DiffEq.DiffEqArithmetic.hSubInst
 attribute [local instance] _root_.torch.DiffEq.DiffEqArithmetic.hMulInst
 
 structure ALIGN where
+  taylorThreshold : Float := 0.1
   deriving Inhabited
 
 private structure ALIGNCoeffs where
@@ -24,9 +25,9 @@ private structure ALIGNCoeffs where
   aa : Float
   deriving Inhabited
 
-private def alignCoeffs (h gamma : Float) : ALIGNCoeffs :=
+private def alignCoeffs (h gamma taylorThreshold : Float) : ALIGNCoeffs :=
   let gh := gamma * h
-  if Float.abs gh < 1.0e-4 then
+  if Float.abs gh < taylorThreshold then
     let gh2 := gh * gh
     {
       beta := 1.0 - gh + 0.5 * gh2
@@ -45,7 +46,7 @@ private def alignCoeffs (h gamma : Float) : ALIGNCoeffs :=
       aa := a1 / h
     }
 
-def ALIGN.solver {X Args : Type}
+def ALIGN.solver (cfg : ALIGN := {}) {X Args : Type}
     [DiffEqSpace X] :
     AbstractSolver
       (MultiTerm (UnderdampedLangevinDriftTerm X Args) (UnderdampedLangevinDiffusionTerm X Args))
@@ -94,7 +95,7 @@ def ALIGN.solver {X Args : Type}
             let gamma := drift.gamma t0 x0 v0 args
             let u := drift.u t0 x0 v0 args
             let rho := Float.sqrt (2.0 * gamma * u)
-            let coeffs := alignCoeffs h gamma
+            let coeffs := alignCoeffs h gamma cfg.taylorThreshold
             let f0 := drift.gradPotential t0 x0 args
 
             let xDrift := coeffs.a1 * v0 - coeffs.b1 * ((u * h) * f0)

@@ -178,6 +178,23 @@ instance (priority := 1100) {Diffusion Y Control Args : Type}
       let qvSafe := safeQuadraticVariationDenom qv wrapped.qvFloor
       (1.0 / qvSafe) * jvpScaled
 
+instance (priority := 1050) {Diffusion Y VF Control Args : Type}
+    [TermLike Diffusion Y VF Control Args] [DiffEqSpace Y] [MilsteinControl Control]
+    [MilsteinJacobianLike Diffusion Y VF Control Args] :
+    MilsteinJacobianControlLike (AutodiffJvpJacobianDiffusion Diffusion Y Control Args) Y VF Control Args where
+  jacobianProd wrapped t y args control :=
+    let qv := MilsteinControl.quadraticVariation control
+    let qvFloor := sanitizeQuadraticVariationFloor wrapped.qvFloor
+    if Float.abs qv <= qvFloor then
+      (inferInstance : MilsteinJacobianLike Diffusion Y VF Control Args).jacobianProd
+        wrapped.term t y args
+    else
+      let inst := (inferInstance : TermLike Diffusion Y VF Control Args)
+      let g0 := inst.vf_prod wrapped.term t y args control
+      let jvpScaled := wrapped.jvpVfProd t y args control g0
+      let qvSafe := safeQuadraticVariationDenom qv wrapped.qvFloor
+      (1.0 / qvSafe) * jvpScaled
+
 instance {Diffusion Y VF Control Args : Type}
     [TermLike Diffusion Y VF Control Args] [DiffEqSpace Y] [MilsteinControl Control] :
     MilsteinJacobianControlLike (AutodiffJvpJacobianDiffusion Diffusion Y Control Args) Y VF Control Args where

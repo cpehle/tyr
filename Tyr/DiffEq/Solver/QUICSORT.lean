@@ -15,6 +15,7 @@ attribute [local instance] _root_.torch.DiffEq.DiffEqArithmetic.hSubInst
 attribute [local instance] _root_.torch.DiffEq.DiffEqArithmetic.hMulInst
 
 structure QUICSORT where
+  taylorThreshold : Float := 0.1
   deriving Inhabited
 
 private structure QUICCoeffs where
@@ -37,32 +38,32 @@ private def rCoeff : Float := 0.5 + Float.sqrt 3.0 / 6.0
 private def betaTau (gh tau : Float) : Float :=
   Float.exp (-(tau * gh))
 
-private def aTau (h gh gamma tau : Float) : Float :=
-  if Float.abs gamma <= 1.0e-12 || Float.abs gh <= 1.0e-6 then
+private def aTau (h gh gamma tau taylorThreshold : Float) : Float :=
+  if Float.abs gamma <= 1.0e-12 || Float.abs gh < taylorThreshold then
     h * (tau - 0.5 * tau * tau * gh + (1.0 / 6.0) * tau * tau * tau * gh * gh)
   else
     (1.0 - betaTau gh tau) / gamma
 
-private def bTau (h gh gamma tau : Float) : Float :=
-  if Float.abs gamma <= 1.0e-12 || Float.abs gh <= 1.0e-6 then
+private def bTau (h gh gamma tau taylorThreshold : Float) : Float :=
+  if Float.abs gamma <= 1.0e-12 || Float.abs gh < taylorThreshold then
     h * (0.5 * tau * tau - (1.0 / 6.0) * tau * tau * tau * gh +
       (1.0 / 24.0) * tau * tau * tau * tau * gh * gh)
   else
     (betaTau gh tau + tau * gh - 1.0) / (gamma * gh)
 
-private def quicsortCoeffs (h gamma : Float) : QUICCoeffs :=
+private def quicsortCoeffs (h gamma taylorThreshold : Float) : QUICCoeffs :=
   let gh := gamma * h
   let betaL := betaTau gh lCoeff
   let betaR := betaTau gh rCoeff
   let beta1 := betaTau gh 1.0
-  let aL := aTau h gh gamma lCoeff
-  let aR := aTau h gh gamma rCoeff
-  let a1 := aTau h gh gamma 1.0
-  let bL := bTau h gh gamma lCoeff
-  let bR := bTau h gh gamma rCoeff
-  let b1 := bTau h gh gamma 1.0
+  let aL := aTau h gh gamma lCoeff taylorThreshold
+  let aR := aTau h gh gamma rCoeff taylorThreshold
+  let a1 := aTau h gh gamma 1.0 taylorThreshold
+  let bL := bTau h gh gamma lCoeff taylorThreshold
+  let bR := bTau h gh gamma rCoeff taylorThreshold
+  let b1 := bTau h gh gamma 1.0 taylorThreshold
   let aThird :=
-    if Float.abs gamma <= 1.0e-12 || Float.abs gh <= 1.0e-6 then
+    if Float.abs gamma <= 1.0e-12 || Float.abs gh < taylorThreshold then
       h * ((1.0 / 3.0) - (1.0 / 18.0) * gh + (1.0 / 162.0) * gh * gh)
     else
       (1.0 - betaTau gh (1.0 / 3.0)) / gamma
@@ -85,7 +86,7 @@ private def quicsortCoeffs (h gamma : Float) : QUICCoeffs :=
     aDivH := aDivH
   }
 
-def QUICSORT.solver {X Args : Type}
+def QUICSORT.solver (cfg : QUICSORT := {}) {X Args : Type}
     [DiffEqSpace X] :
     AbstractSolver
       (MultiTerm (UnderdampedLangevinDriftTerm X Args) (UnderdampedLangevinDiffusionTerm X Args))
@@ -136,7 +137,7 @@ def QUICSORT.solver {X Args : Type}
             let u := drift.u t0 x0 v0 args
             let rho := Float.sqrt (2.0 * gamma * u)
             let uh := u * h
-            let coeffs := quicsortCoeffs h gamma
+            let coeffs := quicsortCoeffs h gamma cfg.taylorThreshold
             let rhoW := rho * dW
 
             let xL := x0 + coeffs.aL * v0 + coeffs.bL * rhoW

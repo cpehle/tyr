@@ -25,6 +25,62 @@ private def pairL2 (a b : Float × Float) : Float :=
   let dv := a.2 - b.2
   Float.sqrt (dx * dx + dv * dv)
 
+private def mkUnderdampedSingleStepTerms :
+    MultiTerm (UnderdampedLangevinDriftTerm Float Unit)
+      (UnderdampedLangevinDiffusionTerm Float Unit) :=
+  let path := AbstractPath.linearInterpolation 0.0 1.0 (0.0 : Float) (1.0 : Float)
+  let drift : UnderdampedLangevinDriftTerm Float Unit := {
+    gradPotential := fun _t x _ => x
+    gamma := fun _t _x _v _ => 0.3
+    u := fun _t _x _v _ => 0.4
+  }
+  let diffusion : UnderdampedLangevinDiffusionTerm Float Unit :=
+    UnderdampedLangevinDiffusionTerm.ofPath path
+      (gamma := fun _t _x _v _ => 0.3)
+      (u := fun _t _x _v _ => 0.4)
+  { term1 := drift, term2 := diffusion }
+
+private def solveUnderdampedSingleStep
+    (label : String)
+    (solver : AbstractSolver
+      (MultiTerm (UnderdampedLangevinDriftTerm Float Unit)
+        (UnderdampedLangevinDiffusionTerm Float Unit))
+      (Float × Float)
+      ((Float × Float) × Scalar)
+      (Time × Float)
+      Unit) : IO (Float × Float) := do
+  let terms := mkUnderdampedSingleStepTerms
+  let sol :=
+    diffeqsolve
+      (Term := MultiTerm (UnderdampedLangevinDriftTerm Float Unit)
+        (UnderdampedLangevinDiffusionTerm Float Unit))
+      (Y := (Float × Float))
+      (VF := ((Float × Float) × Scalar))
+      (Control := (Time × Float))
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      terms solver 0.0 1.0 (some 1.0) ((1.0, 0.5) : Float × Float) ()
+      (saveat := { t1 := true })
+  LeanTest.assertTrue (sol.result == Result.successful)
+    s!"{label}: single-step solve should succeed"
+  finalSavedPair label sol
+
+private def assertThresholdSwitchChangesEndpoint
+    (label : String)
+    (solverDirect solverTaylor : AbstractSolver
+      (MultiTerm (UnderdampedLangevinDriftTerm Float Unit)
+        (UnderdampedLangevinDiffusionTerm Float Unit))
+      (Float × Float)
+      ((Float × Float) × Scalar)
+      (Time × Float)
+      Unit)
+    (minDelta : Float := 1.0e-4) : IO Unit := do
+  let yDirect ← solveUnderdampedSingleStep s!"{label} direct" solverDirect
+  let yTaylor ← solveUnderdampedSingleStep s!"{label} taylor" solverTaylor
+  let delta := pairL2 yDirect yTaylor
+  LeanTest.assertTrue (delta > minDelta)
+    s!"{label}: expected endpoint delta > {minDelta} between forced direct/taylor branches, got {delta}"
+
 private def mkUnderdampedTerms (seed : UInt64) :
     MultiTerm (UnderdampedLangevinDriftTerm Float Unit)
       (UnderdampedLangevinDiffusionTerm Float Unit) :=
@@ -111,6 +167,24 @@ private def assertSelfConvergence
 Deterministic underdamped-Langevin self-convergence checks guided by:
 - `../diffrax/test/test_underdamped_langevin.py::test_uld_strong_order`
 -/
+@[test] def testALIGNUnderdampedTaylorThresholdParity : IO Unit := do
+  assertThresholdSwitchChangesEndpoint
+    "ALIGN underdamped taylor-threshold parity"
+    (ALIGN.solver { taylorThreshold := 0.0 })
+    (ALIGN.solver { taylorThreshold := 100.0 })
+
+@[test] def testShOULDUnderdampedTaylorThresholdParity : IO Unit := do
+  assertThresholdSwitchChangesEndpoint
+    "ShOULD underdamped taylor-threshold parity"
+    (ShOULD.solver { taylorThreshold := 0.0 })
+    (ShOULD.solver { taylorThreshold := 100.0 })
+
+@[test] def testQUICSORTUnderdampedTaylorThresholdParity : IO Unit := do
+  assertThresholdSwitchChangesEndpoint
+    "QUICSORT underdamped taylor-threshold parity"
+    (QUICSORT.solver { taylorThreshold := 0.0 })
+    (QUICSORT.solver { taylorThreshold := 100.0 })
+
 @[test] def testALIGNUnderdampedSelfConvergence : IO Unit := do
   assertSelfConvergence "ALIGN underdamped strong-order trend" ALIGN.solver 1.1 0.2
 
@@ -121,6 +195,9 @@ Deterministic underdamped-Langevin self-convergence checks guided by:
   assertSelfConvergence "QUICSORT underdamped strong-order trend" QUICSORT.solver 1.2 0.12
 
 def run : IO Unit := do
+  testALIGNUnderdampedTaylorThresholdParity
+  testShOULDUnderdampedTaylorThresholdParity
+  testQUICSORTUnderdampedTaylorThresholdParity
   testALIGNUnderdampedSelfConvergence
   testShOULDUnderdampedSelfConvergence
   testQUICSORTUnderdampedSelfConvergence
