@@ -19,6 +19,29 @@ structure EventSpec (Y Args : Type) where
   rootMaxIters : Nat := 24
   rootTol : Time := 1.0e-6
 
+/-- Progress meter compatibility surface for `diffeqsolve`. -/
+inductive ProgressMeter where
+  | none
+  | text
+  | tqdm
+  deriving Repr, BEq, DecidableEq, Inhabited
+
+namespace ProgressMeter
+
+/--
+Normalize compatibility aliases to concrete behavior.
+Currently `tqdm` falls back to lightweight text logging.
+-/
+def normalize (mode : ProgressMeter) : ProgressMeter :=
+  match mode with
+  | .tqdm => .text
+  | other => other
+
+def textEnabled (mode : ProgressMeter) : Bool :=
+  mode.normalize == .text
+
+end ProgressMeter
+
 private def normalizeSaveTs (ts : Option (Array Time)) : Option (Array Time) :=
   match ts with
   | some xs => if xs.size == 0 then none else some xs
@@ -176,6 +199,51 @@ private def eventMaskHitOption {Y Args : Type}
     (mask : Array Bool) : Option (Array Bool) :=
   if events.size == 0 || !(mask.any (fun hit => hit)) then none else some mask
 
+/-!
+`max_steps=None` parity mode is implemented with a large finite cap so the core solver
+loop remains structurally terminating.
+-/
+private def unboundedStepSafetyCap : Nat := 1000000
+
+private def progressMeterStart (mode : ProgressMeter) (t0 t1 : Time) : Unit := Id.run do
+  if mode.textEnabled then
+    if mode == .tqdm then
+      dbg_trace "[DiffEq progress_meter=tqdm] using text compatibility fallback."
+    dbg_trace s!"[DiffEq progress_meter=text] start t0={t0} t1={t1}"
+
+private def progressMeterShouldLogUpdate (attempted : Nat) : Bool :=
+  attempted == 1 || attempted % 64 == 0
+
+private def progressMeterUpdate
+    (mode : ProgressMeter)
+    (attempted : Nat)
+    (tNow : Time) : Unit := Id.run do
+  if mode.textEnabled && progressMeterShouldLogUpdate attempted then
+    dbg_trace s!"[DiffEq progress_meter=text] update steps={attempted} t={tNow}"
+
+private def progressMeterClose
+    (mode : ProgressMeter)
+    (result : Result)
+    (numSteps numAcceptedSteps numRejectedSteps : Nat) : Unit := Id.run do
+  if mode.textEnabled then
+    dbg_trace
+      s!"[DiffEq progress_meter=text] close steps={numSteps} accepted={numAcceptedSteps} rejected={numRejectedSteps} result={repr result}"
+
+private def progressMeterStats (mode : ProgressMeter) (numSteps : Nat) : List (String × Nat) :=
+  if mode.textEnabled then
+    let aliasStats :=
+      if mode == .tqdm then
+        [("progress_meter_tqdm_alias", 1)]
+      else
+        []
+    [
+      ("progress_meter_start", 1),
+      ("progress_meter_updates", numSteps),
+      ("progress_meter_close", 1)
+    ] ++ aliasStats
+  else
+    []
+
 private def maybeThrowOnFailure {Y SolverState ControllerState : Type}
     (throwOnFailure : Bool)
     (sol : Solution Y SolverState ControllerState) :
@@ -288,7 +356,9 @@ def diffeqsolve {Term Y VF Control Args Controller : Type}
     (initialMadeJump : Bool := false)
     (events : Array (EventSpec Y Args) := #[])
     (saveFn : Option (Time → Y → Args → Y) := none)
-    (throwOnFailure : Bool := false) :
+    (throwOnFailure : Bool := false)
+    (maxStepsOpt : Option Nat := some maxSteps)
+    (progress_meter : ProgressMeter := .none) :
     Solution Y solver.SolverState (StepSizeController.State (C := Controller)) := by
   let activeEvents := configuredEvents event events
   let eventMask0 := initialEventMask activeEvents t0 y0 args
@@ -303,6 +373,12 @@ def diffeqsolve {Term Y VF Control Args Controller : Type}
   let saveSolverState := saveat.effectiveSolverState
   let saveControllerState := saveat.effectiveControllerState
   let saveMadeJump := saveat.effectiveMadeJump
+  let isUnbounded := maxStepsOpt.isNone
+  let maxStepBudget :=
+    match maxStepsOpt with
+    | some n => n
+    | none => unboundedStepSafetyCap
+  let saveConfigIncompatibleWithUnbounded := isUnbounded && (saveSteps || saveDense)
   let saveValue : Time → Y → Y :=
     match saveFn with
     | none => fun _ y => y
@@ -322,7 +398,7 @@ def diffeqsolve {Term Y VF Control Args Controller : Type}
     match saveatTs with
     | none => false
     | some ts => !(isMonotoneInSolveDirection t0 t1 ts)
-  if controllerInvalid.isSome || outOfRange || badDirection then
+  if controllerInvalid.isSome || outOfRange || badDirection || saveConfigIncompatibleWithUnbounded then
     exact maybeThrowOnFailure throwOnFailure {
       t0 := t0
       t1 := t1
@@ -463,6 +539,7 @@ def diffeqsolve {Term Y VF Control Args Controller : Type}
     let stepTsInit := if saveSteps then #[t0] else #[]
     let stepYsInit := if saveSteps then #[saveValue t0 y0] else #[]
     let eventMaskLastInit := eventMask0
+    let _ := progressMeterStart progress_meter t0 t1
     let rec loop (attempted : Nat) (accepted : Nat) (rejected : Nat) (t : Time) (y : Y)
         (state : solver.SolverState)
         (ctrlState : StepSizeState (StepSizeController.State (C := Controller)))
@@ -476,10 +553,10 @@ def diffeqsolve {Term Y VF Control Args Controller : Type}
           StepSizeState (StepSizeController.State (C := Controller)) ×
           Bool × Array Time × Array Y × Array (DenseInterpolation Y) ×
           Array Time × Array Y × Result × Nat × Nat × Nat × Array Bool × Array Bool) :=
-      if attempted >= maxSteps then
+      if attempted >= maxStepBudget then
         (t, y, state, ctrlState, madeJump, denseTs, denseYs, denseSegs, stepTs, stepYs,
           Result.maxStepsReached, attempted, accepted, rejected, eventMaskAcc, eventMaskLastAcc)
-      else if rejected >= maxSteps then
+      else if rejected >= maxStepBudget then
         (t, y, state, ctrlState, madeJump, denseTs, denseYs, denseSegs, stepTs, stepYs,
           Result.maxStepsRejected, attempted, accepted, rejected, eventMaskAcc, eventMaskLastAcc)
       else
@@ -496,6 +573,7 @@ def diffeqsolve {Term Y VF Control Args Controller : Type}
             else
               if tCandidate < t1 then t1 else tCandidate
           let attemptedNext := attempted + 1
+          let _ := progressMeterUpdate progress_meter attemptedNext tNext
           if tNext == t then
             (t, y, state, ctrlState, madeJump, denseTs, denseYs, denseSegs, stepTs, stepYs,
               Result.dtMinReached, attemptedNext, accepted, rejected, eventMaskAcc, eventMaskLastAcc)
@@ -580,6 +658,7 @@ def diffeqsolve {Term Y VF Control Args Controller : Type}
         result, numSteps, numAcceptedSteps, numRejectedSteps, eventMaskF, eventMaskLastF) :=
       loop 0 0 0 t0 y0 initState initCtrl initialMadeJump
         denseTsInit denseYsInit denseSegsInit stepTsInit stepYsInit eventMask0 eventMaskLastInit
+    let _ := progressMeterClose progress_meter result numSteps numAcceptedSteps numRejectedSteps
     let denseInterp :=
       if saveDense || saveatTs.isSome then
         if denseSegs.size > 0 then
@@ -589,17 +668,19 @@ def diffeqsolve {Term Y VF Control Args Controller : Type}
       else
         none
     let (tsOut, ysOut) := computeOutputs tf yf stepTs stepYs denseInterp
+    let stats :=
+      [
+        ("num_steps", numSteps),
+        ("num_accepted_steps", numAcceptedSteps),
+        ("num_rejected_steps", numRejectedSteps)
+      ] ++ progressMeterStats progress_meter numSteps
     exact maybeThrowOnFailure throwOnFailure {
       t0 := t0
       t1 := tf
       ts := tsOut
       ys := ysOut
       interpolation := denseInterp
-      stats := [
-        ("num_steps", numSteps),
-        ("num_accepted_steps", numAcceptedSteps),
-        ("num_rejected_steps", numRejectedSteps)
-      ]
+      stats := stats
       result := result
       solverState := if saveSolverState then some statef else none
       controllerState := if saveControllerState then some ctrlState.state else none

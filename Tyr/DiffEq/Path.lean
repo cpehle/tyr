@@ -218,6 +218,41 @@ def mapControl (path : AbstractPath Control)
       | none => none
   }
 
+def compose [DiffEqSpace Control]
+    (leftPath rightPath : AbstractPath Control) : AbstractPath Control :=
+  let split := leftPath.t1
+  {
+    t0 := leftPath.t0
+    t1 := rightPath.t1
+    evaluate := fun tStart tEnd? left =>
+      let tEnd := tEnd?.getD tStart
+      if tStart <= split && tEnd <= split then
+        leftPath.evaluate tStart (some tEnd) left
+      else if tStart >= split && tEnd >= split then
+        rightPath.evaluate tStart (some tEnd) left
+      else if tStart <= split then
+        let leftInc := leftPath.evaluate tStart (some split) left
+        let rightInc := rightPath.evaluate split (some tEnd) left
+        DiffEqSpace.add leftInc rightInc
+      else
+        let rightInc := rightPath.evaluate tStart (some split) left
+        let leftInc := leftPath.evaluate split (some tEnd) left
+        DiffEqSpace.add rightInc leftInc
+    derivativeFn? :=
+      match leftPath.derivativeFn?, rightPath.derivativeFn? with
+      | some leftDeriv, some rightDeriv =>
+          some (fun t left =>
+            if t < split then
+              leftDeriv t left
+            else if t > split then
+              rightDeriv t left
+            else if left then
+              leftDeriv t left
+            else
+              rightDeriv t left)
+      | _, _ => none
+  }
+
 def restrict (path : AbstractPath Control) (t0 t1 : Time) : AbstractPath Control :=
   {
     t0 := t0

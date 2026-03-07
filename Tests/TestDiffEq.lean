@@ -546,6 +546,114 @@ private def evaluateDenseFloat {S C : Type}
       else
         LeanTest.fail "Empty ys for SDE solve"
 
+@[test] def testSlowRKSDE : IO Unit := do
+  let drift : ODETerm Float Unit := { vectorField := fun _t y _ => -y }
+  let bm : VirtualBrownianTree Float :=
+    { t0 := 0.0, t1 := 1.0, tol := 1.0e-3, seed := 88123, shape := (0.0 : Float) }
+  let bmPath := (VirtualBrownianTree.toAbstractSpaceTime bm).toPath
+  let diffusion : ControlTerm Float Float (SpaceTimeLevyArea Time Float) Unit :=
+    ControlTerm.ofPath (fun _t y _ => y + 1.0) bmPath (fun vf control => vf * control.W)
+  let terms : MultiTerm (ODETerm Float Unit) (ControlTerm Float Float (SpaceTimeLevyArea Time Float) Unit) :=
+    { term1 := drift, term2 := diffusion }
+  let solver :=
+    SlowRK.solver
+      (Drift := ODETerm Float Unit)
+      (Diffusion := ControlTerm Float Float (SpaceTimeLevyArea Time Float) Unit)
+      (Y := Float)
+      (VFg := Float)
+      (Control := SpaceTimeLevyArea Time Float)
+      (Args := Unit)
+  let sol :=
+    diffeqsolve
+      (Term := MultiTerm (ODETerm Float Unit) (ControlTerm Float Float (SpaceTimeLevyArea Time Float) Unit))
+      (Y := Float)
+      (VF := (Float × Float))
+      (Control := (Time × SpaceTimeLevyArea Time Float))
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      terms solver 0.0 1.0 (some 1.0) (2.0 : Float) () (saveat := { t1 := true })
+  match sol.ys with
+  | none => LeanTest.fail "Expected ys for SlowRK solve"
+  | some ys =>
+      if ys.size > 0 then
+        let y1 := ys[ys.size - 1]!
+        let inc := VirtualBrownianTree.incrementSpaceTime bm 0.0 1.0
+        let w := inc.W
+        let h := inc.H
+        let y0 := 2.0
+        let h_kf0 := -y0
+        let z1 := y0 + 0.5 * h_kf0
+        let w_kg1 := (z1 + 1.0) * w
+        let z2 := y0 + (0.5 * h_kf0 + 0.5 * w_kg1)
+        let w_kg2 := (z2 + 1.0) * w
+        let z3 := y0 + (0.5 * h_kf0 + 0.5 * w_kg2)
+        let w_kg3 := (z3 + 1.0) * w
+        let h_kg3 := (z3 + 1.0) * h
+        let z4 := y0 + (0.5 * h_kf0 + w_kg3)
+        let w_kg4 := (z4 + 1.0) * w
+        let z5 := y0 + (0.75 * h_kf0 + (0.75 * w_kg3 + 1.5 * h_kg3))
+        let h_kf5 := -z5
+        let z6 := y0 + (h_kf0 + 0.5 * w_kg2)
+        let h_kg6 := (z6 + 1.0) * h
+        let driftResult := (1.0 / 3.0) * h_kf0 + (2.0 / 3.0) * h_kf5
+        let wResult := (1.0 / 6.0) * w_kg1 + (1.0 / 3.0) * w_kg2 +
+          (1.0 / 3.0) * w_kg3 + (1.0 / 6.0) * w_kg4
+        let hResult := 2.0 * h_kg3 - 2.0 * h_kg6
+        let expected := y0 + driftResult + (wResult + hResult)
+        LeanTest.assertTrue (approx y1 expected 1e-6)
+          s!"SlowRK SDE expected {expected}, got {y1}"
+      else
+        LeanTest.fail "Empty ys for SlowRK solve"
+
+@[test] def testSlowRKDiffersFromGeneralShARK : IO Unit := do
+  let drift : ODETerm Float Unit := { vectorField := fun _t y _ => -0.7 * y + 0.3 }
+  let bm : VirtualBrownianTree Float :=
+    { t0 := 0.0, t1 := 1.0, tol := 1.0e-3, seed := 99123, shape := (0.0 : Float) }
+  let bmPath := (VirtualBrownianTree.toAbstractSpaceTime bm).toPath
+  let diffusion : ControlTerm Float Float (SpaceTimeLevyArea Time Float) Unit :=
+    ControlTerm.ofPath (fun _t y _ => y * y + 0.5) bmPath (fun vf control => vf * control.W)
+  let terms : MultiTerm (ODETerm Float Unit) (ControlTerm Float Float (SpaceTimeLevyArea Time Float) Unit) :=
+    { term1 := drift, term2 := diffusion }
+  let slowSolver :=
+    SlowRK.solver
+      (Drift := ODETerm Float Unit)
+      (Diffusion := ControlTerm Float Float (SpaceTimeLevyArea Time Float) Unit)
+      (Y := Float)
+      (VFg := Float)
+      (Control := SpaceTimeLevyArea Time Float)
+      (Args := Unit)
+  let gsSolver :=
+    GeneralShARK.solver
+      (Drift := ODETerm Float Unit)
+      (Diffusion := ControlTerm Float Float (SpaceTimeLevyArea Time Float) Unit)
+      (Y := Float)
+      (VFg := Float)
+      (Control := SpaceTimeLevyArea Time Float)
+      (Args := Unit)
+  let slowSol :=
+    diffeqsolve
+      (Term := MultiTerm (ODETerm Float Unit) (ControlTerm Float Float (SpaceTimeLevyArea Time Float) Unit))
+      (Y := Float)
+      (VF := (Float × Float))
+      (Control := (Time × SpaceTimeLevyArea Time Float))
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      terms slowSolver 0.0 1.0 (some 1.0) (1.25 : Float) () (saveat := { t1 := true })
+  let gsSol :=
+    diffeqsolve
+      (Term := MultiTerm (ODETerm Float Unit) (ControlTerm Float Float (SpaceTimeLevyArea Time Float) Unit))
+      (Y := Float)
+      (VF := (Float × Float))
+      (Control := (Time × SpaceTimeLevyArea Time Float))
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      terms gsSolver 0.0 1.0 (some 1.0) (1.25 : Float) () (saveat := { t1 := true })
+  let ySlow ← finalSaved "SlowRK" slowSol
+  let yGS ← finalSaved "GeneralShARK" gsSol
+  let delta := Float.abs (ySlow - yGS)
+  LeanTest.assertTrue (delta > 1e-6)
+    s!"SlowRK should differ from GeneralShARK on this case: slow={ySlow}, gshark={yGS}, |Δ|={delta}"
+
 @[test] def testRK4ODE : IO Unit := do
   let term : ODETerm Float Unit := { vectorField := fun _t y _ => -y }
   let solver :=
@@ -1687,6 +1795,42 @@ private def evaluateDenseFloat {S C : Type}
   LeanTest.assertTrue nondiffTerm.toODE?.isNone
     "ControlTerm.toODE? should be none when control derivative is unavailable"
 
+@[test] def testAbstractPathComposeLinear : IO Unit := do
+  let left := AbstractPath.linearInterpolation 0.0 1.0 (0.0 : Float) (2.0 : Float)
+  let right := AbstractPath.linearInterpolation 1.0 2.0 (2.0 : Float) (3.0 : Float)
+  let path := AbstractPath.compose left right
+  let forward := path.increment 0.25 1.5
+  LeanTest.assertTrue (approx forward 2.0 1e-12)
+    s!"Expected composed forward increment 2.0, got {forward}"
+  let backward := path.increment 1.5 0.25
+  LeanTest.assertTrue (approx backward (-2.0) 1e-12)
+    s!"Expected composed backward increment -2.0, got {backward}"
+  match path.derivative 1.0 true, path.derivative 1.0 false with
+  | some leftDeriv, some rightDeriv =>
+      LeanTest.assertTrue (approx leftDeriv 2.0 1e-12)
+        s!"Expected left derivative 2.0 at split, got {leftDeriv}"
+      LeanTest.assertTrue (approx rightDeriv 1.0 1e-12)
+        s!"Expected right derivative 1.0 at split, got {rightDeriv}"
+  | _, _ =>
+      LeanTest.fail "Expected composed path derivatives on both sides of split"
+
+@[test] def testAbstractPathMapAndRestrict : IO Unit := do
+  let base := AbstractPath.linearInterpolation 0.0 2.0 (1.0 : Float) (5.0 : Float)
+  let restricted := base.restrict 0.5 1.5
+  let inc := restricted.increment 0.5 1.5
+  LeanTest.assertTrue (approx inc 2.0 1e-12)
+    s!"Expected restricted increment 2.0, got {inc}"
+  let mapped := restricted.mapControl (fun x => 2.0 * x) (some (fun x => 3.0 * x))
+  let mappedInc := mapped.increment 0.5 1.5
+  LeanTest.assertTrue (approx mappedInc 4.0 1e-12)
+    s!"Expected mapped increment 4.0, got {mappedInc}"
+  match mapped.derivative 1.0 with
+  | some deriv =>
+      LeanTest.assertTrue (approx deriv 6.0 1e-12)
+        s!"Expected mapped derivative 6.0, got {deriv}"
+  | none =>
+      LeanTest.fail "Expected mapped derivative when mapDerivative is provided"
+
 @[test] def testUnderdampedLangevinTerms : IO Unit := do
   let drift : UnderdampedLangevinDriftTerm Float (Float × Float) := {
     gradPotential := fun _t x args => args.2 * x
@@ -1774,6 +1918,101 @@ private def evaluateDenseFloat {S C : Type}
   LeanTest.assertTrue sol.result.isFailure "dt0=0 result should be marked as failure"
   LeanTest.assertTrue (sol.result.message.contains "minimum step size")
     s!"Expected failure message to mention minimum step size, got: {sol.result.message}"
+
+@[test] def testMaxStepsReached : IO Unit := do
+  let term : ODETerm Float Unit := { vectorField := fun _t _y _ => 1.0 }
+  let solver :=
+    Euler.solver (Term := ODETerm Float Unit) (Y := Float) (VF := Float) (Args := Unit)
+  let sol :=
+    diffeqsolve
+      (Term := ODETerm Float Unit)
+      (Y := Float)
+      (VF := Float)
+      (Control := Time)
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      term solver 0.0 1.0 (some 0.1) (0.0 : Float) () (saveat := { t1 := true }) (maxSteps := 3)
+  LeanTest.assertTrue (sol.result == Result.maxStepsReached)
+    "Expected maxStepsReached when step budget is exhausted"
+  LeanTest.assertTrue (getStat "num_steps" sol.stats == 3)
+    s!"Expected num_steps=3, got {getStat "num_steps" sol.stats}"
+  LeanTest.assertTrue (getStat "num_accepted_steps" sol.stats == 3)
+    s!"Expected num_accepted_steps=3, got {getStat "num_accepted_steps" sol.stats}"
+  LeanTest.assertTrue (getStat "num_rejected_steps" sol.stats == 0)
+    s!"Expected num_rejected_steps=0, got {getStat "num_rejected_steps" sol.stats}"
+
+@[test] def testMaxStepsNoneParitySuccess : IO Unit := do
+  let term : ODETerm Float Unit := { vectorField := fun _t _y _ => 1.0 }
+  let solver :=
+    Euler.solver (Term := ODETerm Float Unit) (Y := Float) (VF := Float) (Args := Unit)
+  let sol :=
+    diffeqsolve
+      (Term := ODETerm Float Unit)
+      (Y := Float)
+      (VF := Float)
+      (Control := Time)
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      term solver 0.0 1.0 (some 0.1) (0.0 : Float) ()
+      (saveat := { t1 := true })
+      (maxSteps := 3)
+      (maxStepsOpt := none)
+  LeanTest.assertTrue (sol.result == Result.successful)
+    "Expected successful solve with maxStepsOpt=none"
+  let steps := getStat "num_steps" sol.stats
+  LeanTest.assertTrue (steps > 3)
+    s!"Expected unbounded mode to exceed finite maxSteps; got num_steps={steps}"
+  match sol.ys with
+  | some ys =>
+      if ys.size > 0 then
+        let y1 := ys[ys.size - 1]!
+        LeanTest.assertTrue (approx y1 1.0 1e-6)
+          s!"Expected y(t1)=1.0 in unbounded mode test, got {y1}"
+      else
+        LeanTest.fail "Empty ys for maxStepsOpt=none success test"
+  | none => LeanTest.fail "Expected ys for maxStepsOpt=none success test"
+
+@[test] def testMaxStepsNoneRejectsSaveatSteps : IO Unit := do
+  let term : ODETerm Float Unit := { vectorField := fun _t y _ => -y }
+  let solver :=
+    Euler.solver (Term := ODETerm Float Unit) (Y := Float) (VF := Float) (Args := Unit)
+  let sol :=
+    diffeqsolve
+      (Term := ODETerm Float Unit)
+      (Y := Float)
+      (VF := Float)
+      (Control := Time)
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      term solver 0.0 1.0 (some 0.1) (1.0 : Float) ()
+      (saveat := { steps := (1 : Nat) })
+      (maxStepsOpt := none)
+  LeanTest.assertTrue (sol.result == Result.internalError)
+    "Expected internalError when maxStepsOpt=none with saveat.steps"
+  LeanTest.assertTrue sol.ts.isNone
+    "Expected no ts output for incompatible maxStepsOpt=none + saveat.steps config"
+  LeanTest.assertTrue sol.ys.isNone
+    "Expected no ys output for incompatible maxStepsOpt=none + saveat.steps config"
+
+@[test] def testMaxStepsNoneRejectsDenseSave : IO Unit := do
+  let term : ODETerm Float Unit := { vectorField := fun _t y _ => -y }
+  let solver :=
+    Euler.solver (Term := ODETerm Float Unit) (Y := Float) (VF := Float) (Args := Unit)
+  let sol :=
+    diffeqsolve
+      (Term := ODETerm Float Unit)
+      (Y := Float)
+      (VF := Float)
+      (Control := Time)
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      term solver 0.0 1.0 (some 0.1) (1.0 : Float) ()
+      (saveat := { dense := true })
+      (maxStepsOpt := none)
+  LeanTest.assertTrue (sol.result == Result.internalError)
+    "Expected internalError when maxStepsOpt=none with saveat.dense"
+  LeanTest.assertTrue sol.interpolation.isNone
+    "Expected no dense interpolation for incompatible maxStepsOpt=none + saveat.dense config"
 
 @[test] def testUnsafeBrownianPathStructuredIncrements : IO Unit := do
   let pairPath : UnsafeBrownianPath (Float × Float) := {
@@ -1918,6 +2157,91 @@ private def evaluateDenseFloat {S C : Type}
     s!"Pair EulerMaruyama component 0 expected {expected0}, got {y1.1}"
   LeanTest.assertTrue (approx y1.2 expected1 1e-6)
     s!"Pair EulerMaruyama component 1 expected {expected1}, got {y1.2}"
+
+@[test] def testProgressMeterDefaultParity : IO Unit := do
+  let term : ODETerm Float Unit := { vectorField := fun _t y _ => -y }
+  let solver :=
+    Euler.solver (Term := ODETerm Float Unit) (Y := Float) (VF := Float) (Args := Unit)
+  let solDefault :=
+    diffeqsolve
+      (Term := ODETerm Float Unit)
+      (Y := Float)
+      (VF := Float)
+      (Control := Time)
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      term solver 0.0 1.0 (some 0.1) (1.0 : Float) () (saveat := { t1 := true })
+  let solNone :=
+    diffeqsolve
+      (Term := ODETerm Float Unit)
+      (Y := Float)
+      (VF := Float)
+      (Control := Time)
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      term solver 0.0 1.0 (some 0.1) (1.0 : Float) () (saveat := { t1 := true })
+      (progress_meter := .none)
+  let yDefault ← finalSaved "progress_meter default solve" solDefault
+  let yNone ← finalSaved "progress_meter none solve" solNone
+  LeanTest.assertTrue (solDefault.result == Result.successful && solNone.result == Result.successful)
+    "Default and explicit progress_meter:=.none should both succeed"
+  LeanTest.assertTrue (approx yDefault yNone 1.0e-12)
+    s!"Default and explicit progress_meter:=.none should match: {yDefault} vs {yNone}"
+  LeanTest.assertTrue (getStat "num_steps" solDefault.stats == getStat "num_steps" solNone.stats)
+    "Default and explicit progress_meter:=.none should preserve step counts"
+  LeanTest.assertTrue (getStat "progress_meter_start" solDefault.stats == 0)
+    "Default progress meter should not record lifecycle start stats"
+  LeanTest.assertTrue (getStat "progress_meter_updates" solDefault.stats == 0)
+    "Default progress meter should not record lifecycle update stats"
+  LeanTest.assertTrue (getStat "progress_meter_close" solDefault.stats == 0)
+    "Default progress meter should not record lifecycle close stats"
+
+@[test] def testProgressMeterTextAndTqdmCompatibility : IO Unit := do
+  let term : ODETerm Float Unit := { vectorField := fun _t _y _ => 1.0 }
+  let solver :=
+    Euler.solver (Term := ODETerm Float Unit) (Y := Float) (VF := Float) (Args := Unit)
+  let solText :=
+    diffeqsolve
+      (Term := ODETerm Float Unit)
+      (Y := Float)
+      (VF := Float)
+      (Control := Time)
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      term solver 0.0 1.0 (some 0.1) (0.0 : Float) () (saveat := { t1 := true })
+      (progress_meter := .text)
+  let solTqdm :=
+    diffeqsolve
+      (Term := ODETerm Float Unit)
+      (Y := Float)
+      (VF := Float)
+      (Control := Time)
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      term solver 0.0 1.0 (some 0.1) (0.0 : Float) () (saveat := { t1 := true })
+      (progress_meter := .tqdm)
+  let yText ← finalSaved "progress_meter text solve" solText
+  let yTqdm ← finalSaved "progress_meter tqdm solve" solTqdm
+  LeanTest.assertTrue (solText.result == Result.successful && solTqdm.result == Result.successful)
+    "progress_meter text/tqdm should both succeed"
+  LeanTest.assertTrue (approx yText yTqdm 1.0e-12)
+    s!"progress_meter text and tqdm should produce the same output: {yText} vs {yTqdm}"
+  LeanTest.assertTrue (getStat "progress_meter_start" solText.stats == 1)
+    "progress_meter text should record one lifecycle start"
+  LeanTest.assertTrue (getStat "progress_meter_close" solText.stats == 1)
+    "progress_meter text should record one lifecycle close"
+  LeanTest.assertTrue (getStat "progress_meter_updates" solText.stats == getStat "num_steps" solText.stats)
+    "progress_meter text updates should track attempted steps"
+  LeanTest.assertTrue (getStat "progress_meter_tqdm_alias" solText.stats == 0)
+    "progress_meter text should not set tqdm alias stat"
+  LeanTest.assertTrue (getStat "progress_meter_start" solTqdm.stats == 1)
+    "progress_meter tqdm should record one lifecycle start"
+  LeanTest.assertTrue (getStat "progress_meter_close" solTqdm.stats == 1)
+    "progress_meter tqdm should record one lifecycle close"
+  LeanTest.assertTrue (getStat "progress_meter_updates" solTqdm.stats == getStat "num_steps" solTqdm.stats)
+    "progress_meter tqdm updates should track attempted steps"
+  LeanTest.assertTrue (getStat "progress_meter_tqdm_alias" solTqdm.stats == 1)
+    "progress_meter tqdm should set alias compatibility stat"
 
 @[test] def testEulerGlobalOrderTrend : IO Unit := do
   let term : ODETerm Float Unit := { vectorField := fun _t y _ => -y }
@@ -2229,13 +2553,18 @@ def run : IO Unit := do
   testBrownianPairAndFinStructuredIncrements
   testMilsteinAutodiffJvpWrapper
   testControlTermToODEConversion
+  testAbstractPathComposeLinear
+  testAbstractPathMapAndRestrict
   testUnderdampedLangevinTerms
   testSaveFnTransformsOutputs
   testFailureResultMessage
+  testMaxStepsReached
   testUnsafeBrownianPathStructuredIncrements
   testEulerPairStatePyTree
   testEulerFinStatePyTree
   testEulerMaruyamaPairStatePyTree
+  testProgressMeterDefaultParity
+  testProgressMeterTextAndTqdmCompatibility
   testEulerGlobalOrderTrend
   testRK4GlobalOrderTrend
   testDenseInterpolationErrorTrend
