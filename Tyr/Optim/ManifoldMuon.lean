@@ -20,6 +20,12 @@ namespace torch.Optim.ManifoldMuon
 
 open torch
 
+/-- Dual solve backend used inside manifold-Muon. -/
+inductive SolverKind where
+  | dualAscent
+  | fixedPoint
+  deriving Repr, BEq, Inhabited
+
 /-- Manifold-Muon configuration (experimental). -/
 structure Config where
   /-- Base learning rate. -/
@@ -32,9 +38,36 @@ structure Config where
   dualAscentSteps : Nat := 2
   /-- Step size for dual-ascent variable update. -/
   dualAscentLr : Float := 0.1
+  /-- Solver backend for the tangent-constrained inner problem. -/
+  solver : SolverKind := .dualAscent
+  /-- Minimum inner iterations before checking stopping criteria. -/
+  minSolveSteps : Nat := 1
+  /-- Residual tolerance for tangent-constraint satisfaction. -/
+  solveResidualTol : Float := 1e-4
+  /-- Dual-variable delta tolerance for solver convergence. -/
+  solveDualDeltaTol : Float := 1e-5
+  /-- Damping used by fixed-point updates. -/
+  fixedPointDamping : Float := 0.5
   /-- Whether to run distributed gradient averaging before local step. -/
   distributed : Bool := false
   deriving Repr, Inhabited
+
+/-- Diagnostics for the inner tangent-constrained solve. -/
+structure SolveDiagnostics where
+  iterations : Nat := 0
+  residual : Float := 0.0
+  dualDelta : Float := 0.0
+  dualObjective : Float := 0.0
+  converged : Bool := false
+  solver : SolverKind := .dualAscent
+  deriving Repr, Inhabited
+
+/-- Result of solving for a constrained manifold update direction. -/
+structure SolveResult (m n : UInt64) where
+  direction : T #[m, n]
+  dualVar : T #[n, n]
+  diagnostics : SolveDiagnostics
+  deriving Repr
 
 /-- Per-parameter state for Stiefel Manifold-Muon. -/
 structure ParamState (m n : UInt64) where
@@ -94,34 +127,111 @@ def tangentProject {m n : UInt64} (W : T #[m, n]) (G : T #[m, n]) : T #[m, n] :=
   let correction := nn.mm W (sym XtG)
   G - correction
 
+/-- Tangent-constraint residual matrix: `WᵀA + AᵀW`. -/
+def tangentResidual {m n : UInt64} (W : T #[m, n]) (A : T #[m, n]) : T #[n, n] :=
+  nn.mm (nn.transpose2d W) A + nn.mm (nn.transpose2d A) W
+
+private def solveConverged (cfg : Config) (iter residual dualDelta : Float) : Bool :=
+  iter >= cfg.minSolveSteps.toFloat &&
+    residual <= cfg.solveResidualTol &&
+    dualDelta <= cfg.solveDualDeltaTol
+
+/-- Dual objective estimate used for diagnostics. -/
+private def dualObjectiveEstimate {m n : UInt64} (W G : T #[m, n]) (lambda : T #[n, n]) : Float :=
+  let lambdaPlus := lambda + nn.transpose2d lambda
+  let adjusted := G + mul_scalar (nn.mm W lambdaPlus) 2.0
+  0.0 - linalg.nuclearNorm adjusted
+
 /--
 Run lightweight dual ascent and return matrix-sign direction plus updated dual var.
 -/
 def solveDirectionDualAscent {m n : UInt64}
     (W : T #[m, n]) (G : T #[m, n]) (dual0 : T #[n, n]) (cfg : Config)
-    : IO (T #[m, n] × T #[n, n]) := do
+    : IO (SolveResult m n) := do
   let mut lambda := dual0
   let mut signedDir := G
-  for _ in [:cfg.dualAscentSteps] do
-    let lambdaPlus := lambda + nn.transpose2d lambda
-    let adjusted := G + mul_scalar (nn.mm W lambdaPlus) 2.0
-    signedDir ← PolarExpress.apply adjusted { numIters := cfg.numIters }
-    let h := nn.mm (nn.transpose2d W) signedDir + nn.mm (nn.transpose2d signedDir) W
-    lambda := lambda + mul_scalar h cfg.dualAscentLr
-  return (signedDir, lambda)
+  let mut residual := 1e30
+  let mut dualDelta := 1e30
+  let mut iterations : Nat := 0
+  let mut converged := false
+  for i in [:cfg.dualAscentSteps] do
+    if !converged then
+      let lambdaPrev := lambda
+      let lambdaPlus := lambda + nn.transpose2d lambda
+      let adjusted := G + mul_scalar (nn.mm W lambdaPlus) 2.0
+      signedDir ← PolarExpress.apply adjusted { numIters := cfg.numIters }
+      let h := tangentResidual W signedDir
+      lambda := lambda + mul_scalar h cfg.dualAscentLr
+      residual := linalg.frobeniusNorm h
+      dualDelta := linalg.frobeniusNorm (lambda - lambdaPrev)
+      iterations := i + 1
+      converged := solveConverged cfg iterations.toFloat residual dualDelta
+  let diag : SolveDiagnostics := {
+    iterations := iterations
+    residual := residual
+    dualDelta := dualDelta
+    dualObjective := dualObjectiveEstimate W G lambda
+    converged := converged
+    solver := .dualAscent
+  }
+  return { direction := signedDir, dualVar := lambda, diagnostics := diag }
+
+/--
+Fixed-point solver variant for `H(Λ)=0` style updates with damping.
+-/
+def solveDirectionFixedPoint {m n : UInt64}
+    (W : T #[m, n]) (G : T #[m, n]) (dual0 : T #[n, n]) (cfg : Config)
+    : IO (SolveResult m n) := do
+  let mut lambda := dual0
+  let mut signedDir := G
+  let mut residual := 1e30
+  let mut dualDelta := 1e30
+  let mut iterations : Nat := 0
+  let mut converged := false
+  let damp := if cfg.fixedPointDamping < 0.0 then 0.0 else if cfg.fixedPointDamping > 1.0 then 1.0 else cfg.fixedPointDamping
+  for i in [:cfg.dualAscentSteps] do
+    if !converged then
+      let lambdaPrev := lambda
+      let lambdaPlus := lambda + nn.transpose2d lambda
+      let adjusted := G + mul_scalar (nn.mm W lambdaPlus) 2.0
+      signedDir ← PolarExpress.apply adjusted { numIters := cfg.numIters }
+      let h := tangentResidual W signedDir
+      let candidate := lambda - mul_scalar h cfg.dualAscentLr
+      lambda := mul_scalar lambda (1.0 - damp) + mul_scalar candidate damp
+      residual := linalg.frobeniusNorm h
+      dualDelta := linalg.frobeniusNorm (lambda - lambdaPrev)
+      iterations := i + 1
+      converged := solveConverged cfg iterations.toFloat residual dualDelta
+  let diag : SolveDiagnostics := {
+    iterations := iterations
+    residual := residual
+    dualDelta := dualDelta
+    dualObjective := dualObjectiveEstimate W G lambda
+    converged := converged
+    solver := .fixedPoint
+  }
+  return { direction := signedDir, dualVar := lambda, diagnostics := diag }
+
+/-- Solve for direction using the configured inner solver backend. -/
+def solveDirection {m n : UInt64}
+    (W : T #[m, n]) (G : T #[m, n]) (dual0 : T #[n, n]) (cfg : Config)
+    : IO (SolveResult m n) := do
+  match cfg.solver with
+  | .dualAscent => solveDirectionDualAscent W G dual0 cfg
+  | .fixedPoint => solveDirectionFixedPoint W G dual0 cfg
 
 /-- Retraction onto Stiefel using reduced QR. -/
 def retractStiefel {m n : UInt64} (W : T #[m, n]) : T #[m, n] :=
   (Tyr.AD.Stiefel.project m n W).matrix
 
-/-- Single local update step for a Stiefel-constrained matrix parameter. -/
-def stepSingle {m n : UInt64}
+/-- Single update step with inner-solver diagnostics. -/
+def stepSingleWithDiagnostics {m n : UInt64}
     (param : T #[m, n])
     (grad : T #[m, n])
     (state : ParamState m n)
     (cfg : Config)
     (lrMul : Float := 1.0)
-    : IO (T #[m, n] × ParamState m n) := do
+    : IO (T #[m, n] × ParamState m n × SolveDiagnostics) := do
   let gRaw := autograd.detach grad
 
   -- Nesterov-style blend (aligned with NorMuon's momentum semantics).
@@ -130,12 +240,21 @@ def stepSingle {m n : UInt64}
 
   -- Optional dual-ascent solve in ambient space.
   let dual0 := state.dualVar.getD (zeros #[n, n])
-  let (signedDir, dualVar') ←
+  let (signedDir, dualVar', solveDiag) ←
     if cfg.dualAscentSteps == 0 then
       let signed ← PolarExpress.apply nesterovGrad { numIters := cfg.numIters }
-      pure (signed, dual0)
+      let diag : SolveDiagnostics := {
+        iterations := 0
+        residual := linalg.frobeniusNorm (tangentResidual param signed)
+        dualDelta := 0.0
+        dualObjective := dualObjectiveEstimate param nesterovGrad dual0
+        converged := true
+        solver := cfg.solver
+      }
+      pure (signed, dual0, diag)
     else
-      solveDirectionDualAscent param nesterovGrad dual0 cfg
+      let solveRes ← solveDirection param nesterovGrad dual0 cfg
+      pure (solveRes.direction, solveRes.dualVar, solveRes.diagnostics)
 
   -- Enforce tangent constraint explicitly.
   let tangentDir := tangentProject param signedDir
@@ -161,7 +280,18 @@ def stepSingle {m n : UInt64}
     dualVar := some dualVar'
     step := state.step + 1
   }
-  return (newParam, newState)
+  return (newParam, newState, solveDiag)
+
+/-- Single local update step for a Stiefel-constrained matrix parameter. -/
+def stepSingle {m n : UInt64}
+    (param : T #[m, n])
+    (grad : T #[m, n])
+    (state : ParamState m n)
+    (cfg : Config)
+    (lrMul : Float := 1.0)
+    : IO (T #[m, n] × ParamState m n) := do
+  let (param', state', _) ← stepSingleWithDiagnostics param grad state cfg lrMul
+  return (param', state')
 
 /-- Local group update for homogeneous matrix shapes. -/
 def stepGroupLocal {m n : UInt64}

@@ -111,6 +111,79 @@ def testStiefelConstraintAfterStep : IO Unit := do
     "ManifoldMuon step should retract back to Stiefel (W^T W ≈ I)"
 
 @[test]
+def testDualAscentDiagnosticsEarlyStop : IO Unit := do
+  let W0raw ← randn #[8, 4] false
+  let W0 := autograd.set_requires_grad (autograd.detach (retractStiefel W0raw)) true
+  let G ← randn #[8, 4] false
+  let st := initParamState W0
+  let cfg : Config := {
+    lr := 0.02
+    momentum := 0.95
+    numIters := 3
+    dualAscentSteps := 6
+    dualAscentLr := 0.1
+    solver := .dualAscent
+    minSolveSteps := 1
+    solveResidualTol := 1e9
+    solveDualDeltaTol := 1e9
+    distributed := false
+  }
+  let (_W1, _st1, diag) ← stepSingleWithDiagnostics W0 G st cfg
+  LeanTest.assertTrue diag.converged "Expected dual-ascent solve to converge with loose tolerances"
+  LeanTest.assertEqual diag.iterations 1
+  LeanTest.assertTrue (Float.isFinite diag.dualObjective)
+    s!"Expected finite dual objective, got {diag.dualObjective}"
+
+@[test]
+def testFixedPointDiagnosticsPath : IO Unit := do
+  let W0raw ← randn #[8, 4] false
+  let W0 := autograd.set_requires_grad (autograd.detach (retractStiefel W0raw)) true
+  let G ← randn #[8, 4] false
+  let st := initParamState W0
+  let cfg : Config := {
+    lr := 0.02
+    momentum := 0.95
+    numIters := 3
+    dualAscentSteps := 4
+    dualAscentLr := 0.1
+    solver := .fixedPoint
+    minSolveSteps := 1
+    solveResidualTol := 1e9
+    solveDualDeltaTol := 1e9
+    fixedPointDamping := 0.5
+    distributed := false
+  }
+  let (_W1, _st1, diag) ← stepSingleWithDiagnostics W0 G st cfg
+  LeanTest.assertTrue (diag.solver == .fixedPoint)
+    "Expected fixed-point solver diagnostics tag"
+  LeanTest.assertTrue diag.converged
+    "Expected fixed-point solve to converge with loose tolerances"
+  LeanTest.assertEqual diag.iterations 1
+
+@[test]
+def testStrictToleranceRunsFullIterations : IO Unit := do
+  let W0raw ← randn #[8, 4] false
+  let W0 := autograd.set_requires_grad (autograd.detach (retractStiefel W0raw)) true
+  let G ← randn #[8, 4] false
+  let st := initParamState W0
+  let cfg : Config := {
+    lr := 0.02
+    momentum := 0.95
+    numIters := 3
+    dualAscentSteps := 3
+    dualAscentLr := 0.1
+    solver := .dualAscent
+    minSolveSteps := 1
+    solveResidualTol := 0.0
+    solveDualDeltaTol := 0.0
+    distributed := false
+  }
+  let (_W1, _st1, diag) ← stepSingleWithDiagnostics W0 G st cfg
+  LeanTest.assertTrue (!diag.converged)
+    "Expected solver to remain unconverged with impossible zero tolerances"
+  LeanTest.assertEqual diag.iterations cfg.dualAscentSteps
+
+@[test]
 def testManifoldMuonBenchmarkPositive : IO Unit := do
   let avgMs ← benchmarkLocalStep (m := 32) (n := 16) 3
   LeanTest.assertTrue (avgMs > 0.0) s!"Expected positive average step time, got {avgMs}"
