@@ -477,12 +477,17 @@ def diffeqsolve {Term Y VF Control Args Controller : Type}
       Option (StepSizeController.State (C := Controller)) := none)
     (initialMadeJump : Bool := false)
     (events : Array (EventSpec Y Args) := #[])
+    (eventTree : Option (EventTree Y Args) := none)
     (saveFn : Option (Time → Y → Args → Y) := none)
     (throwOnFailure : Bool := false)
     (maxStepsOpt : Option Nat := some maxSteps)
     (progress_meter : ProgressMeter := .none) :
     Solution Y solver.SolverState (StepSizeController.State (C := Controller)) := by
-  let activeEvents := configuredEvents event events
+  let treeEvents :=
+    match eventTree with
+    | some tree => EventTree.flatten tree
+    | none => #[]
+  let activeEvents := configuredEvents event (events ++ treeEvents)
   let eventMask0 := initialEventMask activeEvents t0 y0 args
   let terminateAtStart := anyTerminatingEvent activeEvents eventMask0
   let eventMask0? := eventMaskOption activeEvents eventMask0
@@ -892,7 +897,6 @@ def diffeqsolveEventTree {Term Y VF Control Args Controller : Type}
     (maxStepsOpt : Option Nat := some maxSteps)
     (progress_meter : ProgressMeter := .none) :
     EventTreeSolution Y solver.SolverState (StepSizeController.State (C := Controller)) :=
-  let flatEvents := EventTree.flatten eventTree
   let base :=
     diffeqsolve
       (Term := Term)
@@ -909,7 +913,8 @@ def diffeqsolveEventTree {Term Y VF Control Args Controller : Type}
       (initialSolverState := initialSolverState)
       (initialControllerState := initialControllerState)
       (initialMadeJump := initialMadeJump)
-      (events := flatEvents)
+      (events := #[])
+      (eventTree := some eventTree)
       (saveFn := saveFn)
       (throwOnFailure := throwOnFailure)
       (maxStepsOpt := maxStepsOpt)
@@ -943,6 +948,7 @@ def diffeqsolveOrError {Term Y VF Control Args Controller : Type}
       Option (StepSizeController.State (C := Controller)) := none)
     (initialMadeJump : Bool := false)
     (events : Array (EventSpec Y Args) := #[])
+    (eventTree : Option (EventTree Y Args) := none)
     (saveFn : Option (Time → Y → Args → Y) := none)
     (maxStepsOpt : Option Nat := some maxSteps)
     (progress_meter : ProgressMeter := .none) :
@@ -964,6 +970,7 @@ def diffeqsolveOrError {Term Y VF Control Args Controller : Type}
       (initialControllerState := initialControllerState)
       (initialMadeJump := initialMadeJump)
       (events := events)
+      (eventTree := eventTree)
       (saveFn := saveFn)
       (throwOnFailure := false)
       (maxStepsOpt := maxStepsOpt)

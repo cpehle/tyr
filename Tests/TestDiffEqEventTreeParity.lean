@@ -110,9 +110,63 @@ private def leafHits (tree : EventMaskTree) : Array Bool :=
   | _, _ =>
       LeanTest.fail "Expected tree-shaped tie-time masks"
 
+@[test] def testBaseDiffeqsolveEventTreeParameterParity : IO Unit := do
+  let term : ODETerm Float Unit := { vectorField := fun _t _y _ => 1.0 }
+  let solver :=
+    Euler.solver (Term := ODETerm Float Unit) (Y := Float) (VF := Float) (Args := Unit)
+  let evEarly : EventSpec Float Unit := {
+    condition := .real (fun _t y _ => y - 0.2)
+    terminate := true
+  }
+  let evLate : EventSpec Float Unit := {
+    condition := .real (fun _t y _ => y - 0.8)
+    terminate := false
+  }
+  let eventTree : EventTree Float Unit :=
+    .branch #[.leaf evEarly, .branch #[.leaf evLate]]
+  let solDirect :=
+    diffeqsolve
+      (Term := ODETerm Float Unit)
+      (Y := Float)
+      (VF := Float)
+      (Control := Time)
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      term solver 0.0 1.0 (some 1.0) (0.0 : Float) ()
+      (saveat := { t1 := true })
+      (eventTree := some eventTree)
+  let solWrapped :=
+    (diffeqsolveEventTree
+      (Term := ODETerm Float Unit)
+      (Y := Float)
+      (VF := Float)
+      (Control := Time)
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      term solver 0.0 1.0 (some 1.0) (0.0 : Float) ()
+      eventTree
+      (saveat := { t1 := true })).base
+  LeanTest.assertTrue (solDirect.result == solWrapped.result)
+    "Direct eventTree parameter should match wrapper result"
+  LeanTest.assertTrue (approx solDirect.t1 solWrapped.t1 1.0e-12)
+    s!"Direct eventTree parameter should match wrapper t1: {solDirect.t1} vs {solWrapped.t1}"
+  match solDirect.eventMask, solWrapped.eventMask with
+  | some lhs, some rhs =>
+      LeanTest.assertTrue (lhs == rhs)
+        s!"Direct eventTree parameter should match wrapper eventMask: {lhs} vs {rhs}"
+  | _, _ =>
+      LeanTest.fail "Expected flattened event masks for direct and wrapper solves"
+  match solDirect.eventMaskLast, solWrapped.eventMaskLast with
+  | some lhs, some rhs =>
+      LeanTest.assertTrue (lhs == rhs)
+        s!"Direct eventTree parameter should match wrapper eventMaskLast: {lhs} vs {rhs}"
+  | _, _ =>
+      LeanTest.fail "Expected flattened last-event masks for direct and wrapper solves"
+
 def run : IO Unit := do
   testEventTreeEarliestRootMaskParity
   testEventTreeTieTimeMaskParity
+  testBaseDiffeqsolveEventTreeParameterParity
 
 end Tests.DiffEqEventTreeParity
 
