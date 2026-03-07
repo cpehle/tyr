@@ -7,7 +7,7 @@ open DifferentiableManifold
 /--
 Cartesian product manifold instance.
 
-This ports pymanopt's `Product` manifold concept to Lean's pair type.
+Implements the standard product manifold on Lean pairs.
 -/
 instance prodManifold [DifferentiableManifold M] [DifferentiableManifold N] :
     DifferentiableManifold (M × N) where

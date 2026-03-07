@@ -1,7 +1,14 @@
 import LeanTest
-import Tyr.Manifolds.Pymanopt
+import Tyr.Manifolds.Product
+import Tyr.Manifolds.Sphere
+import Tyr.Manifolds.Oblique
+import Tyr.Manifolds.Positive
+import Tyr.Manifolds.PoincareBall
+import Tyr.Manifolds.PositiveDefinite
+import Tyr.Manifolds.PSD
+import Tyr.Manifolds.FixedRank
 
-namespace Tests.PymanoptManifolds
+namespace Tests.AdditionalManifolds
 
 open LeanTest
 open torch
@@ -80,4 +87,4 @@ def testProductGradientStepCompiles : IO Unit := do
   LeanTest.assertTrue (Float.abs (xn - 1.0) < 1e-5)
     "Product manifold step should keep sphere component on manifold"
 
-end Tests.PymanoptManifolds
+end Tests.AdditionalManifolds
