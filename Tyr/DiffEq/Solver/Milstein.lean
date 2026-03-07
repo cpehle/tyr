@@ -138,10 +138,12 @@ private def finiteDiffJacobianFromVF {Diffusion Y Control Args : Type}
     (term : Diffusion) (t : Time) (y : Y) (args : Args) (epsilon : Float := 1.0e-4) : Y :=
   let inst := (inferInstance : TermLike Diffusion Y Y Control Args)
   let eps := sanitizeFiniteDiffEpsilon epsilon
-  let g0 := inst.vf term t y args
-  let yPert := y + eps * g0
-  let g1 := inst.vf term t yPert args
-  (1.0 / eps) * (g1 - g0)
+  let dir := inst.vf term t y args
+  let yPlus := y + eps * dir
+  let yMinus := y - eps * dir
+  let gPlus := inst.vf term t yPlus args
+  let gMinus := inst.vf term t yMinus args
+  (0.5 / eps) * (gPlus - gMinus)
 
 private def finiteDiffJacobianFromVfProd {Diffusion Y VF Control Args : Type}
     [TermLike Diffusion Y VF Control Args] [DiffEqSpace Y] [MilsteinControl Control]
@@ -149,10 +151,12 @@ private def finiteDiffJacobianFromVfProd {Diffusion Y VF Control Args : Type}
     (epsilon : Float := 1.0e-4) (qvFloor : Float := 1.0e-12) : Y :=
   let inst := (inferInstance : TermLike Diffusion Y VF Control Args)
   let eps := sanitizeFiniteDiffEpsilon epsilon
-  let g0 := inst.vf_prod term t y args control
-  let yPert := y + eps * g0
-  let g1 := inst.vf_prod term t yPert args control
-  let jvpScaled := (1.0 / eps) * (g1 - g0)
+  let dir := inst.vf_prod term t y args control
+  let yPlus := y + eps * dir
+  let yMinus := y - eps * dir
+  let gPlus := inst.vf_prod term t yPlus args control
+  let gMinus := inst.vf_prod term t yMinus args control
+  let jvpScaled := (0.5 / eps) * (gPlus - gMinus)
   let qv := MilsteinControl.quadraticVariation control
   let qvSafe := safeQuadraticVariationDenom qv qvFloor
   (1.0 / qvSafe) * jvpScaled
