@@ -568,11 +568,42 @@ private def broadcastStructuralRule (axis : BroadcastAxis) : LocalJacRule :=
     .ok #[{ src := inv.id, dst := outv.id, map := map }]
 
 private def binaryBroadcastStructuralRule (op : BinaryOp) (axis : BroadcastAxis) : LocalJacRule :=
-  let pair := binaryBroadcastJacPair op axis
-  binarySymbolicRule
-    (kstmtBinaryBroadcastOpName op axis)
-    pair.1
-    pair.2
+  fun eqn _ctx => do
+    let opName := kstmtBinaryBroadcastOpName op axis
+    let (tile, vec, outv) ← requireBinaryShape opName eqn
+    let pair := binaryBroadcastJacPair op axis
+    let tileTag := pair.1.1
+    let tileWeight := pair.1.2
+    let vecTag := pair.2.1
+    let vecWeight := pair.2.2
+
+    let tileMap :=
+      match varFlatDim? tile, varFlatDim? outv with
+      | some inDim, some outDim =>
+        if inDim = 0 || outDim = 0 || inDim != outDim then
+          binaryJacMapForVars tile outv tileTag tileWeight
+        else
+          buildSparseMap tileTag inDim outDim (diagEntries inDim tileWeight)
+      | _, _ =>
+        binaryJacMapForVars tile outv tileTag tileWeight
+
+    let vecMap :=
+      match shapeRowsCols? outv, varFlatDim? vec, varFlatDim? outv with
+      | some (outRows, outCols), some inDim, some outDim =>
+        if inDim = 0 || outDim = 0 || outDim != outRows * outCols then
+          binaryJacMapForVars vec outv vecTag vecWeight
+        else
+          let entries :=
+            (broadcastEntries axis inDim outRows outCols).map fun e =>
+              ({ src := e.src, dst := e.dst, weight := e.weight * vecWeight } : Tyr.AD.Sparse.SparseEntry)
+          buildSparseMap vecTag inDim outDim entries
+      | _, _, _ =>
+        binaryJacMapForVars vec outv vecTag vecWeight
+
+    .ok #[
+      { src := tile.id, dst := outv.id, map := tileMap },
+      { src := vec.id, dst := outv.id, map := vecMap }
+    ]
 
 private def transposeStructuralRule : LocalJacRule :=
   fun eqn _ctx => do

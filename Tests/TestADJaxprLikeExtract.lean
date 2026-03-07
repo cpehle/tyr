@@ -582,6 +582,58 @@ def testBuildAndExtractFromKStmtsStructuralExactSparsePayloads : IO Unit := do
         s!"cumsum map missing expected entry src=5,dst=5: {reprStr e.map.entries}"
 
 @[test]
+def testBuildAndExtractFromKStmtsBinaryBroadcastExactSparsePayloads : IO Unit := do
+  let v0 : VarId := { idx := 0 }
+  let v1 : VarId := { idx := 1 }
+  let v2 : VarId := { idx := 2 }
+  let stmts := #[
+    KStmt.declRT v0 .Float32 2 3 .Row,
+    KStmt.declRV v1 .Float32 3,
+    KStmt.declRT v2 .Float32 2 3 .Row,
+    KStmt.binaryBroadcast .Sub .Row v2 v0 v1
+  ]
+
+  let res ← runCoreM (do
+    registerKStmtAllSupportedSemanticsRules
+    buildAndExtractFromKStmts {} stmts
+  )
+  match res with
+  | .error err =>
+    LeanTest.fail s!"binaryBroadcast exact-payload extraction should succeed, got: {buildExtractErrorToString err}"
+  | .ok (_jaxpr, edges) =>
+    LeanTest.assertEqual edges.size 2 "binaryBroadcast should emit tile/vec edges."
+
+    match findEdge? edges 0 2 with
+    | none => LeanTest.fail "Missing binaryBroadcast tile edge 0 -> 2"
+    | some e =>
+      LeanTest.assertEqual e.map.inDim? (some 6) "binaryBroadcast tile input dim should be explicit."
+      LeanTest.assertEqual e.map.outDim? (some 6) "binaryBroadcast tile output dim should be explicit."
+      LeanTest.assertEqual e.map.repr
+        (.semantic (.binaryBroadcast (kstmtBinaryOpName .Sub) (broadcastAxisTagName .Row) .tile .tileBroadcast))
+        s!"Unexpected binaryBroadcast tile repr: {e.map.repr}"
+      LeanTest.assertEqual e.map.entries.size 6 "binaryBroadcast tile map should materialize six sparse entries."
+      LeanTest.assertTrue (hasEntry e.map.entries 0 0)
+        s!"binaryBroadcast tile map missing expected entry src=0,dst=0: {reprStr e.map.entries}"
+      LeanTest.assertTrue (hasEntry e.map.entries 5 5)
+        s!"binaryBroadcast tile map missing expected entry src=5,dst=5: {reprStr e.map.entries}"
+
+    match findEdge? edges 1 2 with
+    | none => LeanTest.fail "Missing binaryBroadcast vec edge 1 -> 2"
+    | some e =>
+      LeanTest.assertEqual e.map.inDim? (some 3) "binaryBroadcast vec input dim should be explicit."
+      LeanTest.assertEqual e.map.outDim? (some 6) "binaryBroadcast vec output dim should be explicit."
+      LeanTest.assertEqual e.map.repr
+        (.semantic (.binaryBroadcast (kstmtBinaryOpName .Sub) (broadcastAxisTagName .Row) .vec .vecBroadcast))
+        s!"Unexpected binaryBroadcast vec repr: {e.map.repr}"
+      LeanTest.assertEqual e.map.entries.size 6 "binaryBroadcast vec map should materialize six sparse entries."
+      LeanTest.assertTrue (hasEntry e.map.entries 0 0 (-1.0))
+        s!"binaryBroadcast vec map missing expected weighted entry src=0,dst=0: {reprStr e.map.entries}"
+      LeanTest.assertTrue (hasEntry e.map.entries 0 3 (-1.0))
+        s!"binaryBroadcast vec map missing expected weighted entry src=0,dst=3: {reprStr e.map.entries}"
+      LeanTest.assertTrue (hasEntry e.map.entries 2 5 (-1.0))
+        s!"binaryBroadcast vec map missing expected weighted entry src=2,dst=5: {reprStr e.map.entries}"
+
+@[test]
 def testBuildAndExtractFromKStmtsGraphaxAlphaGradSemanticsRules : IO Unit := do
   let v0 : VarId := { idx := 0 }
   let v1 : VarId := { idx := 1 }
