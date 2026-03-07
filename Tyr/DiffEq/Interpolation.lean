@@ -255,6 +255,21 @@ private def findBracket (ts : Array Time) (t : Time) : Nat :=
         n - 2
     go 0
 
+private def segmentIndex (interp : PiecewiseDenseInterpolation Y) (t : Time) (left : Bool) : Nat :=
+  if interp.ts.size <= 1 then
+    0
+  else
+    let idx := findBracket interp.ts t
+    let idx' :=
+      if !left then
+        let rightKnot := idx + 1
+        let hasRightSegment := rightKnot + 1 < interp.ts.size
+        let knotTime := interp.ts.getD rightKnot t
+        if hasRightSegment && t == knotTime then rightKnot else idx
+      else
+        idx
+    clampIndex interp.segments.size idx'
+
 private def evalAt [DiffEqSpace Y] [Inhabited Y]
     (interp : PiecewiseDenseInterpolation Y) (t : Time) (left : Bool) : Y :=
   if hzero : interp.segments.size = 0 then
@@ -262,11 +277,7 @@ private def evalAt [DiffEqSpace Y] [Inhabited Y]
   else
     let hpos : 0 < interp.segments.size := Nat.pos_of_ne_zero hzero
     let defaultSeg := interp.segments[0]'hpos
-    let idx :=
-      if interp.ts.size <= 1 then
-        0
-      else
-        clampIndex interp.segments.size (findBracket interp.ts t)
+    let idx := segmentIndex interp t left
     let seg := interp.segments.getD idx defaultSeg
     seg.evaluate t none left
 
@@ -286,11 +297,7 @@ def toDense [DiffEqSpace Y] [Inhabited Y]
       else
         let hpos : 0 < interp.segments.size := Nat.pos_of_ne_zero hzero
         let defaultSeg := interp.segments[0]'hpos
-        let idx :=
-          if interp.ts.size <= 1 then
-            0
-          else
-            clampIndex interp.segments.size (findBracket interp.ts t)
+        let idx := segmentIndex interp t left
         let seg := interp.segments.getD idx defaultSeg
         seg.derivative t left
   }
