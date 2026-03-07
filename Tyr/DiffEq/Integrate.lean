@@ -376,11 +376,10 @@ def diffeqsolve {Term Y VF Control Args Controller : Type}
   let terminateAtStart := anyTerminatingEvent activeEvents eventMask0
   let eventMask0? := eventMaskOption activeEvents eventMask0
   let eventMaskLast0? := eventMaskHitOption activeEvents eventMask0
+  let payloadSubs := saveat.payloadSubs
   let saveatTs := normalizeSaveTs saveat.effectiveTs
   let saveDense := saveat.effectiveDense
   let saveSteps := saveat.stepsEnabled
-  let saveAtT0 := saveat.effectiveT0
-  let saveAtT1 := saveat.effectiveT1
   let saveSolverState := saveat.effectiveSolverState
   let saveControllerState := saveat.effectiveControllerState
   let saveMadeJump := saveat.effectiveMadeJump
@@ -441,55 +440,80 @@ def diffeqsolve {Term Y VF Control Args Controller : Type}
     }
   else
     let computeOutputs :=
-      fun (tf : Time) (yf : Y) (stepTs : Array Time) (stepYs : Array Y)
+      fun (tf : Time) (yf : Y) (allStepTs : Array Time) (allStepYs : Array Y)
           (denseInterp : Option (DenseInterpolation Y)) =>
-        let (stepTs, stepYs) :=
-          if saveSteps then
-            match stepTs.back?, stepYs.back? with
-            | some lastT, some _ =>
-                if lastT == tf then
-                  (stepTs, stepYs)
+        let evalFromDense : Time → Y :=
+          fun t =>
+            match denseInterp with
+            | some interp => saveValue t (interp.evaluate t none true)
+            | none =>
+                if t == t0 then
+                  saveValue t0 y0
+                else if t == tf then
+                  saveValue tf yf
                 else
-                  (stepTs.push tf, stepYs.push (saveValue tf yf))
-            | _, _ => (#[t0, tf], #[saveValue t0 y0, saveValue tf yf])
-          else
-            (stepTs, stepYs)
-        match saveatTs with
-        | some ts =>
-            let tsOut :=
-              if saveAtT0 || saveAtT1 then
-                let pre := if saveAtT0 then #[t0] else #[]
-                let post := if saveAtT1 then #[tf] else #[]
-                pre ++ ts ++ post
-              else
-                ts
-            let ys :=
-              match denseInterp with
-              | none => #[]
-              | some interp =>
-                  tsOut.map (fun t => saveValue t (interp.evaluate t none true))
-            (some tsOut, some ys)
-        | none =>
-            if saveSteps then
-              (some stepTs, some stepYs)
-            else if saveAtT0 || saveAtT1 then
-              let ts :=
-                if saveAtT0 && saveAtT1 then #[t0, tf]
-                else if saveAtT0 then #[t0] else #[tf]
-              let ys :=
-                if saveAtT0 && saveAtT1 then #[saveValue t0 y0, saveValue tf yf]
-                else if saveAtT0 then #[saveValue t0 y0] else #[saveValue tf yf]
-              (some ts, some ys)
-            else
-              (none, none)
+                  saveValue t yf
+        let (flatTs, flatYs) := Id.run do
+          let mut outTs : Array Time := #[]
+          let mut outYs : Array Y := #[]
+          let stepCount := Nat.min allStepTs.size allStepYs.size
+          for sub in payloadSubs do
+            let mut subTs : Array Time := #[]
+            let mut subYs : Array Y := #[]
+            if sub.t0 then
+              subTs := subTs.push t0
+              subYs := subYs.push (saveValue t0 y0)
+            match sub.ts with
+            | none => pure ()
+            | some ts =>
+                for t in ts do
+                  subTs := subTs.push t
+                  subYs := subYs.push (evalFromDense t)
+            let cadence : Nat := sub.steps
+            if cadence != 0 then
+              if !(subTs.any (fun t => t == t0)) then
+                subTs := subTs.push t0
+                subYs := subYs.push (saveValue t0 y0)
+              for i in [:stepCount] do
+                if i > 0 && i % cadence == 0 then
+                  let tStep := allStepTs[i]!
+                  let yStep := allStepYs[i]!
+                  subTs := subTs.push tStep
+                  subYs := subYs.push (saveValue tStep yStep)
+              match subTs.back? with
+              | some lastT =>
+                  if lastT != tf then
+                    subTs := subTs.push tf
+                    subYs := subYs.push (saveValue tf yf)
+              | none =>
+                  subTs := subTs.push tf
+                  subYs := subYs.push (saveValue tf yf)
+            if sub.t1 then
+              let t1AlreadySavedBySteps :=
+                if sub.steps.enabled then
+                  match subTs.back? with
+                  | some lastT => lastT == tf
+                  | none => false
+                else
+                  false
+              if !t1AlreadySavedBySteps then
+                subTs := subTs.push tf
+                subYs := subYs.push (saveValue tf yf)
+            outTs := outTs ++ subTs
+            outYs := outYs ++ subYs
+          return (outTs, outYs)
+        if flatTs.size == 0 then
+          (none, none)
+        else
+          (some flatTs, some flatYs)
     if t0 == t1 then
       let denseInterp :=
         if saveDense || saveatTs.isSome then
           some (constantInterpolation y0)
         else
           none
-      let stepTs := if saveSteps then #[t0] else #[]
-      let stepYs := if saveSteps then #[saveValue t0 y0] else #[]
+      let stepTs := #[t0]
+      let stepYs := #[y0]
       let (tsOut, ysOut) := computeOutputs t0 y0 stepTs stepYs denseInterp
       exact maybeThrowOnFailure throwOnFailure {
         t0 := t0
@@ -526,8 +550,8 @@ def diffeqsolve {Term Y VF Control Args Controller : Type}
           some (constantInterpolation y0)
         else
           none
-      let stepTs := if saveSteps then #[t0] else #[]
-      let stepYs := if saveSteps then #[saveValue t0 y0] else #[]
+      let stepTs := #[t0]
+      let stepYs := #[y0]
       let (tsOut, ysOut) := computeOutputs t0 y0 stepTs stepYs denseInterp
       exact maybeThrowOnFailure throwOnFailure {
         t0 := t0
@@ -547,8 +571,8 @@ def diffeqsolve {Term Y VF Control Args Controller : Type}
     let denseTsInit := #[t0]
     let denseYsInit := #[y0]
     let denseSegsInit : Array (DenseInterpolation Y) := #[]
-    let stepTsInit := if saveSteps then #[t0] else #[]
-    let stepYsInit := if saveSteps then #[saveValue t0 y0] else #[]
+    let stepTsInit := #[t0]
+    let stepYsInit := #[y0]
     let eventMaskLastInit := eventMask0
     let _ := progressMeterStart progress_meter t0 t1
     let rec loop (attempted : Nat) (accepted : Nat) (rejected : Nat) (t : Time) (y : Y)
@@ -643,12 +667,8 @@ def diffeqsolve {Term Y VF Control Args Controller : Type}
                 let denseTs := denseTs.push stepOutTime
                 let denseYs := denseYs.push stepOutY
                 let denseSegs := denseSegs.push denseStep
-                let stepSaved := saveat.shouldSaveAcceptedStep acceptedNext
-                let (stepTs, stepYs) :=
-                  if stepSaved then
-                    (stepTs.push stepOutTime, stepYs.push (saveValue stepOutTime stepOutY))
-                  else
-                    (stepTs, stepYs)
+                let stepTs := stepTs.push stepOutTime
+                let stepYs := stepYs.push stepOutY
                 if eventHit then
                   if chosenTerminates then
                     (stepOutTime, stepOutY, step.solverState, ctrlState, true,

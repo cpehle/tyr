@@ -845,17 +845,17 @@ instance [VirtualBrownianTreeOps BM1] [VirtualBrownianTreeOps BM2] :
     let (leftPath, rightPath) := splitPair path
     let leftInc := VirtualBrownianTreeOps.increment (BM := BM1) leftPath t0 t1
     let rightInc := VirtualBrownianTreeOps.increment (BM := BM2) rightPath t0 t1
-    { dt := leftInc.dt, W := (leftInc.W, rightInc.W) }
+    { dt := t1 - t0, W := (leftInc.W, rightInc.W) }
   incrementSpaceTime path t0 t1 :=
     let (leftPath, rightPath) := splitPair path
     let leftInc := VirtualBrownianTreeOps.incrementSpaceTime (BM := BM1) leftPath t0 t1
     let rightInc := VirtualBrownianTreeOps.incrementSpaceTime (BM := BM2) rightPath t0 t1
-    { dt := leftInc.dt, W := (leftInc.W, rightInc.W), H := (leftInc.H, rightInc.H) }
+    { dt := t1 - t0, W := (leftInc.W, rightInc.W), H := (leftInc.H, rightInc.H) }
   incrementSpaceTimeTime path t0 t1 :=
     let (leftPath, rightPath) := splitPair path
     let leftInc := VirtualBrownianTreeOps.incrementSpaceTimeTime (BM := BM1) leftPath t0 t1
     let rightInc := VirtualBrownianTreeOps.incrementSpaceTimeTime (BM := BM2) rightPath t0 t1
-    { dt := leftInc.dt, W := (leftInc.W, rightInc.W), H := (leftInc.H, rightInc.H),
+    { dt := t1 - t0, W := (leftInc.W, rightInc.W), H := (leftInc.H, rightInc.H),
       K := (leftInc.K, rightInc.K) }
 
 instance [VirtualBrownianTreeOps BM] : VirtualBrownianTreeOps (Fin n → BM) where

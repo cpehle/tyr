@@ -1498,6 +1498,83 @@ private def evaluateDenseFloat {S C : Type}
   | none =>
       LeanTest.fail "Nested SubSaveAt(t1=True) should save endpoint"
 
+@[test] def testNestedSubSaveAtDeterministicSiblingOrder : IO Unit := do
+  let term : ODETerm Float Unit := { vectorField := fun _t _y _ => 1.0 }
+  let solver :=
+    Euler.solver (Term := ODETerm Float Unit) (Y := Float) (VF := Float) (Args := Unit)
+  let leftLeaf : SubSaveAt := { ts := some #[0.2] }
+  let rightLeaf : SubSaveAt := { ts := some #[0.8] }
+  let parent : SubSaveAt := { subs := #[leftLeaf, rightLeaf] }
+  let saveat : SaveAt := {
+    t0 := false
+    t1 := false
+    subs := #[parent]
+  }
+  let sol :=
+    diffeqsolve
+      (Term := ODETerm Float Unit)
+      (Y := Float)
+      (VF := Float)
+      (Control := Time)
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      term solver 0.0 1.0 (some 0.1) (0.0 : Float) () (saveat := saveat)
+  LeanTest.assertTrue (sol.result == Result.successful)
+    "Nested sibling payload ordering solve should succeed"
+  match sol.ts, sol.ys with
+  | some ts, some ys =>
+      LeanTest.assertTrue (ts.size == 2) s!"Expected two nested payload times, got {ts.size}"
+      LeanTest.assertTrue (ys.size == 2) s!"Expected two nested payload values, got {ys.size}"
+      LeanTest.assertTrue (approx ts[0]! 0.2 1e-12)
+        s!"Expected first nested payload time 0.2, got {ts[0]!}"
+      LeanTest.assertTrue (approx ts[1]! 0.8 1e-12)
+        s!"Expected second nested payload time 0.8, got {ts[1]!}"
+      LeanTest.assertTrue (approx ys[0]! 0.2 1e-12)
+        s!"Expected first nested payload value 0.2, got {ys[0]!}"
+      LeanTest.assertTrue (approx ys[1]! 0.8 1e-12)
+        s!"Expected second nested payload value 0.8, got {ys[1]!}"
+  | _, _ =>
+      LeanTest.fail "Nested sibling payload ordering should save ts/ys"
+
+@[test] def testNestedSubSaveAtMixedTsAndStepsPayload : IO Unit := do
+  let term : ODETerm Float Unit := { vectorField := fun _t _y _ => 1.0 }
+  let solver :=
+    Euler.solver (Term := ODETerm Float Unit) (Y := Float) (VF := Float) (Args := Unit)
+  let tsSub : SubSaveAt := { ts := some #[0.5] }
+  let stepsSub : SubSaveAt := { steps := (2 : Nat) }
+  let parent : SubSaveAt := { subs := #[tsSub, stepsSub] }
+  let saveat : SaveAt := {
+    t0 := false
+    t1 := false
+    subs := #[parent]
+  }
+  let sol :=
+    diffeqsolve
+      (Term := ODETerm Float Unit)
+      (Y := Float)
+      (VF := Float)
+      (Control := Time)
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      term solver 0.0 1.0 (some 0.25) (0.0 : Float) () (saveat := saveat)
+  LeanTest.assertTrue (sol.result == Result.successful)
+    "Nested mixed ts+steps payload solve should succeed"
+  match sol.ts, sol.ys with
+  | some ts, some ys =>
+      let expectedTs : Array Time := #[0.5, 0.0, 0.5, 1.0]
+      LeanTest.assertTrue (ts.size == expectedTs.size)
+        s!"Expected {expectedTs.size} mixed nested payload times, got {ts.size}"
+      LeanTest.assertTrue (ys.size == expectedTs.size)
+        s!"Expected {expectedTs.size} mixed nested payload values, got {ys.size}"
+      for i in [:expectedTs.size] do
+        let expected := expectedTs[i]!
+        LeanTest.assertTrue (approx ts[i]! expected 1e-12)
+          s!"Mixed nested payload ts[{i}] expected {expected}, got {ts[i]!}"
+        LeanTest.assertTrue (approx ys[i]! expected 1e-12)
+          s!"Mixed nested payload ys[{i}] expected {expected}, got {ys[i]!}"
+  | _, _ =>
+      LeanTest.fail "Nested mixed ts+steps payload should save ts/ys"
+
 @[test] def testBooleanEventTerminate : IO Unit := do
   let term : ODETerm Float Unit := { vectorField := fun _t _y _ => 1.0 }
   let solver :=
@@ -1778,6 +1855,61 @@ private def evaluateDenseFloat {S C : Type}
   LeanTest.assertTrue (approx (f01.W i2) ((f05.W i2) + (f51.W i2)) 1e-6)
     "Fin Brownian component 2 not additive"
 
+@[test] def testStructuredSpaceTimeLevyPairAndFin : IO Unit := do
+  let pairTree : VirtualBrownianTree (Float × Float) := {
+    t0 := 0.0
+    t1 := 1.0
+    tol := 1.0e-3
+    seed := 777888
+    shape := ((0.0 : Float), (0.0 : Float))
+  }
+  let p01 := VirtualBrownianTree.incrementSpaceTime pairTree 0.0 1.0
+  let p05 := VirtualBrownianTree.incrementSpaceTime pairTree 0.0 0.5
+  let p51 := VirtualBrownianTree.incrementSpaceTime pairTree 0.5 1.0
+  let p10 := VirtualBrownianTree.incrementSpaceTime pairTree 1.0 0.0
+  let pairRhs1 :=
+    (p05.H.1 * p05.dt) + (p51.H.1 * p51.dt) + 0.5 * (p51.dt * p05.W.1 - p05.dt * p51.W.1)
+  let pairRhs2 :=
+    (p05.H.2 * p05.dt) + (p51.H.2 * p51.dt) + 0.5 * (p51.dt * p05.W.2 - p05.dt * p51.W.2)
+  LeanTest.assertTrue (approx (p01.H.1 * p01.dt) pairRhs1 1e-6)
+    "Pair space-time Levy Chen relation failed for component 0"
+  LeanTest.assertTrue (approx (p01.H.2 * p01.dt) pairRhs2 1e-6)
+    "Pair space-time Levy Chen relation failed for component 1"
+  LeanTest.assertTrue (approx p01.dt (-p10.dt) 1e-12)
+    "Pair space-time dt sign failed"
+  LeanTest.assertTrue (approx p01.W.1 (-p10.W.1) 1e-6 && approx p01.W.2 (-p10.W.2) 1e-6)
+    "Pair space-time W sign failed"
+  LeanTest.assertTrue (approx p01.H.1 (-p10.H.1) 1e-6 && approx p01.H.2 (-p10.H.2) 1e-6)
+    "Pair space-time H sign failed"
+
+  let finTree : VirtualBrownianTree (Fin 2 → Float) := {
+    t0 := 0.0
+    t1 := 1.0
+    tol := 1.0e-3
+    seed := 999000
+    shape := fun _ => (0.0 : Float)
+  }
+  let f01 := VirtualBrownianTree.incrementSpaceTime finTree 0.0 1.0
+  let f05 := VirtualBrownianTree.incrementSpaceTime finTree 0.0 0.5
+  let f51 := VirtualBrownianTree.incrementSpaceTime finTree 0.5 1.0
+  let f10 := VirtualBrownianTree.incrementSpaceTime finTree 1.0 0.0
+  let i0 : Fin 2 := ⟨0, by decide⟩
+  let i1 : Fin 2 := ⟨1, by decide⟩
+  let finRhs0 :=
+    (f05.H i0 * f05.dt) + (f51.H i0 * f51.dt) + 0.5 * (f51.dt * (f05.W i0) - f05.dt * (f51.W i0))
+  let finRhs1 :=
+    (f05.H i1 * f05.dt) + (f51.H i1 * f51.dt) + 0.5 * (f51.dt * (f05.W i1) - f05.dt * (f51.W i1))
+  LeanTest.assertTrue (approx ((f01.H i0) * f01.dt) finRhs0 1e-6)
+    "Fin space-time Levy Chen relation failed for component 0"
+  LeanTest.assertTrue (approx ((f01.H i1) * f01.dt) finRhs1 1e-6)
+    "Fin space-time Levy Chen relation failed for component 1"
+  LeanTest.assertTrue (approx f01.dt (-f10.dt) 1e-12)
+    "Fin space-time dt sign failed"
+  LeanTest.assertTrue (approx (f01.W i0) (-(f10.W i0)) 1e-6 && approx (f01.W i1) (-(f10.W i1)) 1e-6)
+    "Fin space-time W sign failed"
+  LeanTest.assertTrue (approx (f01.H i0) (-(f10.H i0)) 1e-6 && approx (f01.H i1) (-(f10.H i1)) 1e-6)
+    "Fin space-time H sign failed"
+
 @[test] def testMilsteinAutodiffJvpWrapper : IO Unit := do
   let drift : ODETerm Float Unit := { vectorField := fun _t y _ => -y }
   let bm : ScalarBrownianPath := { t0 := 0.0, t1 := 1.0, seed := 909090 }
@@ -1855,6 +1987,84 @@ private def evaluateDenseFloat {S C : Type}
       LeanTest.assertTrue (approx yWrap yBase 1e-6)
         s!"Milstein JVP wrapper mismatch: expected {yBase}, got {yWrap}"
   | _, _ => LeanTest.fail "Expected ys from both Milstein solves"
+
+@[test] def testStratonovichMilsteinAutodiffJvpWrapper : IO Unit := do
+  let drift : ODETerm Float Unit := { vectorField := fun _t y _ => -y }
+  let bm : ScalarBrownianPath := { t0 := 0.0, t1 := 1.0, seed := 707070 }
+  let bmPath := (ScalarBrownianPath.toAbstract bm).toPath
+
+  let baselineDiffusion : DiffusionTerm Float Float Float Unit :=
+    DiffusionTerm.ofPath
+      (fun _t y _ => y)
+      bmPath
+      (fun vf control => vf * control)
+      (fun _t y _ => y)
+
+  let wrappedBase : ControlTerm Float Float Float Unit :=
+    ControlTerm.ofPath (fun _t y _ => y) bmPath (fun vf control => vf * control)
+  let wrappedDiffusion :
+      AutodiffJvpJacobianDiffusion (ControlTerm Float Float Float Unit) Float Float Unit :=
+    withAutodiffJvpJacobianProd
+      wrappedBase
+      (fun _t _y _args control tangent => tangent * control)
+
+  let termsBaseline : MultiTerm (ODETerm Float Unit) (DiffusionTerm Float Float Float Unit) := {
+    term1 := drift
+    term2 := baselineDiffusion
+  }
+  let termsWrapped :
+      MultiTerm (ODETerm Float Unit)
+        (AutodiffJvpJacobianDiffusion (ControlTerm Float Float Float Unit) Float Float Unit) := {
+    term1 := drift
+    term2 := wrappedDiffusion
+  }
+
+  let baselineSolver :=
+    StratonovichMilstein.solver
+      (Drift := ODETerm Float Unit)
+      (Diffusion := DiffusionTerm Float Float Float Unit)
+      (Y := Float)
+      (VFd := Float)
+      (VFg := Float)
+      (Control := Float)
+      (Args := Unit)
+  let wrappedSolver :=
+    StratonovichMilstein.solver
+      (Drift := ODETerm Float Unit)
+      (Diffusion := AutodiffJvpJacobianDiffusion (ControlTerm Float Float Float Unit) Float Float Unit)
+      (Y := Float)
+      (VFd := Float)
+      (VFg := Float)
+      (Control := Float)
+      (Args := Unit)
+
+  let solBaseline :=
+    diffeqsolve
+      (Term := MultiTerm (ODETerm Float Unit) (DiffusionTerm Float Float Float Unit))
+      (Y := Float)
+      (VF := (Float × Float))
+      (Control := (Time × Float))
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      termsBaseline baselineSolver 0.0 1.0 (some 1.0) (2.0 : Float) () (saveat := { t1 := true })
+  let solWrapped :=
+    diffeqsolve
+      (Term := MultiTerm (ODETerm Float Unit)
+        (AutodiffJvpJacobianDiffusion (ControlTerm Float Float Float Unit) Float Float Unit))
+      (Y := Float)
+      (VF := (Float × Float))
+      (Control := (Time × Float))
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      termsWrapped wrappedSolver 0.0 1.0 (some 1.0) (2.0 : Float) () (saveat := { t1 := true })
+
+  match solBaseline.ys, solWrapped.ys with
+  | some ysBase, some ysWrap =>
+      let yBase := ysBase[ysBase.size - 1]!
+      let yWrap := ysWrap[ysWrap.size - 1]!
+      LeanTest.assertTrue (approx yWrap yBase 1e-6)
+        s!"Stratonovich Milstein JVP wrapper mismatch: expected {yBase}, got {yWrap}"
+  | _, _ => LeanTest.fail "Expected ys from both Stratonovich Milstein solves"
 
 @[test] def testControlTermToODEConversion : IO Unit := do
   let path := AbstractPath.linearInterpolation 0.0 1.0 (0.0 : Float) (1.0 : Float)
@@ -2403,6 +2613,78 @@ private def evaluateDenseFloat {S C : Type}
   LeanTest.assertTrue (errFine < 5.0e-4)
     s!"Dense interpolation fine error too large: {errFine}"
 
+@[test] def testDopri5DenseInterpolationErrorTrend : IO Unit := do
+  let term : ODETerm Float Unit := { vectorField := fun _t y _ => -y }
+  let solver :=
+    Dopri5.solver (Term := ODETerm Float Unit) (Y := Float) (VF := Float) (Args := Unit)
+  let probeTs : Array Time := #[0.13, 0.37, 0.79]
+  let solve := fun (dt : Float) =>
+    diffeqsolve
+      (Term := ODETerm Float Unit)
+      (Y := Float)
+      (VF := Float)
+      (Control := Time)
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      term solver 0.0 1.0 (some dt) (1.0 : Float) () (saveat := { dense := true, t1 := false })
+  let maxDenseErr := fun {S C : Type} (label : String) (sol : Solution Float S C) => do
+    let mut maxErr := 0.0
+    for i in [:probeTs.size] do
+      let t := probeTs[i]!
+      let y ← evaluateDenseFloat s!"{label} probe[{i}]" sol t
+      let err := Float.abs (y - Float.exp (-t))
+      if err > maxErr then
+        maxErr := err
+    pure maxErr
+  let errCoarse ← maxDenseErr "Dopri5 dense coarse" (solve 0.25)
+  let errMedium ← maxDenseErr "Dopri5 dense medium" (solve 0.125)
+  let errFine ← maxDenseErr "Dopri5 dense fine" (solve 0.0625)
+  LeanTest.assertTrue (errCoarse > errMedium && errMedium > errFine)
+    s!"Dopri5 dense errors should decrease with dt: {errCoarse}, {errMedium}, {errFine}"
+  let ratio1 := if errMedium <= 1.0e-16 then 0.0 else errCoarse / errMedium
+  let ratio2 := if errFine <= 1.0e-16 then 0.0 else errMedium / errFine
+  LeanTest.assertTrue (ratio1 > 4.0 && ratio2 > 4.0)
+    s!"Dopri5 dense error ratios should show high-order trend: {ratio1}, {ratio2}"
+
+@[test] def testDopri5DenseImprovesOverHermiteFallback : IO Unit := do
+  let term : ODETerm Float Unit := { vectorField := fun _t y _ => -y }
+  let solverPoly :=
+    Dopri5.solver (Term := ODETerm Float Unit) (Y := Float) (VF := Float) (Args := Unit)
+  let solverHermite :=
+    ExplicitRK.solver
+      (Term := ODETerm Float Unit)
+      (Y := Float)
+      (VF := Float)
+      (Args := Unit)
+      { tableau := dopri5Tableau, denseKind := .hermite }
+  let solvePoly :=
+    diffeqsolve
+      (Term := ODETerm Float Unit)
+      (Y := Float)
+      (VF := Float)
+      (Control := Time)
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      term solverPoly 0.0 1.0 (some 0.25) (1.0 : Float) () (saveat := { dense := true, t1 := false })
+  let solveHermite :=
+    diffeqsolve
+      (Term := ODETerm Float Unit)
+      (Y := Float)
+      (VF := Float)
+      (Control := Time)
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      term solverHermite 0.0 1.0 (some 0.25) (1.0 : Float) () (saveat := { dense := true, t1 := false })
+  let yPoly ← evaluateDenseFloat "Dopri5 dense poly" solvePoly 0.37
+  let yHermite ← evaluateDenseFloat "Dopri5 dense hermite fallback" solveHermite 0.37
+  let exact := Float.exp (-0.37)
+  let errPoly := Float.abs (yPoly - exact)
+  let errHermite := Float.abs (yHermite - exact)
+  LeanTest.assertTrue (errPoly < errHermite)
+    s!"Dopri5 dense polynomial should improve over Hermite fallback: {errPoly} vs {errHermite}"
+  LeanTest.assertTrue (errPoly < 0.75 * errHermite)
+    s!"Dopri5 dense polynomial improvement should be meaningful: {errPoly} vs {errHermite}"
+
 private def deterministicWeakSeeds (count : Nat) : Array UInt64 :=
   Id.run do
     let mut seeds := #[]
@@ -2629,6 +2911,8 @@ def run : IO Unit := do
   testSaveAtTsDirectionForward
   testSaveAtTsDirectionReverse
   testNestedSubSaveAtPayloadFlags
+  testNestedSubSaveAtDeterministicSiblingOrder
+  testNestedSubSaveAtMixedTsAndStepsPayload
   testBooleanEventTerminate
   testBooleanEventNonTerminating
   testRealEventDirection
@@ -2636,7 +2920,9 @@ def run : IO Unit := do
   testEventTiePrefersTerminating
   testEventMaskExcludesLaterSameStepRoots
   testBrownianPairAndFinStructuredIncrements
+  testStructuredSpaceTimeLevyPairAndFin
   testMilsteinAutodiffJvpWrapper
+  testStratonovichMilsteinAutodiffJvpWrapper
   testControlTermToODEConversion
   testAbstractPathComposeLinear
   testAbstractPathMapAndRestrict
@@ -2653,6 +2939,8 @@ def run : IO Unit := do
   testEulerGlobalOrderTrend
   testRK4GlobalOrderTrend
   testDenseInterpolationErrorTrend
+  testDopri5DenseInterpolationErrorTrend
+  testDopri5DenseImprovesOverHermiteFallback
   testSDEWeakMomentConvergenceEulerMaruyama
   testSDEStrongOrderTrendAndMilsteinAdvantage
 

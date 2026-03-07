@@ -70,14 +70,33 @@ def flatten (root : SubSaveAt) : Array SubSaveAt := Id.run do
     let node := pending[i]!
     pending := pending.pop
     out := out.push node
-    for child in node.subs do
-      pending := pending.push child
+    for offset in [:node.subs.size] do
+      let childIdx := node.subs.size - 1 - offset
+      pending := pending.push (node.subs[childIdx]!)
   return out
 
 end SubSaveAt
 
+private def rootSubSaveAt (saveat : SaveAt) : SubSaveAt := {
+  t0 := saveat.t0
+  t1 := saveat.t1
+  ts := saveat.ts
+  steps := saveat.steps
+  dense := saveat.dense
+  solverState := saveat.solverState
+  controllerState := saveat.controllerState
+  madeJump := saveat.madeJump
+  subs := saveat.subs
+}
+
 private def allSubs (saveat : SaveAt) : Array SubSaveAt :=
-  saveat.subs.foldl (init := #[]) (fun acc sub => acc ++ SaveAt.SubSaveAt.flatten sub)
+  SaveAt.SubSaveAt.flatten (rootSubSaveAt saveat)
+
+private def hasPayloadOutput (sub : SubSaveAt) : Bool :=
+  sub.t0 || sub.t1 || sub.ts.isSome || sub.steps.enabled
+
+def payloadSubs (saveat : SaveAt) : Array SubSaveAt :=
+  (allSubs saveat).filter hasPayloadOutput
 
 private def appendTs (acc : Array Time) (ts : Option (Array Time)) : Array Time :=
   match ts with
@@ -85,16 +104,13 @@ private def appendTs (acc : Array Time) (ts : Option (Array Time)) : Array Time 
   | none => acc
 
 def effectiveT0 (saveat : SaveAt) : Bool :=
-  saveat.t0 || (allSubs saveat).any (fun sub => sub.t0)
+  (allSubs saveat).any (fun sub => sub.t0)
 
 def effectiveT1 (saveat : SaveAt) : Bool :=
-  saveat.t1 || (allSubs saveat).any (fun sub => sub.t1)
+  (allSubs saveat).any (fun sub => sub.t1)
 
 def stepCadences (saveat : SaveAt) : Array Nat := Id.run do
   let mut cadences : Array Nat := #[]
-  let base : Nat := saveat.steps
-  if base != 0 then
-    cadences := cadences.push base
   for sub in allSubs saveat do
     let cadence : Nat := sub.steps
     if cadence != 0 then
@@ -116,23 +132,22 @@ def shouldSaveAcceptedStep (saveat : SaveAt) (acceptedSteps : Nat) : Bool :=
 def effectiveTs (saveat : SaveAt) : Option (Array Time) :=
   let ts := Id.run do
     let mut out : Array Time := #[]
-    out := appendTs out saveat.ts
     for sub in allSubs saveat do
       out := appendTs out sub.ts
     return out
   if ts.size == 0 then none else some ts
 
 def effectiveDense (saveat : SaveAt) : Bool :=
-  saveat.dense || (allSubs saveat).any (fun sub => sub.dense)
+  (allSubs saveat).any (fun sub => sub.dense)
 
 def effectiveSolverState (saveat : SaveAt) : Bool :=
-  saveat.solverState || (allSubs saveat).any (fun sub => sub.solverState)
+  (allSubs saveat).any (fun sub => sub.solverState)
 
 def effectiveControllerState (saveat : SaveAt) : Bool :=
-  saveat.controllerState || (allSubs saveat).any (fun sub => sub.controllerState)
+  (allSubs saveat).any (fun sub => sub.controllerState)
 
 def effectiveMadeJump (saveat : SaveAt) : Bool :=
-  saveat.madeJump || (allSubs saveat).any (fun sub => sub.madeJump)
+  (allSubs saveat).any (fun sub => sub.madeJump)
 
 end SaveAt
 
