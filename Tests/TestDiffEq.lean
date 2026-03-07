@@ -2168,6 +2168,132 @@ private def evaluateDenseFloat {S C : Type}
   LeanTest.assertTrue (badDrift.validate? 0.0 (1.0, 0.0) ()).isSome
     "Underdamped drift validation should reject negative gamma"
 
+@[test] def testShOULDUnderdampedStep : IO Unit := do
+  let path := AbstractPath.linearInterpolation 0.0 1.0 (0.0 : Float) (1.0 : Float)
+  let drift : UnderdampedLangevinDriftTerm Float Unit := {
+    gradPotential := fun _t x _ => x
+    gamma := fun _t _x _v _ => 0.3
+    u := fun _t _x _v _ => 0.4
+  }
+  let diffusion : UnderdampedLangevinDiffusionTerm Float Unit :=
+    UnderdampedLangevinDiffusionTerm.ofPath path
+      (gamma := fun _t _x _v _ => 0.3)
+      (u := fun _t _x _v _ => 0.4)
+  let terms : MultiTerm (UnderdampedLangevinDriftTerm Float Unit)
+      (UnderdampedLangevinDiffusionTerm Float Unit) := {
+    term1 := drift
+    term2 := diffusion
+  }
+  let solver := ShOULD.solver
+  let sol :=
+    diffeqsolve
+      (Term := MultiTerm (UnderdampedLangevinDriftTerm Float Unit)
+        (UnderdampedLangevinDiffusionTerm Float Unit))
+      (Y := (Float × Float))
+      (VF := ((Float × Float) × Float))
+      (Control := (Time × Float))
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      terms solver 0.0 1.0 (some 1.0) ((1.0, 0.5) : Float × Float) ()
+      (saveat := { t1 := true })
+  let y1 ← finalSaved "ShOULD underdamped" sol
+  let x0 := 1.0
+  let v0 := 0.5
+  let h := 1.0
+  let gamma := 0.3
+  let u := 0.4
+  let gh := gamma * h
+  let betaHalf := Float.exp (-0.5 * gh)
+  let beta1 := Float.exp (-gh)
+  let aHalf := (1.0 - betaHalf) / gamma
+  let a1 := (1.0 - beta1) / gamma
+  let bHalf := (betaHalf + 0.5 * gh - 1.0) / (gamma * gh)
+  let b1 := (beta1 + gh - 1.0) / (gamma * gh)
+  let aa := a1 / h
+  let rho := Float.sqrt (2.0 * gamma * u)
+  let dW := 1.0
+  let uh := u * h
+  let f0 := x0
+  let rhoW := rho * dW
+  let xHalf := x0 + (aHalf * v0 + bHalf * ((-uh) * f0 + rhoW))
+  let fHalf := xHalf
+  let fBlend := (1.0 / 3.0) * f0 + (2.0 / 3.0) * fHalf
+  let xExpected := x0 + (a1 * v0 + b1 * ((-uh) * fBlend + rhoW))
+  let f1 := xExpected
+  let vExpected :=
+    beta1 * v0 -
+    uh * ((beta1 / 6.0) * f0 + ((2.0 / 3.0) * betaHalf) * fHalf + (1.0 / 6.0) * f1) +
+    aa * rhoW
+  LeanTest.assertTrue (approx y1.1 xExpected 1e-6)
+    s!"ShOULD x mismatch: expected {xExpected}, got {y1.1}"
+  LeanTest.assertTrue (approx y1.2 vExpected 1e-6)
+    s!"ShOULD v mismatch: expected {vExpected}, got {y1.2}"
+
+@[test] def testQUICSORTUnderdampedStep : IO Unit := do
+  let path := AbstractPath.linearInterpolation 0.0 1.0 (0.0 : Float) (1.0 : Float)
+  let drift : UnderdampedLangevinDriftTerm Float Unit := {
+    gradPotential := fun _t x _ => x
+    gamma := fun _t _x _v _ => 0.3
+    u := fun _t _x _v _ => 0.4
+  }
+  let diffusion : UnderdampedLangevinDiffusionTerm Float Unit :=
+    UnderdampedLangevinDiffusionTerm.ofPath path
+      (gamma := fun _t _x _v _ => 0.3)
+      (u := fun _t _x _v _ => 0.4)
+  let terms : MultiTerm (UnderdampedLangevinDriftTerm Float Unit)
+      (UnderdampedLangevinDiffusionTerm Float Unit) := {
+    term1 := drift
+    term2 := diffusion
+  }
+  let solver := QUICSORT.solver
+  let sol :=
+    diffeqsolve
+      (Term := MultiTerm (UnderdampedLangevinDriftTerm Float Unit)
+        (UnderdampedLangevinDiffusionTerm Float Unit))
+      (Y := (Float × Float))
+      (VF := ((Float × Float) × Float))
+      (Control := (Time × Float))
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      terms solver 0.0 1.0 (some 1.0) ((1.0, 0.5) : Float × Float) ()
+      (saveat := { t1 := true })
+  let y1 ← finalSaved "QUICSORT underdamped" sol
+  let x0 := 1.0
+  let v0 := 0.5
+  let h := 1.0
+  let gamma := 0.3
+  let u := 0.4
+  let gh := gamma * h
+  let rho := Float.sqrt (2.0 * gamma * u)
+  let uh := u * h
+  let dW := 1.0
+  let rhoW := rho * dW
+  let l := 0.5 - Float.sqrt 3.0 / 6.0
+  let r := 0.5 + Float.sqrt 3.0 / 6.0
+  let betaL := Float.exp (-(l * gh))
+  let betaR := Float.exp (-(r * gh))
+  let beta1 := Float.exp (-gh)
+  let aL := (1.0 - betaL) / gamma
+  let aR := (1.0 - betaR) / gamma
+  let a1 := (1.0 - beta1) / gamma
+  let bL := (betaL + l * gh - 1.0) / (gamma * gh)
+  let bR := (betaR + r * gh - 1.0) / (gamma * gh)
+  let b1 := (beta1 + gh - 1.0) / (gamma * gh)
+  let aThird := (1.0 - Float.exp (-(gh / 3.0))) / gamma
+  let aDivH := (1.0 - Float.exp (-gh)) / gh
+  let xL := x0 + (aL * v0 + bL * rhoW)
+  let fLUh := uh * xL
+  let xR := x0 + (aR * v0 + bR * rhoW) - aThird * fLUh
+  let fRUh := uh * xR
+  let xExpected :=
+    x0 + (a1 * v0 + b1 * rhoW) - 0.5 * (aR * fLUh + aL * fRUh)
+  let vExpected :=
+    beta1 * v0 - 0.5 * (betaR * fLUh + betaL * fRUh) + aDivH * rhoW
+  LeanTest.assertTrue (approx y1.1 xExpected 1e-6)
+    s!"QUICSORT x mismatch: expected {xExpected}, got {y1.1}"
+  LeanTest.assertTrue (approx y1.2 vExpected 1e-6)
+    s!"QUICSORT v mismatch: expected {vExpected}, got {y1.2}"
+
 @[test] def testSaveFnTransformsOutputs : IO Unit := do
   let term : ODETerm Float Unit := { vectorField := fun _t y _ => y }
   let solver :=
