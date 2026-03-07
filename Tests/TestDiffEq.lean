@@ -1996,6 +1996,99 @@ private def evaluateDenseFloat {S C : Type}
   LeanTest.assertTrue (errFine < 5.0e-4)
     s!"Dense interpolation fine error too large: {errFine}"
 
+private def deterministicWeakSeeds (count : Nat) : Array UInt64 :=
+  Id.run do
+    let mut seeds := #[]
+    for i in [:count] do
+      seeds := seeds.push (UInt64.ofNat (700001 + i * 7919))
+    pure seeds
+
+private def eulerMaruyamaOUWeakStats (dt : Float) (seeds : Array UInt64) : IO (Float × Float) := do
+  let theta := 1.0
+  let sigma := 0.1
+  let drift : ODETerm Float Unit := { vectorField := fun _t y _ => -theta * y }
+  let solver :=
+    EulerMaruyama.solver
+      (Drift := ODETerm Float Unit)
+      (Diffusion := ControlTerm Float Float Float Unit)
+      (Y := Float)
+      (VFd := Float)
+      (VFg := Float)
+      (Control := Float)
+      (Args := Unit)
+  let mut sum := 0.0
+  let mut sumSq := 0.0
+  for seed in seeds do
+    let bm : VirtualBrownianTree Float := {
+      t0 := 0.0
+      t1 := 1.0
+      tol := 1.0e-6
+      maxDepth := 22
+      seed := seed
+      shape := 0.0
+    }
+    let bmPath := (VirtualBrownianTree.toAbstract bm).toPath
+    let diffusion : ControlTerm Float Float Float Unit :=
+      ControlTerm.ofPath (fun _t _y _ => sigma) bmPath (fun vf control => vf * control)
+    let terms : MultiTerm (ODETerm Float Unit) (ControlTerm Float Float Float Unit) :=
+      { term1 := drift, term2 := diffusion }
+    let sol :=
+      diffeqsolve
+        (Term := MultiTerm (ODETerm Float Unit) (ControlTerm Float Float Float Unit))
+        (Y := Float)
+        (VF := (Float × Float))
+        (Control := (Time × Float))
+        (Args := Unit)
+        (Controller := ConstantStepSize)
+        terms solver 0.0 1.0 (some dt) (1.0 : Float) () (saveat := { t1 := true })
+    let y1 ← finalSaved "weak OU Euler-Maruyama" sol
+    sum := sum + y1
+    sumSq := sumSq + (y1 * y1)
+  let n := Float.ofNat seeds.size
+  pure (sum / n, sumSq / n)
+
+@[test] def testSDEWeakMomentConvergenceEulerMaruyama : IO Unit := do
+  let theta := 1.0
+  let sigma := 0.1
+  let tFinal := 1.0
+  let x0 := 1.0
+  let seeds := deterministicWeakSeeds 96
+
+  let (meanCoarse, m2Coarse) ← eulerMaruyamaOUWeakStats 0.2 seeds
+  let (meanMedium, m2Medium) ← eulerMaruyamaOUWeakStats 0.1 seeds
+  let (meanFine, m2Fine) ← eulerMaruyamaOUWeakStats 0.05 seeds
+
+  let exactMean := x0 * Float.exp (-theta * tFinal)
+  let exactVariance := ((sigma * sigma) / (2.0 * theta)) * (1.0 - Float.exp (-2.0 * theta * tFinal))
+  let exactM2 := exactMean * exactMean + exactVariance
+
+  let meanErrCoarse := Float.abs (meanCoarse - exactMean)
+  let meanErrMedium := Float.abs (meanMedium - exactMean)
+  let meanErrFine := Float.abs (meanFine - exactMean)
+  let m2ErrCoarse := Float.abs (m2Coarse - exactM2)
+  let m2ErrMedium := Float.abs (m2Medium - exactM2)
+  let m2ErrFine := Float.abs (m2Fine - exactM2)
+
+  LeanTest.assertTrue (meanErrCoarse > meanErrMedium && meanErrMedium > meanErrFine)
+    s!"Weak mean errors should decrease with dt: {meanErrCoarse}, {meanErrMedium}, {meanErrFine}"
+  LeanTest.assertTrue (m2ErrCoarse > m2ErrMedium && m2ErrMedium > m2ErrFine)
+    s!"Weak second-moment errors should decrease with dt: {m2ErrCoarse}, {m2ErrMedium}, {m2ErrFine}"
+
+  let meanRatio1 := if meanErrMedium <= 1.0e-16 then 0.0 else meanErrCoarse / meanErrMedium
+  let meanRatio2 := if meanErrFine <= 1.0e-16 then 0.0 else meanErrMedium / meanErrFine
+  let m2Ratio1 := if m2ErrMedium <= 1.0e-16 then 0.0 else m2ErrCoarse / m2ErrMedium
+  let m2Ratio2 := if m2ErrFine <= 1.0e-16 then 0.0 else m2ErrMedium / m2ErrFine
+
+  LeanTest.assertTrue (meanRatio1 > 1.15 && meanRatio2 > 1.15)
+    s!"Weak mean trend too weak: ratios {meanRatio1}, {meanRatio2}"
+  LeanTest.assertTrue (m2Ratio1 > 1.15 && m2Ratio2 > 1.15)
+    s!"Weak second-moment trend too weak: ratios {m2Ratio1}, {m2Ratio2}"
+
+  LeanTest.assertTrue (meanErrFine < 2.5e-2)
+    s!"Weak mean fine-grid error too large: {meanErrFine}"
+  LeanTest.assertTrue (m2ErrFine < 2.5e-2)
+    s!"Weak second-moment fine-grid error too large: {m2ErrFine}"
+
 @[test] def testSDEStrongOrderTrendAndMilsteinAdvantage : IO Unit := do
   let mu := 0.2
   let sigma := 0.3
@@ -2146,6 +2239,7 @@ def run : IO Unit := do
   testEulerGlobalOrderTrend
   testRK4GlobalOrderTrend
   testDenseInterpolationErrorTrend
+  testSDEWeakMomentConvergenceEulerMaruyama
   testSDEStrongOrderTrendAndMilsteinAdvantage
 
 end Tests.DiffEq
