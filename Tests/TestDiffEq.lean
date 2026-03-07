@@ -2873,6 +2873,63 @@ private def evaluateDenseFloat {S C : Type}
   LeanTest.assertTrue (errFine < 5.0e-4)
     s!"Dense interpolation fine error too large: {errFine}"
 
+@[test] def testKvaerno3DenseInterpolationTrend : IO Unit := do
+  let term : ODETerm Float Unit := { vectorField := fun _t y _ => -y }
+  let solver :=
+    Kvaerno3.solver (Term := ODETerm Float Unit) (Y := Float) (VF := Float) (Args := Unit)
+  let solve := fun (dt : Float) =>
+    diffeqsolve
+      (Term := ODETerm Float Unit)
+      (Y := Float)
+      (VF := Float)
+      (Control := Time)
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      term solver 0.0 1.0 (some dt) (1.0 : Float) () (saveat := { dense := true, t1 := false })
+  let yCoarse ← evaluateDenseFloat "Kvaerno3 dense coarse" (solve 0.25) 0.37
+  let yFine ← evaluateDenseFloat "Kvaerno3 dense fine" (solve 0.125) 0.37
+  let exact := Float.exp (-0.37)
+  let errCoarse := Float.abs (yCoarse - exact)
+  let errFine := Float.abs (yFine - exact)
+  LeanTest.assertTrue (errCoarse > errFine)
+    s!"Kvaerno3 dense interpolation should improve with smaller dt: {errCoarse} vs {errFine}"
+  LeanTest.assertTrue (errFine < 8.0e-3)
+    s!"Kvaerno3 dense interpolation fine-grid error too large: {errFine}"
+
+@[test] def testKencarp3DenseInterpolationTrend : IO Unit := do
+  let explicit : ODETerm Float Unit := { vectorField := fun _t y _ => -0.3 * y }
+  let implicit : ODETerm Float Unit := { vectorField := fun _t y _ => -0.7 * y }
+  let terms : MultiTerm (ODETerm Float Unit) (ODETerm Float Unit) := {
+    term1 := explicit
+    term2 := implicit
+  }
+  let solver :=
+    Kencarp3.solver
+      (ExplicitTerm := ODETerm Float Unit)
+      (ImplicitTerm := ODETerm Float Unit)
+      (Y := Float)
+      (VFe := Float)
+      (VFi := Float)
+      (Args := Unit)
+  let solve := fun (dt : Float) =>
+    diffeqsolve
+      (Term := MultiTerm (ODETerm Float Unit) (ODETerm Float Unit))
+      (Y := Float)
+      (VF := (Float × Float))
+      (Control := (Time × Time))
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      terms solver 0.0 1.0 (some dt) (1.0 : Float) () (saveat := { dense := true, t1 := false })
+  let yCoarse ← evaluateDenseFloat "KenCarp3 dense coarse" (solve 0.25) 0.37
+  let yFine ← evaluateDenseFloat "KenCarp3 dense fine" (solve 0.125) 0.37
+  let exact := Float.exp (-0.37)
+  let errCoarse := Float.abs (yCoarse - exact)
+  let errFine := Float.abs (yFine - exact)
+  LeanTest.assertTrue (errCoarse > errFine)
+    s!"KenCarp3 dense interpolation should improve with smaller dt: {errCoarse} vs {errFine}"
+  LeanTest.assertTrue (errFine < 1.5e-2)
+    s!"KenCarp3 dense interpolation fine-grid error too large: {errFine}"
+
 @[test] def testDopri5DenseInterpolationErrorTrend : IO Unit := do
   let term : ODETerm Float Unit := { vectorField := fun _t y _ => -y }
   let solver :=
@@ -3242,6 +3299,8 @@ def run : IO Unit := do
   testEulerGlobalOrderTrend
   testRK4GlobalOrderTrend
   testDenseInterpolationErrorTrend
+  testKvaerno3DenseInterpolationTrend
+  testKencarp3DenseInterpolationTrend
   testDopri5DenseInterpolationErrorTrend
   testDopri5DenseImprovesOverHermiteFallback
   testTsit5DenseImprovesOverHermiteFallback

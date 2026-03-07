@@ -52,7 +52,7 @@ def solver {s : Nat} {Term Y VF Args : Type}
     [DiffEqSpace Y] [DiffEqSeminorm Y] [DiffEqElem Y]
     (rk : ImplicitRK s) : AbstractSolver Term Y VF Time Args := {
   SolverState := Unit
-  DenseInfo := LocalLinearDenseInfo Y
+  DenseInfo := LocalHermiteDenseInfo Y
   termStructure := TermStructure.single
   order := fun _ => rk.tableau.order
   strongOrder := fun _ => 0.0
@@ -98,7 +98,9 @@ def solver {s : Nat} {Term Y VF Args : Type}
           let high := weightedSum rk.tableau.b ks y0
           let low := weightedSum bErr ks y0
           some (high - low)
-    let dense := { t0 := t0, t1 := t1, y0 := y0, y1 := y1 }
+    let m0 := inst.vf_prod term t0 y0 args dt
+    let m1 := inst.vf_prod term t1 y1 args dt
+    let dense := { t0 := t0, t1 := t1, y0 := y0, y1 := y1, m0 := m0, m1 := m1 }
     {
       y1 := y1
       yError := yErr
@@ -140,7 +142,7 @@ def solver {s : Nat} {ExplicitTerm ImplicitTerm Y VFe VFi Args : Type}
     (rk : IMEXRK s) :
     AbstractSolver (MultiTerm ExplicitTerm ImplicitTerm) Y (VFe × VFi) (Time × Time) Args := {
   SolverState := Unit
-  DenseInfo := LocalLinearDenseInfo Y
+  DenseInfo := LocalHermiteDenseInfo Y
   termStructure := TermStructure.pair
   order := fun _ => rk.explicit.order
   strongOrder := fun _ => 0.0
@@ -199,7 +201,11 @@ def solver {s : Nat} {ExplicitTerm ImplicitTerm Y VFe VFi Args : Type}
             (weightedSum bErrE ksExp y0) + (weightedSum bErrI ksImp y0)
           some (high - low)
       | _, _ => none
-    let dense := { t0 := t0, t1 := t1, y0 := y0, y1 := yHigh }
+    let m0 :=
+      (expInst.vf_prod explicit t0 y0 args dt) + (impInst.vf_prod implicit t0 y0 args dt)
+    let m1 :=
+      (expInst.vf_prod explicit t1 yHigh args dt) + (impInst.vf_prod implicit t1 yHigh args dt)
+    let dense := { t0 := t0, t1 := t1, y0 := y0, y1 := yHigh, m0 := m0, m1 := m1 }
     {
       y1 := yHigh
       yError := yErr
