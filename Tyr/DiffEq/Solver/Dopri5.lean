@@ -9,7 +9,7 @@ structure Dopri5 where
   deriving Inhabited
 
 def dopri5DenseKind : ExplicitRKDenseKind :=
-  .splitAtStage 2 "dopri5-stage3-split-hermite"
+  .dopri5Poly4
 
 def Dopri5.solver {Term Y VF Args : Type}
     [TermLike Term Y VF Time Args]

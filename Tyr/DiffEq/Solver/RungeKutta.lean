@@ -19,6 +19,7 @@ structure ButcherTableau (s : Nat) where
 inductive ExplicitRKDenseKind where
   | hermite
   | splitAtStage (stage : Nat) (tag : String)
+  | dopri5Poly4
   deriving Repr, BEq, Inhabited
 
 structure ExplicitRK (s : Nat) where
@@ -26,6 +27,19 @@ structure ExplicitRK (s : Nat) where
   denseKind : ExplicitRKDenseKind := .hermite
 
 namespace ExplicitRK
+
+inductive DenseInfo (Y : Type) where
+  | hermite (info : LocalHermiteDenseInfo Y)
+  | poly4 (info : LocalPolynomial4DenseInfo Y)
+
+namespace DenseInfo
+
+def toInterpolation [DiffEqSpace Y] (info : DenseInfo Y) : DenseInterpolation Y :=
+  match info with
+  | .hermite info => info.toInterpolation
+  | .poly4 info => info.toInterpolation
+
+end DenseInfo
 
 private def zeroLike [DiffEqSpace Y] (y0 : Y) : Y :=
   0.0 * y0
@@ -36,6 +50,15 @@ private def weightedSum {s : Nat} [DiffEqSpace Y] (coeffs : Vector s Time)
   let coeffArr := coeffs.toArray
   for j in [:coeffArr.size] do
     let a := coeffArr.getD j 0.0
+    let kj := ks.getD j (zeroLike y0)
+    acc := acc + a * kj
+  return acc
+
+private def weightedSumArray [DiffEqSpace Y] (coeffs : Array Time)
+    (ks : Array Y) (y0 : Y) : Y := Id.run do
+  let mut acc := zeroLike y0
+  for j in [:coeffs.size] do
+    let a := coeffs.getD j 0.0
     let kj := ks.getD j (zeroLike y0)
     acc := acc + a * kj
   return acc
@@ -52,39 +75,79 @@ private def stageState {s : Nat} [DiffEqSpace Y] (rk : ExplicitRK s)
     sum := sum + aij * kj
   return y0 + sum
 
+private def baseHermiteDenseInfo [DiffEqSpace Y]
+    (t0 t1 : Time) (y0 y1 : Y) (m0 m1 : Y) : LocalHermiteDenseInfo Y := {
+  t0 := t0
+  t1 := t1
+  y0 := y0
+  y1 := y1
+  m0 := m0
+  m1 := m1
+}
+
+private def dopri5Poly4DenseInfo [DiffEqSpace Y]
+    (t0 t1 : Time) (y0 y1 : Y) (ks : Array Y) (fallback : LocalHermiteDenseInfo Y) :
+    DenseInfo Y :=
+  if ks.size == 7 then
+    let cMid : Array Time := #[
+      (6025192743.0 / 30085553152.0) / 2.0,
+      0.0,
+      (51252292925.0 / 65400821598.0) / 2.0,
+      (-2691868925.0 / 45128329728.0) / 2.0,
+      (187940372067.0 / 1594534317056.0) / 2.0,
+      (-1776094331.0 / 19743644256.0) / 2.0,
+      (11237099.0 / 235043384.0) / 2.0
+    ]
+    let zero := zeroLike y0
+    let yMid := y0 + weightedSumArray cMid ks y0
+    let f0 := ks.getD 0 zero
+    let f1 := ks.getD 6 zero
+    -- Quartic polynomial in normalized step time theta.
+    let c4 := 2.0 * (f1 - f0) - 8.0 * (y1 + y0) + 16.0 * yMid
+    let c3 := 5.0 * f0 - 3.0 * f1 + 18.0 * y0 + 14.0 * y1 - 32.0 * yMid
+    let c2 := f1 - 4.0 * f0 - 11.0 * y0 - 5.0 * y1 + 16.0 * yMid
+    .poly4 {
+      t0 := t0
+      t1 := t1
+      c4 := c4
+      c3 := c3
+      c2 := c2
+      c1 := f0
+      c0 := y0
+    }
+  else
+    .hermite fallback
+
 private def denseInfo {s : Nat} [DiffEqSpace Y] (rk : ExplicitRK s)
     (t0 t1 : Time) (y0 y1 : Y) (dt : Time) (ks : Array Y) (m0 m1 : Y) :
-    LocalHermiteDenseInfo Y :=
-  let base : LocalHermiteDenseInfo Y := {
-    t0 := t0
-    t1 := t1
-    y0 := y0
-    y1 := y1
-    m0 := m0
-    m1 := m1
-  }
+    DenseInfo Y :=
+  let base := baseHermiteDenseInfo t0 t1 y0 y1 m0 m1
   match rk.denseKind with
-  | .hermite => base
+  | .hermite => .hermite base
   | .splitAtStage stage tag =>
       let cs := rk.tableau.c.toArray
       if hStage : stage < cs.size then
         let c := cs[stage]'hStage
         if c <= 0.0 || c >= 1.0 then
-          base
+          .hermite base
         else
           let zero := zeroLike y0
           let tSplit := t0 + c * dt
           let ySplit := stageState rk ks y0 stage
           let mSplit := ks.getD stage zero
-          { base with split? := some (tSplit, ySplit, mSplit), splitKind? := some tag }
+          .hermite {
+            base with split? := some (tSplit, ySplit, mSplit), splitKind? := some tag
+          }
       else
-        base
+        .hermite base
+  | .dopri5Poly4 =>
+      dopri5Poly4DenseInfo t0 t1 y0 y1 ks base
 
 def solver {s : Nat} {Term Y VF Args : Type}
     [TermLike Term Y VF Time Args]
     [DiffEqSpace Y] (rk : ExplicitRK s) : AbstractSolver Term Y VF Time Args := {
   SolverState := Unit
-  DenseInfo := LocalHermiteDenseInfo Y
+  DenseInfo := DenseInfo Y
   termStructure := TermStructure.single
   order := fun _ => rk.tableau.order
   strongOrder := fun _ => 0.0

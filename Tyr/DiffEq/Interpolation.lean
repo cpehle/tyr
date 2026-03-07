@@ -168,6 +168,70 @@ def toInterpolation [DiffEqSpace Y] (info : LocalHermiteDenseInfo Y) :
 
 end LocalHermiteDenseInfo
 
+/-- Per-step quartic polynomial dense output over normalized step time `theta`. -/
+structure LocalPolynomial4DenseInfo (Y : Type) where
+  t0 : Time
+  t1 : Time
+  c4 : Y
+  c3 : Y
+  c2 : Y
+  c1 : Y
+  c0 : Y
+
+namespace LocalPolynomial4DenseInfo
+
+private def evalTheta [DiffEqSpace Y] (info : LocalPolynomial4DenseInfo Y) (theta : Time) : Y :=
+  let theta2 := theta * theta
+  let theta3 := theta2 * theta
+  let theta4 := theta2 * theta2
+  let term4 := DiffEqSpace.scale theta4 info.c4
+  let term3 := DiffEqSpace.scale theta3 info.c3
+  let term2 := DiffEqSpace.scale theta2 info.c2
+  let term1 := DiffEqSpace.scale theta info.c1
+  DiffEqSpace.add
+    (DiffEqSpace.add term4 term3)
+    (DiffEqSpace.add term2 (DiffEqSpace.add term1 info.c0))
+
+private def derivTheta [DiffEqSpace Y] (info : LocalPolynomial4DenseInfo Y) (theta : Time) : Y :=
+  let theta2 := theta * theta
+  let theta3 := theta2 * theta
+  let term4 := DiffEqSpace.scale (4.0 * theta3) info.c4
+  let term3 := DiffEqSpace.scale (3.0 * theta2) info.c3
+  let term2 := DiffEqSpace.scale (2.0 * theta) info.c2
+  DiffEqSpace.add (DiffEqSpace.add term4 term3) (DiffEqSpace.add term2 info.c1)
+
+private def evalPoint [DiffEqSpace Y] (info : LocalPolynomial4DenseInfo Y) (t : Time) : Y :=
+  if info.t0 == info.t1 then
+    info.c0
+  else
+    let theta := (t - info.t0) / (info.t1 - info.t0)
+    evalTheta info theta
+
+private def derivPoint [DiffEqSpace Y] (info : LocalPolynomial4DenseInfo Y) (t : Time) : Y :=
+  if info.t0 == info.t1 then
+    DiffEqSpace.scale 0.0 info.c1
+  else
+    let h := info.t1 - info.t0
+    let theta := (t - info.t0) / h
+    let dTheta := derivTheta info theta
+    DiffEqSpace.scale (1.0 / h) dTheta
+
+def toInterpolation [DiffEqSpace Y] (info : LocalPolynomial4DenseInfo Y) :
+    DenseInterpolation Y := by
+  exact {
+    evaluate := fun t0 t1 _left =>
+      let y0 := evalPoint info t0
+      match t1 with
+      | none => y0
+      | some t1 =>
+          let y1 := evalPoint info t1
+          DiffEqSpace.sub y1 y0
+    derivative := fun t _left =>
+      derivPoint info t
+  }
+
+end LocalPolynomial4DenseInfo
+
 /-- Piecewise dense interpolation assembled from per-step solver interpolation data. -/
 structure PiecewiseDenseInterpolation (Y : Type) where
   ts : Array Time
