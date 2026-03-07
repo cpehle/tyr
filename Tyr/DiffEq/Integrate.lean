@@ -85,6 +85,17 @@ private def hasDirectedSignChange (v0 v1 : Float) (direction : Option Bool) : Bo
   | some true => floatSign v0 <= 0 && floatSign v1 > 0
   | some false => floatSign v0 > 0 && floatSign v1 <= 0
 
+private def hasDirectedBoolEdge (c0 c1 : Bool) (direction : Option Bool) : Bool :=
+  match direction with
+  | none => (!c0) && c1
+  | some true => (!c0) && c1
+  | some false => c0 && (!c1)
+
+private def booleanHitAtStart (c0 : Bool) (direction : Option Bool) : Bool :=
+  match direction with
+  | some false => false
+  | _ => c0
+
 private def maxTol (a b : Time) : Time :=
   if a >= b then a else b
 
@@ -163,7 +174,7 @@ private def eventHitAtStart {Y Args : Type}
     (y0 : Y)
     (args : Args) : Bool :=
   match ev.condition with
-  | .boolean cond => cond t0 y0 args
+  | .boolean cond => booleanHitAtStart (cond t0 y0 args) ev.direction
   | .real cond => cond t0 y0 args == 0.0
 
 private def initialEventMask {Y Args : Type}
@@ -307,7 +318,7 @@ private def stepEventHit? {Y Args : Type}
   | .boolean cond =>
       let c0 := cond t0 y0 args
       let c1 := cond t1 y1 args
-      if (!c0) && c1 then
+      if hasDirectedBoolEdge c0 c1 ev.direction then
         some {
           idx := idx
           time := t1
@@ -606,13 +617,14 @@ def diffeqsolve {Term Y VF Control Args Controller : Type}
                         | none => pure ()
                         | some hit => hits := hits.push hit
                   return hits
-                let stepMaskAll := maskFromStepHits activeEvents stepHits
-                let eventMaskAcc := mergeEventMasks eventMaskAcc stepMaskAll
                 let chosenHit? := chooseStepEventHit? forward stepHits
                 let stepMaskChosen :=
                   match chosenHit? with
                   | none => Array.replicate activeEvents.size false
                   | some chosen => maskAtEventTime activeEvents stepHits chosen
+                -- Only hits at the chosen event time are considered committed for this step.
+                -- Later roots in the same coarse step are re-evaluated after localization restart.
+                let eventMaskAcc := mergeEventMasks eventMaskAcc stepMaskChosen
                 let eventMaskLastAcc :=
                   match chosenHit? with
                   | none => eventMaskLastAcc

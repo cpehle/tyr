@@ -1624,6 +1624,44 @@ private def evaluateDenseFloat {S C : Type}
   LeanTest.assertTrue solDown.eventMaskLast.isNone
     "Last-event mask should remain none when no event fired"
 
+@[test] def testBooleanEventDirectionDown : IO Unit := do
+  let term : ODETerm Float Unit := { vectorField := fun _t _y _ => -1.0 }
+  let solver :=
+    Euler.solver (Term := ODETerm Float Unit) (Y := Float) (VF := Float) (Args := Unit)
+  let ev : EventSpec Float Unit := {
+    condition := .boolean (fun _t y _ => y > 0.5)
+    direction := some false
+    terminate := true
+  }
+  let sol :=
+    diffeqsolve
+      (Term := ODETerm Float Unit)
+      (Y := Float)
+      (VF := Float)
+      (Control := Time)
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      term solver 0.0 1.0 (some 0.2) (1.0 : Float) () (saveat := { t1 := true })
+      (event := some ev)
+  LeanTest.assertTrue (sol.result == Result.eventOccurred)
+    "Downward boolean direction should trigger on true->false edge (not at t0)."
+  match sol.ts, sol.ys with
+  | some ts, some ys =>
+      LeanTest.assertTrue (ts.size == 1) s!"Expected one output time, got {ts.size}"
+      LeanTest.assertTrue (ys.size == 1) s!"Expected one output state, got {ys.size}"
+      LeanTest.assertTrue (approx ts[0]! 0.6 1e-12)
+        s!"Expected downward boolean edge at t=0.6, got {ts[0]!}"
+      LeanTest.assertTrue (approx ys[0]! 0.4 1e-12)
+        s!"Expected state y=0.4 at downward edge, got {ys[0]!}"
+  | _, _ => LeanTest.fail "Expected endpoint save for downward boolean event"
+  match sol.eventMask, sol.eventMaskLast with
+  | some mask, some lastMask =>
+      LeanTest.assertTrue (mask.size == 1 && lastMask.size == 1)
+        s!"Expected single-event masks, got sizes {mask.size} and {lastMask.size}"
+      LeanTest.assertTrue (mask[0]! && lastMask[0]!)
+        "Downward boolean event should be recorded in eventMask and eventMaskLast"
+  | _, _ => LeanTest.fail "Expected event masks for downward boolean direction event"
+
 @[test] def testEventTiePrefersTerminating : IO Unit := do
   let term : ODETerm Float Unit := { vectorField := fun _t _y _ => 1.0 }
   let solver :=
@@ -1658,6 +1696,51 @@ private def evaluateDenseFloat {S C : Type}
         "Both events at chosen event time should be reflected in eventMaskLast"
   | _, _ =>
       LeanTest.fail "Expected event masks for multi-event tie case"
+
+@[test] def testEventMaskExcludesLaterSameStepRoots : IO Unit := do
+  let term : ODETerm Float Unit := { vectorField := fun _t _y _ => 1.0 }
+  let solver :=
+    Euler.solver (Term := ODETerm Float Unit) (Y := Float) (VF := Float) (Args := Unit)
+  let evEarly : EventSpec Float Unit := {
+    condition := .real (fun _t y _ => y - 0.2)
+    terminate := true
+  }
+  let evLate : EventSpec Float Unit := {
+    condition := .real (fun _t y _ => y - 0.8)
+    terminate := false
+  }
+  let sol :=
+    diffeqsolve
+      (Term := ODETerm Float Unit)
+      (Y := Float)
+      (VF := Float)
+      (Control := Time)
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      term solver 0.0 1.0 (some 1.0) (0.0 : Float) () (saveat := { t1 := true })
+      (events := #[evEarly, evLate])
+  LeanTest.assertTrue (sol.result == Result.eventOccurred)
+    "Earliest terminating root should stop solve."
+  match sol.ts, sol.ys with
+  | some ts, some ys =>
+      LeanTest.assertTrue (ts.size == 1) s!"Expected one output time, got {ts.size}"
+      LeanTest.assertTrue (ys.size == 1) s!"Expected one output state, got {ys.size}"
+      LeanTest.assertTrue (approx ts[0]! 0.2 1.0e-4)
+        s!"Expected early localized root near 0.2, got {ts[0]!}"
+      LeanTest.assertTrue (approx ys[0]! 0.2 1.0e-4)
+        s!"Expected state near 0.2 at early root, got {ys[0]!}"
+  | _, _ => LeanTest.fail "Expected endpoint save for terminating early-root event"
+  match sol.eventMask, sol.eventMaskLast with
+  | some mask, some lastMask =>
+      LeanTest.assertTrue (mask.size == 2 && lastMask.size == 2)
+        s!"Expected two-event masks, got sizes {mask.size} and {lastMask.size}"
+      LeanTest.assertTrue mask[0]! "Early root should be marked as hit"
+      LeanTest.assertTrue (!mask[1]!)
+        "Later same-step root should not be marked hit when solve terminates at earlier root"
+      LeanTest.assertTrue lastMask[0]! "Last-event mask should include early chosen root"
+      LeanTest.assertTrue (!lastMask[1]!)
+        "Last-event mask should exclude later same-step root"
+  | _, _ => LeanTest.fail "Expected event masks for same-step multi-root case"
 
 @[test] def testBrownianPairAndFinStructuredIncrements : IO Unit := do
   let pairTree : VirtualBrownianTree (Float × Float) := {
@@ -2549,7 +2632,9 @@ def run : IO Unit := do
   testBooleanEventTerminate
   testBooleanEventNonTerminating
   testRealEventDirection
+  testBooleanEventDirectionDown
   testEventTiePrefersTerminating
+  testEventMaskExcludesLaterSameStepRoots
   testBrownianPairAndFinStructuredIncrements
   testMilsteinAutodiffJvpWrapper
   testControlTermToODEConversion
