@@ -14,9 +14,15 @@ import Examples.GPT.Train
 import Examples.GPT.GPTDataLoader
 import Examples.GPT.Pretraining
 import Examples.GPT.NanoGPTCopy
+import Examples.GPT.RiemannianNanoGPT
 
 -- NanoChat (modded GPT + tools + tasks)
 import Examples.NanoChat.NanoChat
+
+-- AlphaGrad elimination-port scaffolding (library modules only)
+import Examples.AlphaGradPort.Tasks
+import Examples.AlphaGradPort.A0Train
+import Examples.AlphaGradPort.PolicyTrain
 
 
 -- Executable entry points excluded (they define global `main`):

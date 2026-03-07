@@ -269,15 +269,45 @@ lean_exe test_runner_experimental where
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
+/-- Focused LeanTest runner for the Riemannian nanoGPT tests. -/
+lean_exe RunRiemannianNanoGPTTests where
+  root := `Tests.RunRiemannianNanoGPTTests
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
 /-- GPT training executable -/
 lean_exe TrainGPT where
   root := `Examples.TrainGPT
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
+/-- Exact-VJP Riemannian nanoGPT prototype runner. -/
+lean_exe RunRiemannianNanoGPT where
+  root := `Examples.GPT.RunRiemannianNanoGPT
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
 /-- Diffusion training executable -/
 lean_exe TrainDiffusion where
   root := `Examples.TrainDiffusion
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
+/-- AlphaGrad-style RoeFlux_1d elimination planning port demo. -/
+lean_exe AlphaGradRoeFlux1dA0 where
+  root := `Examples.AlphaGradPort.RoeFlux1dA0
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
+/-- AlphaGrad port task sweep runner (targets tasks one-by-one). -/
+lean_exe AlphaGradPortSweep where
+  root := `Examples.AlphaGradPort.TaskSweep
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
+/-- AlphaGrad policy-training runner with real parameter updates. -/
+lean_exe AlphaGradPolicyTrain where
+  root := `Examples.AlphaGradPort.PolicyTrain
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 

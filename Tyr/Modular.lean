@@ -2,7 +2,9 @@ import Tyr.Modular.Norm
 import Tyr.Modular.Atomic
 import Tyr.Modular.Compose
 import Tyr.Modular.Budget
+import Tyr.Modular.MetricFactor
 import Tyr.Modular.Manifold
+import Tyr.Modular.RiemannianModule
 
 /-!
 # Tyr.Modular

@@ -6,17 +6,24 @@ import Tyr.TensorStruct
 import Tyr.Mctx
 
 -- AutoGrad (JAX-style AD on IR)
-import Tyr.AutoGrad
+import Tyr.AD
 
 -- Neural network modules
 import Tyr.Module
 
 -- Optimizers
 import Tyr.Optim
+import Tyr.Optim.ManifoldMuon
+import Tyr.Optim.RiemannianSGD
+import Tyr.Optim.RiemannianTreeSGD
 import Tyr.Optim.Scheduler
 import Tyr.Optim.Schedule
 import Tyr.Optim.DualOptimizer
 import Tyr.Optim.DistAdam
+
+-- Modular and manifold optimization primitives
+import Tyr.Modular
+import Tyr.Manifolds
 
 -- Distributed training
 import Tyr.Distributed
