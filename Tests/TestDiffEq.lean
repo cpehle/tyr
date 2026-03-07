@@ -2419,6 +2419,192 @@ private def evaluateDenseFloat {S C : Type}
   LeanTest.assertTrue (approx y1.2 vExpected 1e-6)
     s!"QUICSORT v mismatch: expected {vExpected}, got {y1.2}"
 
+private def underdampedReverseTs (t0 t1 : Time) (n : Nat) : Array Time :=
+  if n <= 1 then
+    #[t0]
+  else
+    Id.run do
+      let mut out : Array Time := #[]
+      let step := (t1 - t0) / Float.ofNat (n - 1)
+      for i in [:n] do
+        out := out.push (t0 + Float.ofNat i * step)
+      pure out
+
+private def mkUnderdampedReverseTerms (seed : UInt64) :
+    MultiTerm (UnderdampedLangevinDriftTerm Float Unit)
+      (UnderdampedLangevinDiffusionTerm Float Unit) :=
+  let tLo := -1.2
+  let tHi := 0.7
+  let bm : VirtualBrownianTree Float := {
+    t0 := tLo
+    t1 := tHi
+    tol := 5.0e-3
+    maxDepth := 24
+    seed := seed
+    shape := 0.0
+  }
+  let bmPath := (VirtualBrownianTree.toAbstract bm).toPath
+  let gammaConst := 2.0
+  let uConst := 0.5
+  let drift : UnderdampedLangevinDriftTerm Float Unit := {
+    gradPotential := fun _t x _ => 2.0 * x
+    gamma := fun _t _x _v _ => gammaConst
+    u := fun _t _x _v _ => uConst
+  }
+  let diffusion : UnderdampedLangevinDiffusionTerm Float Unit :=
+    UnderdampedLangevinDiffusionTerm.ofPath bmPath
+      (gamma := fun _t _x _v _ => gammaConst)
+      (u := fun _t _x _v _ => uConst)
+  { term1 := drift, term2 := diffusion }
+
+private def solveUnderdampedReverseWith
+    (solver : AbstractSolver
+      (MultiTerm (UnderdampedLangevinDriftTerm Float Unit)
+        (UnderdampedLangevinDiffusionTerm Float Unit))
+      (Float × Float)
+      ((Float × Float) × Scalar)
+      (Time × Float)
+      Unit)
+    : Solution (Float × Float) solver.SolverState Unit :=
+  let t0 := 0.7
+  let t1 := -1.2
+  let ts := underdampedReverseTs t0 t1 20
+  let terms := mkUnderdampedReverseTerms 424242
+  diffeqsolve
+    (Term := MultiTerm (UnderdampedLangevinDriftTerm Float Unit)
+      (UnderdampedLangevinDiffusionTerm Float Unit))
+    (Y := (Float × Float))
+    (VF := ((Float × Float) × Scalar))
+    (Control := (Time × Float))
+    (Args := Unit)
+    (Controller := ConstantStepSize)
+    terms solver t0 t1 (some (-0.01)) ((0.0, 0.0) : Float × Float) ()
+    (saveat := { ts := some ts, t1 := false })
+
+private def savedPairPath {S C : Type}
+    (label : String) (sol : Solution (Float × Float) S C) : IO (Array (Float × Float)) := do
+  match sol.ys with
+  | some ys => pure ys
+  | none =>
+      LeanTest.fail s!"{label}: expected ys output"
+      pure #[]
+
+private def pathL2Pair (xs ys : Array (Float × Float)) : Float := Id.run do
+  let n := Nat.min xs.size ys.size
+  if n == 0 then
+    return 0.0
+  let mut acc := 0.0
+  for i in [:n] do
+    let dx := xs[i]!.1 - ys[i]!.1
+    let dv := xs[i]!.2 - ys[i]!.2
+    acc := acc + (dx * dx + dv * dv)
+  return Float.sqrt (acc / Float.ofNat n)
+
+private def assertUnderdampedReverseParity
+    (label : String)
+    (solver : AbstractSolver
+      (MultiTerm (UnderdampedLangevinDriftTerm Float Unit)
+        (UnderdampedLangevinDiffusionTerm Float Unit))
+      (Float × Float)
+      ((Float × Float) × Scalar)
+      (Time × Float)
+      Unit)
+    (tol : Float := 0.1) : IO Unit := do
+  let sol := solveUnderdampedReverseWith solver
+  let ref :=
+    solveUnderdampedReverseWith
+      (Heun.solver
+        (Term := MultiTerm (UnderdampedLangevinDriftTerm Float Unit)
+          (UnderdampedLangevinDiffusionTerm Float Unit))
+        (Y := (Float × Float))
+        (VF := ((Float × Float) × Scalar))
+        (Control := (Time × Float))
+        (Args := Unit))
+  LeanTest.assertTrue (sol.result == Result.successful)
+    s!"{label}: expected successful reverse solve, got {repr sol.result}"
+  LeanTest.assertTrue (ref.result == Result.successful)
+    s!"{label}: reverse Heun reference should succeed, got {repr ref.result}"
+  let ys ← savedPairPath s!"{label} candidate" sol
+  let ysRef ← savedPairPath s!"{label} reference" ref
+  LeanTest.assertTrue (ys.size == ysRef.size)
+    s!"{label}: reverse solve path size mismatch {ys.size}/{ysRef.size}"
+  let err := pathL2Pair ys ysRef
+  LeanTest.assertTrue (err < tol)
+    s!"{label}: reverse solve L2 path error {err} exceeded tolerance {tol}"
+
+@[test] def testALIGNUnderdampedReverseSolveParity : IO Unit := do
+  assertUnderdampedReverseParity "ALIGN reverse underdamped parity" ALIGN.solver
+
+@[test] def testShOULDUnderdampedReverseSolveParity : IO Unit := do
+  assertUnderdampedReverseParity "ShOULD reverse underdamped parity" ShOULD.solver
+
+@[test] def testQUICSORTUnderdampedReverseSolveParity : IO Unit := do
+  assertUnderdampedReverseParity "QUICSORT reverse underdamped parity" QUICSORT.solver
+
+private def solveUnderdampedBoolArgsWith
+    (solver : AbstractSolver
+      (MultiTerm (UnderdampedLangevinDriftTerm Float Bool)
+        (UnderdampedLangevinDiffusionTerm Float Bool))
+      (Float × Float)
+      ((Float × Float) × Scalar)
+      (Time × Float)
+      Bool)
+    (diffusionArgsValid : Bool → Bool)
+    (args : Bool) :
+    Solution (Float × Float) solver.SolverState Unit :=
+  let path := AbstractPath.linearInterpolation 0.0 1.0 (0.0 : Float) (1.0 : Float)
+  let drift : UnderdampedLangevinDriftTerm Float Bool := {
+    gradPotential := fun _t x _ => x
+    gamma := fun _t _x _v _ => 0.3
+    u := fun _t _x _v _ => 0.4
+    argsValid := fun _t _x _v a => a
+  }
+  let diffusion : UnderdampedLangevinDiffusionTerm Float Bool :=
+    UnderdampedLangevinDiffusionTerm.ofPath path
+      (gamma := fun _t _x _v _ => 0.3)
+      (u := fun _t _x _v _ => 0.4)
+      (argsValid := fun _t _x _v a => diffusionArgsValid a)
+  let terms : MultiTerm (UnderdampedLangevinDriftTerm Float Bool)
+      (UnderdampedLangevinDiffusionTerm Float Bool) := {
+    term1 := drift
+    term2 := diffusion
+  }
+  diffeqsolve
+    (Term := MultiTerm (UnderdampedLangevinDriftTerm Float Bool)
+      (UnderdampedLangevinDiffusionTerm Float Bool))
+    (Y := (Float × Float))
+    (VF := ((Float × Float) × Scalar))
+    (Control := (Time × Float))
+    (Args := Bool)
+    (Controller := ConstantStepSize)
+    terms solver 0.0 1.0 (some 0.1) ((1.0, 0.0) : Float × Float) args
+    (saveat := { t1 := true })
+
+private def assertUnderdampedArgsContract
+    (label : String)
+    (solver : AbstractSolver
+      (MultiTerm (UnderdampedLangevinDriftTerm Float Bool)
+        (UnderdampedLangevinDiffusionTerm Float Bool))
+      (Float × Float)
+      ((Float × Float) × Scalar)
+      (Time × Float)
+      Bool) : IO Unit := do
+  let bad := solveUnderdampedBoolArgsWith solver (fun a => !a) true
+  LeanTest.assertTrue (bad.result == Result.internalError)
+    s!"{label}: expected internalError for mismatched drift/diffusion args constraints, got {repr bad.result}"
+  let good := solveUnderdampedBoolArgsWith solver (fun a => a) true
+  LeanTest.assertTrue (good.result == Result.successful)
+    s!"{label}: expected successful solve for matching drift/diffusion args constraints, got {repr good.result}"
+
+@[test] def testUnderdampedArgsContractALIGN : IO Unit := do
+  assertUnderdampedArgsContract "ALIGN args contract" ALIGN.solver
+
+@[test] def testUnderdampedArgsContractShOULD : IO Unit := do
+  assertUnderdampedArgsContract "ShOULD args contract" ShOULD.solver
+
+@[test] def testUnderdampedArgsContractQUICSORT : IO Unit := do
+  assertUnderdampedArgsContract "QUICSORT args contract" QUICSORT.solver
+
 @[test] def testSaveFnTransformsOutputs : IO Unit := do
   let term : ODETerm Float Unit := { vectorField := fun _t y _ => y }
   let solver :=
@@ -3587,6 +3773,12 @@ def run : IO Unit := do
   testAbstractPathComposeLinear
   testAbstractPathMapAndRestrict
   testUnderdampedLangevinTerms
+  testALIGNUnderdampedReverseSolveParity
+  testShOULDUnderdampedReverseSolveParity
+  testQUICSORTUnderdampedReverseSolveParity
+  testUnderdampedArgsContractALIGN
+  testUnderdampedArgsContractShOULD
+  testUnderdampedArgsContractQUICSORT
   testSaveFnTransformsOutputs
   testFailureResultMessage
   testDiffeqsolveOrErrorSuccess
