@@ -1,4 +1,5 @@
 import Tyr.Manifolds.Basic
+import Tyr.Manifolds.Optimizer
 import Tyr.Manifolds.Stiefel
 import Tyr.Manifolds.Orthogonal
 import Tyr.Manifolds.Grassmann
@@ -14,6 +15,7 @@ geometry-aware optimization and constrained parameterization workflows.
 ## Major Components
 
 - `Basic`: foundational manifold/typeclass definitions.
+- `Optimizer`: geometry-aware optimizer interfaces (including dual-map/Finsler hooks).
 - `Stiefel`: orthonormal-column matrix manifolds.
 - `Orthogonal`: orthogonal-group manifold utilities.
 - `Grassmann`: subspace-valued manifold representation.

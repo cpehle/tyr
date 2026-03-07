@@ -1,6 +1,6 @@
 # Tyr Code Review Tracker
 
-Last updated: 2026-03-04
+Last updated: 2026-03-06
 Scope: broad static review across `Tyr/`, `cc/src/`, `Examples/`, `Tests/`, CI/workflows, hooks, and scripts.
 
 Status legend:
@@ -130,6 +130,83 @@ Status legend:
   Refs: `Tyr/Model/Qwen3ASR/Transcribe.lean`, `../Qwen3-ASR/qwen_asr/inference/qwen3_asr.py`
 - [~] `L06` Remove URL/base64 temp-file materialization from ASR normalization by adding in-memory decode frontend path.
   Refs: `Tyr/Model/Qwen3ASR/Frontend.lean`
+
+### Modular + Manifold Optimizer Drafts (Epic + Children)
+Status: draft issue specs for planning only. These are experimental and do **not** replace `NorMuon` by default.
+
+- [ ] `MM00` [Epic] Modular + manifold optimization framework with Stiefel-first learning, then generic non-Riemannian optimizer abstractions.
+  Scope:
+  - Deliver a Stiefel manifold-Muon path first as a concrete learning vehicle.
+  - If a clean abstraction emerges early, land the generic API first and make Stiefel a special case.
+  - Keep current `NorMuon` as default/production path unless explicitly enabled by config.
+  Acceptance:
+  - Child issues include both unit-test coverage and at least one benchmark signal per milestone.
+  Refs: `Tyr/Manifolds/Basic.lean`, `Tyr/Manifolds/Stiefel.lean`, `Tyr/Manifolds/Orthogonal.lean`, `Tyr/Manifolds/Grassmann.lean`, `Tyr/Manifolds/Hyperbolic.lean`, `Tyr/Modular/Norm.lean`, `Tyr/Modular/Compose.lean`, `Tyr/Optim/NorMuon.lean`, `Examples/NanoChat/ModdedTrain.lean`
+
+- [ ] `MM01` [High] Stiefel manifold-Muon prototype optimizer (experimental).
+  Deliverables:
+  - New optimizer module that keeps matrix weights on Stiefel with tangent projection + retraction.
+  - Muon-like spectral-step behavior using matrix-sign approximation and optional dual-ascent solve for tangent-constrained updates.
+  - Local and distributed step parity with current group-owner update semantics.
+  Acceptance:
+  - Constraint residual checks (`WᵀW≈I`) after each step.
+  - Unit tests for tangent/retraction correctness and optimizer-step invariants.
+  - Small benchmark against `NorMuon` baseline on fixed tiny workload (step time + stability signal).
+  - No default behavior change in existing training loops.
+  Refs: `Tyr/Manifolds/Stiefel.lean`, `Tyr/Optim/PolarExpress.lean`, `Tyr/Optim/NorMuon.lean`, `Tyr/Distributed.lean`
+
+- [ ] `MM02` [High] Generic manifold optimizer API with custom non-Riemannian norm and dual-map support.
+  Deliverables:
+  - Extend manifold optimizer interface beyond Riemannian `sharp/flat` so optimizers can specify:
+    - custom step norm on tangent space,
+    - dual norm,
+    - steepest-descent dual map (`argmin` direction operator).
+  - Keep compatibility with existing `DifferentiableManifold` while allowing normed/Finsler-style optimizers.
+  Acceptance:
+  - Stiefel optimizer can be implemented against the generic API.
+  - At least one non-Euclidean dual-map test passes.
+  - Benchmark compares generic API path overhead vs specialized path on the same update kernel.
+  Refs: `Tyr/Manifolds/Basic.lean`, `Tyr/Modular/Norm.lean`, `Tyr/Optim.lean`
+
+- [ ] `MM03` [Medium] Manifold family adapters: Orthogonal, Grassmann, Hyperbolic.
+  Deliverables:
+  - Adapter layers that plug `Orthogonal`, `Grassmann`, and `Hyperbolic` manifolds into the generic optimizer interface.
+  - Shared utilities for tangent projection/retraction validation and invariants per manifold.
+  Acceptance:
+  - Unit tests verify each manifold preserves its defining constraints after optimizer steps.
+  - Benchmark includes per-manifold step-time and constraint-residual tracking on fixed synthetic workload.
+  Refs: `Tyr/Manifolds/Orthogonal.lean`, `Tyr/Manifolds/Grassmann.lean`, `Tyr/Manifolds/Hyperbolic.lean`, `Tests/TestAutoGrad.lean`
+
+- [ ] `MM04` [Medium] Modular learning-rate budget compiler for manifold-aware updates.
+  Deliverables:
+  - Compile per-module LR multipliers (`s_i`) from modular `nu`/`mu` recursion.
+  - Emit optimizer-ready parameter group scaling without hardcoding architecture-specific constants.
+  Acceptance:
+  - Reproduces existing composition formulas for sequential and product modules.
+  - Exposes debug metrics for layerwise budget allocation.
+  - Unit tests validate emitted budgets for representative module trees.
+  - Benchmark reports effect of budgeting on update magnitudes and short-run training stability.
+  Refs: `Tyr/Modular/Norm.lean`, `Tyr/Modular/Compose.lean`, `Tests/TestModularNorm.lean`, `Tyr/Optim/DualOptimizer.lean`
+
+- [ ] `MM05` [Medium] Optimizer plumbing proposal using a NanoGPT-copy style Shakespeare training loop (not NanoChat-first).
+  Deliverables:
+  - Design doc and minimal integration plan for a NanoGPT-like, small GPT training entrypoint (Shakespeare-scale) to exercise manifold optimizer options safely.
+  - Prefer adapting/copying the existing simple GPT training structure over introducing a new training abstraction.
+  - Optional config flags for optimizer selection (`NorMuon`, `StiefelMuon`, `GenericManifold`).
+  Non-goals:
+  - No mandatory integration into full NanoChat distributed path in phase 1.
+  Acceptance:
+  - One small end-to-end NanoGPT-copy Shakespeare prototype with unit tests and benchmark output (loss/step-time/constraint metrics).
+  Refs: `Examples/GPT/Train.lean`, `Examples/GPT/Pretraining.lean`, `Tyr/Optim/DualOptimizer.lean`, `Examples/NanoChat/ModdedTrain.lean`
+
+- [ ] `MM06` [Low] Benchmark and diagnostics harness for manifold optimizers.
+  Deliverables:
+  - Add lightweight benchmark fixtures tracking: wall time/step, constraint residuals, spectral stats, train loss trajectory.
+  - Compare `NorMuon` baseline vs manifold variants on small tasks.
+  Acceptance:
+  - Unit tests validate deterministic benchmark harness behavior and metric schema.
+  - Deterministic small-scale benchmark runs under CI-friendly settings.
+  Refs: `Tests/TestModdedGPT.lean`, `Examples/GPT/Train.lean`, `Tyr/Optim/NorMuon.lean`
 
 ### DiffEq / ODE-SDE Parity (vs `../diffrax`)
 Reviewed: 2026-03-06 (`Tyr/DiffEq/*` vs `../diffrax/diffrax/*`, `../diffrax/docs/*`).

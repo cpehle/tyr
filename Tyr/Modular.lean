@@ -1,6 +1,7 @@
 import Tyr.Modular.Norm
 import Tyr.Modular.Atomic
 import Tyr.Modular.Compose
+import Tyr.Modular.Budget
 
 /-!
 # Tyr.Modular
@@ -14,6 +15,7 @@ that supports width/depth-robust optimization scaling.
 - `Norm`: foundational modular-norm abstractions.
 - `Atomic`: atomic module instances (for example linear/layer-style primitives).
 - `Compose`: composition rules for sequential/product/container module structures.
+- `Budget`: modular sensitivity -> LR budget compilation utilities.
 
 ## Scope
 

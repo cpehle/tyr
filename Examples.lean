@@ -13,6 +13,7 @@ import Examples.GPT.GPT
 import Examples.GPT.Train
 import Examples.GPT.GPTDataLoader
 import Examples.GPT.Pretraining
+import Examples.GPT.NanoGPTCopy
 
 -- NanoChat (modded GPT + tools + tasks)
 import Examples.NanoChat.NanoChat

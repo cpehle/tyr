@@ -12,11 +12,19 @@ import Tyr.TensorStruct
 import Tyr.Optim.NorMuon
 import Tyr.Optim.DistAdam
 import Tyr.Optim.Scheduler
+import Tyr.Modular.Budget
 
 namespace torch.Optim.DualOptimizer
 
 open torch
 open NorMuon (ParamLabel)
+open Tyr.Modular
+
+/-- Matrix optimizer backend selection (experimental). -/
+inductive MatrixOptimizerKind where
+  | norMuon
+  | manifoldMuon
+  deriving Repr, BEq, Inhabited
 
 /-- Configuration for dual optimizer setup -/
 structure Config where
@@ -46,6 +54,12 @@ structure Config where
   totalSteps : Nat := 10000
   /-- Warmup steps for momentum -/
   warmupSteps : Nat := 300
+  /-- Matrix optimizer backend (default keeps NorMuon behavior). -/
+  matrixOptimizer : MatrixOptimizerKind := .norMuon
+  /-- Enable modular-budget multipliers on group learning rates. -/
+  useModularBudget : Bool := false
+  /-- Optional groupwise modular budget multipliers. -/
+  budget : GroupBudget := {}
   deriving Repr, Inhabited
 
 /-- Compute dimension-based learning rate scaling.
@@ -95,13 +109,27 @@ def labelToGroup (label : ParamLabel) : ParamGroup :=
   | .scalars => .scalar
 
 /-- Get learning rate multiplier for a parameter group -/
-def groupLrMul (cfg : Config) (group : ParamGroup) : Float :=
+def baseGroupLrMul (cfg : Config) (group : ParamGroup) : Float :=
   let scale := dimLrScale cfg
   match group with
   | .matrix => 1.0  -- Base LR for Muon
   | .embedding => cfg.embeddingLr / cfg.matrixLr * scale
   | .lmHead => cfg.lmHeadLr / cfg.matrixLr * scale
   | .scalar => cfg.scalarLr / cfg.matrixLr
+
+/-- Get learning rate multiplier for a parameter group (optionally budget-scaled). -/
+def groupLrMul (cfg : Config) (group : ParamGroup) : Float :=
+  let raw := baseGroupLrMul cfg group
+  if !cfg.useModularBudget then
+    raw
+  else
+    let budgetMul :=
+      match group with
+      | .matrix => cfg.budget.matrix
+      | .embedding => cfg.budget.embedding
+      | .lmHead => cfg.budget.lmHead
+      | .scalar => cfg.budget.scalar
+    raw * budgetMul
 
 /-- Get weight decay multiplier for a parameter group -/
 def groupWdMul (_cfg : Config) (group : ParamGroup) : Float :=
@@ -116,6 +144,10 @@ def groupUsesMuon (group : ParamGroup) : Bool :=
   match group with
   | .matrix => true
   | _ => false
+
+/-- Determine whether current config uses manifold-Muon for matrix groups. -/
+def usesManifoldMuon (cfg : Config) : Bool :=
+  cfg.matrixOptimizer == .manifoldMuon
 
 /-- Get scheduled momentum for a given step (with warmup/cooldown) -/
 def getScheduledMomentum (cfg : Config) (step : Nat) : Float :=
