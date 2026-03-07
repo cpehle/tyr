@@ -79,6 +79,61 @@ private def eulerMaruyamaGBMWeakMeanVariance
   let variance := if varRaw < 0.0 then 0.0 else varRaw
   pure (mean, variance)
 
+private def exactTimeInhomogeneousOUSecondMoment
+    (a x0 tFinal : Float) : Float :=
+  let mean := x0 * Float.exp (-a * tFinal)
+  let k := 2.0 * a
+  let invK := 1.0 / k
+  let invK2 := invK * invK
+  let invK3 := invK2 * invK
+  let variance :=
+    (tFinal * tFinal) * invK
+      - (2.0 * tFinal) * invK2
+      + 2.0 * invK3
+      - (2.0 * Float.exp (-k * tFinal)) * invK3
+  variance + (mean * mean)
+
+private def eulerMaruyamaTimeInhomogeneousOUWeakSecondMoment
+    (a x0 tFinal dt : Float) (seeds : Array UInt64) : IO Float := do
+  let drift : ODETerm Float Unit := { vectorField := fun _t y _ => -a * y }
+  let solver :=
+    EulerMaruyama.solver
+      (Drift := ODETerm Float Unit)
+      (Diffusion := ControlTerm Float Float Float Unit)
+      (Y := Float)
+      (VFd := Float)
+      (VFg := Float)
+      (Control := Float)
+      (Args := Unit)
+  let mut sumM2 := 0.0
+  for seed in seeds do
+    let bm : VirtualBrownianTree Float := {
+      t0 := 0.0
+      t1 := tFinal
+      tol := 1.0e-6
+      maxDepth := 22
+      seed := seed
+      shape := 0.0
+    }
+    let bmPath := (VirtualBrownianTree.toAbstract bm).toPath
+    let diffusion : ControlTerm Float Float Float Unit :=
+      ControlTerm.ofPath (fun t _y _ => t) bmPath (fun vf control => vf * control)
+    let terms : MultiTerm (ODETerm Float Unit) (ControlTerm Float Float Float Unit) :=
+      { term1 := drift, term2 := diffusion }
+    let sol :=
+      diffeqsolve
+        (Term := MultiTerm (ODETerm Float Unit) (ControlTerm Float Float Float Unit))
+        (Y := Float)
+        (VF := (Float × Float))
+        (Control := (Time × Float))
+        (Args := Unit)
+        (Controller := ConstantStepSize)
+        terms solver 0.0 tFinal (some dt) x0 () (saveat := { t1 := true })
+    let y1 ← finalSaved "weak time-inhomogeneous OU Euler-Maruyama" sol
+    sumM2 := sumM2 + (y1 * y1)
+  let n := Float.ofNat seeds.size
+  pure (sumM2 / n)
+
 /--
 Weak-stat parity regression for geometric Brownian motion under Euler-Maruyama.
 Guidance sources:
@@ -149,7 +204,48 @@ Guidance sources:
   LeanTest.assertTrue (Float.abs (varRef - exactVariance) < 6.0e-2)
     s!"Weak GBM reference variance unexpectedly far from exact: {varRef} vs {exactVariance}"
 
+/--
+Weak-stat parity regression for a time-inhomogeneous additive-noise OU family:
+`dY = -aY dt + t dW`.
+Guidance sources:
+- `../diffrax/test/test_sde2.py` (time-dependent diffusion coefficients)
+- `../diffrax/test/test_sde1.py` (coarse/medium/fine-to-reference convergence structure)
+-/
+@[test] def testSDEWeakTimeInhomogeneousOUM2ConvergenceEulerMaruyama : IO Unit := do
+  let a := 0.7
+  let x0 := 1.0
+  let tFinal := 1.0
+  let seeds := deterministicWeakSeeds 640
+
+  let dtCoarse := 0.5
+  let dtMedium := 0.25
+  let dtFine := 0.125
+
+  let m2Coarse ←
+    eulerMaruyamaTimeInhomogeneousOUWeakSecondMoment a x0 tFinal dtCoarse seeds
+  let m2Medium ←
+    eulerMaruyamaTimeInhomogeneousOUWeakSecondMoment a x0 tFinal dtMedium seeds
+  let m2Fine ←
+    eulerMaruyamaTimeInhomogeneousOUWeakSecondMoment a x0 tFinal dtFine seeds
+
+  let exactM2 := exactTimeInhomogeneousOUSecondMoment a x0 tFinal
+  let errCoarse := Float.abs (m2Coarse - exactM2)
+  let errMedium := Float.abs (m2Medium - exactM2)
+  let errFine := Float.abs (m2Fine - exactM2)
+
+  LeanTest.assertTrue (errCoarse > errMedium && errMedium > errFine)
+    s!"Weak time-inhomogeneous OU M2-to-exact errors should decrease with dt: {errCoarse}, {errMedium}, {errFine}"
+
+  let ratio1 := errCoarse / errMedium
+  let ratio2 := errMedium / errFine
+  LeanTest.assertTrue (ratio1 > 1.4 && ratio2 > 1.4)
+    s!"Weak time-inhomogeneous OU M2 trend too weak: ratios {ratio1}, {ratio2}"
+
+  LeanTest.assertTrue (errFine < 1.0e-2)
+    s!"Weak time-inhomogeneous OU fine-step M2 unexpectedly far from exact: {m2Fine} vs {exactM2}"
+
 def run : IO Unit := do
   testSDEWeakGBMMeanVarianceConvergenceEulerMaruyama
+  testSDEWeakTimeInhomogeneousOUM2ConvergenceEulerMaruyama
 
 end Tests.DiffEqWeakStatsParity2
