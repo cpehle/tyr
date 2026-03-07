@@ -1,6 +1,7 @@
 import LeanTest
 import Lean.Util.Path
 import Tests
+import Tests.TestPymanoptManifolds
 
 /-- Parse command line arguments into a RunConfig. -/
 def parseArgs (args : List String) : IO LeanTest.RunConfig := do
@@ -39,7 +40,8 @@ unsafe def main (args : List String) : IO UInt32 := do
 
   let env ← Lean.importModules #[
     { module := `LeanTest },
-    { module := `Tests }
+    { module := `Tests },
+    { module := `Tests.TestPymanoptManifolds }
   ] {}
   
   LeanTest.runTestsAndExit env {} config
