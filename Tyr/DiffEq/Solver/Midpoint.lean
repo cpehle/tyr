@@ -9,6 +9,11 @@ attribute [local instance] _root_.torch.DiffEq.DiffEqArithmetic.hAddInst
 attribute [local instance] _root_.torch.DiffEq.DiffEqArithmetic.hSubInst
 attribute [local instance] _root_.torch.DiffEq.DiffEqArithmetic.hMulInst
 
+private def hDivRightScalarInst [DiffEqSpace Y] : HDiv Y Scalar Y where
+  hDiv y a := (1.0 / a) * y
+
+attribute [local instance] hDivRightScalarInst
+
 structure Midpoint where
   deriving Inhabited
 
@@ -25,7 +30,7 @@ def Midpoint.solver {Term Y VF Args : Type}
     let inst := (inferInstance : TermLike Term Y VF Time Args)
     let dt := inst.contr term t0 t1
     let k1 := inst.vf_prod term t0 y0 args dt
-    let yMid := y0 + (0.5 * k1)
+    let yMid := y0 + (k1 / 2.0)
     let tMid := t0 + dt / 2.0
     let k2 := inst.vf_prod term tMid yMid args dt
     let y1 := y0 + k2

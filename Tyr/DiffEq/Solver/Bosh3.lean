@@ -5,6 +5,10 @@ namespace DiffEq
 
 /-! ## Bosh3 Solver -/
 
+attribute [local instance] _root_.torch.DiffEq.DiffEqArithmetic.hAddInst
+attribute [local instance] _root_.torch.DiffEq.DiffEqArithmetic.hSubInst
+attribute [local instance] _root_.torch.DiffEq.DiffEqArithmetic.hMulInst
+
 structure Bosh3 where
   deriving Inhabited
 

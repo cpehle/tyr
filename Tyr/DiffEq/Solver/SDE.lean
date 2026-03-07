@@ -5,6 +5,10 @@ namespace DiffEq
 
 /-! ## SDE Type Aliases and Helpers -/
 
+attribute [local instance] _root_.torch.DiffEq.DiffEqArithmetic.hAddInst
+attribute [local instance] _root_.torch.DiffEq.DiffEqArithmetic.hSubInst
+attribute [local instance] _root_.torch.DiffEq.DiffEqArithmetic.hMulInst
+
 abbrev SDETerm (Drift Diffusion : Type) : Type :=
   MultiTerm Drift Diffusion
 

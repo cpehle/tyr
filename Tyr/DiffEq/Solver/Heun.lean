@@ -9,6 +9,11 @@ attribute [local instance] _root_.torch.DiffEq.DiffEqArithmetic.hAddInst
 attribute [local instance] _root_.torch.DiffEq.DiffEqArithmetic.hSubInst
 attribute [local instance] _root_.torch.DiffEq.DiffEqArithmetic.hMulInst
 
+private def hDivRightScalarInst [DiffEqSpace Y] : HDiv Y Scalar Y where
+  hDiv y a := (1.0 / a) * y
+
+attribute [local instance] hDivRightScalarInst
+
 structure Heun where
   deriving Inhabited
 
@@ -28,7 +33,7 @@ def Heun.solver {Term Y VF Control Args : Type}
     let yPred := y0 + k1
     let k2 := inst.vf_prod term t1 yPred args dt
     let y1 :=
-      y0 + (0.5 * (k1 + k2))
+      y0 + ((k1 + k2) / 2.0)
     let dense := { t0 := t0, t1 := t1, y0 := y0, y1 := y1 }
     {
       y1 := y1

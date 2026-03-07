@@ -9,6 +9,11 @@ attribute [local instance] _root_.torch.DiffEq.DiffEqArithmetic.hAddInst
 attribute [local instance] _root_.torch.DiffEq.DiffEqArithmetic.hSubInst
 attribute [local instance] _root_.torch.DiffEq.DiffEqArithmetic.hMulInst
 
+private def hDivRightScalarInst [DiffEqSpace Y] : HDiv Y Scalar Y where
+  hDiv y a := (1.0 / a) * y
+
+attribute [local instance] hDivRightScalarInst
+
 structure Euler where
   deriving Inhabited
 
