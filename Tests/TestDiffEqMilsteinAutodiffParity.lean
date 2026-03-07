@@ -250,8 +250,119 @@ private def finalSaved {S C : Type}
   LeanTest.assertTrue (approx yFinite yExact 3.0e-7)
     s!"Milstein vector finite-diff wrapper parity mismatch: expected {yExact}, got {yFinite}"
 
+@[test] def testMilsteinAutodiffJvpZeroQuadraticVariationFallback : IO Unit := do
+  let drift : ODETerm Float Unit := { vectorField := fun _t _y _ => 0.0 }
+  let path := AbstractPath.linearInterpolation 0.0 1.0 (0.0 : Float) (0.0 : Float)
+  let diffusionBase : ControlTerm Float Float Float Unit :=
+    ControlTerm.ofPath
+      (fun _t y _ => y * y)
+      path
+      (fun vf control => vf * control)
+  let diffusionJvp :
+      AutodiffJvpJacobianDiffusion (ControlTerm Float Float Float Unit) Float Float Unit :=
+    withAutodiffJvpJacobianProd diffusionBase
+      (fun _t y _args control tangent => (2.0 * y * tangent) * control)
+  let diffusionExact :
+      JacobianProdDiffusion (ControlTerm Float Float Float Unit) Float Float Unit :=
+    withJacobianProd diffusionBase (fun _t y _args _control => 2.0 * y * y * y)
+
+  let termsBase : MultiTerm (ODETerm Float Unit) (ControlTerm Float Float Float Unit) := {
+    term1 := drift
+    term2 := diffusionBase
+  }
+  let termsJvp :
+      MultiTerm (ODETerm Float Unit)
+        (AutodiffJvpJacobianDiffusion (ControlTerm Float Float Float Unit) Float Float Unit) := {
+    term1 := drift
+    term2 := diffusionJvp
+  }
+  let termsExact :
+      MultiTerm (ODETerm Float Unit)
+        (JacobianProdDiffusion (ControlTerm Float Float Float Unit) Float Float Unit) := {
+    term1 := drift
+    term2 := diffusionExact
+  }
+
+  let solverBase :=
+    Milstein.solver
+      (Drift := ODETerm Float Unit)
+      (Diffusion := ControlTerm Float Float Float Unit)
+      (Y := Float)
+      (VFd := Float)
+      (VFg := Float)
+      (Control := Float)
+      (Args := Unit)
+  let solverJvp :=
+    Milstein.solver
+      (Drift := ODETerm Float Unit)
+      (Diffusion := AutodiffJvpJacobianDiffusion (ControlTerm Float Float Float Unit) Float Float Unit)
+      (Y := Float)
+      (VFd := Float)
+      (VFg := Float)
+      (Control := Float)
+      (Args := Unit)
+  let solverExact :=
+    Milstein.solver
+      (Drift := ODETerm Float Unit)
+      (Diffusion := JacobianProdDiffusion (ControlTerm Float Float Float Unit) Float Float Unit)
+      (Y := Float)
+      (VFd := Float)
+      (VFg := Float)
+      (Control := Float)
+      (Args := Unit)
+
+  let y0 := 0.8
+  let solveBase :=
+    diffeqsolve
+      (Term := MultiTerm (ODETerm Float Unit) (ControlTerm Float Float Float Unit))
+      (Y := Float)
+      (VF := (Float × Float))
+      (Control := (Time × Float))
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      termsBase solverBase 0.0 1.0 (some 1.0) y0 () (saveat := { t1 := true })
+  let solveJvp :=
+    diffeqsolve
+      (Term := MultiTerm (ODETerm Float Unit)
+        (AutodiffJvpJacobianDiffusion (ControlTerm Float Float Float Unit) Float Float Unit))
+      (Y := Float)
+      (VF := (Float × Float))
+      (Control := (Time × Float))
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      termsJvp solverJvp 0.0 1.0 (some 1.0) y0 () (saveat := { t1 := true })
+  let solveExact :=
+    diffeqsolve
+      (Term := MultiTerm (ODETerm Float Unit)
+        (JacobianProdDiffusion (ControlTerm Float Float Float Unit) Float Float Unit))
+      (Y := Float)
+      (VF := (Float × Float))
+      (Control := (Time × Float))
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      termsExact solverExact 0.0 1.0 (some 1.0) y0 () (saveat := { t1 := true })
+
+  let yBase ← finalSaved "Milstein base qv=0 fallback" solveBase
+  let yJvp ← finalSaved "Milstein JVP qv=0 fallback" solveJvp
+  let yExact ← finalSaved "Milstein exact qv=0 fallback" solveExact
+
+  let dControl : Float := path.increment 0.0 1.0
+  let qv := MilsteinControl.quadraticVariation dControl
+  let gg0 := 2.0 * y0 * y0 * y0
+  let expected := y0 + (0.5 * (qv - 1.0)) * gg0
+
+  LeanTest.assertTrue (approx yExact expected 1.0e-12)
+    s!"Milstein qv=0 exact wrapper should match analytic Ito correction: {expected} vs {yExact}"
+  LeanTest.assertTrue (approx yBase yExact 2.0e-7)
+    s!"Milstein qv=0 base fallback parity mismatch: expected {yExact}, got {yBase}"
+  LeanTest.assertTrue (approx yJvp yExact 2.0e-7)
+    s!"Milstein qv=0 JVP wrapper parity mismatch: expected {yExact}, got {yJvp}"
+  LeanTest.assertTrue (approx yJvp expected 5.0e-7)
+    s!"Milstein qv=0 JVP wrapper should preserve Ito -dt correction: {expected} vs {yJvp}"
+
 def run : IO Unit := do
   testMilsteinFiniteDiffFallbackScalarParity
   testMilsteinFiniteDiffFallbackVectorControlParity
+  testMilsteinAutodiffJvpZeroQuadraticVariationFallback
 
 end Tests.DiffEqMilsteinAutodiffParity
