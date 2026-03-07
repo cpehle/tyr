@@ -7,7 +7,7 @@ namespace DiffEq
 
 structure Kencarp3 where
   rootFinder : FixedPoint := {}
-  denseKind : ImplicitRKDenseKind := .splitAtStage 1 "kencarp3-stage2-split-hermite"
+  denseKind : ImplicitRKDenseKind := .kencarp3Poly2
   deriving Inhabited
 
 private def gamma : Float := 1767732205903.0 / 4055673282236.0

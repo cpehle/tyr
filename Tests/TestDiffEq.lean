@@ -3180,6 +3180,57 @@ private def deterministicEndpointError
   LeanTest.assertTrue (errFine < 1.5e-2)
     s!"KenCarp3 dense interpolation fine-grid error too large: {errFine}"
 
+@[test] def testKencarp3DefaultDenseMatchesPoly2Mode : IO Unit := do
+  let tProbe : Time := 0.37
+  let explicit : ODETerm Float Unit := { vectorField := fun _t y _ => -0.3 * y }
+  let implicit : ODETerm Float Unit := { vectorField := fun _t y _ => -1.6 * y }
+  let terms : MultiTerm (ODETerm Float Unit) (ODETerm Float Unit) := {
+    term1 := explicit
+    term2 := implicit
+  }
+  let solverDefault :=
+    Kencarp3.solver
+      (cfg := {})
+      (ExplicitTerm := ODETerm Float Unit)
+      (ImplicitTerm := ODETerm Float Unit)
+      (Y := Float)
+      (VFe := Float)
+      (VFi := Float)
+      (Args := Unit)
+  let solverPoly :=
+    Kencarp3.solver
+      (cfg := { denseKind := .kencarp3Poly2 })
+      (ExplicitTerm := ODETerm Float Unit)
+      (ImplicitTerm := ODETerm Float Unit)
+      (Y := Float)
+      (VFe := Float)
+      (VFi := Float)
+      (Args := Unit)
+  let solveDense := fun (solver :
+      AbstractSolver
+        (MultiTerm (ODETerm Float Unit) (ODETerm Float Unit))
+        Float
+        (Float × Float)
+        (Time × Time)
+        Unit) =>
+    diffeqsolve
+      (Term := MultiTerm (ODETerm Float Unit) (ODETerm Float Unit))
+      (Y := Float)
+      (VF := (Float × Float))
+      (Control := (Time × Time))
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      terms solver 0.0 1.0 (some 0.5) (1.0 : Float) ()
+      (saveat := { dense := true, t1 := false })
+  let solDefault := solveDense solverDefault
+  let solPoly := solveDense solverPoly
+  LeanTest.assertTrue (solDefault.result == Result.successful && solPoly.result == Result.successful)
+    "KenCarp3 default/poly2 dense solves should both succeed"
+  let yDefault ← evaluateDenseFloat "KenCarp3 default dense value" solDefault tProbe
+  let yPoly ← evaluateDenseFloat "KenCarp3 explicit poly2 dense value" solPoly tProbe
+  LeanTest.assertTrue (approx yDefault yPoly 1.0e-12)
+    s!"KenCarp3 default dense mode should match explicit .kencarp3Poly2: {yDefault} vs {yPoly}"
+
 @[test] def testDopri5DenseInterpolationErrorTrend : IO Unit := do
   let term : ODETerm Float Unit := { vectorField := fun _t y _ => -y }
   let solver :=
@@ -3560,6 +3611,7 @@ def run : IO Unit := do
   testDenseInterpolationErrorTrend
   testKvaerno3DenseInterpolationTrend
   testKencarp3DenseInterpolationTrend
+  testKencarp3DefaultDenseMatchesPoly2Mode
   testDopri5DenseInterpolationErrorTrend
   testDopri5DenseImprovesOverHermiteFallback
   testTsit5DenseImprovesOverHermiteFallback
