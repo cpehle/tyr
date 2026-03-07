@@ -850,6 +850,20 @@ private def splitVector (path : VirtualBrownianTree (Vector n BM)) (i : Fin n) :
   let childSeed := (PRNGKey.foldIn root idx).state
   mkChildPath path childSeed (path.shape.get i)
 
+private def splitArrayIdx [Inhabited BM] (path : VirtualBrownianTree (Array BM)) (i : Nat) :
+    VirtualBrownianTree BM :=
+  let root := PRNGKey.foldIn (baseKey path.seed) 0x56544152
+  let idx : UInt32 := UInt32.ofNat i
+  let childSeed := (PRNGKey.foldIn root idx).state
+  mkChildPath path childSeed (path.shape.getD i default)
+
+private def splitListIdx [Inhabited BM] (path : VirtualBrownianTree (List BM)) (i : Nat) :
+    VirtualBrownianTree BM :=
+  let root := PRNGKey.foldIn (baseKey path.seed) 0x56544c53
+  let idx : UInt32 := UInt32.ofNat i
+  let childSeed := (PRNGKey.foldIn root idx).state
+  mkChildPath path childSeed (path.shape.getD i default)
+
 instance : VirtualBrownianTreeOps Float where
   increment := incrementFloatCore
   incrementSpaceTime := incrementSpaceTimeFloatCore
@@ -949,6 +963,98 @@ instance [VirtualBrownianTreeOps BM] : VirtualBrownianTreeOps (Vector n BM) wher
         let childInc := VirtualBrownianTreeOps.incrementSpaceTimeTime (BM := BM) childPath t0 t1
         childInc.K
     }
+
+private def buildArrayFromChildren [VirtualBrownianTreeOps BM] [Inhabited BM]
+    (path : VirtualBrownianTree (Array BM))
+    (mkChild : Nat → VirtualBrownianTree BM)
+    (project : BrownianIncrement Time BM → BM)
+    (t0 t1 : Time) : Array BM := Id.run do
+  let mut out : Array BM := #[]
+  for i in [:path.shape.size] do
+    let childInc := VirtualBrownianTreeOps.increment (BM := BM) (mkChild i) t0 t1
+    out := out.push (project childInc)
+  return out
+
+private def buildArrayFromChildrenST [VirtualBrownianTreeOps BM] [Inhabited BM]
+    (path : VirtualBrownianTree (Array BM))
+    (mkChild : Nat → VirtualBrownianTree BM)
+    (project : SpaceTimeLevyArea Time BM → BM)
+    (t0 t1 : Time) : Array BM := Id.run do
+  let mut out : Array BM := #[]
+  for i in [:path.shape.size] do
+    let childInc := VirtualBrownianTreeOps.incrementSpaceTime (BM := BM) (mkChild i) t0 t1
+    out := out.push (project childInc)
+  return out
+
+private def buildArrayFromChildrenSTT [VirtualBrownianTreeOps BM] [Inhabited BM]
+    (path : VirtualBrownianTree (Array BM))
+    (mkChild : Nat → VirtualBrownianTree BM)
+    (project : SpaceTimeTimeLevyArea Time BM → BM)
+    (t0 t1 : Time) : Array BM := Id.run do
+  let mut out : Array BM := #[]
+  for i in [:path.shape.size] do
+    let childInc := VirtualBrownianTreeOps.incrementSpaceTimeTime (BM := BM) (mkChild i) t0 t1
+    out := out.push (project childInc)
+  return out
+
+instance instVirtualBrownianTreeOpsArray {BM : Type}
+    [VirtualBrownianTreeOps BM] [Inhabited BM] :
+    VirtualBrownianTreeOps (Array BM) where
+  increment path t0 t1 :=
+    {
+      dt := t1 - t0
+      W := buildArrayFromChildren path (fun i => splitArrayIdx path i) (fun inc => inc.W) t0 t1
+    }
+  incrementSpaceTime path t0 t1 :=
+    {
+      dt := t1 - t0
+      W := buildArrayFromChildrenST path (fun i => splitArrayIdx path i) (fun inc => inc.W) t0 t1
+      H := buildArrayFromChildrenST path (fun i => splitArrayIdx path i) (fun inc => inc.H) t0 t1
+    }
+  incrementSpaceTimeTime path t0 t1 :=
+    {
+      dt := t1 - t0
+      W := buildArrayFromChildrenSTT path (fun i => splitArrayIdx path i) (fun inc => inc.W) t0 t1
+      H := buildArrayFromChildrenSTT path (fun i => splitArrayIdx path i) (fun inc => inc.H) t0 t1
+      K := buildArrayFromChildrenSTT path (fun i => splitArrayIdx path i) (fun inc => inc.K) t0 t1
+    }
+
+instance instVirtualBrownianTreeOpsList {BM : Type}
+    [VirtualBrownianTreeOps BM] [Inhabited BM] :
+    VirtualBrownianTreeOps (List BM) where
+  increment path t0 t1 :=
+    let arrayPath : VirtualBrownianTree (Array BM) := {
+      t0 := path.t0
+      t1 := path.t1
+      tol := path.tol
+      maxDepth := path.maxDepth
+      seed := path.seed
+      shape := path.shape.toArray
+    }
+    let inc := VirtualBrownianTreeOps.increment (BM := Array BM) arrayPath t0 t1
+    { dt := inc.dt, W := inc.W.toList }
+  incrementSpaceTime path t0 t1 :=
+    let arrayPath : VirtualBrownianTree (Array BM) := {
+      t0 := path.t0
+      t1 := path.t1
+      tol := path.tol
+      maxDepth := path.maxDepth
+      seed := path.seed
+      shape := path.shape.toArray
+    }
+    let inc := VirtualBrownianTreeOps.incrementSpaceTime (BM := Array BM) arrayPath t0 t1
+    { dt := inc.dt, W := inc.W.toList, H := inc.H.toList }
+  incrementSpaceTimeTime path t0 t1 :=
+    let arrayPath : VirtualBrownianTree (Array BM) := {
+      t0 := path.t0
+      t1 := path.t1
+      tol := path.tol
+      maxDepth := path.maxDepth
+      seed := path.seed
+      shape := path.shape.toArray
+    }
+    let inc := VirtualBrownianTreeOps.incrementSpaceTimeTime (BM := Array BM) arrayPath t0 t1
+    { dt := inc.dt, W := inc.W.toList, H := inc.H.toList, K := inc.K.toList }
 
 def increment [VirtualBrownianTreeOps BM] (path : VirtualBrownianTree BM) (t0 t1 : Time) :
     BrownianIncrement Time BM :=
