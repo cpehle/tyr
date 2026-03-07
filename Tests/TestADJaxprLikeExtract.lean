@@ -998,11 +998,11 @@ def testExtractDynamicAliasRules : IO Unit := do
 @[test]
 def testExtractScanAliasRuleSubjaxprPartition : IO Unit := do
   let jaxpr : LeanJaxpr := {
-    invars := #[{ id := 10 }, { id := 11 }]
+    invars := #[{ id := 10 }, { id := 11 }, { id := 14 }]
     eqns := #[
       {
         op := scanAliasOpName
-        invars := #[{ id := 10 }, { id := 11 }]
+        invars := #[{ id := 10 }, { id := 11 }, { id := 14 }]
         outvars := #[{ id := 12 }, { id := 13 }]
         params := #[
           OpParam.mkNat .scanCarryInputCount 1,
@@ -1033,6 +1033,8 @@ def testExtractScanAliasRuleSubjaxprPartition : IO Unit := do
       "scan data input should connect to carry output."
     LeanTest.assertTrue (edges.any (fun e => e.src == 11 && e.dst == 13))
       "scan data input should connect to data output."
+    LeanTest.assertTrue (!(edges.any (fun e => e.src == 14)))
+      "scan should ignore trailing non-data inputs when `scanDataInputCount` excludes them."
     LeanTest.assertTrue
       (edges.any (fun e =>
         e.src == 10 && e.dst == 12 &&
@@ -1051,11 +1053,11 @@ def testExtractScanAliasRuleSubjaxprPartition : IO Unit := do
 @[test]
 def testExtractCondAliasRuleSubjaxprPartition : IO Unit := do
   let jaxpr : LeanJaxpr := {
-    invars := #[{ id := 20 }, { id := 21 }, { id := 22 }]
+    invars := #[{ id := 20 }, { id := 21 }, { id := 22 }, { id := 25 }]
     eqns := #[
       {
         op := condAliasOpName
-        invars := #[{ id := 20 }, { id := 21 }, { id := 22 }]
+        invars := #[{ id := 20 }, { id := 21 }, { id := 22 }, { id := 25 }]
         outvars := #[{ id := 23 }, { id := 24 }]
         params := #[
           OpParam.mkNat .condPredicateCount 1,
@@ -1079,6 +1081,8 @@ def testExtractCondAliasRuleSubjaxprPartition : IO Unit := do
       "cond with two data inputs and two outputs should produce four dependency edges."
     LeanTest.assertTrue (!(edges.any (fun e => e.src == 20)))
       "cond should not emit predicate-input local-Jac edges."
+    LeanTest.assertTrue (!(edges.any (fun e => e.src == 25)))
+      "cond should ignore trailing non-data inputs when `condDataInputCount` excludes them."
     LeanTest.assertTrue (edges.any (fun e => e.src == 21 && e.dst == 23))
       "cond should connect first data input to first output."
     LeanTest.assertTrue (edges.any (fun e => e.src == 22 && e.dst == 24))

@@ -106,6 +106,34 @@ private def decodeMMTransposeFromContractAxes?
   else
     none
 
+private def shapeDim? (v : JVar) (idx : Nat) : Option Nat := do
+  let shape ← v.metaInfo.shape
+  shape[idx]?
+
+private def hasUnitBatchDim0 (v : JVar) : Bool :=
+  match shapeDim? v 0 with
+  | some 1 => true
+  | _ => false
+
+private def decodeMMTransposeFromUnitBatchAxes?
+    (lhsContract rhsContract lhsBatch rhsBatch : Array Nat)
+    (lhs rhs out : JVar) :
+    Option MMATranspose :=
+  if lhsBatch == #[0] && rhsBatch == #[0] &&
+      hasUnitBatchDim0 lhs && hasUnitBatchDim0 rhs && hasUnitBatchDim0 out then
+    if lhsContract == #[2] && rhsContract == #[1] then
+      some .AB
+    else if lhsContract == #[2] && rhsContract == #[2] then
+      some .ABt
+    else if lhsContract == #[1] && rhsContract == #[1] then
+      some .AtB
+    else if lhsContract == #[1] && rhsContract == #[2] then
+      some .AtBt
+    else
+      none
+  else
+    none
+
 /-- True iff `opName` can be lowered into a concrete `KStmt` constructor. -/
 def isKStmtLowerableOpName (opName : OpName) : Bool :=
   (decodeUnaryOp? opName).isSome ||
@@ -199,7 +227,16 @@ private def lowerEqnToKStmt (idx0 : Nat) (eqn : JEqn) : Except String KStmt := d
     let rhsContract := (eqn.params.findNats? .rhsContract).getD #[]
     let lhsBatch := (eqn.params.findNats? .lhsBatch).getD #[]
     let rhsBatch := (eqn.params.findNats? .rhsBatch).getD #[]
-    match decodeMMTransposeFromContractAxes? lhsContract rhsContract lhsBatch rhsBatch with
+    let lhsVar := eqn.invars[0]!
+    let rhsVar := eqn.invars[1]!
+    let outVar := eqn.outvars[0]!
+    let trans? :=
+      match decodeMMTransposeFromContractAxes? lhsContract rhsContract lhsBatch rhsBatch with
+      | some trans => some trans
+      | none =>
+        decodeMMTransposeFromUnitBatchAxes?
+          lhsContract rhsContract lhsBatch rhsBatch lhsVar rhsVar outVar
+    match trans? with
     | some trans =>
       return .mm trans dst invars[0]! invars[1]!
     | none =>

@@ -827,7 +827,10 @@ private def condAliasRule (opName : OpName) : LocalJacRule :=
       let predDefault := if eqn.invars.isEmpty then 0 else 1
       let predCount :=
         min ((eqn.params.findNat? .condPredicateCount).getD predDefault) eqn.invars.size
-      let dataInvars := sliceWindow eqn.invars predCount (eqn.invars.size - predCount)
+      let maxData := eqn.invars.size - predCount
+      let dataCount :=
+        min ((eqn.params.findNat? .condDataInputCount).getD maxData) maxData
+      let dataInvars := sliceWindow eqn.invars predCount dataCount
       let mut edges : Array LocalJacEdge := #[]
       for outv in eqn.outvars do
         for inv in dataInvars do
@@ -847,7 +850,10 @@ private def scanAliasRule (opName : OpName) : LocalJacRule :=
       let carryCount :=
         min ((eqn.params.findNat? .scanCarryInputCount).getD carryDefault) eqn.invars.size
       let carryInvars := sliceWindow eqn.invars 0 carryCount
-      let dataInvars := sliceWindow eqn.invars carryCount (eqn.invars.size - carryCount)
+      let maxData := eqn.invars.size - carryCount
+      let dataCount :=
+        min ((eqn.params.findNat? .scanDataInputCount).getD maxData) maxData
+      let dataInvars := sliceWindow eqn.invars carryCount dataCount
 
       let carryOutDefault := min carryCount eqn.outvars.size
       let carryOutCount :=
