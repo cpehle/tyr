@@ -31,6 +31,7 @@ import Tests.TestMctx
 import Tests.TestMctxBatched
 import Tests.TestMctxDag
 import Tests.TestDiffEq
+import Tests.TestDiffEqEventTreeParity
 import Tests.TestDiffEqAdjoint
 import Tests.TestDiffEqAdjointCore
 import Tests.TestGPUDSL

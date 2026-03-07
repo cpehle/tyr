@@ -72,6 +72,68 @@ def steadyState {Term Y VF Control Args : Type}
 
 end EventSpec
 
+/-- Tree-structured event configuration for PyTree-style parity with diffrax. -/
+inductive EventTree (Y Args : Type) where
+  | leaf (event : EventSpec Y Args)
+  | branch (children : Array (EventTree Y Args))
+  deriving Inhabited
+
+/-- Tree-structured event mask aligned with an `EventTree` layout. -/
+inductive EventMaskTree where
+  | leaf (hit : Bool)
+  | branch (children : Array EventMaskTree)
+  deriving Inhabited, Repr, BEq
+
+namespace EventTree
+
+private def flattenAux {Y Args : Type}
+    (tree : EventTree Y Args)
+    (acc : Array (EventSpec Y Args)) : Array (EventSpec Y Args) :=
+  match tree with
+  | .leaf ev => acc.push ev
+  | .branch children =>
+      children.foldl (fun acc child => flattenAux child acc) acc
+
+/-- Flatten a tree of events in left-to-right depth-first leaf order. -/
+def flatten {Y Args : Type} (tree : EventTree Y Args) : Array (EventSpec Y Args) :=
+  flattenAux tree #[]
+
+private def maskTreeFromFlatAux {Y Args : Type}
+    (tree : EventTree Y Args)
+    (mask : Array Bool)
+    (idx : Nat) : EventMaskTree × Nat :=
+  match tree with
+  | .leaf _ =>
+      (.leaf (mask.getD idx false), idx + 1)
+  | .branch children =>
+      let (out, next) :=
+        children.foldl
+          (fun (state : Array EventMaskTree × Nat) child =>
+            let (acc, i) := state
+            let (childTree, iNext) := maskTreeFromFlatAux child mask i
+            (acc.push childTree, iNext))
+          (#[], idx)
+      (.branch out, next)
+
+/-- Reconstruct a tree-shaped mask from a flattened event mask. -/
+def maskTreeFromFlat {Y Args : Type}
+    (tree : EventTree Y Args)
+    (mask : Array Bool) : EventMaskTree :=
+  (maskTreeFromFlatAux tree mask 0).fst
+
+def liftMaskTree? {Y Args : Type}
+    (tree : EventTree Y Args)
+    (mask? : Option (Array Bool)) : Option EventMaskTree :=
+  mask?.map (fun mask => maskTreeFromFlat tree mask)
+
+end EventTree
+
+structure EventTreeSolution (Y SolverState ControllerState : Type) where
+  base : Solution Y SolverState ControllerState
+  eventMaskTree : Option EventMaskTree
+  eventMaskLastTree : Option EventMaskTree
+  deriving Inhabited
+
 /-- Progress meter compatibility surface for `diffeqsolve`. -/
 inductive ProgressMeter where
   | none
@@ -796,6 +858,67 @@ def diffeqsolve {Term Y VF Control Args Controller : Type}
       eventMask := eventMaskOption activeEvents eventMaskF
       eventMaskLast := eventMaskHitOption activeEvents eventMaskLastF
     }
+
+/--
+Solve with a tree-structured event configuration.
+
+This is a compatibility surface for diffrax-style event PyTrees: the solver runs on
+flattened leaves, then event masks are reconstructed with the original tree shape.
+-/
+def diffeqsolveEventTree {Term Y VF Control Args Controller : Type}
+    [DiffEqSpace Y]
+    [DiffEqSeminorm Y]
+    [DiffEqElem Y]
+    [Inhabited Y]
+    [StepSizeController Controller]
+    [StepSizeControllerValidation Controller]
+    [Inhabited Controller]
+    (terms : Term)
+    (solver : AbstractSolver Term Y VF Control Args)
+    (t0 t1 : Time)
+    (dt0 : Option Time)
+    (y0 : Y)
+    (args : Args)
+    (eventTree : EventTree Y Args)
+    (saveat : SaveAt := {})
+    (maxSteps : Nat := 4096)
+    (controller : Controller := default)
+    (initialSolverState : Option solver.SolverState := none)
+    (initialControllerState :
+      Option (StepSizeController.State (C := Controller)) := none)
+    (initialMadeJump : Bool := false)
+    (saveFn : Option (Time → Y → Args → Y) := none)
+    (throwOnFailure : Bool := false)
+    (maxStepsOpt : Option Nat := some maxSteps)
+    (progress_meter : ProgressMeter := .none) :
+    EventTreeSolution Y solver.SolverState (StepSizeController.State (C := Controller)) :=
+  let flatEvents := EventTree.flatten eventTree
+  let base :=
+    diffeqsolve
+      (Term := Term)
+      (Y := Y)
+      (VF := VF)
+      (Control := Control)
+      (Args := Args)
+      (Controller := Controller)
+      terms solver t0 t1 dt0 y0 args
+      (saveat := saveat)
+      (maxSteps := maxSteps)
+      (controller := controller)
+      (event := none)
+      (initialSolverState := initialSolverState)
+      (initialControllerState := initialControllerState)
+      (initialMadeJump := initialMadeJump)
+      (events := flatEvents)
+      (saveFn := saveFn)
+      (throwOnFailure := throwOnFailure)
+      (maxStepsOpt := maxStepsOpt)
+      (progress_meter := progress_meter)
+  {
+    base := base
+    eventMaskTree := EventTree.liftMaskTree? eventTree base.eventMask
+    eventMaskLastTree := EventTree.liftMaskTree? eventTree base.eventMaskLast
+  }
 
 def diffeqsolveOrError {Term Y VF Control Args Controller : Type}
     [DiffEqSpace Y]
