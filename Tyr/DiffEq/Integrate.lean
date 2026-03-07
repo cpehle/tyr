@@ -19,6 +19,59 @@ structure EventSpec (Y Args : Type) where
   rootMaxIters : Nat := 24
   rootTol : Time := 1.0e-6
 
+private def clampNonnegativeTime (value : Time) : Time :=
+  if value < 0.0 then 0.0 else value
+
+namespace EventSpec
+
+/--
+Construct a steady-state event condition from a term bundle and solver function.
+
+The condition is `vfNorm(f(t, y, args)) < atol + rtol * stateNorm(y)`, where
+`f` is `solver.func terms`.
+
+- `rtol` and `atol` are clamped to nonnegative values.
+- This is a boolean event: checks occur on accepted step endpoints (plus `(t0, y0)`),
+  so no real-valued root localization is performed.
+- With default `direction := none`, a true condition at `(t0, y0)` triggers
+  immediately.
+-/
+def steadyStateWithNorms {Term Y VF Control Args : Type}
+    (terms : Term)
+    (solver : AbstractSolver Term Y VF Control Args)
+    (vfNorm : VF → Time)
+    (stateNorm : Y → Time)
+    (rtol atol : Time)
+    (terminate : Bool := true)
+    (direction : Option Bool := none) : EventSpec Y Args :=
+  let rtol := clampNonnegativeTime rtol
+  let atol := clampNonnegativeTime atol
+  {
+    condition := .boolean (fun t y args =>
+      let vf := solver.func terms t y args
+      vfNorm vf < atol + rtol * stateNorm y)
+    terminate := terminate
+    direction := direction
+  }
+
+/--
+Construct a steady-state event condition using `DiffEqSeminorm.rms` for both state
+and vector-field norms.
+-/
+def steadyState {Term Y VF Control Args : Type}
+    [DiffEqSeminorm Y]
+    [DiffEqSeminorm VF]
+    (terms : Term)
+    (solver : AbstractSolver Term Y VF Control Args)
+    (rtol atol : Time)
+    (terminate : Bool := true)
+    (direction : Option Bool := none) : EventSpec Y Args :=
+  steadyStateWithNorms
+    terms solver DiffEqSeminorm.rms DiffEqSeminorm.rms rtol atol
+    terminate direction
+
+end EventSpec
+
 /-- Progress meter compatibility surface for `diffeqsolve`. -/
 inductive ProgressMeter where
   | none
@@ -444,6 +497,13 @@ def diffeqsolve {Term Y VF Control Args Controller : Type}
     let computeOutputs :=
       fun (tf : Time) (yf : Y) (allStepTs : Array Time) (allStepYs : Array Y)
           (denseInterp : Option (DenseInterpolation Y)) =>
+        let terminalTol : Time := 1.0e-6
+        let forward := tf >= t0
+        let timeNotPastTerminal : Time → Bool :=
+          if forward then
+            fun t => t <= tf + terminalTol
+          else
+            fun t => t >= tf - terminalTol
         let evalFromDense : Time → Y :=
           fun t =>
             match denseInterp with
@@ -469,8 +529,9 @@ def diffeqsolve {Term Y VF Control Args Controller : Type}
             | none => pure ()
             | some ts =>
                 for t in ts do
-                  subTs := subTs.push t
-                  subYs := subYs.push (evalFromDense t)
+                  if timeNotPastTerminal t then
+                    subTs := subTs.push t
+                    subYs := subYs.push (evalFromDense t)
             let cadence : Nat := sub.steps
             if cadence != 0 then
               if !(subTs.any (fun t => t == t0)) then
