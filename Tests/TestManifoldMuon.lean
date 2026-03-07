@@ -18,6 +18,48 @@ open Tyr.AD.DifferentiableManifold
 open torch
 open torch.Optim.ManifoldMuon
 
+private def benchmarkOrthogonalDualMapStep (numSteps : Nat := 5) : IO Float := do
+  let mut q ← Orthogonal.random 16
+  let t0 ← IO.monoNanosNow
+  for _ in [:numSteps] do
+    let gRaw ← randn #[16, 16] false
+    let g := OrthogonalTangent.fromAmbient q gRaw
+    q := DualMapGeometry.dualMapStep q g 0.02
+  let t1 ← IO.monoNanosNow
+  let elapsedMs := (t1.toFloat - t0.toFloat) / 1000000.0
+  if numSteps == 0 then
+    return elapsedMs
+  else
+    return elapsedMs / numSteps.toFloat
+
+private def benchmarkGrassmannDualMapStep (numSteps : Nat := 5) : IO Float := do
+  let mut x ← Grassmann.random 24 8
+  let t0 ← IO.monoNanosNow
+  for _ in [:numSteps] do
+    let gRaw ← randn #[24, 8] false
+    let g := GrassmannTangent.project x gRaw
+    x := DualMapGeometry.dualMapStep x g 0.02
+  let t1 ← IO.monoNanosNow
+  let elapsedMs := (t1.toFloat - t0.toFloat) / 1000000.0
+  if numSteps == 0 then
+    return elapsedMs
+  else
+    return elapsedMs / numSteps.toFloat
+
+private def benchmarkHyperbolicDualMapStep (numSteps : Nat := 5) : IO Float := do
+  let mut x ← Hyperbolic.random 8
+  let t0 ← IO.monoNanosNow
+  for _ in [:numSteps] do
+    let gRaw ← randn #[9] false
+    let g := HyperbolicTangent.project x gRaw
+    x := DualMapGeometry.dualMapStep x g 0.02
+  let t1 ← IO.monoNanosNow
+  let elapsedMs := (t1.toFloat - t0.toFloat) / 1000000.0
+  if numSteps == 0 then
+    return elapsedMs
+  else
+    return elapsedMs / numSteps.toFloat
+
 @[test]
 def testFloatDualMapDiffersFromRiemannian : IO Unit := do
   let x : Float := 0.0
@@ -72,5 +114,52 @@ def testStiefelConstraintAfterStep : IO Unit := do
 def testManifoldMuonBenchmarkPositive : IO Unit := do
   let avgMs ← benchmarkLocalStep (m := 32) (n := 16) 3
   LeanTest.assertTrue (avgMs > 0.0) s!"Expected positive average step time, got {avgMs}"
+
+@[test]
+def testOrthogonalDualMapStepPreservesConstraint : IO Unit := do
+  let q0 ← Orthogonal.random 6
+  let gRaw ← randn #[6, 6] false
+  let g := OrthogonalTangent.fromAmbient q0 gRaw
+  let q1 := DualMapGeometry.dualMapStep q0 g 0.05
+
+  let qtq := nn.mm (nn.transpose2d q1.matrix) q1.matrix
+  let I := eye 6
+  LeanTest.assertTrue (allclose qtq I (rtol := 1e-4) (atol := 1e-5))
+    "Orthogonal dual-map step should preserve Q^T Q ≈ I via retraction"
+
+@[test]
+def testGrassmannDualMapStepPreservesConstraint : IO Unit := do
+  let x0 ← Grassmann.random 7 3
+  let gRaw ← randn #[7, 3] false
+  let g := GrassmannTangent.project x0 gRaw
+  let x1 := DualMapGeometry.dualMapStep x0 g 0.05
+
+  let xtx := nn.mm (nn.transpose2d x1.matrix) x1.matrix
+  let I := eye 3
+  LeanTest.assertTrue (allclose xtx I (rtol := 1e-4) (atol := 1e-5))
+    "Grassmann dual-map step should preserve X^T X ≈ I via retraction"
+
+@[test]
+def testHyperbolicDualMapStepPreservesConstraint : IO Unit := do
+  let x0 ← Hyperbolic.random 4
+  let gRaw ← randn #[5] false
+  let g := HyperbolicTangent.project x0 gRaw
+  let x1 := DualMapGeometry.dualMapStep x0 g 0.05
+
+  let inner := Hyperbolic.minkowskiInner x1.coords x1.coords
+  LeanTest.assertTrue (Float.abs (inner + 1.0) < 1e-4)
+    s!"Hyperbolic dual-map step should preserve <x,x>_L = -1, got {inner}"
+
+@[test]
+def testDualMapAdapterBenchmarksPositive : IO Unit := do
+  let orthoMs ← benchmarkOrthogonalDualMapStep 3
+  let grassMs ← benchmarkGrassmannDualMapStep 3
+  let hyperMs ← benchmarkHyperbolicDualMapStep 3
+  LeanTest.assertTrue (orthoMs > 0.0)
+    s!"Expected positive orthogonal benchmark latency, got {orthoMs}"
+  LeanTest.assertTrue (grassMs > 0.0)
+    s!"Expected positive grassmann benchmark latency, got {grassMs}"
+  LeanTest.assertTrue (hyperMs > 0.0)
+    s!"Expected positive hyperbolic benchmark latency, got {hyperMs}"
 
 end Tests.ManifoldMuon
