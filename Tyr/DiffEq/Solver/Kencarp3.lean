@@ -7,6 +7,7 @@ namespace DiffEq
 
 structure Kencarp3 where
   rootFinder : FixedPoint := {}
+  denseKind : ImplicitRKDenseKind := .splitAtStage 1 "kencarp3-stage2-split-hermite"
   deriving Inhabited
 
 private def gamma : Float := 1767732205903.0 / 4055673282236.0
@@ -52,7 +53,12 @@ def Kencarp3.solver (cfg : Kencarp3 := {}) {ExplicitTerm ImplicitTerm Y VFe VFi 
     [TermLike ImplicitTerm Y VFi Time Args]
     [DiffEqSpace Y] [DiffEqSeminorm Y] [DiffEqElem Y] :
     AbstractSolver (MultiTerm ExplicitTerm ImplicitTerm) Y (VFe × VFi) (Time × Time) Args :=
-  IMEXRK.solver { explicit := kencarp3Explicit, implicit := kencarp3Implicit, rootFinder := cfg.rootFinder }
+  IMEXRK.solver {
+    explicit := kencarp3Explicit
+    implicit := kencarp3Implicit
+    rootFinder := cfg.rootFinder
+    denseKind := cfg.denseKind
+  }
 
 instance : ImplicitSolver Kencarp3 := ⟨True.intro⟩
 instance : AdaptiveSolver Kencarp3 := ⟨True.intro⟩

@@ -7,6 +7,7 @@ namespace DiffEq
 
 structure Kvaerno3 where
   rootFinder : FixedPoint := {}
+  denseKind : ImplicitRKDenseKind := .hermite
   deriving Inhabited
 
 private def gamma : Float := 0.43586652150
@@ -33,7 +34,11 @@ def Kvaerno3.solver (cfg : Kvaerno3 := {}) {Term Y VF Args : Type}
     [TermLike Term Y VF Time Args]
     [DiffEqSpace Y] [DiffEqSeminorm Y] [DiffEqElem Y] :
     AbstractSolver Term Y VF Time Args :=
-  ImplicitRK.solver { tableau := kvaerno3Tableau, rootFinder := cfg.rootFinder }
+  ImplicitRK.solver {
+    tableau := kvaerno3Tableau
+    rootFinder := cfg.rootFinder
+    denseKind := cfg.denseKind
+  }
 
 instance : ImplicitSolver Kvaerno3 := ⟨True.intro⟩
 instance : AdaptiveSolver Kvaerno3 := ⟨True.intro⟩

@@ -11,6 +11,11 @@ attribute [local instance] _root_.torch.DiffEq.DiffEqArithmetic.hAddInst
 attribute [local instance] _root_.torch.DiffEq.DiffEqArithmetic.hSubInst
 attribute [local instance] _root_.torch.DiffEq.DiffEqArithmetic.hMulInst
 
+inductive ImplicitRKDenseKind where
+  | hermite
+  | splitAtStage (stage : Nat) (tag : String)
+  deriving Repr, BEq, Inhabited
+
 structure ImplicitRK (s : Nat) where
   tableau : ButcherTableau s
   rootFinder : FixedPoint := {}
@@ -18,6 +23,7 @@ structure ImplicitRK (s : Nat) where
   rootRtol : Option Float := none
   rootAtol : Option Float := none
   rootMaxIters : Option Nat := none
+  denseKind : ImplicitRKDenseKind := .hermite
 
 structure IMEXRK (s : Nat) where
   explicit : ButcherTableau s
@@ -27,6 +33,42 @@ structure IMEXRK (s : Nat) where
   rootRtol : Option Float := none
   rootAtol : Option Float := none
   rootMaxIters : Option Nat := none
+  denseKind : ImplicitRKDenseKind := .hermite
+
+private def baseHermiteDenseInfo [DiffEqSpace Y]
+    (t0 t1 : Time) (y0 y1 : Y) (m0 m1 : Y) : LocalHermiteDenseInfo Y := {
+  t0 := t0
+  t1 := t1
+  y0 := y0
+  y1 := y1
+  m0 := m0
+  m1 := m1
+}
+
+private def denseInfo [DiffEqSpace Y]
+    (kind : ImplicitRKDenseKind)
+    (cs : Array Time)
+    (t0 t1 dt : Time)
+    (y0 y1 : Y)
+    (m0 m1 : Y)
+    (stageYs stageMs : Array Y) :
+    LocalHermiteDenseInfo Y :=
+  let base := baseHermiteDenseInfo t0 t1 y0 y1 m0 m1
+  match kind with
+  | .hermite =>
+      base
+  | .splitAtStage stage tag =>
+      if hStage : stage < cs.size then
+        let c := cs[stage]'hStage
+        if c <= 0.0 || c >= 1.0 then
+          base
+        else
+          let tSplit := t0 + c * dt
+          let ySplit := stageYs.getD stage y0
+          let mSplit := stageMs.getD stage m0
+          { base with split? := some (tSplit, ySplit, mSplit), splitKind? := some tag }
+      else
+        base
 
 namespace ImplicitRK
 
@@ -63,10 +105,10 @@ def solver {s : Nat} {Term Y VF Args : Type}
     let zero := zeroLike y0
     let rows := rk.tableau.a.toArray
     let cs := rk.tableau.c.toArray
-    let (ks, ok) :=
+    let (ks, stageYs, ok) :=
       (List.range rows.size).foldl
         (fun acc i =>
-          let (ks, ok) := acc
+          let (ks, stageYs, ok) := acc
           let row := rows.getD i #[]
           let sum :=
             (List.range i).foldl
@@ -88,8 +130,8 @@ def solver {s : Nat} {Term Y VF Args : Type}
               let sol := RootFinder.solve (R := RootFindMethod) rootMethod stepFn base
               (sol.value, ok && sol.converged)
           let ki := inst.vf_prod term ti yi args dt
-          (ks.push ki, ok))
-        (#[], true)
+          (ks.push ki, stageYs.push yi, ok))
+        (#[], #[], true)
     let y1 := y0 + weightedSum rk.tableau.b ks y0
     let yErr :=
       match rk.tableau.bErr with
@@ -100,7 +142,7 @@ def solver {s : Nat} {Term Y VF Args : Type}
           some (high - low)
     let m0 := inst.vf_prod term t0 y0 args dt
     let m1 := inst.vf_prod term t1 y1 args dt
-    let dense := { t0 := t0, t1 := t1, y0 := y0, y1 := y1, m0 := m0, m1 := m1 }
+    let dense := torch.DiffEq.denseInfo rk.denseKind cs t0 t1 dt y0 y1 m0 m1 stageYs ks
     {
       y1 := y1
       yError := yErr
@@ -157,10 +199,10 @@ def solver {s : Nat} {ExplicitTerm ImplicitTerm Y VFe VFi Args : Type}
     let rowsE := rk.explicit.a.toArray
     let rowsI := rk.implicit.a.toArray
     let cs := rk.explicit.c.toArray
-    let (ksExp, ksImp, ok) :=
+    let (ksExp, ksImp, stageYs, ok) :=
       (List.range rowsE.size).foldl
         (fun acc i =>
-          let (ksExp, ksImp, ok) := acc
+          let (ksExp, ksImp, stageYs, ok) := acc
           let rowE := rowsE.getD i #[]
           let rowI := rowsI.getD i #[]
           let sum :=
@@ -188,8 +230,8 @@ def solver {s : Nat} {ExplicitTerm ImplicitTerm Y VFe VFi Args : Type}
               (sol.value, ok && sol.converged)
           let kE := expInst.vf_prod explicit ti yi args dt
           let kI := impInst.vf_prod implicit ti yi args dt
-          (ksExp.push kE, ksImp.push kI, ok))
-        (#[], #[], true)
+          (ksExp.push kE, ksImp.push kI, stageYs.push yi, ok))
+        (#[], #[], #[], true)
     let yHigh :=
       y0 + ((weightedSum rk.explicit.b ksExp y0) + (weightedSum rk.implicit.b ksImp y0))
     let yErr :=
@@ -205,7 +247,12 @@ def solver {s : Nat} {ExplicitTerm ImplicitTerm Y VFe VFi Args : Type}
       (expInst.vf_prod explicit t0 y0 args dt) + (impInst.vf_prod implicit t0 y0 args dt)
     let m1 :=
       (expInst.vf_prod explicit t1 yHigh args dt) + (impInst.vf_prod implicit t1 yHigh args dt)
-    let dense := { t0 := t0, t1 := t1, y0 := y0, y1 := yHigh, m0 := m0, m1 := m1 }
+    let stageMs : Array Y := Id.run do
+      let mut ms : Array Y := #[]
+      for i in [:cs.size] do
+        ms := ms.push ((ksExp.getD i zero) + (ksImp.getD i zero))
+      return ms
+    let dense := torch.DiffEq.denseInfo rk.denseKind cs t0 t1 dt y0 yHigh m0 m1 stageYs stageMs
     {
       y1 := yHigh
       yError := yErr
