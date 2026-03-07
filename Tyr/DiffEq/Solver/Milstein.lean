@@ -111,6 +111,34 @@ instance {Diffusion Y VF Control Args : Type} [TermLike Diffusion Y VF Control A
   is_vf_expensive wrapped :=
     (inferInstance : TermLike Diffusion Y VF Control Args).is_vf_expensive wrapped.term
 
+/-- Stratonovich Milstein correction term.
+
+Default behavior uses `0.5 * qv * (g' g)`, while autodiff-JVP wrappers can provide
+a direct `0.5 * jvp(vf_prod)` implementation to avoid tiny-`qv` attenuation from
+intermediate normalization. -/
+class StratonovichMilsteinCorrectionLike (τ : Type) (Y VF Control Args : Type) where
+  correction : τ → Time → Y → Args → Control → Y
+
+instance (priority := 10) {τ Y VF Control Args : Type}
+    [MilsteinJacobianControlLike τ Y VF Control Args]
+    [MilsteinControl Control] [DiffEqSpace Y] :
+    StratonovichMilsteinCorrectionLike τ Y VF Control Args where
+  correction term t y args control :=
+    let derivInst := (inferInstance : MilsteinJacobianControlLike τ Y VF Control Args)
+    let gg0 := derivInst.jacobianProd term t y args control
+    let qv := MilsteinControl.quadraticVariation control
+    (0.5 * qv) * gg0
+
+instance (priority := 1100) {Diffusion Y VF Control Args : Type}
+    [TermLike Diffusion Y VF Control Args] [DiffEqSpace Y] :
+    StratonovichMilsteinCorrectionLike
+      (AutodiffJvpJacobianDiffusion Diffusion Y Control Args) Y VF Control Args where
+  correction wrapped t y args control :=
+    let inst := (inferInstance : TermLike Diffusion Y VF Control Args)
+    let g0 := inst.vf_prod wrapped.term t y args control
+    let jvpScaled := wrapped.jvpVfProd t y args control g0
+    (0.5 : Float) * jvpScaled
+
 structure FiniteDiffJacobianDiffusion (Diffusion : Type) where
   term : Diffusion
   epsilon : Float := 1.0e-4
@@ -173,6 +201,23 @@ instance (priority := 1100) {Diffusion Y Control Args : Type}
         wrapped.term t y args
     else
       let inst := (inferInstance : TermLike Diffusion Y Y Control Args)
+      let g0 := inst.vf_prod wrapped.term t y args control
+      let jvpScaled := wrapped.jvpVfProd t y args control g0
+      let qvSafe := safeQuadraticVariationDenom qv wrapped.qvFloor
+      (1.0 / qvSafe) * jvpScaled
+
+instance (priority := 1060) {Diffusion Y VF Control Args : Type}
+    [TermLike Diffusion Y VF Control Args] [DiffEqSpace Y] [MilsteinControl Control]
+    [MilsteinJacobianControlLike Diffusion Y VF Control Args] :
+    MilsteinJacobianControlLike (AutodiffJvpJacobianDiffusion Diffusion Y Control Args) Y VF Control Args where
+  jacobianProd wrapped t y args control :=
+    let qv := MilsteinControl.quadraticVariation control
+    let qvFloor := sanitizeQuadraticVariationFloor wrapped.qvFloor
+    if Float.abs qv <= qvFloor then
+      (inferInstance : MilsteinJacobianControlLike Diffusion Y VF Control Args).jacobianProd
+        wrapped.term t y args control
+    else
+      let inst := (inferInstance : TermLike Diffusion Y VF Control Args)
       let g0 := inst.vf_prod wrapped.term t y args control
       let jvpScaled := wrapped.jvpVfProd t y args control g0
       let qvSafe := safeQuadraticVariationDenom qv wrapped.qvFloor

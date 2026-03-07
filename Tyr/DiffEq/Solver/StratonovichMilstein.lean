@@ -17,6 +17,7 @@ def StratonovichMilstein.solver {Drift Diffusion Y VFd VFg Control Args : Type}
     [TermLike Diffusion Y VFg Control Args]
     [MilsteinJacobianControlLike Diffusion Y VFg Control Args]
     [MilsteinControl Control]
+    [StratonovichMilsteinCorrectionLike Diffusion Y VFg Control Args]
     [DiffEqSpace Y] :
     AbstractSolver (MultiTerm Drift Diffusion) Y (VFd × VFg) (Time × Control) Args := {
   SolverState := Unit
@@ -30,14 +31,12 @@ def StratonovichMilstein.solver {Drift Diffusion Y VFd VFg Control Args : Type}
     let diffusion := terms.term2
     let driftInst := (inferInstance : TermLike Drift Y VFd Time Args)
     let diffInst := (inferInstance : TermLike Diffusion Y VFg Control Args)
-    let diffDerivInst := (inferInstance : MilsteinJacobianControlLike Diffusion Y VFg Control Args)
+    let correctionInst := (inferInstance : StratonovichMilsteinCorrectionLike Diffusion Y VFg Control Args)
     let dt := driftInst.contr drift t0 t1
     let dControl := diffInst.contr diffusion t0 t1
     let f0 := driftInst.vf_prod drift t0 y0 args dt
     let g0 := diffInst.vf_prod diffusion t0 y0 args dControl
-    let gg0 := diffDerivInst.jacobianProd diffusion t0 y0 args dControl
-    let qv := MilsteinControl.quadraticVariation dControl
-    let corr := (0.5 * qv) * gg0
+    let corr := correctionInst.correction diffusion t0 y0 args dControl
     let y1 := y0 + (f0 + (g0 + corr))
     let dense := { t0 := t0, t1 := t1, y0 := y0, y1 := y1 }
     {
