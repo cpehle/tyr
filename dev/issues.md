@@ -164,6 +164,16 @@ Reviewed: 2026-03-06 (`Tyr/DiffEq/*` vs `../diffrax/diffrax/*`, `../diffrax/docs
   Refs: `Tests/TestDiffEq.lean`, `Tyr/DiffEq/Solver/*.lean`, `../diffrax/diffrax/_solver/*`
 - [ ] `DX15` [Low] Add weak-order/statistical SDE correctness tests (moment and expectation convergence over Monte Carlo ensembles); current SDE coverage emphasizes pathwise/strong-order checks only.
   Refs: `Tests/TestDiffEq.lean`, `Tyr/DiffEq/Solver/SDE.lean`, `../diffrax/docs/*`
+- [ ] `DX16` [High] Add underdamped-Langevin term primitives and argument-shape validation parity (`UnderdampedLangevinDriftTerm` / `UnderdampedLangevinDiffusionTerm` style API).
+  Refs: `Tyr/DiffEq/Term.lean`, `../diffrax/diffrax/_term.py`
+- [ ] `DX17` [High] Replace compatibility wrappers for `SlowRK`/`ALIGN`/`ShOULD`/`QUICSORT` with solver-faithful algorithm implementations; current wrappers close API surface but not full behavior parity.
+  Refs: `Tyr/DiffEq/Solver/SlowRK.lean`, `Tyr/DiffEq/Solver/ALIGN.lean`, `Tyr/DiffEq/Solver/ShOULD.lean`, `Tyr/DiffEq/Solver/QUICSORT.lean`, `../diffrax/diffrax/_solver/slowrk.py`, `../diffrax/diffrax/_solver/align.py`, `../diffrax/diffrax/_solver/should.py`, `../diffrax/diffrax/_solver/quicsort.py`
+- [x] `DX18` [Medium] Hardened `StepTo` contract parity with solve-direction strict monotonicity plus endpoint checks (`t0 == ts[0]`, `t1 == ts[-1]`) and reverse/failure regression tests.
+  Refs: `Tyr/DiffEq/StepSizeController.lean`, `Tyr/DiffEq/Integrate.lean`, `Tests/TestDiffEq.lean`, `../diffrax/diffrax/_step_size_controller/constant.py`
+- [ ] `DX19` [Medium] Add `progress_meter` solve API parity (none/text/tqdm-style progress lifecycle and compatibility behavior).
+  Refs: `Tyr/DiffEq/Integrate.lean`, `../diffrax/diffrax/_integrate.py`, `../diffrax/diffrax/_progress_meter.py`
+- [ ] `DX20` [Medium] Support `max_steps=None`-style unbounded stepping mode with save-compatibility checks (`saveat.steps`, `saveat.dense`) matching diffrax semantics.
+  Refs: `Tyr/DiffEq/Integrate.lean`, `../diffrax/diffrax/_integrate.py`
 
 
 ## Completed (This Pass)
