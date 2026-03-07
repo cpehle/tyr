@@ -102,48 +102,67 @@ def QUICSORT.solver {X Args : Type}
   step := fun terms t0 t1 y0 args state _madeJump =>
     let drift := terms.term1
     let diffusion := terms.term2
-    let driftInst := (inferInstance :
-      TermLike (UnderdampedLangevinDriftTerm X Args) (X × X) (X × X) Time Args)
-    let diffInst := (inferInstance :
-      TermLike (UnderdampedLangevinDiffusionTerm X Args) (X × X) Scalar X Args)
-    let _ := driftInst.vf drift t0 y0 args
-    let _ := diffInst.vf diffusion t0 y0 args
+    let denseFail := { t0 := t0, t1 := t1, y0 := y0, y1 := y0 }
+    match UnderdampedLangevinDriftTerm.validate? drift t0 y0 args with
+    | some _ =>
+        {
+          y1 := y0
+          yError := none
+          denseInfo := denseFail
+          solverState := state
+          result := Result.internalError
+        }
+    | none =>
+        match UnderdampedLangevinDiffusionTerm.validate? diffusion t0 y0 args with
+        | some _ =>
+            {
+              y1 := y0
+              yError := none
+              denseInfo := denseFail
+              solverState := state
+              result := Result.internalError
+            }
+        | none =>
+            let driftInst := (inferInstance :
+              TermLike (UnderdampedLangevinDriftTerm X Args) (X × X) (X × X) Time Args)
+            let diffInst := (inferInstance :
+              TermLike (UnderdampedLangevinDiffusionTerm X Args) (X × X) Scalar X Args)
 
-    let x0 := y0.1
-    let v0 := y0.2
-    let h := driftInst.contr drift t0 t1
-    let dW := diffInst.contr diffusion t0 t1
-    let gamma := drift.gamma t0 x0 v0 args
-    let u := drift.u t0 x0 v0 args
-    let rho := Float.sqrt (2.0 * gamma * u)
-    let uh := u * h
-    let coeffs := quicsortCoeffs h gamma
-    let rhoW := rho * dW
+            let x0 := y0.1
+            let v0 := y0.2
+            let h := driftInst.contr drift t0 t1
+            let dW := diffInst.contr diffusion t0 t1
+            let gamma := drift.gamma t0 x0 v0 args
+            let u := drift.u t0 x0 v0 args
+            let rho := Float.sqrt (2.0 * gamma * u)
+            let uh := u * h
+            let coeffs := quicsortCoeffs h gamma
+            let rhoW := rho * dW
 
-    let xL := x0 + coeffs.aL * v0 + coeffs.bL * rhoW
-    let fLUh := uh * drift.gradPotential (t0 + lCoeff * h) xL args
+            let xL := x0 + coeffs.aL * v0 + coeffs.bL * rhoW
+            let fLUh := uh * drift.gradPotential (t0 + lCoeff * h) xL args
 
-    let xR := x0 + coeffs.aR * v0 + coeffs.bR * rhoW - coeffs.aThird * fLUh
-    let fRUh := uh * drift.gradPotential (t0 + rCoeff * h) xR args
+            let xR := x0 + coeffs.aR * v0 + coeffs.bR * rhoW - coeffs.aThird * fLUh
+            let fRUh := uh * drift.gradPotential (t0 + rCoeff * h) xR args
 
-    let x1 :=
-      x0 + coeffs.a1 * v0 + coeffs.b1 * rhoW -
-      0.5 * (coeffs.aR * fLUh + coeffs.aL * fRUh)
+            let x1 :=
+              x0 + coeffs.a1 * v0 + coeffs.b1 * rhoW -
+              0.5 * (coeffs.aR * fLUh + coeffs.aL * fRUh)
 
-    let v1 :=
-      coeffs.beta1 * v0 -
-      0.5 * (coeffs.betaR * fLUh + coeffs.betaL * fRUh) +
-      coeffs.aDivH * rhoW
+            let v1 :=
+              coeffs.beta1 * v0 -
+              0.5 * (coeffs.betaR * fLUh + coeffs.betaL * fRUh) +
+              coeffs.aDivH * rhoW
 
-    let y1 : X × X := (x1, v1)
-    let dense := { t0 := t0, t1 := t1, y0 := y0, y1 := y1 }
-    {
-      y1 := y1
-      yError := none
-      denseInfo := dense
-      solverState := state
-      result := Result.successful
-    }
+            let y1 : X × X := (x1, v1)
+            let dense := { t0 := t0, t1 := t1, y0 := y0, y1 := y1 }
+            {
+              y1 := y1
+              yError := none
+              denseInfo := dense
+              solverState := state
+              result := Result.successful
+            }
   func := fun terms t y args =>
     let driftInst := (inferInstance :
       TermLike (UnderdampedLangevinDriftTerm X Args) (X × X) (X × X) Time Args)

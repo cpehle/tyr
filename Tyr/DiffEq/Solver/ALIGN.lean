@@ -62,45 +62,62 @@ def ALIGN.solver {X Args : Type}
   step := fun terms t0 t1 y0 args state _madeJump =>
     let drift := terms.term1
     let diffusion := terms.term2
-    let driftInst := (inferInstance :
-      TermLike (UnderdampedLangevinDriftTerm X Args) (X × X) (X × X) Time Args)
-    let diffInst := (inferInstance :
-      TermLike (UnderdampedLangevinDiffusionTerm X Args) (X × X) Scalar X Args)
-    -- Preserve runtime validation performed by the term instances.
-    let _ := driftInst.vf drift t0 y0 args
-    let _ := diffInst.vf diffusion t0 y0 args
+    let denseFail := { t0 := t0, t1 := t1, y0 := y0, y1 := y0 }
+    match UnderdampedLangevinDriftTerm.validate? drift t0 y0 args with
+    | some _ =>
+        {
+          y1 := y0
+          yError := none
+          denseInfo := denseFail
+          solverState := state
+          result := Result.internalError
+        }
+    | none =>
+        match UnderdampedLangevinDiffusionTerm.validate? diffusion t0 y0 args with
+        | some _ =>
+            {
+              y1 := y0
+              yError := none
+              denseInfo := denseFail
+              solverState := state
+              result := Result.internalError
+            }
+        | none =>
+            let driftInst := (inferInstance :
+              TermLike (UnderdampedLangevinDriftTerm X Args) (X × X) (X × X) Time Args)
+            let diffInst := (inferInstance :
+              TermLike (UnderdampedLangevinDiffusionTerm X Args) (X × X) Scalar X Args)
+            let x0 := y0.1
+            let v0 := y0.2
+            let h := driftInst.contr drift t0 t1
+            let dW := diffInst.contr diffusion t0 t1
+            let gamma := drift.gamma t0 x0 v0 args
+            let u := drift.u t0 x0 v0 args
+            let rho := Float.sqrt (2.0 * gamma * u)
+            let coeffs := alignCoeffs h gamma
+            let f0 := drift.gradPotential t0 x0 args
 
-    let x0 := y0.1
-    let v0 := y0.2
-    let h := driftInst.contr drift t0 t1
-    let dW := diffInst.contr diffusion t0 t1
-    let gamma := drift.gamma t0 x0 v0 args
-    let u := drift.u t0 x0 v0 args
-    let rho := Float.sqrt (2.0 * gamma * u)
-    let coeffs := alignCoeffs h gamma
-    let f0 := drift.gradPotential t0 x0 args
+            let xDrift := coeffs.a1 * v0 - coeffs.b1 * ((u * h) * f0)
+            let xDiff := (rho * coeffs.b1) * dW
+            let x1 := x0 + (xDrift + xDiff)
 
-    let xDrift := coeffs.a1 * v0 - coeffs.b1 * ((u * h) * f0)
-    let xDiff := (rho * coeffs.b1) * dW
-    let x1 := x0 + (xDrift + xDiff)
+            let f1 := drift.gradPotential t1 x1 args
+            let vDrift :=
+              coeffs.beta * v0 -
+                u * (((coeffs.a1 - coeffs.b1) * f0) + coeffs.b1 * f1)
+            let vDiff := (rho * coeffs.aa) * dW
+            let v1 := vDrift + vDiff
 
-    let f1 := drift.gradPotential t1 x1 args
-    let vDrift :=
-      coeffs.beta * v0 -
-        u * (((coeffs.a1 - coeffs.b1) * f0) + coeffs.b1 * f1)
-    let vDiff := (rho * coeffs.aa) * dW
-    let v1 := vDrift + vDiff
-
-    let y1 : X × X := (x1, v1)
-    let yErr : X × X := (0.0 * x0, (-u * coeffs.b1) * (f1 - f0))
-    let dense := { t0 := t0, t1 := t1, y0 := y0, y1 := y1 }
-    {
-      y1 := y1
-      yError := some yErr
-      denseInfo := dense
-      solverState := state
-      result := Result.successful
-    }
+            let y1 : X × X := (x1, v1)
+            let yErr : X × X := (0.0 * x0, (-u * coeffs.b1) * (f1 - f0))
+            let dense := { t0 := t0, t1 := t1, y0 := y0, y1 := y1 }
+            {
+              y1 := y1
+              yError := some yErr
+              denseInfo := dense
+              solverState := state
+              result := Result.successful
+            }
   func := fun terms t y args =>
     let driftInst := (inferInstance :
       TermLike (UnderdampedLangevinDriftTerm X Args) (X × X) (X × X) Time Args)
