@@ -11,6 +11,11 @@ open torch.DiffEq
 private def approx (a b tol : Float) : Bool :=
   Float.abs (a - b) < tol
 
+private def getStat (name : String) (stats : List (String × Nat)) : Nat :=
+  match stats.find? (fun kv => kv.fst == name) with
+  | some (_, v) => v
+  | none => 0
+
 private def getY1 {S C : Type} (label : String) (sol : Solution Float S C) : IO Float := do
   match sol.ys with
   | some ys =>
@@ -31,6 +36,13 @@ section
       let gradY := a * adjY
       let gradA := y * adjY
       (f, gradY, gradA)
+
+  local instance : AdjointFnBackend Float Float where
+    vjpFn f y a adjY :=
+      let eps := 1.0e-4
+      let dy := ((f (y + eps) a) - (f (y - eps) a)) / (2.0 * eps)
+      let da := ((f y (a + eps)) - (f y (a - eps))) / (2.0 * eps)
+      (dy * adjY, da * adjY)
 
   @[test] def testBacksolveAdjointLinearODE : IO Unit := do
     let term : ODETerm Float Float := { vectorField := fun _t y a => a * y }
@@ -223,6 +235,116 @@ section
           s!"Recursive checkpoint adjY0 expected ~{expectedY0}, got {adj.adjY0}"
         LeanTest.assertTrue (approx adj.adjArgs expectedA 8.0e-2)
           s!"Recursive checkpoint adjArgs expected ~{expectedA}, got {adj.adjArgs}"
+
+  @[test] def testForwardModeInferredDt0MatchesExplicitDt0 : IO Unit := do
+    let term : ODETerm Float Float := { vectorField := fun _t y a => a * y }
+    let solver :=
+      Euler.solver
+        (Term := ODETerm Float Float)
+        (Y := Float)
+        (VF := Float)
+        (Args := Float)
+    let mode : ForwardMode := { requireDt0 := false }
+    let y0 := 2.0
+    let a := 0.3
+    let adjY1 := 1.0
+    let steps := 16
+    let inferredDt := (1.0 : Float) / Float.ofNat (steps / 2)
+    let (solInferred, adjInferredOpt, errInferredOpt) :=
+      diffeqsolveForwardMode
+        mode term solver 0.0 1.0 none y0 a adjY1
+        (saveat := { t1 := true }) (maxSteps := steps)
+    let (solExplicit, adjExplicitOpt, errExplicitOpt) :=
+      diffeqsolveForwardMode
+        mode term solver 0.0 1.0 (some inferredDt) y0 a adjY1
+        (saveat := { t1 := true }) (maxSteps := steps)
+
+    LeanTest.assertTrue (solInferred.result == Result.successful)
+      "ForwardMode with inferred dt0 should succeed when requireDt0=false"
+    LeanTest.assertTrue errInferredOpt.isNone
+      "ForwardMode with inferred dt0 should not report unsupported errors"
+    LeanTest.assertTrue (solExplicit.result == Result.successful)
+      "ForwardMode with explicit dt0 should succeed"
+    LeanTest.assertTrue errExplicitOpt.isNone
+      "ForwardMode with explicit dt0 should not report unsupported errors"
+
+    let yInferred ← getY1 "forward inferred dt0" solInferred
+    let yExplicit ← getY1 "forward explicit dt0" solExplicit
+    LeanTest.assertTrue (approx yInferred yExplicit 1.0e-12)
+      s!"ForwardMode inferred/explicit primal mismatch: {yInferred} vs {yExplicit}"
+    match adjInferredOpt, adjExplicitOpt with
+    | some adjInferred, some adjExplicit =>
+        LeanTest.assertTrue (approx adjInferred.adjY0 adjExplicit.adjY0 2.0e-3)
+          s!"ForwardMode inferred/explicit adjY0 mismatch: {adjInferred.adjY0} vs {adjExplicit.adjY0}"
+        LeanTest.assertTrue (approx adjInferred.adjArgs adjExplicit.adjArgs 2.0e-3)
+          s!"ForwardMode inferred/explicit adjArgs mismatch: {adjInferred.adjArgs} vs {adjExplicit.adjArgs}"
+    | _, _ =>
+        LeanTest.fail "Expected adjoint results for both inferred/explicit forward mode runs"
+
+  @[test] def testForwardModeRequireDt0ErrorReporting : IO Unit := do
+    let term : ODETerm Float Float := { vectorField := fun _t y a => a * y }
+    let solver :=
+      Euler.solver
+        (Term := ODETerm Float Float)
+        (Y := Float)
+        (VF := Float)
+        (Args := Float)
+    let (sol, adjOpt, errOpt) :=
+      diffeqsolveForwardMode
+        (mode := { requireDt0 := true })
+        term solver 0.0 1.0 none 2.0 0.3 1.0 (saveat := { t1 := true })
+    LeanTest.assertTrue (sol.result == Result.internalError)
+      "ForwardMode without dt0 should fail when requireDt0=true"
+    LeanTest.assertTrue adjOpt.isNone
+      "ForwardMode unsupported run should not return adjoints"
+    LeanTest.assertTrue (getStat "adjoint_error" sol.stats == 1)
+      "ForwardMode unsupported run should mark adjoint_error stat"
+    LeanTest.assertTrue (getStat "unsupported_forward_mode" sol.stats == 1)
+      "ForwardMode unsupported run should mark unsupported_forward_mode stat"
+    match errOpt with
+    | some msg =>
+        LeanTest.assertTrue (msg.contains "requires `dt0`")
+          s!"Expected dt0 requirement message for ForwardMode, got: {msg}"
+    | none =>
+        LeanTest.fail "Expected unsupported message for ForwardMode without dt0"
+
+  @[test] def testImplicitAdjointRecursiveNeedsBacksolveFallbackMessage : IO Unit := do
+    let term : ODETerm Float Float := { vectorField := fun _t y a => a * y }
+    let solver :=
+      RK4.solver
+        (Term := ODETerm Float Float)
+        (Y := Float)
+        (VF := Float)
+        (Args := Float)
+    let adjSolver :=
+      RK4.solver
+        (Term := ODETerm (AdjointState Float Float) Float)
+        (Y := AdjointState Float Float)
+        (VF := AdjointState Float Float)
+        (Args := Float)
+    let adjoint : BacksolveAdjoint Float Float := { adjSolver := adjSolver }
+    let mode : ImplicitAdjoint := {
+      useBacksolveFallback := false
+      recursiveCheckpoint := some { checkpointEvery := 4, recomputeSegments := true }
+    }
+    let (sol, adjOpt, errOpt) :=
+      diffeqsolveImplicitAdjoint
+        (Controller := ConstantStepSize)
+        mode term solver adjoint 0.0 1.0 (some 0.01) 2.0 0.3 1.0 (saveat := { t1 := true })
+    LeanTest.assertTrue (sol.result == Result.internalError)
+      "ImplicitAdjoint recursive mode without fallback should report unsupported mode"
+    LeanTest.assertTrue adjOpt.isNone
+      "ImplicitAdjoint recursive unsupported mode should not return adjoints"
+    LeanTest.assertTrue (getStat "adjoint_error" sol.stats == 1)
+      "ImplicitAdjoint unsupported run should mark adjoint_error stat"
+    LeanTest.assertTrue (getStat "unsupported_implicit_adjoint" sol.stats == 1)
+      "ImplicitAdjoint unsupported run should mark unsupported_implicit_adjoint stat"
+    match errOpt with
+    | some msg =>
+        LeanTest.assertTrue (msg.contains "requires `useBacksolveFallback := true`")
+          s!"Expected recursive fallback requirement message, got: {msg}"
+    | none =>
+        LeanTest.fail "Expected unsupported message for recursive implicit adjoint without fallback"
 end
 
 end Tests.DiffEqAdjointCore

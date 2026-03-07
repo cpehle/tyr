@@ -572,7 +572,7 @@ def directModeUnsupportedReason
     if mode.requireDt0 then
       directAdjointUnsupportedReason dt0
     else
-      some "Adjoint solve failed: `DirectAdjoint` without `dt0` is not implemented yet."
+      none
   else
     none
 
@@ -583,16 +583,51 @@ def forwardModeUnsupportedReason
     if mode.requireDt0 then
       directAdjointUnsupportedReason dt0
     else
-      some "Adjoint solve failed: `ForwardMode` without `dt0` is not implemented yet."
+      none
   else
     none
+
+private def inferConstantStepDt0 (t0 t1 : Time) (maxSteps : Nat) : Option Time :=
+  let span := t1 - t0
+  if span == 0.0 then
+    none
+  else
+    let budget := if maxSteps <= 1 then 1 else maxSteps / 2
+    let steps := Nat.min 256 budget
+    let dt := span / Float.ofNat steps
+    if dt == 0.0 then some span else some dt
+
+private def resolveDirectLikeDt0
+    (modeName : String)
+    (requireDt0 : Bool)
+    (t0 t1 : Time)
+    (dt0 : Option Time)
+    (maxSteps : Nat) :
+    (Option Time × Option String) :=
+  match dt0 with
+  | some dt => (some dt, none)
+  | none =>
+      if requireDt0 then
+        (none, directAdjointUnsupportedReason none)
+      else
+        match inferConstantStepDt0 t0 t1 maxSteps with
+        | some inferred => (some inferred, none)
+        | none =>
+            (none,
+              some
+                s!"Adjoint solve failed: `{modeName}` without `dt0` could not infer a nonzero constant step from `t0`/`t1`.")
 
 def implicitAdjointUnsupportedReason
     (mode : ImplicitAdjoint) : Option String :=
   if mode.useBacksolveFallback then
     none
   else
-    some "Adjoint solve failed: `ImplicitAdjoint` without backsolve fallback is not implemented yet."
+    match mode.recursiveCheckpoint with
+    | some _ =>
+        some
+          "Adjoint solve failed: `ImplicitAdjoint.recursiveCheckpoint` requires `useBacksolveFallback := true`."
+    | none =>
+        some "Adjoint solve failed: `ImplicitAdjoint` without backsolve fallback is not implemented yet."
 
 private def diffeqsolveDirectAdjointWithReportCore
     {Y Args : Type}
@@ -698,9 +733,15 @@ def diffeqsolveDirectAdjointMode
     (controller : ConstantStepSize := default) :
     AdjointSolveWithReport Y solver.SolverState
       (StepSizeController.State (C := ConstantStepSize)) Args :=
+  let (dt0Resolved, dt0UnsupportedReason) :=
+    resolveDirectLikeDt0 "DirectAdjoint" mode.requireDt0 t0 t1 dt0 maxSteps
+  let unsupportedReason :=
+    match dt0UnsupportedReason with
+    | some msg => some msg
+    | none => directModeUnsupportedReason mode dt0Resolved
   diffeqsolveDirectAdjointWithReportCore
-    term solver t0 t1 dt0 y0 args adjY1 saveat maxSteps controller
-    "unsupported_direct_adjoint_mode" (directModeUnsupportedReason mode dt0)
+    term solver t0 t1 dt0Resolved y0 args adjY1 saveat maxSteps controller
+    "unsupported_direct_adjoint_mode" unsupportedReason
 
 def diffeqsolveForwardMode
     {Y Args : Type}
@@ -721,9 +762,15 @@ def diffeqsolveForwardMode
     (controller : ConstantStepSize := default) :
     AdjointSolveWithReport Y solver.SolverState
       (StepSizeController.State (C := ConstantStepSize)) Args :=
+  let (dt0Resolved, dt0UnsupportedReason) :=
+    resolveDirectLikeDt0 "ForwardMode" mode.requireDt0 t0 t1 dt0 maxSteps
+  let unsupportedReason :=
+    match dt0UnsupportedReason with
+    | some msg => some msg
+    | none => forwardModeUnsupportedReason mode dt0Resolved
   diffeqsolveDirectAdjointWithReportCore
-    term solver t0 t1 dt0 y0 args adjY1 saveat maxSteps controller
-    "unsupported_forward_mode" (forwardModeUnsupportedReason mode dt0)
+    term solver t0 t1 dt0Resolved y0 args adjY1 saveat maxSteps controller
+    "unsupported_forward_mode" unsupportedReason
 
 def diffeqsolveRecursiveCheckpointAdjoint
     {Y Args Controller : Type}
