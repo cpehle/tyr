@@ -134,6 +134,49 @@ private def eulerMaruyamaTimeInhomogeneousOUWeakSecondMoment
   let n := Float.ofNat seeds.size
   pure (sumM2 / n)
 
+private def eulerHeunOUWeakMeanSecondMoment
+    (a sigma x0 tFinal dt : Float) (seeds : Array UInt64) : IO (Float × Float) := do
+  let drift : ODETerm Float Unit := { vectorField := fun _t y _ => -a * y }
+  let solver :=
+    EulerHeun.solver
+      (Drift := ODETerm Float Unit)
+      (Diffusion := ControlTerm Float Float Float Unit)
+      (Y := Float)
+      (VFd := Float)
+      (VFg := Float)
+      (Control := Float)
+      (Args := Unit)
+  let mut sum := 0.0
+  let mut sumSq := 0.0
+  for seed in seeds do
+    let bm : VirtualBrownianTree Float := {
+      t0 := 0.0
+      t1 := tFinal
+      tol := 1.0e-6
+      maxDepth := 22
+      seed := seed
+      shape := 0.0
+    }
+    let bmPath := (VirtualBrownianTree.toAbstract bm).toPath
+    let diffusion : ControlTerm Float Float Float Unit :=
+      ControlTerm.ofPath (fun _t _y _ => sigma) bmPath (fun vf control => vf * control)
+    let terms : MultiTerm (ODETerm Float Unit) (ControlTerm Float Float Float Unit) :=
+      { term1 := drift, term2 := diffusion }
+    let sol :=
+      diffeqsolve
+        (Term := MultiTerm (ODETerm Float Unit) (ControlTerm Float Float Float Unit))
+        (Y := Float)
+        (VF := (Float × Float))
+        (Control := (Time × Float))
+        (Args := Unit)
+        (Controller := ConstantStepSize)
+        terms solver 0.0 tFinal (some dt) x0 () (saveat := { t1 := true })
+    let y1 ← finalSaved "weak OU Euler-Heun" sol
+    sum := sum + y1
+    sumSq := sumSq + (y1 * y1)
+  let n := Float.ofNat seeds.size
+  pure (sum / n, sumSq / n)
+
 /--
 Weak-stat parity regression for geometric Brownian motion under Euler-Maruyama.
 Guidance sources:
@@ -244,8 +287,59 @@ Guidance sources:
   LeanTest.assertTrue (errFine < 1.0e-2)
     s!"Weak time-inhomogeneous OU fine-step M2 unexpectedly far from exact: {m2Fine} vs {exactM2}"
 
+/--
+Weak-order parity regression for Stratonovich additive-noise OU under Euler-Heun.
+Guidance sources:
+- `../diffrax/docs/devdocs/SDE_solver_table.md` (`Heun` weak order 1.0)
+- `../diffrax/test/test_sde1.py` (coarse/medium/fine convergence structure)
+-/
+@[test] def testSDEWeakOUMeanM2ConvergenceEulerHeun : IO Unit := do
+  let a := 0.9
+  let sigma := 0.2
+  let x0 := 1.0
+  let tFinal := 1.0
+  let seeds := deterministicWeakSeeds 512
+
+  let (meanCoarse, m2Coarse) ←
+    eulerHeunOUWeakMeanSecondMoment a sigma x0 tFinal 0.2 seeds
+  let (meanMedium, m2Medium) ←
+    eulerHeunOUWeakMeanSecondMoment a sigma x0 tFinal 0.1 seeds
+  let (meanFine, m2Fine) ←
+    eulerHeunOUWeakMeanSecondMoment a sigma x0 tFinal 0.05 seeds
+
+  let exactMean := x0 * Float.exp (-a * tFinal)
+  let exactVar := ((sigma * sigma) / (2.0 * a)) * (1.0 - Float.exp (-2.0 * a * tFinal))
+  let exactM2 := exactVar + exactMean * exactMean
+
+  let meanErrCoarse := Float.abs (meanCoarse - exactMean)
+  let meanErrMedium := Float.abs (meanMedium - exactMean)
+  let meanErrFine := Float.abs (meanFine - exactMean)
+  let m2ErrCoarse := Float.abs (m2Coarse - exactM2)
+  let m2ErrMedium := Float.abs (m2Medium - exactM2)
+  let m2ErrFine := Float.abs (m2Fine - exactM2)
+
+  LeanTest.assertTrue (meanErrCoarse > meanErrMedium && meanErrMedium > meanErrFine)
+    s!"Weak Euler-Heun OU mean errors should decrease with dt: {meanErrCoarse}, {meanErrMedium}, {meanErrFine}"
+  LeanTest.assertTrue (m2ErrCoarse > m2ErrMedium && m2ErrMedium > m2ErrFine)
+    s!"Weak Euler-Heun OU second-moment errors should decrease with dt: {m2ErrCoarse}, {m2ErrMedium}, {m2ErrFine}"
+
+  let meanRatio1 := meanErrCoarse / meanErrMedium
+  let meanRatio2 := meanErrMedium / meanErrFine
+  let m2Ratio1 := m2ErrCoarse / m2ErrMedium
+  let m2Ratio2 := m2ErrMedium / m2ErrFine
+  LeanTest.assertTrue (meanRatio1 > 1.3 && meanRatio2 > 1.3)
+    s!"Weak Euler-Heun OU mean trend too weak: ratios {meanRatio1}, {meanRatio2}"
+  LeanTest.assertTrue (m2Ratio1 > 1.3 && m2Ratio2 > 1.3)
+    s!"Weak Euler-Heun OU second-moment trend too weak: ratios {m2Ratio1}, {m2Ratio2}"
+
+  LeanTest.assertTrue (meanErrFine < 2.0e-2)
+    s!"Weak Euler-Heun OU fine-step mean error too large: {meanErrFine}"
+  LeanTest.assertTrue (m2ErrFine < 2.0e-2)
+    s!"Weak Euler-Heun OU fine-step second-moment error too large: {m2ErrFine}"
+
 def run : IO Unit := do
   testSDEWeakGBMMeanVarianceConvergenceEulerMaruyama
   testSDEWeakTimeInhomogeneousOUM2ConvergenceEulerMaruyama
+  testSDEWeakOUMeanM2ConvergenceEulerHeun
 
 end Tests.DiffEqWeakStatsParity2
