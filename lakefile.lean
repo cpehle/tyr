@@ -307,7 +307,13 @@ lean_exe AlphaGradPortSweep where
 
 /-- AlphaGrad policy-training runner with real parameter updates. -/
 lean_exe AlphaGradPolicyTrain where
-  root := `Examples.AlphaGradPort.PolicyTrain
+  root := `Examples.AlphaGradPort.PolicyTrainMain
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
+/-- AlphaGrad policy-training sweep runner across tasks and training modes. -/
+lean_exe AlphaGradPolicySweep where
+  root := `Examples.AlphaGradPort.PolicySweepMain
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 

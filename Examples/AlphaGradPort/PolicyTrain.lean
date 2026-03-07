@@ -872,7 +872,7 @@ private def runTrain
       | .ok _ =>
         pure 0
 
-def main (args : List String) : IO UInt32 := do
+def policyTrainMain (args : List String) : IO UInt32 := do
   match args with
   | [] =>
     runTrain .ppo .roeFlux1d
@@ -913,5 +913,3 @@ def main (args : List String) : IO UInt32 := do
     pure 1
 
 end Examples.AlphaGradPort
-
-def main : List String → IO UInt32 := Examples.AlphaGradPort.main

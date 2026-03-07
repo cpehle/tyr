@@ -1,5 +1,6 @@
 import LeanTest
 import Examples.AlphaGradPort.A0Train
+import Examples.AlphaGradPort.PolicySweep
 
 namespace Tests.AlphaGradPortExamples
 
@@ -86,5 +87,11 @@ def testAllAlphaGradTasksMaterialize : IO Unit := do
       | .ok task => pure task
     LeanTest.assertTrue (task.numVertices > 0)
       s!"{task.name} should report a positive vertex count."
+
+@[test]
+def testPolicySweepPPOPerceptronTinyRun : IO Unit := do
+  let code ← Examples.AlphaGradPort.policySweepMain ["ppo", "Perceptron", "1", "1"]
+  LeanTest.assertEqual code 0
+    "AlphaGradPolicySweep should complete a tiny PPO run for Perceptron."
 
 end Tests.AlphaGradPortExamples

@@ -13,6 +13,7 @@ Executables:
 - `lake exe AlphaGradPortSweep <task-name> [episodes]`
 - `lake exe AlphaGradPolicyTrain ppo [task-name] [epochs] [episodes-per-epoch]`
 - `lake exe AlphaGradPolicyTrain alphazero [task-name] [epochs] [episodes-per-epoch]`
+- `lake exe AlphaGradPolicySweep [mode] [task-name|all] [epochs] [episodes-per-epoch]`
 
 Task order used by the sweep:
 1. `RoeFlux_1d`
@@ -37,3 +38,5 @@ Notes:
   (clipped objective + value loss + entropy regularization).
 - `AlphaGradPolicyTrain alphazero` is full network AlphaZero-style training
   (MCTS policy targets + value regression).
+- `AlphaGradPolicySweep` runs PPO/AlphaZero/both across one task or all tasks
+  with a single CLI entrypoint.
