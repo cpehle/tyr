@@ -10,6 +10,11 @@ open torch.DiffEq
 private def approx (a b tol : Float) : Bool :=
   Float.abs (a - b) < tol
 
+private def getStat (name : String) (stats : List (String × Nat)) : Nat :=
+  match stats.find? (fun kv => kv.fst == name) with
+  | some (_, v) => v
+  | none => 0
+
 private def assertSavedTsYsEq {S C : Type}
     (label : String)
     (sol : Solution Float S C)
@@ -191,11 +196,93 @@ private def solveStepTo (ts : Array Time) (saveat : SaveAt) :
   | _, _, _, _ =>
       LeanTest.fail "skip-vs-ts parity: expected ts/ys outputs from both solves"
 
+@[test] def testDegenerateIntervalRootSaveAtParity : IO Unit := do
+  -- Diffrax reference: `test_saveat_solution.py::test_t0_eq_t1` (root SaveAt case).
+  let term : ODETerm Float Unit := { vectorField := fun _t y _ => y }
+  let solver :=
+    Dopri5.solver (Term := ODETerm Float Unit) (Y := Float) (VF := Float) (Args := Unit)
+  let saveat : SaveAt := {
+    t0 := true
+    t1 := true
+    ts := some #[1.0, 1.0, 1.0]
+  }
+  let sol :=
+    diffeqsolve
+      (Term := ODETerm Float Unit)
+      (Y := Float)
+      (VF := Float)
+      (Control := Time)
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      term solver 1.0 1.0 (some 0.1) (2.0 : Float) () (saveat := saveat)
+  LeanTest.assertTrue (sol.result == Result.successful)
+    "Degenerate-interval root SaveAt solve should succeed"
+  LeanTest.assertTrue (getStat "num_steps" sol.stats == 0)
+    s!"Expected num_steps=0 when t0==t1, got {getStat "num_steps" sol.stats}"
+  LeanTest.assertTrue (getStat "num_accepted_steps" sol.stats == 0)
+    s!"Expected num_accepted_steps=0 when t0==t1, got {getStat "num_accepted_steps" sol.stats}"
+  LeanTest.assertTrue (getStat "num_rejected_steps" sol.stats == 0)
+    s!"Expected num_rejected_steps=0 when t0==t1, got {getStat "num_rejected_steps" sol.stats}"
+  match sol.ts, sol.ys with
+  | some ts, some ys =>
+      LeanTest.assertTrue (ts.size == 5 && ys.size == 5)
+        s!"Expected 5 degenerate-interval saves, got ts/ys sizes {ts.size}/{ys.size}"
+      for i in [:ts.size] do
+        LeanTest.assertTrue (approx ts[i]! 1.0 1e-12)
+          s!"Expected ts[{i}] = 1.0 in degenerate solve, got {ts[i]!}"
+        LeanTest.assertTrue (approx ys[i]! 2.0 1e-12)
+          s!"Expected ys[{i}] = 2.0 in degenerate solve, got {ys[i]!}"
+  | _, _ =>
+      LeanTest.fail "Expected ts/ys output for degenerate-interval root SaveAt"
+
+@[test] def testDegenerateIntervalSubSaveAtParity : IO Unit := do
+  -- Diffrax reference: `test_saveat_solution.py::test_t0_eq_t1` (SubSaveAt case).
+  let term : ODETerm Float Unit := { vectorField := fun _t y _ => y }
+  let solver :=
+    Dopri5.solver (Term := ODETerm Float Unit) (Y := Float) (VF := Float) (Args := Unit)
+  let subA : SubSaveAt := { ts := some #[1.0, 1.0, 1.0], t1 := true }
+  let subB : SubSaveAt := { t0 := true, ts := some #[1.0, 1.0, 1.0] }
+  let subC : SubSaveAt := { t0 := true, ts := some #[1.0, 1.0, 1.0], steps := (1 : Nat) }
+  let saveat : SaveAt := {
+    t1 := false
+    subs := #[subA, subB, subC]
+  }
+  let sol :=
+    diffeqsolve
+      (Term := ODETerm Float Unit)
+      (Y := Float)
+      (VF := Float)
+      (Control := Time)
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      term solver 1.0 1.0 (some 0.1) (2.0 : Float) () (saveat := saveat)
+  LeanTest.assertTrue (sol.result == Result.successful)
+    "Degenerate-interval SubSaveAt solve should succeed"
+  LeanTest.assertTrue (getStat "num_steps" sol.stats == 0)
+    s!"Expected num_steps=0 when t0==t1, got {getStat "num_steps" sol.stats}"
+  LeanTest.assertTrue (getStat "num_accepted_steps" sol.stats == 0)
+    s!"Expected num_accepted_steps=0 when t0==t1, got {getStat "num_accepted_steps" sol.stats}"
+  LeanTest.assertTrue (getStat "num_rejected_steps" sol.stats == 0)
+    s!"Expected num_rejected_steps=0 when t0==t1, got {getStat "num_rejected_steps" sol.stats}"
+  match sol.ts, sol.ys with
+  | some ts, some ys =>
+      LeanTest.assertTrue (ts.size == 12 && ys.size == 12)
+        s!"Expected 12 SubSaveAt degenerate saves, got ts/ys sizes {ts.size}/{ys.size}"
+      for i in [:ts.size] do
+        LeanTest.assertTrue (approx ts[i]! 1.0 1e-12)
+          s!"Expected ts[{i}] = 1.0 in SubSaveAt degenerate solve, got {ts[i]!}"
+        LeanTest.assertTrue (approx ys[i]! 2.0 1e-12)
+          s!"Expected ys[{i}] = 2.0 in SubSaveAt degenerate solve, got {ys[i]!}"
+  | _, _ =>
+      LeanTest.fail "Expected ts/ys output for degenerate-interval SubSaveAt"
+
 def run : IO Unit := do
   testSaveAtSubsIgnoresSyntheticRootPayload
   testNestedContainerSubSaveAtPayloadIgnored
   testReverseTimeNestedSubSaveAtUsesPerLeafTsMonotonicity
   testSaveAtStepsSkipStepToParity
   testSaveAtStepsSkipVsTsParity
+  testDegenerateIntervalRootSaveAtParity
+  testDegenerateIntervalSubSaveAtParity
 
 end Tests.DiffEqSaveAtParity
