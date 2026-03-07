@@ -231,19 +231,29 @@ def compose [DiffEqSpace Control]
     t0 := leftPath.t0
     t1 := rightPath.t1
     evaluate := fun tStart tEnd? left =>
-      let tEnd := tEnd?.getD tStart
-      if tStart <= split && tEnd <= split then
-        leftPath.evaluate tStart (some tEnd) left
-      else if tStart >= split && tEnd >= split then
-        rightPath.evaluate tStart (some tEnd) left
-      else if tStart <= split then
-        let leftInc := leftPath.evaluate tStart (some split) left
-        let rightInc := rightPath.evaluate split (some tEnd) left
-        DiffEqSpace.add leftInc rightInc
-      else
-        let rightInc := rightPath.evaluate tStart (some split) left
-        let leftInc := leftPath.evaluate split (some tEnd) left
-        DiffEqSpace.add rightInc leftInc
+      match tEnd? with
+      | none =>
+          if tStart < split then
+            leftPath.evaluate tStart none left
+          else if tStart > split then
+            rightPath.evaluate tStart none left
+          else if left then
+            leftPath.evaluate tStart none left
+          else
+            rightPath.evaluate tStart none left
+      | some tEnd =>
+          if tStart <= split && tEnd <= split then
+            leftPath.evaluate tStart (some tEnd) left
+          else if tStart >= split && tEnd >= split then
+            rightPath.evaluate tStart (some tEnd) left
+          else if tStart <= split then
+            let leftInc := leftPath.evaluate tStart (some split) left
+            let rightInc := rightPath.evaluate split (some tEnd) left
+            DiffEqSpace.add leftInc rightInc
+          else
+            let rightInc := rightPath.evaluate tStart (some split) left
+            let leftInc := leftPath.evaluate split (some tEnd) left
+            DiffEqSpace.add rightInc leftInc
     derivativeFn? :=
       match leftPath.derivativeFn?, rightPath.derivativeFn? with
       | some leftDeriv, some rightDeriv =>
