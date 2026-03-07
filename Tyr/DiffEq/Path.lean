@@ -49,8 +49,9 @@ def increment [DiffEqSpace Control] (path : LinearPath Control) (tStart tEnd : T
 
 def evaluate [DiffEqSpace Control] (path : LinearPath Control)
     (tStart : Time) (tEnd? : Option Time) (_left : Bool := true) : Control :=
-  let tEnd := tEnd?.getD tStart
-  path.increment tStart tEnd
+  match tEnd? with
+  | some tEnd => path.increment tStart tEnd
+  | none => path.position tStart
 
 def toAbstract [DiffEqSpace Control] (path : LinearPath Control) : AbstractPath Control :=
   {
@@ -120,8 +121,9 @@ def increment [DiffEqSpace Control] (path : CubicHermitePath Control) (tStart tE
 
 def evaluate [DiffEqSpace Control] (path : CubicHermitePath Control)
     (tStart : Time) (tEnd? : Option Time) (_left : Bool := true) : Control :=
-  let tEnd := tEnd?.getD tStart
-  path.increment tStart tEnd
+  match tEnd? with
+  | some tEnd => path.increment tStart tEnd
+  | none => path.position tStart
 
 def toAbstract [DiffEqSpace Control] (path : CubicHermitePath Control) : AbstractPath Control :=
   {
@@ -134,6 +136,9 @@ def toAbstract [DiffEqSpace Control] (path : CubicHermitePath Control) : Abstrac
 end CubicHermitePath
 
 namespace AbstractPath
+
+def position (path : AbstractPath Control) (t : Time) (left : Bool := true) : Control :=
+  path.evaluate t none left
 
 def derivative (path : AbstractPath Control) (t : Time) (left : Bool := true) : Option Control :=
   match path.derivativeFn? with
@@ -172,8 +177,9 @@ def ofPosition [DiffEqSpace Control]
     (derivativeFn? : Option (Time → Bool → Control) := none) : AbstractPath Control :=
   ofFunctions t0 t1
     (fun tStart tEnd? _left =>
-      let tEnd := tEnd?.getD tStart
-      DiffEqSpace.sub (position tEnd) (position tStart))
+      match tEnd? with
+      | some tEnd => DiffEqSpace.sub (position tEnd) (position tStart)
+      | none => position tStart)
     derivativeFn?
 
 def ofDifferentiablePosition [DiffEqSpace Control]
