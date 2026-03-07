@@ -346,6 +346,14 @@ private def transposeAliasEntries? (inv outv : JVar) : Option (Array Tyr.AD.Spar
   else
     some (transposeEntries rows cols)
 
+private def identityAliasEntries? (inv outv : JVar) : Option (Array Tyr.AD.Sparse.SparseEntry) := do
+  let inDim ← varFlatDim? inv
+  let outDim ← varFlatDim? outv
+  if inDim = 0 || outDim = 0 || inDim != outDim then
+    none
+  else
+    some (diagEntries inDim 1.0)
+
 private def broadcastAliasEntries? (inv outv : JVar) : Option (Array Tyr.AD.Sparse.SparseEntry) := do
   let inShape ← inv.metaInfo.shape
   let outShape ← outv.metaInfo.shape
@@ -1040,6 +1048,14 @@ private def structuralUnaryAliasRule
     let entries? :=
       if opName == transposeAliasOpName || opName == `jax.lax.transpose_p || opName == `Graphax.transpose then
         transposeAliasEntries? inv outv
+      else if
+          opName == reshapeAliasOpName ||
+          opName == `jax.lax.reshape_p ||
+          opName == `Graphax.reshape ||
+          opName == squeezeAliasOpName ||
+          opName == `jax.lax.squeeze_p ||
+          opName == `Graphax.squeeze then
+        identityAliasEntries? inv outv
       else if
           opName == broadcastInDimAliasOpName ||
           opName == `jax.lax.broadcast_in_dim_p ||

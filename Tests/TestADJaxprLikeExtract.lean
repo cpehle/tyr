@@ -905,21 +905,35 @@ def testExtractStructuralAliasRules : IO Unit := do
 
 @[test]
 def testExtractStructuralAliasRulesUseShapeAwareSparsePayloads : IO Unit := do
-  let x : JVar := { id := 0, metaInfo := { shape := some #[3] } }
-  let y : JVar := { id := 1, metaInfo := { shape := some #[2, 1] } }
-  let z : JVar := { id := 2, metaInfo := { shape := some #[2, 1] } }
-  let bcast : JVar := { id := 3, metaInfo := { shape := some #[2, 3] } }
-  let sliced : JVar := { id := 4, metaInfo := { shape := some #[2, 2] } }
-  let transposed : JVar := { id := 5, metaInfo := { shape := some #[2, 2] } }
-  let out : JVar := { id := 6, metaInfo := { shape := some #[2, 4] } }
+  let x : JVar := { id := 0, metaInfo := { shape := some #[2, 1, 2] } }
+  let reshaped : JVar := { id := 1, metaInfo := { shape := some #[1, 4] } }
+  let squeezed : JVar := { id := 2, metaInfo := { shape := some #[4] } }
+  let y : JVar := { id := 3, metaInfo := { shape := some #[2, 1] } }
+  let z : JVar := { id := 4, metaInfo := { shape := some #[2, 1] } }
+  let bcast : JVar := { id := 5, metaInfo := { shape := some #[2, 4] } }
+  let sliced : JVar := { id := 6, metaInfo := { shape := some #[2, 2] } }
+  let transposed : JVar := { id := 7, metaInfo := { shape := some #[2, 2] } }
+  let out : JVar := { id := 8, metaInfo := { shape := some #[2, 4] } }
   let jaxpr : LeanJaxpr := {
     invars := #[x, y, z]
     eqns := #[
       {
-        op := broadcastInDimAliasOpName
+        op := reshapeAliasOpName
         invars := #[x]
-        outvars := #[bcast]
+        outvars := #[reshaped]
         source := { decl := `test.structural_alias_exact, line? := some 90 }
+      },
+      {
+        op := squeezeAliasOpName
+        invars := #[reshaped]
+        outvars := #[squeezed]
+        source := { decl := `test.structural_alias_exact, line? := some 91 }
+      },
+      {
+        op := broadcastInDimAliasOpName
+        invars := #[squeezed]
+        outvars := #[bcast]
+        source := { decl := `test.structural_alias_exact, line? := some 92 }
       },
       {
         op := `jax.lax.slice_in_dim_p
@@ -929,19 +943,19 @@ def testExtractStructuralAliasRulesUseShapeAwareSparsePayloads : IO Unit := do
           OpParam.mkNat .startCol 1,
           OpParam.mkNat .numCols 2
         ]
-        source := { decl := `test.structural_alias_exact, line? := some 91 }
+        source := { decl := `test.structural_alias_exact, line? := some 93 }
       },
       {
         op := transposeAliasOpName
         invars := #[sliced]
         outvars := #[transposed]
-        source := { decl := `test.structural_alias_exact, line? := some 92 }
+        source := { decl := `test.structural_alias_exact, line? := some 94 }
       },
       {
         op := concatenateAliasOpName
         invars := #[transposed, y, z]
         outvars := #[out]
-        source := { decl := `test.structural_alias_exact, line? := some 93 }
+        source := { decl := `test.structural_alias_exact, line? := some 95 }
       }
     ]
     outvars := #[out]
@@ -955,41 +969,67 @@ def testExtractStructuralAliasRulesUseShapeAwareSparsePayloads : IO Unit := do
   | .error errs =>
     LeanTest.fail s!"Shape-aware structural alias rules should extract successfully, got: {errs.map ruleExecutionErrorToString}"
   | .ok edges =>
-    LeanTest.assertEqual edges.size 6
-      "broadcast(1) + slice_in_dim(1) + transpose(1) + concatenate(3) should produce six local-Jac edges."
+    LeanTest.assertEqual edges.size 8
+      "reshape(1) + squeeze(1) + broadcast(1) + slice_in_dim(1) + transpose(1) + concatenate(3) should produce eight local-Jac edges."
 
-    match findEdge? edges 0 3 with
-    | none => LeanTest.fail "Missing broadcast_in_dim edge 0 -> 3"
+    match findEdge? edges 0 1 with
+    | none => LeanTest.fail "Missing reshape edge 0 -> 1"
+    | some e =>
+      LeanTest.assertTrue (e.map.repr == .semantic (.unary reshapeAliasOpName .x .projection))
+        s!"Unexpected reshape repr: {e.map.repr}"
+      LeanTest.assertEqual e.map.inDim? (some 4) "reshape input dim should be explicit."
+      LeanTest.assertEqual e.map.outDim? (some 4) "reshape output dim should be explicit."
+      LeanTest.assertEqual e.map.entries.size 4 "reshape should materialize four sparse entries."
+      LeanTest.assertTrue (hasEntry e.map.entries 0 0)
+        s!"reshape missing src=0,dst=0: {reprStr e.map.entries}"
+      LeanTest.assertTrue (hasEntry e.map.entries 3 3)
+        s!"reshape missing src=3,dst=3: {reprStr e.map.entries}"
+
+    match findEdge? edges 1 2 with
+    | none => LeanTest.fail "Missing squeeze edge 1 -> 2"
+    | some e =>
+      LeanTest.assertTrue (e.map.repr == .semantic (.unary squeezeAliasOpName .x .projection))
+        s!"Unexpected squeeze repr: {e.map.repr}"
+      LeanTest.assertEqual e.map.inDim? (some 4) "squeeze input dim should be explicit."
+      LeanTest.assertEqual e.map.outDim? (some 4) "squeeze output dim should be explicit."
+      LeanTest.assertEqual e.map.entries.size 4 "squeeze should materialize four sparse entries."
+      LeanTest.assertTrue (hasEntry e.map.entries 0 0)
+        s!"squeeze missing src=0,dst=0: {reprStr e.map.entries}"
+      LeanTest.assertTrue (hasEntry e.map.entries 3 3)
+        s!"squeeze missing src=3,dst=3: {reprStr e.map.entries}"
+
+    match findEdge? edges 2 5 with
+    | none => LeanTest.fail "Missing broadcast_in_dim edge 2 -> 5"
     | some e =>
       LeanTest.assertTrue (e.map.repr == .semantic (.unary broadcastInDimAliasOpName .x .expand))
         s!"Unexpected broadcast repr: {e.map.repr}"
-      LeanTest.assertEqual e.map.inDim? (some 3) "broadcast input dim should be explicit."
-      LeanTest.assertEqual e.map.outDim? (some 6) "broadcast output dim should be explicit."
-      LeanTest.assertEqual e.map.entries.size 6 "broadcast should materialize six sparse entries."
+      LeanTest.assertEqual e.map.inDim? (some 4) "broadcast input dim should be explicit."
+      LeanTest.assertEqual e.map.outDim? (some 8) "broadcast output dim should be explicit."
+      LeanTest.assertEqual e.map.entries.size 8 "broadcast should materialize eight sparse entries."
       LeanTest.assertTrue (hasEntry e.map.entries 0 0)
         s!"broadcast missing src=0,dst=0: {reprStr e.map.entries}"
-      LeanTest.assertTrue (hasEntry e.map.entries 0 3)
-        s!"broadcast missing src=0,dst=3: {reprStr e.map.entries}"
-      LeanTest.assertTrue (hasEntry e.map.entries 2 5)
-        s!"broadcast missing src=2,dst=5: {reprStr e.map.entries}"
+      LeanTest.assertTrue (hasEntry e.map.entries 0 4)
+        s!"broadcast missing src=0,dst=4: {reprStr e.map.entries}"
+      LeanTest.assertTrue (hasEntry e.map.entries 3 7)
+        s!"broadcast missing src=3,dst=7: {reprStr e.map.entries}"
 
-    match findEdge? edges 3 4 with
-    | none => LeanTest.fail "Missing slice_in_dim edge 3 -> 4"
+    match findEdge? edges 5 6 with
+    | none => LeanTest.fail "Missing slice_in_dim edge 5 -> 6"
     | some e =>
       LeanTest.assertTrue (e.map.repr == .semantic (.unary sliceInDimAliasOpName .x .projection))
         s!"Unexpected slice_in_dim repr: {e.map.repr}"
-      LeanTest.assertEqual e.map.inDim? (some 6) "slice input dim should be explicit."
+      LeanTest.assertEqual e.map.inDim? (some 8) "slice input dim should be explicit."
       LeanTest.assertEqual e.map.outDim? (some 4) "slice output dim should be explicit."
       LeanTest.assertEqual e.map.entries.size 4 "slice_in_dim should materialize four sparse entries."
       LeanTest.assertTrue (hasEntry e.map.entries 1 0)
         s!"slice_in_dim missing src=1,dst=0: {reprStr e.map.entries}"
       LeanTest.assertTrue (hasEntry e.map.entries 2 1)
         s!"slice_in_dim missing src=2,dst=1: {reprStr e.map.entries}"
-      LeanTest.assertTrue (hasEntry e.map.entries 5 3)
-        s!"slice_in_dim missing src=5,dst=3: {reprStr e.map.entries}"
+      LeanTest.assertTrue (hasEntry e.map.entries 6 3)
+        s!"slice_in_dim missing src=6,dst=3: {reprStr e.map.entries}"
 
-    match findEdge? edges 4 5 with
-    | none => LeanTest.fail "Missing transpose edge 4 -> 5"
+    match findEdge? edges 6 7 with
+    | none => LeanTest.fail "Missing transpose edge 6 -> 7"
     | some e =>
       LeanTest.assertTrue (e.map.repr == .semantic (.unary transposeAliasOpName .x .permute))
         s!"Unexpected transpose repr: {e.map.repr}"
@@ -999,8 +1039,8 @@ def testExtractStructuralAliasRulesUseShapeAwareSparsePayloads : IO Unit := do
       LeanTest.assertTrue (hasEntry e.map.entries 2 1)
         s!"transpose missing src=2,dst=1: {reprStr e.map.entries}"
 
-    match findEdge? edges 5 6 with
-    | none => LeanTest.fail "Missing concatenate edge 5 -> 6"
+    match findEdge? edges 7 8 with
+    | none => LeanTest.fail "Missing concatenate edge 7 -> 8"
     | some e =>
       LeanTest.assertTrue (e.map.repr == .semantic (.unary concatenateAliasOpName .x .inject))
         s!"Unexpected concatenate(first) repr: {e.map.repr}"
@@ -1010,8 +1050,8 @@ def testExtractStructuralAliasRulesUseShapeAwareSparsePayloads : IO Unit := do
       LeanTest.assertTrue (hasEntry e.map.entries 3 5)
         s!"concatenate(first) missing src=3,dst=5: {reprStr e.map.entries}"
 
-    match findEdge? edges 1 6 with
-    | none => LeanTest.fail "Missing concatenate edge 1 -> 6"
+    match findEdge? edges 3 8 with
+    | none => LeanTest.fail "Missing concatenate edge 3 -> 8"
     | some e =>
       LeanTest.assertEqual e.map.entries.size 2 "second concatenate input should materialize two sparse entries."
       LeanTest.assertTrue (hasEntry e.map.entries 0 2)
@@ -1019,8 +1059,8 @@ def testExtractStructuralAliasRulesUseShapeAwareSparsePayloads : IO Unit := do
       LeanTest.assertTrue (hasEntry e.map.entries 1 6)
         s!"concatenate(second) missing src=1,dst=6: {reprStr e.map.entries}"
 
-    match findEdge? edges 2 6 with
-    | none => LeanTest.fail "Missing concatenate edge 2 -> 6"
+    match findEdge? edges 4 8 with
+    | none => LeanTest.fail "Missing concatenate edge 4 -> 8"
     | some e =>
       LeanTest.assertEqual e.map.entries.size 2 "third concatenate input should materialize two sparse entries."
       LeanTest.assertTrue (hasEntry e.map.entries 0 3)

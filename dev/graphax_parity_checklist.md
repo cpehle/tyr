@@ -15,13 +15,13 @@ Non-goals:
 Already in place:
 - LeanJaxpr extraction and sparse elimination graph construction.
 - Graphax/JAX alias coverage for the main arithmetic, reduction, structural, no-grad, communication, and dynamic-update families.
-- Exact sparse payloads for key shape-aware structural aliases: `broadcast_in_dim`, `slice`, `slice_in_dim`, `transpose`, and `concatenate`.
+- Exact sparse payloads for key shape-aware structural aliases: `reshape`, `squeeze`, `broadcast_in_dim`, `slice`, `slice_in_dim`, `transpose`, and `concatenate`.
 - Strict no-fallback rule-pack gating for the declared Graphax parity op surface.
 - LeanJaxpr-derived elimination graphs now carry explicit `inputs`, `outputs`, and `eliminable` partitions.
 - The higher-level order-policy surface now resolves Graphax-style `forward` / `reverse`, filtered explicit custom orders, and AlphaGrad action orders against that eliminable set, and the Jaxpr/KStmt execution path can run policies directly.
 
 Still blocking full parity:
-- Structural local-Jac behavior is not yet exact for every transform/reduction path Graphax models explicitly.
+- Structural local-Jac behavior is not yet exact for every transform/reduction path Graphax models explicitly, with `pad` and the remaining reduction/value-dependent cases still on the conservative semantic path.
 - Executable lowering for `dot_general` still covers only `mm` / `outer`-like subsets.
 
 ## P0: Core Graphax Semantics

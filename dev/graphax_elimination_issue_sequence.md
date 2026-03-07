@@ -43,11 +43,12 @@ Progress update (2026-03-06):
 - Issue 22: advanced (action-space compatibility layer now supports full-vertex and explicit restricted action tables, with root/recurrent mask-semantics diagnostics and strict `ActionId0 -> VertexId1` boundary checks).
 - Issue 23: advanced (DAG keying now canonicalizes sparse maps via shape + sorted sparse entries, removing `repr`-string dependence for transposition identity).
 - Issue 8/9/15: advanced further (LeanJaxpr-derived elimination graphs now carry explicit `inputs` / `outputs` / `eliminable` partitions, complete-order validation over the eliminable set, direct forward/reverse elimination entrypoints for Jaxpr/KStmt paths, and higher-level policy resolution/execution for Graphax-style `forward` / `reverse`, explicit custom orders, and AlphaGrad action orders).
+- Issue 16: advanced further (source-path structural aliases now emit exact sparse-entry payloads for shape-aware `reshape` and `squeeze`, joining the existing exact `broadcast_in_dim`, `slice` / `slice_in_dim`, `transpose`, and `concatenate` coverage).
 - DAG-MCTS execution is now policy-selectable (`alphaZero` and `gumbelMuZero`) through a shared DAG search entrypoint.
 
 Immediate next priorities (2026-03-07):
-1. Extend dot-general lowering beyond current representable `mm`/outer-like contraction subsets (including richer contract/batch patterns).
-2. Expand exact sparse payload coverage to remaining structural primitives and alias paths (`pad`, reduction aliases, and higher-rank/value-dependent transforms).
+1. Expand exact sparse payload coverage to remaining structural primitives and alias paths (`pad`, reduction aliases, and higher-rank/value-dependent transforms).
+2. Extend dot-general lowering beyond current representable `mm`/outer-like contraction subsets (including richer contract/batch patterns).
 3. Move `scan`/`cond` from metadata-aware dependency routing to full subjaxpr/body-aware local-Jac semantics.
 
 ## Issue 1: Bootstrap LeanJaxpr + Policy Modules
