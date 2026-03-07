@@ -231,7 +231,7 @@ Reviewed: 2026-03-06 (`Tyr/DiffEq/*` vs `../diffrax/diffrax/*`, `../diffrax/docs
   Refs: `Tyr/DiffEq/StepSizeController.lean`, `../diffrax/diffrax/_step_size_controller/clip.py`
 - [x] `DX10` [Medium] Broadened implicit root-finder support beyond fixed-point with Newton/VeryChord options plus tolerance plumbing.
   Refs: `Tyr/DiffEq/RootFinder.lean`, `Tyr/DiffEq/Solver/ImplicitRungeKutta.lean`, `../diffrax/diffrax/_root_finder/_verychord.py`, `../diffrax/diffrax/_root_finder/_with_tols.py`
-- [~] `DX11` [Low] Added path-derivative support, `ControlTerm.to_ode` conversions, and reusable path constructors (linear/cubic Hermite interpolation), plus path composition/restriction helpers and conversion regression tests; full interpolation-path parity remains.
+- [~] `DX11` [Low] Added path-derivative support, `ControlTerm.to_ode` conversions, reusable path constructors (linear/cubic Hermite interpolation), and `AbstractPath.compose`/`restrict`/`mapControl` regression coverage; full interpolation-path parity remains.
   Refs: `Tyr/DiffEq/Path.lean`, `Tyr/DiffEq/Term.lean`, `Tyr/DiffEq/Interpolation.lean`, `../diffrax/diffrax/_path.py`, `../diffrax/diffrax/_global_interpolation.py`, `../diffrax/diffrax/_term.py`
 - [x] `DX12` [Low] Added solve diagnostics (`num_accepted_steps`, `num_rejected_steps`) and optional throw-on-failure behavior (`throwOnFailure`) while preserving default non-throwing behavior.
   Refs: `Tyr/DiffEq/Integrate.lean`, `Tyr/DiffEq/Solution.lean`, `../diffrax/diffrax/_integrate.py`, `../diffrax/diffrax/_solution.py`
@@ -239,18 +239,20 @@ Reviewed: 2026-03-06 (`Tyr/DiffEq/*` vs `../diffrax/diffrax/*`, `../diffrax/docs
   Refs: `Tyr/DiffEq/Term.lean`, `Tyr/DiffEq/Solver/Base.lean`, `../diffrax/diffrax/_term.py`, `../diffrax/diffrax/_solver/base.py`
 - [~] `DX14` [Medium] Added initial convergence/order regressions (Euler first-order trend, RK4 high-order trend, dense interpolation error trend, EM strong-order trend, and Milstein-vs-EM pathwise advantage over seeded Brownian ensembles); full solver-by-solver order certification and broader statistical coverage are still pending.
   Refs: `Tests/TestDiffEq.lean`, `Tyr/DiffEq/Solver/*.lean`, `../diffrax/diffrax/_solver/*`
-- [ ] `DX15` [Low] Add weak-order/statistical SDE correctness tests (moment and expectation convergence over Monte Carlo ensembles); current SDE coverage emphasizes pathwise/strong-order checks only.
+- [~] `DX15` [Low] Added deterministic weak-order Monte-Carlo regression coverage for Euler-Maruyama (OU mean/second-moment convergence across step refinements); broader weak-statistical parity across SDE families still remains.
   Refs: `Tests/TestDiffEq.lean`, `Tyr/DiffEq/Solver/SDE.lean`, `../diffrax/docs/*`
-- [ ] `DX16` [High] Add underdamped-Langevin term primitives and argument-shape validation parity (`UnderdampedLangevinDriftTerm` / `UnderdampedLangevinDiffusionTerm` style API).
+- [~] `DX16` [High] Added underdamped-Langevin term primitives and runtime argument validation (`UnderdampedLangevinDriftTerm` / `UnderdampedLangevinDiffusionTerm`) with regression coverage; solver-family parity for ALIGN/ShOULD/QUICSORT remains pending.
   Refs: `Tyr/DiffEq/Term.lean`, `../diffrax/diffrax/_term.py`
-- [ ] `DX17` [High] Replace compatibility wrappers for `SlowRK`/`ALIGN`/`ShOULD`/`QUICSORT` with solver-faithful algorithm implementations; current wrappers close API surface but not full behavior parity.
+- [~] `DX17` [High] Replaced `SlowRK` compatibility wrapper with a staged solver-faithful SRK implementation (order/strong-order + explicit staged drift/diffusion updates); `ALIGN`/`ShOULD`/`QUICSORT` still remain wrapper-backed.
   Refs: `Tyr/DiffEq/Solver/SlowRK.lean`, `Tyr/DiffEq/Solver/ALIGN.lean`, `Tyr/DiffEq/Solver/ShOULD.lean`, `Tyr/DiffEq/Solver/QUICSORT.lean`, `../diffrax/diffrax/_solver/slowrk.py`, `../diffrax/diffrax/_solver/align.py`, `../diffrax/diffrax/_solver/should.py`, `../diffrax/diffrax/_solver/quicsort.py`
 - [x] `DX18` [Medium] Hardened `StepTo` contract parity with solve-direction strict monotonicity plus endpoint checks (`t0 == ts[0]`, `t1 == ts[-1]`) and reverse/failure regression tests.
   Refs: `Tyr/DiffEq/StepSizeController.lean`, `Tyr/DiffEq/Integrate.lean`, `Tests/TestDiffEq.lean`, `../diffrax/diffrax/_step_size_controller/constant.py`
-- [ ] `DX19` [Medium] Add `progress_meter` solve API parity (none/text/tqdm-style progress lifecycle and compatibility behavior).
+- [~] `DX19` [Medium] Added `progress_meter` solve API surface (`none`/`text`/`tqdm`) with lifecycle hooks and compatibility aliasing (`tqdm` -> lightweight text behavior), plus regression coverage for default/text/tqdm parity.
   Refs: `Tyr/DiffEq/Integrate.lean`, `../diffrax/diffrax/_integrate.py`, `../diffrax/diffrax/_progress_meter.py`
-- [ ] `DX20` [Medium] Support `max_steps=None`-style unbounded stepping mode with save-compatibility checks (`saveat.steps`, `saveat.dense`) matching diffrax semantics.
+- [~] `DX20` [Medium] Added `maxStepsOpt := none` unbounded-step compatibility mode with explicit save-config guards (`saveat.steps`, `saveat.dense`) and regression tests; implementation currently uses a high safety cap to preserve structural termination.
   Refs: `Tyr/DiffEq/Integrate.lean`, `../diffrax/diffrax/_integrate.py`
+- [ ] `DX21` [Low] Replace `panic!`-based `throwOnFailure`/error surfacing with catchable solve-error semantics so failure paths are testable and match exception-style parity expectations.
+  Refs: `Tyr/DiffEq/Integrate.lean`, `Tyr/DiffEq/Solution.lean`, `Tests/TestDiffEq.lean`
 
 
 ## Completed (This Pass)
