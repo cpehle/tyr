@@ -629,6 +629,25 @@ def implicitAdjointUnsupportedReason
     | none =>
         some "Adjoint solve failed: `ImplicitAdjoint` without backsolve fallback is not implemented yet."
 
+private def implicitAdjointSaveAtContractHolds (saveat : SaveAt) : Bool :=
+  saveat.t1 &&
+    !saveat.t0 &&
+    saveat.ts.isNone &&
+    !saveat.steps.enabled &&
+    !saveat.dense &&
+    !saveat.solverState &&
+    !saveat.controllerState &&
+    !saveat.madeJump &&
+    saveat.subs.size == 0
+
+def implicitAdjointSaveAtUnsupportedReason
+    (saveat : SaveAt) : Option String :=
+  if implicitAdjointSaveAtContractHolds saveat then
+    none
+  else
+    some
+      s!"Adjoint solve failed: can only use `ImplicitAdjoint` with `saveat.t1 := true` and all other save fields disabled (Diffrax parity: `saveat=SaveAt(t1=True)`). Got `t0={saveat.t0}`, `t1={saveat.t1}`, `ts?={saveat.ts.isSome}`, `steps?={saveat.steps.enabled}`, `dense={saveat.dense}`, `solverState={saveat.solverState}`, `controllerState={saveat.controllerState}`, `madeJump={saveat.madeJump}`, `subs={saveat.subs.size}`."
+
 private def diffeqsolveDirectAdjointWithReportCore
     {Y Args : Type}
     [DiffEqSpace Y] [DiffEqSpace Args]
@@ -912,20 +931,30 @@ def diffeqsolveImplicitAdjoint
           (Args := Args)
           t0 t1 "unsupported_implicit_adjoint" msg
   | none =>
-      match mode.recursiveCheckpoint with
-      | some recursiveMode =>
+      match implicitAdjointSaveAtUnsupportedReason saveat with
+      | some msg =>
           exact
-            diffeqsolveRecursiveCheckpointAdjoint
-              (Controller := Controller)
-              recursiveMode term solver adjoint t0 t1 dt0 y0 args adjY1 saveat maxSteps
-              controller
+            mkAdjointFailure
+              (Y := Y)
+              (SolverState := solver.SolverState)
+              (ControllerState := StepSizeController.State (C := Controller))
+              (Args := Args)
+              t0 t1 "unsupported_implicit_adjoint_saveat" msg
       | none =>
-          exact
-            diffeqsolveBacksolveAdjointWithReportCore
-              (Controller := Controller)
-              term solver adjoint t0 t1 dt0 y0 args adjY1 saveat maxSteps controller
-              "unsupported_implicit_adjoint"
-              none
+          match mode.recursiveCheckpoint with
+          | some recursiveMode =>
+              exact
+                diffeqsolveRecursiveCheckpointAdjoint
+                  (Controller := Controller)
+                  recursiveMode term solver adjoint t0 t1 dt0 y0 args adjY1 saveat maxSteps
+                  controller
+          | none =>
+              exact
+                diffeqsolveBacksolveAdjointWithReportCore
+                  (Controller := Controller)
+                  term solver adjoint t0 t1 dt0 y0 args adjY1 saveat maxSteps controller
+                  "unsupported_implicit_adjoint"
+                  none
 
 end DiffEq
 end torch
