@@ -241,9 +241,9 @@ Reviewed: 2026-03-06 (`Tyr/DiffEq/*` vs `../diffrax/diffrax/*`, `../diffrax/docs
   Refs: `Tests/TestDiffEq.lean`, `Tyr/DiffEq/Solver/*.lean`, `../diffrax/diffrax/_solver/*`
 - [~] `DX15` [Low] Added deterministic weak-order Monte-Carlo regression coverage for Euler-Maruyama (OU mean/second-moment convergence across step refinements); broader weak-statistical parity across SDE families still remains.
   Refs: `Tests/TestDiffEq.lean`, `Tyr/DiffEq/Solver/SDE.lean`, `../diffrax/docs/*`
-- [~] `DX16` [High] Added underdamped-Langevin term primitives and runtime argument validation (`UnderdampedLangevinDriftTerm` / `UnderdampedLangevinDiffusionTerm`) with regression coverage; solver-family parity is partially advanced via staged `ALIGN` implementation, with `ShOULD`/`QUICSORT` parity still pending.
+- [~] `DX16` [High] Added underdamped-Langevin term primitives and runtime argument validation (`UnderdampedLangevinDriftTerm` / `UnderdampedLangevinDiffusionTerm`) with regression coverage; solver-family parity now includes staged `ALIGN`/`ShOULD`/`QUICSORT` implementations with deterministic step regressions, while higher-order Levy-area-faithful parity remains pending.
   Refs: `Tyr/DiffEq/Term.lean`, `../diffrax/diffrax/_term.py`
-- [~] `DX17` [High] Replaced `SlowRK` wrapper with a staged solver-faithful SRK implementation and replaced `ALIGN` wrapper with a staged underdamped solver implementation; `ShOULD`/`QUICSORT` still remain wrapper-backed.
+- [x] `DX17` [High] Replaced wrapper-backed `SlowRK`/`ALIGN`/`ShOULD`/`QUICSORT` with staged solver-faithful implementations and deterministic underdamped step regressions for `ShOULD`/`QUICSORT`.
   Refs: `Tyr/DiffEq/Solver/SlowRK.lean`, `Tyr/DiffEq/Solver/ALIGN.lean`, `Tyr/DiffEq/Solver/ShOULD.lean`, `Tyr/DiffEq/Solver/QUICSORT.lean`, `../diffrax/diffrax/_solver/slowrk.py`, `../diffrax/diffrax/_solver/align.py`, `../diffrax/diffrax/_solver/should.py`, `../diffrax/diffrax/_solver/quicsort.py`
 - [x] `DX18` [Medium] Hardened `StepTo` contract parity with solve-direction strict monotonicity plus endpoint checks (`t0 == ts[0]`, `t1 == ts[-1]`) and reverse/failure regression tests.
   Refs: `Tyr/DiffEq/StepSizeController.lean`, `Tyr/DiffEq/Integrate.lean`, `Tests/TestDiffEq.lean`, `../diffrax/diffrax/_step_size_controller/constant.py`
