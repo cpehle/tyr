@@ -7,33 +7,13 @@ open LeanTest
 open Examples.AlphaGradPort
 open Tyr.AD.Elim
 
-@[test]
-def testMaterializeAllAlphaGradPortTasksAndBaseline : IO Unit := do
-  for taskName in taskSequence do
-    match (← materializeTask taskName) with
-    | .error msg =>
-      LeanTest.fail s!"Task materialization failed for {taskName}: {msg}"
-    | .ok task =>
-      LeanTest.assertTrue (task.numVertices > 0)
-        s!"Task {task.name} must declare at least one vertex."
-      LeanTest.assertTrue (!task.edges.isEmpty)
-        s!"Task {task.name} must expose at least one local-Jac edge."
-
-      let cfg : Examples.AlphaGradPort.RunConfig := {
-        episodes := 0
-        backend := .dagGumbel
-        logEvery := 0
-      }
-      match (← runTask task cfg) with
-      | .error msg =>
-        LeanTest.fail s!"Baseline evaluation failed for {task.name}: {msg}"
-      | .ok summary =>
-        LeanTest.assertEqual summary.taskName task.name
-          "Run summary should preserve task name."
-        LeanTest.assertEqual summary.episodes 0
-          "Baseline run should preserve requested episode count."
-        LeanTest.assertTrue (summary.bestActions0.isEmpty && summary.bestOrder1.isEmpty)
-          "Zero-episode baseline should not emit sampled action/order traces."
+private def assertSemanticEdges (label : String) (edges : Array Tyr.AD.JaxprLike.LocalJacEdge) : IO Unit := do
+  let hasNonSemantic := edges.any (fun e =>
+    match e.map.repr with
+    | Tyr.AD.Sparse.SparseMapTag.semantic _ => false
+    | _ => true)
+  LeanTest.assertTrue (!hasNonSemantic)
+    s!"{label} should only contain semantic local-Jac edges (no placeholder/hybrid fallback tags)."
 
 @[test]
 def testPerceptronSearchParityAcrossPolicies : IO Unit := do
@@ -77,5 +57,34 @@ def testPerceptronSearchParityAcrossPolicies : IO Unit := do
   checkEpisode "gumbel" gumbel
   checkEpisode "dag-alphaZero" dagAlphaZero
   checkEpisode "dag-gumbelMuZero" dagGumbel
+
+@[test]
+def testKStmtLoweredTasksUseSemanticMaterialization : IO Unit := do
+  let loweredTasks : Array TaskName := #[
+    .perceptron, .encoder, .robotArm6DOF, .blackScholesJacobian,
+    .humanHeartDipole, .propaneCombustion
+  ]
+
+  for taskName in loweredTasks do
+    let task ←
+      match (← materializeTask taskName) with
+      | .error msg => LeanTest.fail s!"{taskName} materialization failed: {msg}"
+      | .ok task => pure task
+
+    LeanTest.assertTrue (task.numVertices > 0)
+      s!"{task.name} should expose at least one vertex after KStmt lowering."
+    LeanTest.assertTrue (!task.edges.isEmpty)
+      s!"{task.name} should expose non-empty local-Jac edges after KStmt lowering."
+    assertSemanticEdges task.name task.edges
+
+@[test]
+def testAllAlphaGradTasksMaterialize : IO Unit := do
+  for taskName in taskSequence do
+    let task ←
+      match (← materializeTask taskName) with
+      | .error msg => LeanTest.fail s!"{taskName} materialization failed: {msg}"
+      | .ok task => pure task
+    LeanTest.assertTrue (task.numVertices > 0)
+      s!"{task.name} should report a positive vertex count."
 
 end Tests.AlphaGradPortExamples

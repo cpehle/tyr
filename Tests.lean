@@ -20,6 +20,7 @@ import Tests.TestADSparse
 import Tests.TestADElimGraph
 import Tests.TestADElimOrderPolicy
 import Tests.TestADElimFromJaxpr
+import Tests.TestADElimLowering
 import Tests.TestADElimAlphaGradMctx
 import Tests.TestAlphaGradPortExamples
 import Tests.TestModularNorm

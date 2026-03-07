@@ -9,8 +9,7 @@ import Tyr.GPU.Codegen.IR
 
   Task specifications for AlphaGrad-style elimination planning ports.
   `RoeFlux_1d` remains the first fully hand-shaped baseline.
-  `Perceptron`/`Encoder`/`RobotArm_6DOF`/`BlackScholes_Jacobian` are now
-  materialized from real `KStmt` lowering.
+  All non-`RoeFlux_1d` tasks are now materialized from real `KStmt` lowering.
 -/
 
 namespace Examples.AlphaGradPort
@@ -140,30 +139,6 @@ private def roeFlux1dEdges : Array LocalJacEdge := #[
   mkEdge 31 34 "dF1->phi1",
   mkEdge 32 35 "dF2->phi2"
 ]
-
-private def robotArmEdges : Array LocalJacEdge :=
-  denseBipartite 1 6 7 10 "r.trig" ++
-  denseBipartite 7 10 17 8 "r.pose" ++
-  chainEdges 17 8 "r.euler" ++
-  denseBipartite 20 5 25 4 "r.output"
-
-private def blackScholesEdges : Array LocalJacEdge :=
-  denseBipartite 1 5 6 8 "b.pricing" ++
-  chainEdges 6 8 "b.normal_cdf" ++
-  denseBipartite 10 4 14 5 "b.greeks" ++
-  chainEdges 14 5 "b.aggregate"
-
-private def heartDipoleEdges : Array LocalJacEdge :=
-  denseBipartite 1 8 9 10 "h.geom" ++
-  denseBipartite 9 10 19 6 "h.residual" ++
-  chainEdges 19 6 "h.norm" ++
-  denseBipartite 22 3 25 2 "h.output"
-
-private def propaneEdges : Array LocalJacEdge :=
-  denseBipartite 1 11 12 10 "pc.chem1" ++
-  denseBipartite 12 10 22 8 "pc.chem2" ++
-  chainEdges 22 8 "pc.balance" ++
-  denseBipartite 26 4 30 3 "pc.output"
 
 private def runCoreMResult (x : CoreM α) : IO (Except String α) := do
   let env ← mkEmptyEnvironment
@@ -432,6 +407,57 @@ private def blackScholesJacobianKStmts : Array KStmt := #[
   KStmt.binary .Add (v 52) (v 48) (v 51)
 ]
 
+private def humanHeartDipoleKStmts : Array KStmt := #[
+  -- Inputs are v1..v8.
+  KStmt.unary .Sin (v 9) (v 1),
+  KStmt.unary .Cos (v 10) (v 2),
+  KStmt.binary .Add (v 11) (v 3) (v 4),
+  KStmt.binary .Mul (v 12) (v 5) (v 6),
+  KStmt.binary .Sub (v 13) (v 7) (v 8),
+
+  KStmt.outer (v 14) (v 9) (v 10),
+  KStmt.reduce .Sum .Col (v 15) (v 14),
+  KStmt.broadcast .Row (v 16) (v 15),
+  KStmt.binaryBroadcast .Add .Row (v 17) (v 14) (v 15),
+  KStmt.reduce .Sum .Row (v 18) (v 17),
+  KStmt.binaryBroadcast .Sub .Row (v 19) (v 17) (v 18),
+  KStmt.unary .Square (v 20) (v 19),
+  KStmt.reduce .Sum .Row (v 21) (v 20),
+  KStmt.unary .Sqrt (v 22) (v 21),
+  KStmt.binaryBroadcast .Div .Row (v 23) (v 19) (v 22),
+
+  KStmt.outer (v 24) (v 23) (v 13),
+  KStmt.reduce .Sum .Full (v 25) (v 24),
+  KStmt.binary .Add (v 26) (v 25) (v 12)
+]
+
+private def propaneCombustionKStmts : Array KStmt := #[
+  -- Inputs are v1..v11.
+  KStmt.unary .Exp (v 12) (v 1),
+  KStmt.unary .Log (v 13) (v 2),
+  KStmt.binary .Add (v 14) (v 3) (v 4),
+  KStmt.binary .Mul (v 15) (v 5) (v 6),
+  KStmt.binary .Sub (v 16) (v 7) (v 8),
+  KStmt.binary .Div (v 17) (v 9) (v 10),
+  KStmt.binary .Add (v 18) (v 11) (v 12),
+
+  KStmt.outer (v 19) (v 13) (v 14),
+  KStmt.reduce .Sum .Col (v 20) (v 19),
+  KStmt.binary .Add (v 21) (v 20) (v 15),
+  KStmt.outer (v 22) (v 16) (v 17),
+  KStmt.reduce .Sum .Col (v 23) (v 22),
+  KStmt.binary .Add (v 24) (v 21) (v 23),
+  KStmt.broadcast .Row (v 25) (v 24),
+
+  KStmt.binaryBroadcast .Mul .Row (v 26) (v 19) (v 24),
+  KStmt.reduce .Sum .Row (v 27) (v 26),
+  KStmt.binaryBroadcast .Sub .Row (v 28) (v 26) (v 27),
+  KStmt.unary .Square (v 29) (v 28),
+  KStmt.reduce .Sum .Full (v 30) (v 29),
+  KStmt.cumsum .Row (v 31) (v 26),
+  KStmt.binary .Add (v 32) (v 30) (v 31)
+]
+
 private def materializeFromKStmts
     (name : String)
     (description : String)
@@ -440,7 +466,7 @@ private def materializeFromKStmts
     (mctsCfg : AlphaGradMctsConfig := {}) :
     IO (Except String TaskSpec) := do
   let lowered ← runCoreMResult do
-    registerKStmtAllSupportedHybridRules
+    registerKStmtAllSupportedSemanticsRules
     buildAndExtractFromKStmts {} stmts
 
   match lowered with
@@ -449,18 +475,25 @@ private def materializeFromKStmts
   | .ok (.error err) =>
     return .error s!"{name}: {buildExtractErrorToString err}"
   | .ok (.ok (_jaxpr, edges)) =>
-    match inferDenseVertexCount? edges with
-    | .error msg =>
-      return .error s!"{name}: {msg}"
-    | .ok numVertices =>
-      return .ok {
-        name := name
-        description := description
-        numVertices := numVertices
-        edges := edges
-        envCfg := envCfg
-        mctsCfg := mctsCfg
-      }
+    let hasNonSemantic := edges.any (fun e =>
+      match e.map.repr with
+      | Tyr.AD.Sparse.SparseMapTag.semantic _ => false
+      | _ => true)
+    if hasNonSemantic then
+      return .error s!"{name}: KStmt materialization produced non-semantic local-Jac edges; strict semantic pack expected."
+    else
+      match inferDenseVertexCount? edges with
+      | .error msg =>
+        return .error s!"{name}: {msg}"
+      | .ok numVertices =>
+        return .ok {
+          name := name
+          description := description
+          numVertices := numVertices
+          edges := edges
+          envCfg := envCfg
+          mctsCfg := mctsCfg
+        }
 
 private def taskSpecStatic : TaskName → TaskSpec
   | .roeFlux1d =>
@@ -481,23 +514,9 @@ private def taskSpecStatic : TaskName → TaskSpec
   | .blackScholesJacobian =>
     panic! "BlackScholes_Jacobian task is now KStmt-lowered. Use materializeTask instead of taskSpec."
   | .humanHeartDipole =>
-    {
-      name := "HumanHeartDipole"
-      description := "HumanHeartDipole-style surrogate graph used for staged AlphaGrad porting."
-      numVertices := 26
-      edges := heartDipoleEdges
-      envCfg := { terminalBonus := 0.0, discount := 1.0 }
-      mctsCfg := { numSimulations := 48, maxNumConsideredActions := 8, gumbelScale := 1.0 }
-    }
+    panic! "HumanHeartDipole task is now KStmt-lowered. Use materializeTask instead of taskSpec."
   | .propaneCombustion =>
-    {
-      name := "PropaneCombustion"
-      description := "PropaneCombustion-style surrogate graph used for staged AlphaGrad porting."
-      numVertices := 32
-      edges := propaneEdges
-      envCfg := { terminalBonus := 0.0, discount := 1.0 }
-      mctsCfg := { numSimulations := 56, maxNumConsideredActions := 9, gumbelScale := 1.0 }
-    }
+    panic! "PropaneCombustion task is now KStmt-lowered. Use materializeTask instead of taskSpec."
 
 /--
 Materialize task spec. Selected benchmark tasks are lowered from `KStmt`
@@ -532,13 +551,28 @@ def materializeTask : TaskName → IO (Except String TaskSpec)
       blackScholesJacobianKStmts
       { terminalBonus := 0.0, discount := 1.0 }
       { numSimulations := 40, maxNumConsideredActions := 6, gumbelScale := 1.0 }
+  | .humanHeartDipole =>
+    materializeFromKStmts
+      "HumanHeartDipole"
+      "HumanHeartDipole graph lowered from Tyr KStmt IR (geometric residual + normalized dipole proxy path)."
+      humanHeartDipoleKStmts
+      { terminalBonus := 0.0, discount := 1.0 }
+      { numSimulations := 48, maxNumConsideredActions := 8, gumbelScale := 1.0 }
+  | .propaneCombustion =>
+    materializeFromKStmts
+      "PropaneCombustion"
+      "PropaneCombustion graph lowered from Tyr KStmt IR (reaction-composition + balance aggregation path)."
+      propaneCombustionKStmts
+      { terminalBonus := 0.0, discount := 1.0 }
+      { numSimulations := 56, maxNumConsideredActions := 9, gumbelScale := 1.0 }
   | task =>
     pure (.ok (taskSpecStatic task))
 
 /--
 Static task spec accessor.
 For KStmt-lowered tasks (`Perceptron`, `Encoder`, `RobotArm_6DOF`,
-`BlackScholes_Jacobian`) call `materializeTask`.
+`BlackScholes_Jacobian`, `HumanHeartDipole`, `PropaneCombustion`)
+call `materializeTask`.
 -/
 def taskSpec (taskName : TaskName) : TaskSpec :=
   taskSpecStatic taskName

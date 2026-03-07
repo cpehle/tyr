@@ -57,6 +57,11 @@ def applyTemperature (logits : Array Float) (temperature : Float) : Array Float 
     let t := if temperature <= 0.0 then 1e-30 else temperature
     shifted.map (fun x => x / t)
 
+private def sampleGumbel (key : UInt64) (n : Nat) (scale : Float) : Array Float :=
+  (List.range n).toArray.map fun i =>
+    let u := pseudoUniform01 key i
+    scale * (-(Float.log (-Float.log u)))
+
 /-- DAG-backed MuZero policy (unbatched). -/
 def muzeroPolicyDag
     [Inhabited S]
@@ -148,6 +153,48 @@ def alphazeroPolicyDag
   let actionWeights := summary.visitProbs
   let actionLogits := applyTemperature (getLogitsFromProbs actionWeights) temperature
   let action := argmax actionLogits
+  { action := action, actionWeights := actionWeights, searchTree := searchTree }
+
+/-- DAG-backed Gumbel MuZero policy (unbatched). -/
+def gumbelMuZeroPolicyDag
+    [Inhabited S]
+    [Inhabited K]
+    [BEq K]
+    [Hashable K]
+    (params : P)
+    (rngKey : UInt64)
+    (root : RootFnOutput S)
+    (recurrentFn : RecurrentFn P S)
+    (keyFn : S → K)
+    (numSimulations : Nat)
+    (invalidActions : Option (Array Bool) := none)
+    (maxDepth : Option Nat := none)
+    (qtransform : QTransform S K GumbelMuZeroExtraData := qtransformCompletedByMixValue)
+    (maxNumConsideredActions : Nat := 16)
+    (gumbelScale : Float := 1.0)
+    : PolicyOutput (DagTree S K GumbelMuZeroExtraData) :=
+  let root := { root with priorLogits := maskInvalidActions root.priorLogits invalidActions }
+  let gumbel := sampleGumbel rngKey root.priorLogits.size gumbelScale
+  let extraData : GumbelMuZeroExtraData := { rootGumbel := gumbel }
+
+  let rootFn : RootActionSelectionFn S K GumbelMuZeroExtraData := fun _ tree nodeIndex =>
+    gumbelMuZeroRootActionSelection tree nodeIndex numSimulations maxNumConsideredActions qtransform
+  let interiorFn : InteriorActionSelectionFn S K GumbelMuZeroExtraData := fun _ tree nodeIndex _depth =>
+    gumbelMuZeroInteriorActionSelection tree nodeIndex qtransform
+
+  let searchTree := searchDag params rngKey root recurrentFn keyFn rootFn interiorFn
+    numSimulations maxDepth invalidActions extraData
+
+  let summary := searchTree.summary
+  let consideredVisit := summary.visitCounts.foldl (init := 0) fun acc c => if c > acc then c else acc
+  let completedQvalues := qtransform searchTree ROOT_INDEX
+  let toArgmax :=
+    torch.mctx.scoreConsidered consideredVisit gumbel root.priorLogits completedQvalues summary.visitCounts
+  let action := maskedArgmax toArgmax invalidActions
+
+  let completedSearchLogits := maskInvalidActions (addArrays root.priorLogits completedQvalues) invalidActions
+  let actionWeights := softmax completedSearchLogits
+
   { action := action, actionWeights := actionWeights, searchTree := searchTree }
 
 end torch.mctxdag

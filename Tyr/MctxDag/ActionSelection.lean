@@ -1,4 +1,5 @@
 import Tyr.MctxDag.QTransforms
+import Tyr.Mctx.SeqHalving
 
 namespace torch.mctxdag
 
@@ -48,5 +49,53 @@ def muzeroActionSelection
   let toArgmax := addArrays valueScore policyScore
   let invalid := if depth = 0 then some tree.rootInvalidActions else none
   maskedArgmax toArgmax invalid
+
+/-- Extra search metadata for Gumbel MuZero (DAG variant). -/
+structure GumbelMuZeroExtraData where
+  rootGumbel : Array Float
+  deriving Repr, Inhabited
+
+private def prepareArgmaxInput (probs : Array Float) (visitCounts : Array Nat) : Array Float :=
+  let total := Float.ofNat (visitCounts.foldl (init := 0) (· + ·))
+  (List.range probs.size).toArray.map fun i =>
+    probs.getD i 0.0 - (Float.ofNat (visitCounts.getD i 0)) / (1.0 + total)
+
+/-- Root action selection for DAG Gumbel MuZero using sequential halving. -/
+def gumbelMuZeroRootActionSelection
+    [BEq K]
+    [Hashable K]
+    (tree : DagTree S K GumbelMuZeroExtraData)
+    (nodeIndex : NodeIndex)
+    (numSimulations : Nat)
+    (maxNumConsideredActions : Nat)
+    (qtransform : QTransform S K GumbelMuZeroExtraData := qtransformCompletedByMixValue)
+    : Action :=
+  let visitCounts := tree.childrenVisits.getD nodeIndex #[]
+  let priorLogits := tree.childrenPriorLogits.getD nodeIndex #[]
+  let completedQvalues := qtransform tree nodeIndex
+  let table := torch.mctx.getTableOfConsideredVisits maxNumConsideredActions numSimulations
+  let numValidActions := tree.rootInvalidActions.foldl (init := 0) fun acc invalid =>
+    if invalid then acc else acc + 1
+  let numConsidered := Nat.min maxNumConsideredActions numValidActions
+  let simulationIndex := visitCounts.foldl (init := 0) (· + ·)
+  let consideredVisit := (table.getD numConsidered #[]).getD simulationIndex 0
+  let toArgmax :=
+    torch.mctx.scoreConsidered consideredVisit tree.extraData.rootGumbel priorLogits completedQvalues visitCounts
+  maskedArgmax toArgmax (some tree.rootInvalidActions)
+
+/-- Deterministic interior action selection for DAG Gumbel MuZero. -/
+def gumbelMuZeroInteriorActionSelection
+    [BEq K]
+    [Hashable K]
+    (tree : DagTree S K E)
+    (nodeIndex : NodeIndex)
+    (qtransform : QTransform S K E := qtransformCompletedByMixValue)
+    : Action :=
+  let visitCounts := tree.childrenVisits.getD nodeIndex #[]
+  let logits := tree.childrenPriorLogits.getD nodeIndex #[]
+  let completedQ := qtransform tree nodeIndex
+  let probs := softmax (addArrays logits completedQ)
+  let toArgmax := prepareArgmaxInput probs visitCounts
+  argmax toArgmax
 
 end torch.mctxdag
