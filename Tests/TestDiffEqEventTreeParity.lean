@@ -103,10 +103,10 @@ private def leafHits (tree : EventMaskTree) : Array Bool :=
       let lastHits := leafHits lastTree
       LeanTest.assertTrue (hits.size == 2 && lastHits.size == 2)
         s!"Expected two leaf mask entries, got {hits.size}/{lastHits.size}"
-      LeanTest.assertTrue (hits[0]! && hits[1]!)
-        s!"Both tie-time events should be committed in eventMask, got {hits}"
-      LeanTest.assertTrue (lastHits[0]! && lastHits[1]!)
-        s!"Both tie-time events should appear in eventMaskLast, got {lastHits}"
+      LeanTest.assertTrue (!hits[0]! && hits[1]!)
+        s!"Only the chosen terminating tie-time event should be committed in eventMask, got {hits}"
+      LeanTest.assertTrue (!lastHits[0]! && lastHits[1]!)
+        s!"Only the chosen terminating tie-time event should appear in eventMaskLast, got {lastHits}"
   | _, _ =>
       LeanTest.fail "Expected tree-shaped tie-time masks"
 
@@ -170,6 +170,10 @@ def run : IO Unit := do
 
 end Tests.DiffEqEventTreeParity
 
+namespace Tests.DiffEqEventTreeParity
+
 unsafe def main : IO Unit := do
-  Tests.DiffEqEventTreeParity.run
+  run
   IO.println "TestDiffEqEventTreeParity: ok"
+
+end Tests.DiffEqEventTreeParity

@@ -15,6 +15,7 @@ import Tests.TestGPUAutoGrad
 import Tests.TestADJaxprLike
 import Tests.TestADJaxprLikeExtract
 import Tests.TestADGraphaxAlphaGradParity
+import Tests.TestADGraphaxAlphaGradCoverageGate
 import Tests.TestADSparse
 import Tests.TestADElimGraph
 import Tests.TestADElimOrderPolicy
@@ -32,6 +33,7 @@ import Tests.TestMctxBatched
 import Tests.TestMctxDag
 import Tests.TestDiffEq
 import Tests.TestDiffEqEventTreeParity
+import Tests.TestDiffEqMilsteinAutodiffParity
 import Tests.TestDiffEqAdjoint
 import Tests.TestDiffEqAdjointCore
 import Tests.TestGPUDSL
