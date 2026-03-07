@@ -100,7 +100,7 @@ Implemented now:
 - AlphaGrad task materialization for all non-`RoeFlux_1d` tasks (`Perceptron`, `Encoder`, `RobotArm_6DOF`, `BlackScholes_Jacobian`, `HumanHeartDipole`, `PropaneCombustion`) now uses strict all-semantics registration and rejects non-semantic extracted edges.
 
 Still missing for closer parity:
-- Full numeric structural Jacobian payloads for every structural primitive. Current status: exact sparse-entry payloads are now emitted for key linear structural/reduction ops (`broadcast`, `reduce_sum`, `transpose`, `sliceRows`, `sliceCols`, `concatCols`, `cumsum`) when shape metadata is available; nonlinear structural ops still use semantic tags.
+- Full numeric structural Jacobian payloads for every structural primitive. Current status: exact sparse-entry payloads are now emitted for key linear structural/reduction ops (`broadcast`, `binaryBroadcast`, `reduce_sum`, `transpose`, `sliceRows`, `sliceCols`, `concatCols`, `cumsum`) when shape metadata is available; nonlinear structural ops still use semantic tags.
 - Full subjaxpr/body interpretation for higher-order/control primitives. Current status: `scan`/`cond` rules are now metadata-aware (predicate/carry/data partitioning and multi-output routing), but still conservative dependency semantics rather than branch/body jaxpr execution.
 - Dot-general backend representability beyond canonical 2D `mm`/`outer` forms. Current status: `LowerKStmt` now also accepts dot-general specs with any number of leading unit batch axes (canonicalized to `KStmt.mm`), but still rejects non-leading/non-unit batch patterns and richer contraction layouts.
 

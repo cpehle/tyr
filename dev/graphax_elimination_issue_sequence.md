@@ -27,7 +27,7 @@ Progress update (2026-03-06):
 - Issue 17: advanced (constant-Jac + symbolic unary/binary semantics aligned with Graphax/AlphaGrad overlap: add/sub/mul/div/max/min and core unary set).
 - Issue 20: advanced further (source-path structural alias rules now cover `transpose`/`reshape`/`squeeze`/`broadcast_in_dim`/`slice`/`concatenate`/`convert_element_type` with parity tests).
 - Issue 20: advanced further (dynamic/update source-path aliases now cover `dynamic_slice`/`dynamic_update_slice` plus gather/scatter family with explicit non-diff index handling in parity tests).
-- Issue 20: advanced further (key structural KStmt rules now emit exact sparse payload entries when shape metadata is available: `broadcast`, `reduce_sum`, `transpose`, `sliceRows`, `sliceCols`, `concatCols`, `cumsum`).
+- Issue 20: advanced further (key structural KStmt rules now emit exact sparse payload entries when shape metadata is available: `broadcast`, `binaryBroadcast`, `reduce_sum`, `transpose`, `sliceRows`, `sliceCols`, `concatCols`, `cumsum`).
 - Issue 21: advanced (parity rule-pack now includes explicit no-grad/control rules for `stop_gradient` and `iota`, plus dedicated dot-general semantics and extraction tests).
 - Issue 21: advanced further (Graphax/JAX alias coverage now includes extra unary/binary primitives and communication-collective unary aliases, with parity tests gating extraction behavior).
 - Issue 21: advanced further (source-path reduction/control aliases now include `reduce_*` and `select_n` semantics with parity tests).
