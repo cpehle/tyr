@@ -110,27 +110,34 @@ private def shapeDim? (v : JVar) (idx : Nat) : Option Nat := do
   let shape ← v.metaInfo.shape
   shape[idx]?
 
-private def hasUnitBatchDim0 (v : JVar) : Bool :=
-  match shapeDim? v 0 with
-  | some 1 => true
-  | _ => false
+private def isLeadingBatchAxes (axes : Array Nat) : Bool :=
+  axes == (Array.range axes.size)
+
+private def allUnitBatchAxes (v : JVar) (axes : Array Nat) : Bool :=
+  axes.all (fun axis => shapeDim? v axis == some 1)
 
 private def decodeMMTransposeFromUnitBatchAxes?
     (lhsContract rhsContract lhsBatch rhsBatch : Array Nat)
     (lhs rhs out : JVar) :
     Option MMATranspose :=
-  if lhsBatch == #[0] && rhsBatch == #[0] &&
-      hasUnitBatchDim0 lhs && hasUnitBatchDim0 rhs && hasUnitBatchDim0 out then
-    if lhsContract == #[2] && rhsContract == #[1] then
-      some .AB
-    else if lhsContract == #[2] && rhsContract == #[2] then
-      some .ABt
-    else if lhsContract == #[1] && rhsContract == #[1] then
-      some .AtB
-    else if lhsContract == #[1] && rhsContract == #[2] then
-      some .AtBt
-    else
-      none
+  let batchRank := lhsBatch.size
+  if batchRank == 0 then
+    none
+  else if lhsBatch != rhsBatch || !isLeadingBatchAxes lhsBatch then
+    none
+  else if
+      !(allUnitBatchAxes lhs lhsBatch &&
+        allUnitBatchAxes rhs rhsBatch &&
+        allUnitBatchAxes out lhsBatch) then
+    none
+  else if lhsContract == #[batchRank + 1] && rhsContract == #[batchRank] then
+    some .AB
+  else if lhsContract == #[batchRank + 1] && rhsContract == #[batchRank + 1] then
+    some .ABt
+  else if lhsContract == #[batchRank] && rhsContract == #[batchRank] then
+    some .AtB
+  else if lhsContract == #[batchRank] && rhsContract == #[batchRank + 1] then
+    some .AtBt
   else
     none
 

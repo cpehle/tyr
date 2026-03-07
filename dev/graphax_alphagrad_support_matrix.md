@@ -102,6 +102,7 @@ Implemented now:
 Still missing for closer parity:
 - Full numeric structural Jacobian payloads for every structural primitive. Current status: exact sparse-entry payloads are now emitted for key linear structural/reduction ops (`broadcast`, `reduce_sum`, `transpose`, `sliceRows`, `sliceCols`, `concatCols`, `cumsum`) when shape metadata is available; nonlinear structural ops still use semantic tags.
 - Full subjaxpr/body interpretation for higher-order/control primitives. Current status: `scan`/`cond` rules are now metadata-aware (predicate/carry/data partitioning and multi-output routing), but still conservative dependency semantics rather than branch/body jaxpr execution.
+- Dot-general backend representability beyond canonical 2D `mm`/`outer` forms. Current status: `LowerKStmt` now also accepts dot-general specs with any number of leading unit batch axes (canonicalized to `KStmt.mm`), but still rejects non-leading/non-unit batch patterns and richer contraction layouts.
 
 ## 5) Immediate Next Priorities
 

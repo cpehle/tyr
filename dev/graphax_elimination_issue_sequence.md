@@ -35,6 +35,7 @@ Progress update (2026-03-06):
 - Issue 21: parity baseline completed for higher-order control aliases (`scan`/`cond`) with deterministic control-flow local-Jac rules (no fallback): `cond` ignores predicate input and propagates data inputs; `scan` propagates all data/carry inputs.
 - Issue 21: advanced further (`scan`/`cond` control-flow rules are now metadata-aware and multi-output aware, partitioning predicate/carry/data paths using typed op params).
 - Issue 12: advanced (`LeanJaxpr -> KStmt` lowering now covers `dot_general` and `mma` families for representable `mm`/outer-like contraction patterns).
+- Issue 12: advanced further (`dot_general` lowering now accepts multi-leading-unit-batch specs and canonicalizes them to `KStmt.mm`; non-leading/non-unit batch patterns remain strict representability failures).
 - Issue 2: advanced further (`FnBody -> LeanJaxpr` now canonicalizes dot-general aliases and records typed control-flow counts for `scan`/`cond`).
 - Issue 21: advanced in AlphaGrad example integration path (`Examples/AlphaGradPort/Tasks`) by switching all non-`RoeFlux_1d` task materialization to strict all-semantics rule registration and asserting non-semantic edge extraction as hard failure.
 - Issue 21: advanced further with explicit support-matrix gate tests that enforce declared op-family registration for the parity pack, including `scan`/`cond` control-flow aliases under strict no-fallback semantics.
