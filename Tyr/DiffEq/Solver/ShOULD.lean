@@ -117,17 +117,8 @@ def ShOULD.solver (cfg : ShOULD := {}) {X Args : Type}
             let v0 := y0.2
             let h := driftInst.contr drift t0 t1
             let dW := diffInst.contr diffusion t0 t1
-            let zeroControl : X := 0.0 * dW
-            let dHOpt := diffusion.controlH?.map (fun controlH => controlH t0 t1)
-            let dKOpt := diffusion.controlK?.map (fun controlK => controlK t0 t1)
-            let dH : X :=
-              match dHOpt with
-              | some hCtrl => hCtrl
-              | none => zeroControl
-            let dK : X :=
-              match dKOpt with
-              | some kCtrl => kCtrl
-              | none => zeroControl
+            let dH : X := UnderdampedLangevinDiffusionTerm.controlH diffusion t0 t1
+            let dK : X := UnderdampedLangevinDiffusionTerm.controlK diffusion t0 t1
             let gamma := drift.gamma t0 x0 v0 args
             let u := drift.u t0 x0 v0 args
             let rho := Float.sqrt (2.0 * gamma * u)
@@ -137,22 +128,25 @@ def ShOULD.solver (cfg : ShOULD := {}) {X Args : Type}
             let f0 := drift.gradPotential t0 x0 args
             let chhHPlusCkkK : X := coeffs.chh * dH + coeffs.ckk * dK
             let rhoWK : X := rho * (dW - 12.0 * dK)
-            let vTilde : X := v0 + rho * (dH + 6.0 * dK)
+            let levyShift : X := dH + 6.0 * dK
+            let vTilde : X := v0 + rho * levyShift
 
             let xHalf : X :=
               x0 + coeffs.aHalf * vTilde + coeffs.bHalf * ((-uh) * f0 + rhoWK)
             let fHalf := drift.gradPotential (t0 + 0.5 * h) xHalf args
 
+            let forceBlendX : X := (1.0 / 3.0) * f0 + (2.0 / 3.0) * fHalf
+            let xForce : X := (uh * coeffs.b1) * forceBlendX
+            let xNoise : X := rho * (coeffs.b1 * dW + chhHPlusCkkK)
             let x1 : X :=
-              x0 + coeffs.a1 * v0 - (uh * coeffs.b1) * ((1.0 / 3.0) * f0 + (2.0 / 3.0) * fHalf) +
-                rho * (coeffs.b1 * dW + chhHPlusCkkK)
+              x0 + coeffs.a1 * v0 - xForce + xNoise
             let f1 := drift.gradPotential t1 x1 args
 
             let forceBlend : X :=
               (coeffs.beta1 / 6.0) * f0 + ((2.0 / 3.0) * coeffs.betaHalf * fHalf) + (1.0 / 6.0) * f1
+            let vNoise : X := rho * (coeffs.aa * dW - gamma * chhHPlusCkkK)
             let v1 : X :=
-              (coeffs.beta1 * v0) - (uh * forceBlend) +
-                rho * (coeffs.aa * dW - gamma * chhHPlusCkkK)
+              (coeffs.beta1 * v0) - (uh * forceBlend) + vNoise
 
             let y1 : X × X := (x1, v1)
             let dense := { t0 := t0, t1 := t1, y0 := y0, y1 := y1 }

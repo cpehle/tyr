@@ -336,6 +336,82 @@ Deterministic underdamped-Langevin self-convergence checks guided by:
     (QUICSORT.solver { taylorThreshold := 100.0 })
 
 /--
+One-step deterministic parity check for ShOULD's richer-control correction.
+Matches diffrax `ShOULD` formula that uses `chh * H + ckk * K`.
+-/
+@[test] def testShOULDUnderdampedLevyCoeffWeightingParity : IO Unit := do
+  let gammaConst := 0.7
+  let uConst := 0.6
+  let drift : UnderdampedLangevinDriftTerm Float Unit := {
+    gradPotential := fun _t _x _ => 0.0
+    gamma := fun _t _x _v _ => gammaConst
+    u := fun _t _x _v _ => uConst
+  }
+  let diffusionBase : UnderdampedLangevinDiffusionTerm Float Unit := {
+    control := fun t0 t1 =>
+      let dt := t1 - t0
+      0.3 * dt
+    gamma := fun _t _x _v _ => gammaConst
+    u := fun _t _x _v _ => uConst
+  }
+  let diffusion :=
+    UnderdampedLangevinDiffusionTerm.withControlsHK diffusionBase
+      (fun t0 t1 =>
+        let dt := t1 - t0
+        0.8 * dt)
+      (fun t0 t1 =>
+        let dt := t1 - t0
+        (-0.4) * dt)
+
+  let terms :
+      MultiTerm (UnderdampedLangevinDriftTerm Float Unit) (UnderdampedLangevinDiffusionTerm Float Unit) := {
+    term1 := drift
+    term2 := diffusion
+  }
+  let solver := ShOULD.solver { taylorThreshold := 0.1 }
+  let t0 : Time := 0.0
+  let t1 : Time := 0.2
+  let dt := t1 - t0
+  let y0 : Float × Float := (0.15, -0.2)
+  let sol :=
+    diffeqsolve
+      (Term := MultiTerm (UnderdampedLangevinDriftTerm Float Unit)
+        (UnderdampedLangevinDiffusionTerm Float Unit))
+      (Y := (Float × Float))
+      (VF := ((Float × Float) × Scalar))
+      (Control := (Time × Float))
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      terms solver t0 t1 (some dt) y0 ()
+      (saveat := { t1 := true })
+
+  LeanTest.assertTrue (sol.result == Result.successful)
+    "ShOULD levy-coeff parity: solve should succeed"
+  let y1 ← finalSavedPair "ShOULD levy-coeff parity" sol
+
+  let gh := gammaConst * dt
+  let beta1 := Float.exp (-gh)
+  let a1 := (1.0 - beta1) / gammaConst
+  let b1 := (beta1 + gh - 1.0) / (gammaConst * gh)
+  let aa := a1 / dt
+  let chh := 6.0 * (beta1 * (gh + 2.0) + gh - 2.0) / ((gh * gh) * gammaConst)
+  let ckk :=
+    60.0 * (beta1 * (gh * (gh + 6.0) + 12.0) - gh * (gh - 6.0) - 12.0) /
+      ((gh * gh * gh) * gammaConst)
+  let rho := Float.sqrt (2.0 * gammaConst * uConst)
+  let dW := 0.3 * dt
+  let dH := 0.8 * dt
+  let dK := (-0.4) * dt
+  let chhHPlusCkkK := chh * dH + ckk * dK
+  let xExpected := y0.1 + a1 * y0.2 + rho * (b1 * dW + chhHPlusCkkK)
+  let vExpected := beta1 * y0.2 + rho * (aa * dW - gammaConst * chhHPlusCkkK)
+
+  LeanTest.assertTrue (Float.abs (y1.1 - xExpected) <= 1.0e-8)
+    s!"ShOULD levy-coeff parity (x): expected {xExpected}, got {y1.1}"
+  LeanTest.assertTrue (Float.abs (y1.2 - vExpected) <= 1.0e-8)
+    s!"ShOULD levy-coeff parity (v): expected {vExpected}, got {y1.2}"
+
+/--
 Deterministic richer-control parity for underdamped ALIGN:
 - identical `W` control with and without explicit `H` input should diverge,
 - and richer-control endpoints should stay stable under step refinement.
@@ -437,6 +513,7 @@ def run : IO Unit := do
   testALIGNUnderdampedTaylorThresholdParity
   testShOULDUnderdampedTaylorThresholdParity
   testQUICSORTUnderdampedTaylorThresholdParity
+  testShOULDUnderdampedLevyCoeffWeightingParity
   testALIGNUnderdampedLevyControlParityAndStability
   testUnderdampedVectorStateShapeParity
   testALIGNUnderdampedSelfConvergence
