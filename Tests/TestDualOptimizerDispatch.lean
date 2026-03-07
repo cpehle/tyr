@@ -45,6 +45,35 @@ def testMatrixStateInitializationDispatch : IO Unit := do
   | _ => LeanTest.fail "Expected generic manifold state for non-Stiefel manifold path"
 
 @[test]
+def testMatrixBackendSpecPerLabelDispatch : IO Unit := do
+  let spec : MatrixBackendSpec := {
+    default := { matrixOptimizer := MatrixOptimizerKind.norMuon }
+    attn := some {
+      matrixOptimizer := MatrixOptimizerKind.manifoldMuon
+      matrixManifold := MatrixManifoldFamily.stiefel
+    }
+    mlp := some {
+      matrixOptimizer := MatrixOptimizerKind.manifoldMuon
+      matrixManifold := MatrixManifoldFamily.grassmann
+      preferGenericManifoldPath := true
+    }
+  }
+  let attnCfg := spec.configForLabel torch.Optim.NorMuon.ParamLabel.attn
+  let mlpCfg := spec.configForLabel torch.Optim.NorMuon.ParamLabel.mlp
+  let smearCfg := spec.configForLabel torch.Optim.NorMuon.ParamLabel.smearGate
+
+  LeanTest.assertTrue (usesManifoldMuon attnCfg)
+    "Expected manifold backend for attention label"
+  LeanTest.assertTrue (attnCfg.matrixManifold == MatrixManifoldFamily.stiefel)
+    "Expected Stiefel manifold for attention label"
+  LeanTest.assertTrue (usesManifoldMuon mlpCfg)
+    "Expected manifold backend for MLP label"
+  LeanTest.assertTrue (mlpCfg.preferGenericManifoldPath && mlpCfg.matrixManifold == MatrixManifoldFamily.grassmann)
+    "Expected generic Grassmann path for MLP label"
+  LeanTest.assertTrue (!(usesManifoldMuon smearCfg))
+    "Expected default non-manifold backend for unspecified label"
+
+@[test]
 def testStepMatrixSingleStiefelConstraint : IO Unit := do
   let pRaw ← randn #[8, 4] false
   let p := autograd.set_requires_grad

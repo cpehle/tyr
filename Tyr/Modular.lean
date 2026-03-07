@@ -2,6 +2,7 @@ import Tyr.Modular.Norm
 import Tyr.Modular.Atomic
 import Tyr.Modular.Compose
 import Tyr.Modular.Budget
+import Tyr.Modular.Manifold
 
 /-!
 # Tyr.Modular
@@ -16,6 +17,7 @@ that supports width/depth-robust optimization scaling.
 - `Atomic`: atomic module instances (for example linear/layer-style primitives).
 - `Compose`: composition rules for sequential/product/container module structures.
 - `Budget`: modular sensitivity -> LR budget compilation utilities.
+- `Manifold`: manifold-native module wrappers and modular-to-optimizer bridges.
 
 ## Scope
 

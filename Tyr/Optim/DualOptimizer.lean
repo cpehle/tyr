@@ -122,6 +122,23 @@ inductive ParamGroup where
   | scalar     : ParamGroup  -- Use AdamW (per-layer scalars)
   deriving Repr, BEq, Inhabited
 
+/--
+Per-label matrix backend spec.
+
+This allows retrofitting manifold/NorMuon selection below top-level by binding
+backend configs at parameter-label granularity.
+-/
+structure MatrixBackendSpec where
+  /-- Fallback config used when no label-specific override is provided. -/
+  default : Config := {}
+  /-- Attention-matrix override (`attn`, `attnGate`). -/
+  attn : Option Config := none
+  /-- MLP-matrix override. -/
+  mlp : Option Config := none
+  /-- Smear-gate matrix override. -/
+  smearGate : Option Config := none
+  deriving Repr, Inhabited
+
 /-- Map NorMuon's ParamLabel to ParamGroup -/
 def labelToGroup (label : ParamLabel) : ParamGroup :=
   match label with
@@ -133,6 +150,15 @@ def labelToGroup (label : ParamLabel) : ParamGroup :=
   | .valueEmbed => .embedding
   | .lmHead => .lmHead
   | .scalars => .scalar
+
+/-- Resolve per-label matrix backend configuration from a `MatrixBackendSpec`. -/
+def MatrixBackendSpec.configForLabel (spec : MatrixBackendSpec) (label : ParamLabel) : Config :=
+  match label with
+  | .attn => spec.attn.getD spec.default
+  | .attnGate => spec.attn.getD spec.default
+  | .mlp => spec.mlp.getD spec.default
+  | .smearGate => spec.smearGate.getD spec.default
+  | _ => spec.default
 
 /-- Get learning rate multiplier for a parameter group -/
 def baseGroupLrMul (cfg : Config) (group : ParamGroup) : Float :=
@@ -232,12 +258,54 @@ structure GenericManifoldState (m n : UInt64) where
   step : Nat := 0
   deriving Repr, Inhabited
 
+instance {m n : UInt64} : TensorStruct (GenericManifoldState m n) where
+  map f s := { s with momentumBuffer := s.momentumBuffer.map f }
+  mapM f s := do
+    let momentumBuffer ← match s.momentumBuffer with
+      | some t => some <$> f t
+      | none => pure none
+    pure { s with momentumBuffer }
+  zipWith f a b := {
+    momentumBuffer := match a.momentumBuffer, b.momentumBuffer with
+      | some t1, some t2 => some (f t1 t2)
+      | _, _ => none
+    step := a.step
+  }
+  fold f init s := match s.momentumBuffer with
+    | some t => f t init
+    | none => init
+
 /-- Matrix-parameter optimizer state tagged by backend family. -/
 inductive MatrixParamState (m n : UInt64) where
   | norMuon (state : NorMuon.ParamState #[m, n])
   | manifoldMuon (state : torch.Optim.ManifoldMuon.ParamState m n)
   | genericManifold (state : GenericManifoldState m n)
   deriving Repr
+
+instance {m n : UInt64} : TensorStruct (MatrixParamState m n) where
+  map f st :=
+    match st with
+    | .norMuon s => .norMuon (TensorStruct.map f s)
+    | .manifoldMuon s => .manifoldMuon (TensorStruct.map f s)
+    | .genericManifold s => .genericManifold (TensorStruct.map f s)
+  mapM f st := do
+    match st with
+    | .norMuon s => pure <| .norMuon (← TensorStruct.mapM f s)
+    | .manifoldMuon s => pure <| .manifoldMuon (← TensorStruct.mapM f s)
+    | .genericManifold s => pure <| .genericManifold (← TensorStruct.mapM f s)
+  zipWith f a b :=
+    match a, b with
+    | .norMuon s1, .norMuon s2 => .norMuon (TensorStruct.zipWith f s1 s2)
+    | .manifoldMuon s1, .manifoldMuon s2 => .manifoldMuon (TensorStruct.zipWith f s1 s2)
+    | .genericManifold s1, .genericManifold s2 => .genericManifold (TensorStruct.zipWith f s1 s2)
+    | .norMuon s, _ => .norMuon s
+    | .manifoldMuon s, _ => .manifoldMuon s
+    | .genericManifold s, _ => .genericManifold s
+  fold f init st :=
+    match st with
+    | .norMuon s => TensorStruct.fold f init s
+    | .manifoldMuon s => TensorStruct.fold f init s
+    | .genericManifold s => TensorStruct.fold f init s
 
 /-- Initialize generic manifold state. -/
 def initGenericManifoldState {m n : UInt64} (_param : T #[m, n]) : GenericManifoldState m n := {}
@@ -469,5 +537,15 @@ def matrixBackendOps {m n : UInt64}
   stepGroupLocal := fun ps gs ss => stepMatrixGroupLocal ps gs ss cfg step lrMul wdMul
   stepGroupDistributed := fun ps gs ss => stepMatrixGroupDistributed ps gs ss cfg step lrMul wdMul
 }
+
+/-- Build matrix backend ops for a specific parameter label from a backend spec. -/
+def matrixBackendOpsForLabel {m n : UInt64}
+    (spec : MatrixBackendSpec)
+    (label : ParamLabel)
+    (step : Nat)
+    (lrMul : Float := 1.0)
+    (wdMul : Float := 1.0)
+    : MatrixBackendOps m n :=
+  matrixBackendOps (cfg := spec.configForLabel label) (step := step) (lrMul := lrMul) (wdMul := wdMul)
 
 end torch.Optim.DualOptimizer
