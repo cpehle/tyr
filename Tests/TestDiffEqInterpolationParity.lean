@@ -134,11 +134,74 @@ private def finalSavedValue {S C : Type}
   assertApprox "Piecewise dense left derivative at knot" dLeft 1.0 1e-12
   assertApprox "Piecewise dense right derivative at knot" dRight 2.0 1e-12
 
+@[test] def testLocalLinearDenseZeroLengthParity : IO Unit := do
+  /-
+  Diffrax reference: `../diffrax/test/test_local_interpolation.py` (zero-length local interval).
+  -/
+  let interp :=
+    LocalLinearDenseInfo.toInterpolation
+      ({ t0 := 2.0, t1 := 2.0, y0 := (2.1 : Float), y1 := (2.2 : Float) } :
+        LocalLinearDenseInfo Float)
+  let value := interp.evaluate 2.0 none true
+  let inc := interp.evaluate 2.0 (some 2.0) true
+  let deriv := interp.derivative 2.0 true
+  assertApprox "Local linear zero-length value" value 2.1 1e-12
+  assertApprox "Local linear zero-length increment" inc 0.0 1e-12
+  assertApprox "Local linear zero-length derivative" deriv 0.0 1e-12
+
+@[test] def testLocalLinearDenseIncrementShiftAndAntisymmetryParity : IO Unit := do
+  /-
+  Diffrax reference: `../diffrax/test/test_local_interpolation.py` (increment semantics).
+  -/
+  let interp :=
+    LocalLinearDenseInfo.toInterpolation
+      ({ t0 := 2.0, t1 := 3.3, y0 := (2.1 : Float), y1 := (2.2 : Float) } :
+        LocalLinearDenseInfo Float)
+
+  let incA := interp.evaluate 2.6 (some 2.8) true
+  let incB := interp.evaluate 2.7 (some 2.9) true
+  assertApprox "Local linear increment shift invariance" incA incB 1e-12
+
+  let fwd := interp.evaluate 2.8 (some 2.9) true
+  let bwd := interp.evaluate 2.9 (some 2.8) true
+  assertApprox "Local linear increment antisymmetry" bwd (-fwd) 1e-12
+
+  let incAC := interp.evaluate 2.6 (some 2.9) true
+  let incAB := interp.evaluate 2.6 (some 2.75) true
+  let incBC := interp.evaluate 2.75 (some 2.9) true
+  assertApprox "Local linear increment additivity" incAC (incAB + incBC) 1e-12
+
+@[test] def testLinearInterpolationKnotAndSlopeParity : IO Unit := do
+  /-
+  Diffrax reference: `../diffrax/test/test_global_interpolation.py`
+  (`LinearInterpolation` knot recovery + per-segment slope behavior).
+  -/
+  let interp :=
+    LinearInterpolation.toDense
+      ({ ts := #[0.0, 2.0, 3.0, 5.0], ys := #[1.0, 5.0, 2.0, 10.0] } :
+        LinearInterpolation Float)
+
+  assertApprox "LinearInterpolation knot value t=0" (interp.evaluate 0.0 none true) 1.0 1e-12
+  assertApprox "LinearInterpolation knot value t=2" (interp.evaluate 2.0 none true) 5.0 1e-12
+  assertApprox "LinearInterpolation knot value t=3" (interp.evaluate 3.0 none true) 2.0 1e-12
+  assertApprox "LinearInterpolation knot value t=5" (interp.evaluate 5.0 none true) 10.0 1e-12
+
+  assertApprox "LinearInterpolation slope in [0,2]" (interp.derivative 1.0 true) 2.0 1e-12
+  assertApprox "LinearInterpolation slope in [2,3]" (interp.derivative 2.5 true) (-3.0) 1e-12
+  assertApprox "LinearInterpolation slope in [3,5]" (interp.derivative 4.0 true) 4.0 1e-12
+
+  let inc := interp.evaluate 1.5 (some 4.5) true
+  let diff := interp.evaluate 4.5 none true - interp.evaluate 1.5 none true
+  assertApprox "LinearInterpolation increment consistency" inc diff 1e-12
+
 def run : IO Unit := do
   testLinearPathEndpointIncrementAndDerivativeParity
   testCubicPathEndpointIncrementAndDerivativeParity
   testDenseSolutionEndpointIncrementAndDerivativeParity
   testPiecewiseDenseBoundaryLeftRightParity
+  testLocalLinearDenseZeroLengthParity
+  testLocalLinearDenseIncrementShiftAndAntisymmetryParity
+  testLinearInterpolationKnotAndSlopeParity
 
 end Tests.DiffEqInterpolationParity
 

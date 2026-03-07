@@ -57,10 +57,69 @@ private def approx (a b tol : Float) : Bool :=
   | none =>
       LeanTest.fail "Expected ControlTerm.toODE? for differentiable path"
 
+@[test] def testPathIncrementAdditivityAndAntisymmetryParity : IO Unit := do
+  let path := AbstractPath.linearInterpolation 0.0 2.0 (1.0 : Float) (5.0 : Float)
+  let tA : Time := 0.3
+  let tB : Time := 1.1
+  let tC : Time := 1.7
+  let incAB := path.increment tA tB
+  let incBC := path.increment tB tC
+  let incAC := path.increment tA tC
+  LeanTest.assertTrue (approx incAC (incAB + incBC) 1e-12)
+    s!"Path increment additivity failed: incAC={incAC}, incAB+incBC={incAB + incBC}"
+  let incBA := path.increment tB tA
+  LeanTest.assertTrue (approx incBA (-incAB) 1e-12)
+    s!"Path increment antisymmetry failed: incBA={incBA}, -incAB={-incAB}"
+
+@[test] def testPathDerivativeFiniteDifferenceParity : IO Unit := do
+  let linear := AbstractPath.linearInterpolation 0.0 2.0 (1.0 : Float) (5.0 : Float)
+  let cubic :=
+    AbstractPath.cubicHermiteInterpolation 0.0 1.0
+      (0.0 : Float) (1.0 : Float) (0.0 : Float) (0.0 : Float)
+  let smooth :=
+    AbstractPath.ofDifferentiablePosition 0.0 2.0
+      (fun t => t * t * t + 1.0)
+      (fun t _left => 3.0 * t * t)
+  let eps : Time := 1.0e-4
+
+  let check := fun (label : String) (path : AbstractPath Float) (t : Time) => do
+    match path.derivative t with
+    | some d =>
+        let fd :=
+          (path.evaluate (t + eps) none true - path.evaluate (t - eps) none true) / (2.0 * eps)
+        LeanTest.assertTrue (approx d fd 5.0e-4)
+          s!"{label}: derivative/FD mismatch at t={t}: derivative={d}, fd={fd}"
+    | none =>
+        LeanTest.fail s!"{label}: expected derivative"
+
+  check "linear path" linear 0.73
+  check "cubic path" cubic 0.41
+  check "ofDifferentiablePosition path" smooth 1.2
+
+@[test] def testPathClearDerivativePreservesValues : IO Unit := do
+  let base := AbstractPath.linearInterpolation 0.0 2.0 (1.0 : Float) (5.0 : Float)
+  let cleared := base.clearDerivative
+  LeanTest.assertTrue cleared.derivativeFn?.isNone
+    "clearDerivative should remove derivative metadata"
+
+  let t : Time := 0.8
+  let t' : Time := 1.6
+  let basePos := base.evaluate t none true
+  let clearedPos := cleared.evaluate t none true
+  LeanTest.assertTrue (approx basePos clearedPos 1e-12)
+    s!"clearDerivative should preserve point evaluation: {basePos} vs {clearedPos}"
+  let baseInc := base.increment t t'
+  let clearedInc := cleared.increment t t'
+  LeanTest.assertTrue (approx baseInc clearedInc 1e-12)
+    s!"clearDerivative should preserve increments: {baseInc} vs {clearedInc}"
+
 def run : IO Unit := do
   testLinearInterpolationEvaluateParity
   testCubicHermiteEvaluateParity
   testOfPositionEvaluateParity
   testControlTermContrStillUsesIncrement
+  testPathIncrementAdditivityAndAntisymmetryParity
+  testPathDerivativeFiniteDifferenceParity
+  testPathClearDerivativePreservesValues
 
 end Tests.DiffEqPathParity
