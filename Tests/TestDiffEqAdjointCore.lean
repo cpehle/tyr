@@ -154,6 +154,75 @@ section
     match adj with
     | some _ => pure ()
     | none => LeanTest.fail "Expected adjoint result from wrapper"
+
+  @[test] def testImplicitAdjointFallbackDisabled : IO Unit := do
+    let term : ODETerm Float Float := { vectorField := fun _t y a => a * y }
+    let solver :=
+      RK4.solver
+        (Term := ODETerm Float Float)
+        (Y := Float)
+        (VF := Float)
+        (Args := Float)
+    let adjSolver :=
+      RK4.solver
+        (Term := ODETerm (AdjointState Float Float) Float)
+        (Y := AdjointState Float Float)
+        (VF := AdjointState Float Float)
+        (Args := Float)
+    let adjoint : BacksolveAdjoint Float Float := { adjSolver := adjSolver }
+    let mode : ImplicitAdjoint := { useBacksolveFallback := false }
+    let (sol, adjOpt, errOpt) :=
+      diffeqsolveImplicitAdjoint
+        (Controller := ConstantStepSize)
+        mode term solver adjoint 0.0 1.0 (some 0.01) 2.0 0.3 1.0 (saveat := { t1 := true })
+    LeanTest.assertTrue (sol.result == Result.internalError)
+      "ImplicitAdjoint without fallback should report unsupported mode"
+    LeanTest.assertTrue adjOpt.isNone
+      "ImplicitAdjoint unsupported mode should not return adjoint values"
+    match errOpt with
+    | some msg =>
+        LeanTest.assertTrue (msg.contains "without backsolve fallback")
+          s!"Expected unsupported fallback message, got: {msg}"
+    | none =>
+        LeanTest.fail "Expected error message for unsupported implicit adjoint mode"
+
+  @[test] def testImplicitAdjointRecursiveCheckpoint : IO Unit := do
+    let term : ODETerm Float Float := { vectorField := fun _t y a => a * y }
+    let solver :=
+      RK4.solver
+        (Term := ODETerm Float Float)
+        (Y := Float)
+        (VF := Float)
+        (Args := Float)
+    let adjSolver :=
+      RK4.solver
+        (Term := ODETerm (AdjointState Float Float) Float)
+        (Y := AdjointState Float Float)
+        (VF := AdjointState Float Float)
+        (Args := Float)
+    let adjoint : BacksolveAdjoint Float Float := { adjSolver := adjSolver }
+    let mode : ImplicitAdjoint := {
+      useBacksolveFallback := true
+      recursiveCheckpoint := some { checkpointEvery := 2, recomputeSegments := true }
+    }
+    let (solAdj, adjOpt, errOpt) :=
+      diffeqsolveImplicitAdjoint
+        (Controller := ConstantStepSize)
+        mode term solver adjoint 0.0 1.0 (some 0.01) 2.0 0.3 1.0 (saveat := { t1 := true })
+
+    LeanTest.assertTrue (solAdj.result == Result.successful)
+      "ImplicitAdjoint recursive checkpoint primal solve should succeed"
+    LeanTest.assertTrue errOpt.isNone
+      "ImplicitAdjoint recursive checkpoint should not report an error"
+    match adjOpt with
+    | none => LeanTest.fail "Expected adjoint result from recursive checkpoint mode"
+    | some adj =>
+        let expectedY0 := Float.exp 0.3
+        let expectedA := 2.0 * Float.exp 0.3
+        LeanTest.assertTrue (approx adj.adjY0 expectedY0 5.0e-2)
+          s!"Recursive checkpoint adjY0 expected ~{expectedY0}, got {adj.adjY0}"
+        LeanTest.assertTrue (approx adj.adjArgs expectedA 8.0e-2)
+          s!"Recursive checkpoint adjArgs expected ~{expectedA}, got {adj.adjArgs}"
 end
 
 end Tests.DiffEqAdjointCore

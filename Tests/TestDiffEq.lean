@@ -1236,6 +1236,452 @@ private def getStat (name : String) (stats : List (String × Nat)) : Nat :=
       else
         LeanTest.fail "Empty ys for SIL3 solve"
 
+@[test] def testSaveAtTsDirectionForward : IO Unit := do
+  let term : ODETerm Float Unit := { vectorField := fun _t y _ => -y }
+  let solver :=
+    Euler.solver (Term := ODETerm Float Unit) (Y := Float) (VF := Float) (Args := Unit)
+  let badSaveAt : SaveAt := { ts := some #[0.8, 0.2], t1 := false }
+  let sol :=
+    diffeqsolve
+      (Term := ODETerm Float Unit)
+      (Y := Float)
+      (VF := Float)
+      (Control := Time)
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      term solver 0.0 1.0 (some 0.1) (1.0 : Float) () (saveat := badSaveAt)
+  LeanTest.assertTrue (sol.result == Result.internalError)
+    "Forward solve with non-monotone SaveAt.ts should fail"
+
+@[test] def testSaveAtTsDirectionReverse : IO Unit := do
+  let term : ODETerm Float Unit := { vectorField := fun _t y _ => -y }
+  let solver :=
+    Euler.solver (Term := ODETerm Float Unit) (Y := Float) (VF := Float) (Args := Unit)
+  let badSaveAt : SaveAt := { ts := some #[0.2, 0.8], t1 := false }
+  let sol :=
+    diffeqsolve
+      (Term := ODETerm Float Unit)
+      (Y := Float)
+      (VF := Float)
+      (Control := Time)
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      term solver 1.0 0.0 (some 0.1) (1.0 : Float) () (saveat := badSaveAt)
+  LeanTest.assertTrue (sol.result == Result.internalError)
+    "Reverse solve with non-monotone SaveAt.ts should fail"
+
+@[test] def testNestedSubSaveAtPayloadFlags : IO Unit := do
+  let term : ODETerm Float Unit := { vectorField := fun _t y _ => -y }
+  let solver :=
+    Dopri5.solver (Term := ODETerm Float Unit) (Y := Float) (VF := Float) (Args := Unit)
+  let nested : SubSaveAt := {
+    t1 := true
+    solverState := true
+    controllerState := true
+    madeJump := true
+  }
+  let saveat : SaveAt := {
+    t0 := false
+    t1 := false
+    solverState := false
+    controllerState := false
+    madeJump := false
+    subs := #[nested]
+  }
+  let sol :=
+    diffeqsolve
+      (Term := ODETerm Float Unit)
+      (Y := Float)
+      (VF := Float)
+      (Control := Time)
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      term solver 0.0 1.0 (some 0.1) (2.0 : Float) () (saveat := saveat)
+  LeanTest.assertTrue (sol.result == Result.successful) "Nested SaveAt solve should succeed"
+  LeanTest.assertTrue sol.solverState.isSome "Nested SubSaveAt should request solverState"
+  LeanTest.assertTrue sol.controllerState.isSome "Nested SubSaveAt should request controllerState"
+  LeanTest.assertTrue sol.madeJump.isSome "Nested SubSaveAt should request madeJump"
+  match sol.ts with
+  | some ts =>
+      LeanTest.assertTrue (ts.size == 1) s!"Expected one saved t1 value, got {ts.size}"
+      LeanTest.assertTrue (approx ts[0]! 1.0 1e-12) s!"Expected t1=1.0, got {ts[0]!}"
+  | none =>
+      LeanTest.fail "Nested SubSaveAt(t1=True) should save endpoint"
+
+@[test] def testBooleanEventTerminate : IO Unit := do
+  let term : ODETerm Float Unit := { vectorField := fun _t _y _ => 1.0 }
+  let solver :=
+    Euler.solver (Term := ODETerm Float Unit) (Y := Float) (VF := Float) (Args := Unit)
+  let ev : EventSpec Float Unit := {
+    condition := .boolean (fun t _y _ => t >= 0.35)
+    terminate := true
+  }
+  let sol :=
+    diffeqsolve
+      (Term := ODETerm Float Unit)
+      (Y := Float)
+      (VF := Float)
+      (Control := Time)
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      term solver 0.0 1.0 (some 0.1) (0.0 : Float) () (saveat := { t1 := true })
+      (event := some ev)
+  LeanTest.assertTrue (sol.result == Result.eventOccurred) "Terminating event should stop solve"
+  match sol.ts, sol.ys with
+  | some ts, some ys =>
+      LeanTest.assertTrue (ts.size == 1) s!"Expected one output time, got {ts.size}"
+      LeanTest.assertTrue (ys.size == 1) s!"Expected one output state, got {ys.size}"
+      LeanTest.assertTrue (approx ts[0]! 0.4 1e-12) s!"Expected event time 0.4, got {ts[0]!}"
+      LeanTest.assertTrue (approx ys[0]! 0.4 1e-12) s!"Expected event state 0.4, got {ys[0]!}"
+  | _, _ => LeanTest.fail "Expected endpoint save for terminating event"
+  match sol.eventMask with
+  | some mask =>
+      LeanTest.assertTrue (mask.size == 1) s!"Expected one event mask entry, got {mask.size}"
+      LeanTest.assertTrue mask[0]! "Event mask should record the triggered event"
+  | none => LeanTest.fail "Event mask should be present when events are configured"
+  match sol.eventMaskLast with
+  | some mask =>
+      LeanTest.assertTrue (mask.size == 1) s!"Expected one last-event mask entry, got {mask.size}"
+      LeanTest.assertTrue mask[0]! "Last-event mask should record terminating event"
+  | none => LeanTest.fail "Last-event mask should be present for triggered event"
+
+@[test] def testBooleanEventNonTerminating : IO Unit := do
+  let term : ODETerm Float Unit := { vectorField := fun _t _y _ => 1.0 }
+  let solver :=
+    Euler.solver (Term := ODETerm Float Unit) (Y := Float) (VF := Float) (Args := Unit)
+  let ev : EventSpec Float Unit := {
+    condition := .boolean (fun t _y _ => t >= 0.35)
+    terminate := false
+  }
+  let sol :=
+    diffeqsolve
+      (Term := ODETerm Float Unit)
+      (Y := Float)
+      (VF := Float)
+      (Control := Time)
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      term solver 0.0 1.0 (some 0.1) (0.0 : Float) () (saveat := { t1 := true })
+      (event := some ev)
+  LeanTest.assertTrue (sol.result == Result.successful)
+    "Non-terminating event should allow solve completion"
+  match sol.ts, sol.ys with
+  | some ts, some ys =>
+      LeanTest.assertTrue (ts.size == 1) s!"Expected one output time, got {ts.size}"
+      LeanTest.assertTrue (approx ts[0]! 1.0 1e-12) s!"Expected final time 1.0, got {ts[0]!}"
+      LeanTest.assertTrue (approx ys[0]! 1.0 1e-12) s!"Expected final state 1.0, got {ys[0]!}"
+  | _, _ => LeanTest.fail "Expected endpoint save for non-terminating event solve"
+  match sol.eventMask with
+  | some mask =>
+      LeanTest.assertTrue (mask.size == 1) s!"Expected one event mask entry, got {mask.size}"
+      LeanTest.assertTrue mask[0]! "Event mask should record non-terminating event hit"
+  | none => LeanTest.fail "Event mask should be present when events are configured"
+  match sol.eventMaskLast with
+  | some mask =>
+      LeanTest.assertTrue (mask.size == 1) s!"Expected one last-event mask entry, got {mask.size}"
+      LeanTest.assertTrue mask[0]! "Last-event mask should track latest event time hits"
+  | none => LeanTest.fail "Last-event mask should be present after an event hit"
+
+@[test] def testRealEventDirection : IO Unit := do
+  let term : ODETerm Float Unit := { vectorField := fun _t _y _ => 1.0 }
+  let solver :=
+    Euler.solver (Term := ODETerm Float Unit) (Y := Float) (VF := Float) (Args := Unit)
+  let up : EventSpec Float Unit := {
+    condition := .real (fun _t y _ => y - 0.5)
+    direction := some true
+    terminate := true
+  }
+  let down : EventSpec Float Unit := {
+    condition := .real (fun _t y _ => y - 0.5)
+    direction := some false
+    terminate := true
+  }
+  let solUp :=
+    diffeqsolve
+      (Term := ODETerm Float Unit)
+      (Y := Float)
+      (VF := Float)
+      (Control := Time)
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      term solver 0.0 1.0 (some 0.2) (0.0 : Float) () (saveat := { t1 := true })
+      (event := some up)
+  LeanTest.assertTrue (solUp.result == Result.eventOccurred)
+    "Upward real event should trigger"
+  match solUp.ts with
+  | some ts =>
+      LeanTest.assertTrue (ts.size == 1) s!"Expected one output time, got {ts.size}"
+      LeanTest.assertTrue (approx ts[0]! 0.5 1.0e-4) s!"Expected localized root near 0.5, got {ts[0]!}"
+  | none => LeanTest.fail "Expected saved root time for upward event"
+
+  let solDown :=
+    diffeqsolve
+      (Term := ODETerm Float Unit)
+      (Y := Float)
+      (VF := Float)
+      (Control := Time)
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      term solver 0.0 1.0 (some 0.2) (0.0 : Float) () (saveat := { t1 := true })
+      (event := some down)
+  LeanTest.assertTrue (solDown.result == Result.successful)
+    "Downward-only event should not trigger on increasing trajectory"
+  match solDown.eventMask with
+  | some mask =>
+      LeanTest.assertTrue (mask.size == 1) s!"Expected one event mask entry, got {mask.size}"
+      LeanTest.assertTrue (!mask[0]!) "Downward event mask should remain false"
+  | none => LeanTest.fail "Event mask should be present when events are configured"
+  LeanTest.assertTrue solDown.eventMaskLast.isNone
+    "Last-event mask should remain none when no event fired"
+
+@[test] def testEventTiePrefersTerminating : IO Unit := do
+  let term : ODETerm Float Unit := { vectorField := fun _t _y _ => 1.0 }
+  let solver :=
+    Euler.solver (Term := ODETerm Float Unit) (Y := Float) (VF := Float) (Args := Unit)
+  let evKeep : EventSpec Float Unit := {
+    condition := .boolean (fun t _y _ => t >= 0.5)
+    terminate := false
+  }
+  let evStop : EventSpec Float Unit := {
+    condition := .boolean (fun t _y _ => t >= 0.5)
+    terminate := true
+  }
+  let sol :=
+    diffeqsolve
+      (Term := ODETerm Float Unit)
+      (Y := Float)
+      (VF := Float)
+      (Control := Time)
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      term solver 0.0 1.0 (some 0.1) (0.0 : Float) () (saveat := { t1 := true })
+      (events := #[evKeep, evStop])
+  LeanTest.assertTrue (sol.result == Result.eventOccurred)
+    "Terminating event should win on tie-time event hits"
+  match sol.eventMask, sol.eventMaskLast with
+  | some mask, some lastMask =>
+      LeanTest.assertTrue (mask.size == 2) s!"Expected two event mask entries, got {mask.size}"
+      LeanTest.assertTrue (lastMask.size == 2)
+        s!"Expected two last-event mask entries, got {lastMask.size}"
+      LeanTest.assertTrue (mask[0]! && mask[1]!) "Both events should be marked as hit"
+      LeanTest.assertTrue (lastMask[0]! && lastMask[1]!)
+        "Both events at chosen event time should be reflected in eventMaskLast"
+  | _, _ =>
+      LeanTest.fail "Expected event masks for multi-event tie case"
+
+@[test] def testBrownianPairAndFinStructuredIncrements : IO Unit := do
+  let pairTree : VirtualBrownianTree (Float × Float) := {
+    t0 := 0.0
+    t1 := 1.0
+    tol := 1.0e-3
+    seed := 11122
+    shape := ((0.0 : Float), (0.0 : Float))
+  }
+  let p01 := VirtualBrownianTree.increment pairTree 0.0 1.0
+  let p05 := VirtualBrownianTree.increment pairTree 0.0 0.5
+  let p51 := VirtualBrownianTree.increment pairTree 0.5 1.0
+  LeanTest.assertTrue (approx p01.W.1 (p05.W.1 + p51.W.1) 1e-6)
+    s!"Pair Brownian component 0 not additive: {p01.W.1} vs {p05.W.1 + p51.W.1}"
+  LeanTest.assertTrue (approx p01.W.2 (p05.W.2 + p51.W.2) 1e-6)
+    s!"Pair Brownian component 1 not additive: {p01.W.2} vs {p05.W.2 + p51.W.2}"
+
+  let finTree : VirtualBrownianTree (Fin 3 → Float) := {
+    t0 := 0.0
+    t1 := 1.0
+    tol := 1.0e-3
+    seed := 33344
+    shape := fun _ => (0.0 : Float)
+  }
+  let f01 := VirtualBrownianTree.increment finTree 0.0 1.0
+  let f05 := VirtualBrownianTree.increment finTree 0.0 0.5
+  let f51 := VirtualBrownianTree.increment finTree 0.5 1.0
+  let i0 : Fin 3 := ⟨0, by decide⟩
+  let i1 : Fin 3 := ⟨1, by decide⟩
+  let i2 : Fin 3 := ⟨2, by decide⟩
+  LeanTest.assertTrue (approx (f01.W i0) ((f05.W i0) + (f51.W i0)) 1e-6)
+    "Fin Brownian component 0 not additive"
+  LeanTest.assertTrue (approx (f01.W i1) ((f05.W i1) + (f51.W i1)) 1e-6)
+    "Fin Brownian component 1 not additive"
+  LeanTest.assertTrue (approx (f01.W i2) ((f05.W i2) + (f51.W i2)) 1e-6)
+    "Fin Brownian component 2 not additive"
+
+@[test] def testMilsteinAutodiffJvpWrapper : IO Unit := do
+  let drift : ODETerm Float Unit := { vectorField := fun _t y _ => -y }
+  let bm : ScalarBrownianPath := { t0 := 0.0, t1 := 1.0, seed := 909090 }
+  let bmPath := (ScalarBrownianPath.toAbstract bm).toPath
+
+  let baselineDiffusion : DiffusionTerm Float Float Float Unit :=
+    DiffusionTerm.ofPath
+      (fun _t y _ => y)
+      bmPath
+      (fun vf control => vf * control)
+      (fun _t y _ => y)
+
+  let wrappedBase : ControlTerm Float Float Float Unit :=
+    ControlTerm.ofPath (fun _t y _ => y) bmPath (fun vf control => vf * control)
+  let wrappedDiffusion :
+      AutodiffJvpJacobianDiffusion (ControlTerm Float Float Float Unit) Float Float Unit :=
+    withAutodiffJvpJacobian
+      wrappedBase
+      (fun _t _y _args control tangent => tangent * control)
+
+  let termsBaseline : MultiTerm (ODETerm Float Unit) (DiffusionTerm Float Float Float Unit) := {
+    term1 := drift
+    term2 := baselineDiffusion
+  }
+  let termsWrapped :
+      MultiTerm (ODETerm Float Unit)
+        (AutodiffJvpJacobianDiffusion (ControlTerm Float Float Float Unit) Float Float Unit) := {
+    term1 := drift
+    term2 := wrappedDiffusion
+  }
+
+  let baselineSolver :=
+    Milstein.solver
+      (Drift := ODETerm Float Unit)
+      (Diffusion := DiffusionTerm Float Float Float Unit)
+      (Y := Float)
+      (VFd := Float)
+      (VFg := Float)
+      (Control := Float)
+      (Args := Unit)
+  let wrappedSolver :=
+    Milstein.solver
+      (Drift := ODETerm Float Unit)
+      (Diffusion := AutodiffJvpJacobianDiffusion (ControlTerm Float Float Float Unit) Float Float Unit)
+      (Y := Float)
+      (VFd := Float)
+      (VFg := Float)
+      (Control := Float)
+      (Args := Unit)
+
+  let solBaseline :=
+    diffeqsolve
+      (Term := MultiTerm (ODETerm Float Unit) (DiffusionTerm Float Float Float Unit))
+      (Y := Float)
+      (VF := (Float × Float))
+      (Control := (Time × Float))
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      termsBaseline baselineSolver 0.0 1.0 (some 1.0) (2.0 : Float) () (saveat := { t1 := true })
+  let solWrapped :=
+    diffeqsolve
+      (Term := MultiTerm (ODETerm Float Unit)
+        (AutodiffJvpJacobianDiffusion (ControlTerm Float Float Float Unit) Float Float Unit))
+      (Y := Float)
+      (VF := (Float × Float))
+      (Control := (Time × Float))
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      termsWrapped wrappedSolver 0.0 1.0 (some 1.0) (2.0 : Float) () (saveat := { t1 := true })
+
+  match solBaseline.ys, solWrapped.ys with
+  | some ysBase, some ysWrap =>
+      let yBase := ysBase[ysBase.size - 1]!
+      let yWrap := ysWrap[ysWrap.size - 1]!
+      LeanTest.assertTrue (approx yWrap yBase 1e-6)
+        s!"Milstein JVP wrapper mismatch: expected {yBase}, got {yWrap}"
+  | _, _ => LeanTest.fail "Expected ys from both Milstein solves"
+
+@[test] def testControlTermToODEConversion : IO Unit := do
+  let path := AbstractPath.linearInterpolation 0.0 1.0 (0.0 : Float) (1.0 : Float)
+  let term : ControlTerm Float Float Float Unit :=
+    ControlTerm.ofPath (fun _t y _ => y) path (fun vf control => vf * control)
+  match term.toODE? with
+  | none => LeanTest.fail "Differentiable control path should convert to ODE term"
+  | some ode =>
+      let vf := ode.vectorField 0.2 3.0 ()
+      LeanTest.assertTrue (approx vf 3.0 1e-12)
+        s!"ControlTerm.toODE produced wrong vf value: expected 3.0, got {vf}"
+
+  let nondiffPath : AbstractPath Float :=
+    AbstractPath.ofFunctions 0.0 1.0
+      (fun t0 t1? _left =>
+        let t1 := t1?.getD t0
+        t1 - t0)
+      none
+  let nondiffTerm : ControlTerm Float Float Float Unit :=
+    ControlTerm.ofPath (fun _t y _ => y) nondiffPath (fun vf control => vf * control)
+  LeanTest.assertTrue nondiffTerm.toODE?.isNone
+    "ControlTerm.toODE? should be none when control derivative is unavailable"
+
+@[test] def testSaveFnTransformsOutputs : IO Unit := do
+  let term : ODETerm Float Unit := { vectorField := fun _t y _ => y }
+  let solver :=
+    Euler.solver (Term := ODETerm Float Unit) (Y := Float) (VF := Float) (Args := Unit)
+  let sol :=
+    diffeqsolve
+      (Term := ODETerm Float Unit)
+      (Y := Float)
+      (VF := Float)
+      (Control := Time)
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      term solver 0.0 1.0 (some 0.5) (2.0 : Float) () (saveat := { t0 := true, t1 := true })
+      (saveFn := some (fun t y _ => y + 10.0 * t))
+  match sol.ts, sol.ys with
+  | some ts, some ys =>
+      LeanTest.assertTrue (ts.size == 2) s!"Expected 2 save times, got {ts.size}"
+      LeanTest.assertTrue (ys.size == 2) s!"Expected 2 save values, got {ys.size}"
+      LeanTest.assertTrue (approx ys[0]! 2.0 1e-12)
+        s!"Expected transformed y(t0)=2.0, got {ys[0]!}"
+      -- Euler with dt=0.5: y(1) = 2*(1+0.5)^2 = 4.5 ; saveFn adds +10 at t=1.
+      LeanTest.assertTrue (approx ys[1]! 14.5 1e-12)
+        s!"Expected transformed y(t1)=14.5, got {ys[1]!}"
+  | _, _ => LeanTest.fail "Expected ts/ys for saveFn transform test"
+
+@[test] def testFailureResultMessage : IO Unit := do
+  let term : ODETerm Float Unit := { vectorField := fun _t y _ => -y }
+  let solver :=
+    Euler.solver (Term := ODETerm Float Unit) (Y := Float) (VF := Float) (Args := Unit)
+  let sol :=
+    diffeqsolve
+      (Term := ODETerm Float Unit)
+      (Y := Float)
+      (VF := Float)
+      (Control := Time)
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      term solver 0.0 1.0 (some 0.0) (1.0 : Float) () (saveat := { t1 := true })
+  LeanTest.assertTrue (sol.result == Result.dtMinReached)
+    "dt0=0 should produce dtMinReached"
+  LeanTest.assertTrue sol.result.isFailure "dt0=0 result should be marked as failure"
+  LeanTest.assertTrue (sol.result.message.contains "minimum step size")
+    s!"Expected failure message to mention minimum step size, got: {sol.result.message}"
+
+@[test] def testUnsafeBrownianPathStructuredIncrements : IO Unit := do
+  let pairPath : UnsafeBrownianPath (Float × Float) := {
+    t0 := 0.0
+    t1 := 1.0
+    seed := 525252
+    shape := ((0.0 : Float), (0.0 : Float))
+  }
+  let pA := UnsafeBrownianPath.increment pairPath 0.2 0.8
+  let pB := UnsafeBrownianPath.increment pairPath 0.2 0.8
+  LeanTest.assertTrue (approx pA.W.1 pB.W.1 1e-12)
+    "UnsafeBrownianPath pair component 0 should be deterministic per interval/seed"
+  LeanTest.assertTrue (approx pA.W.2 pB.W.2 1e-12)
+    "UnsafeBrownianPath pair component 1 should be deterministic per interval/seed"
+  LeanTest.assertTrue (Float.isFinite pA.W.1 && Float.isFinite pA.W.2)
+    "UnsafeBrownianPath pair increments should be finite"
+
+  let finPath : UnsafeBrownianPath (Fin 2 → Float) := {
+    t0 := 0.0
+    t1 := 1.0
+    seed := 535353
+    shape := fun _ => (0.0 : Float)
+  }
+  let fA := UnsafeBrownianPath.increment finPath 0.3 0.9
+  let fB := UnsafeBrownianPath.increment finPath 0.3 0.9
+  let i0 : Fin 2 := ⟨0, by decide⟩
+  let i1 : Fin 2 := ⟨1, by decide⟩
+  LeanTest.assertTrue (approx (fA.W i0) (fB.W i0) 1e-12)
+    "UnsafeBrownianPath Fin component 0 should be deterministic per interval/seed"
+  LeanTest.assertTrue (approx (fA.W i1) (fB.W i1) 1e-12)
+    "UnsafeBrownianPath Fin component 1 should be deterministic per interval/seed"
+  LeanTest.assertTrue (Float.isFinite (fA.W i0) && Float.isFinite (fA.W i1))
+    "UnsafeBrownianPath Fin increments should be finite"
+
 def run : IO Unit := do
   testHeunODE
   testEulerODE
@@ -1280,5 +1726,18 @@ def run : IO Unit := do
   testKencarp5IMEX
   testMultiTermODE
   testSIL3IMEX
+  testSaveAtTsDirectionForward
+  testSaveAtTsDirectionReverse
+  testNestedSubSaveAtPayloadFlags
+  testBooleanEventTerminate
+  testBooleanEventNonTerminating
+  testRealEventDirection
+  testEventTiePrefersTerminating
+  testBrownianPairAndFinStructuredIncrements
+  testMilsteinAutodiffJvpWrapper
+  testControlTermToODEConversion
+  testSaveFnTransformsOutputs
+  testFailureResultMessage
+  testUnsafeBrownianPathStructuredIncrements
 
 end Tests.DiffEq
