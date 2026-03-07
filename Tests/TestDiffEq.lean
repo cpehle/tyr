@@ -1687,6 +1687,50 @@ private def evaluateDenseFloat {S C : Type}
   LeanTest.assertTrue nondiffTerm.toODE?.isNone
     "ControlTerm.toODE? should be none when control derivative is unavailable"
 
+@[test] def testUnderdampedLangevinTerms : IO Unit := do
+  let drift : UnderdampedLangevinDriftTerm Float (Float × Float) := {
+    gradPotential := fun _t x args => args.2 * x
+    gamma := fun _t _x _v args => args.1
+    u := fun _t _x _v _args => 0.5
+    argsValid := fun _t _x _v args => args.1 >= 0.0 && args.2 >= 0.0
+  }
+  let y : Float × Float := (1.5, -0.25)
+  let driftInst :
+      TermLike (UnderdampedLangevinDriftTerm Float (Float × Float))
+        (Float × Float) (Float × Float) Time (Float × Float) :=
+    inferInstance
+  let driftVf := driftInst.vf drift 0.0 y (0.4, 2.0)
+  LeanTest.assertTrue (approx driftVf.1 (-0.25) 1e-12)
+    s!"Underdamped drift position component mismatch: {driftVf.1}"
+  LeanTest.assertTrue (approx driftVf.2 (-1.4) 1e-12)
+    s!"Underdamped drift velocity component mismatch: {driftVf.2}"
+
+  let diffusionPath := AbstractPath.linearInterpolation 0.0 1.0 (0.0 : Float) (1.0 : Float)
+  let diffusion : UnderdampedLangevinDiffusionTerm Float Unit :=
+    UnderdampedLangevinDiffusionTerm.ofPath diffusionPath
+      (gamma := fun _t _x _v _ => 0.5)
+      (u := fun _t _x _v _ => 2.0)
+  let diffusionInst :
+      TermLike (UnderdampedLangevinDiffusionTerm Float Unit)
+        (Float × Float) Float Float Unit :=
+    inferInstance
+  let sigma := diffusionInst.vf diffusion 0.25 y ()
+  LeanTest.assertTrue (approx sigma (Float.sqrt 2.0) 1e-12)
+    s!"Underdamped diffusion sigma mismatch: {sigma}"
+  let dW := diffusionInst.contr diffusion 0.0 1.0
+  let diffusionStep := diffusionInst.vf_prod diffusion 0.25 y () dW
+  LeanTest.assertTrue (approx diffusionStep.1 0.0 1e-12)
+    s!"Underdamped diffusion should not perturb position: {diffusionStep.1}"
+  LeanTest.assertTrue (approx diffusionStep.2 sigma 1e-12)
+    s!"Underdamped diffusion velocity mismatch: {diffusionStep.2}"
+
+  let badDrift : UnderdampedLangevinDriftTerm Float Unit := {
+    gradPotential := fun _t x _ => x
+    gamma := fun _t _x _v _ => -0.1
+  }
+  LeanTest.assertTrue (badDrift.validate? 0.0 (1.0, 0.0) ()).isSome
+    "Underdamped drift validation should reject negative gamma"
+
 @[test] def testSaveFnTransformsOutputs : IO Unit := do
   let term : ODETerm Float Unit := { vectorField := fun _t y _ => y }
   let solver :=
@@ -2092,6 +2136,7 @@ def run : IO Unit := do
   testBrownianPairAndFinStructuredIncrements
   testMilsteinAutodiffJvpWrapper
   testControlTermToODEConversion
+  testUnderdampedLangevinTerms
   testSaveFnTransformsOutputs
   testFailureResultMessage
   testUnsafeBrownianPathStructuredIncrements

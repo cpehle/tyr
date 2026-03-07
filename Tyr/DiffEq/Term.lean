@@ -298,6 +298,178 @@ def ofPath (vectorField : Time → Y → Args → VF) (path : AbstractPath Contr
 
 end DiffusionTerm
 
+/-- Underdamped Langevin drift term on pair state `(position, velocity)`. -/
+structure UnderdampedLangevinDriftTerm (X Args : Type) where
+  gradPotential : Time → X → Args → X
+  gamma : Time → X → X → Args → Scalar := fun _ _ _ _ => 1.0
+  u : Time → X → X → Args → Scalar := fun _ _ _ _ => 1.0
+  argsValid : Time → X → X → Args → Bool := fun _ _ _ _ => true
+
+namespace UnderdampedLangevinDriftTerm
+
+private def validateScale (name : String) (value : Scalar) : Option String :=
+  if !Float.isFinite value then
+    some s!"{name} must be finite, got {value}"
+  else if value < 0.0 then
+    some s!"{name} must be nonnegative, got {value}"
+  else
+    none
+
+def validate? (term : UnderdampedLangevinDriftTerm X Args)
+    (t : Time) (y : X × X) (args : Args) : Option String :=
+  let x := y.1
+  let v := y.2
+  if !(term.argsValid t x v args) then
+    some "argsValid predicate rejected (t, x, v, args)."
+  else
+    match validateScale "gamma" (term.gamma t x v args) with
+    | some msg => some msg
+    | none => validateScale "u" (term.u t x v args)
+
+private def ensureValid (term : UnderdampedLangevinDriftTerm X Args)
+    (t : Time) (y : X × X) (args : Args) : Unit :=
+  match validate? term t y args with
+  | none => ()
+  | some msg => panic! s!"UnderdampedLangevinDriftTerm invalid inputs: {msg}"
+
+private def vfCore [DiffEqSpace X] (term : UnderdampedLangevinDriftTerm X Args)
+    (t : Time) (y : X × X) (args : Args) : X × X :=
+  let x := y.1
+  let v := y.2
+  let grad := term.gradPotential t x args
+  let gamma := term.gamma t x v args
+  let u := term.u t x v args
+  let damping := DiffEqSpace.scale (-gamma) v
+  let restoring := DiffEqSpace.scale (-u) grad
+  (v, DiffEqSpace.add damping restoring)
+
+instance [DiffEqSpace X] :
+    TermLike (UnderdampedLangevinDriftTerm X Args) (X × X) (X × X) Time Args where
+  vf term t y args :=
+    let _ := ensureValid term t y args
+    vfCore term t y args
+  contr _ t0 t1 := t1 - t0
+  prod _ vf control := (DiffEqSpace.scale control vf.1, DiffEqSpace.scale control vf.2)
+  vf_prod term t y args control :=
+    let _ := ensureValid term t y args
+    let vf := vfCore term t y args
+    (DiffEqSpace.scale control vf.1, DiffEqSpace.scale control vf.2)
+  is_vf_expensive _ _ _ _ _ := false
+
+instance : TermShape (UnderdampedLangevinDriftTerm X Args) where
+  arity? _ := some 1
+  layoutTag? _ := some "single"
+  tree? _ := some TermTree.single
+
+def toAbstract [DiffEqSpace X] (term : UnderdampedLangevinDriftTerm X Args) :
+    AbstractTerm (X × X) (X × X) Time Args :=
+  AbstractTerm.ofTermLike term
+
+end UnderdampedLangevinDriftTerm
+
+/-- Underdamped Langevin diffusion term on pair state `(position, velocity)`.
+Noise is injected into the velocity component only.
+-/
+structure UnderdampedLangevinDiffusionTerm (X Args : Type) where
+  control : Time → Time → X
+  gamma : Time → X → X → Args → Scalar := fun _ _ _ _ => 1.0
+  u : Time → X → X → Args → Scalar := fun _ _ _ _ => 1.0
+  argsValid : Time → X → X → Args → Bool := fun _ _ _ _ => true
+
+namespace UnderdampedLangevinDiffusionTerm
+
+private def validateScale (name : String) (value : Scalar) : Option String :=
+  if !Float.isFinite value then
+    some s!"{name} must be finite, got {value}"
+  else if value < 0.0 then
+    some s!"{name} must be nonnegative, got {value}"
+  else
+    none
+
+def validate? (term : UnderdampedLangevinDiffusionTerm X Args)
+    (t : Time) (y : X × X) (args : Args) : Option String :=
+  let x := y.1
+  let v := y.2
+  if !(term.argsValid t x v args) then
+    some "argsValid predicate rejected (t, x, v, args)."
+  else
+    let gamma := term.gamma t x v args
+    let u := term.u t x v args
+    match validateScale "gamma" gamma with
+    | some msg => some msg
+    | none =>
+        match validateScale "u" u with
+        | some msg => some msg
+        | none =>
+            let sigma2 := 2.0 * gamma * u
+            if !Float.isFinite sigma2 then
+              some s!"2*gamma*u must be finite, got {sigma2}"
+            else if sigma2 < 0.0 then
+              some s!"2*gamma*u must be nonnegative, got {sigma2}"
+            else
+              none
+
+private def ensureValid (term : UnderdampedLangevinDiffusionTerm X Args)
+    (t : Time) (y : X × X) (args : Args) : Unit :=
+  match validate? term t y args with
+  | none => ()
+  | some msg => panic! s!"UnderdampedLangevinDiffusionTerm invalid inputs: {msg}"
+
+private def noiseScale (term : UnderdampedLangevinDiffusionTerm X Args)
+    (t : Time) (y : X × X) (args : Args) : Scalar :=
+  let x := y.1
+  let v := y.2
+  let gamma := term.gamma t x v args
+  let u := term.u t x v args
+  Float.sqrt (2.0 * gamma * u)
+
+instance [DiffEqSpace X] :
+    TermLike (UnderdampedLangevinDiffusionTerm X Args) (X × X) Scalar X Args where
+  vf term t y args :=
+    let _ := ensureValid term t y args
+    noiseScale term t y args
+  contr term t0 t1 := term.control t0 t1
+  prod _ vf control :=
+    let zero := DiffEqSpace.scale 0.0 control
+    (zero, DiffEqSpace.scale vf control)
+  vf_prod term t y args control :=
+    let _ := ensureValid term t y args
+    let sigma := noiseScale term t y args
+    let zero := DiffEqSpace.scale 0.0 control
+    (zero, DiffEqSpace.scale sigma control)
+  is_vf_expensive _ _ _ _ _ := false
+
+instance : TermShape (UnderdampedLangevinDiffusionTerm X Args) where
+  arity? _ := some 1
+  layoutTag? _ := some "single"
+  tree? _ := some TermTree.single
+
+def toAbstract [DiffEqSpace X] (term : UnderdampedLangevinDiffusionTerm X Args) :
+    AbstractTerm (X × X) Scalar X Args :=
+  AbstractTerm.ofTermLike term
+
+def ofPathWithSide (path : AbstractPath X)
+    (gamma : Time → X → X → Args → Scalar := fun _ _ _ _ => 1.0)
+    (u : Time → X → X → Args → Scalar := fun _ _ _ _ => 1.0)
+    (argsValid : Time → X → X → Args → Bool := fun _ _ _ _ => true)
+    (left : Bool := true) :
+    UnderdampedLangevinDiffusionTerm X Args :=
+  {
+    control := fun t0 t1 => path.evaluate t0 (some t1) left
+    gamma := gamma
+    u := u
+    argsValid := argsValid
+  }
+
+def ofPath (path : AbstractPath X)
+    (gamma : Time → X → X → Args → Scalar := fun _ _ _ _ => 1.0)
+    (u : Time → X → X → Args → Scalar := fun _ _ _ _ => 1.0)
+    (argsValid : Time → X → X → Args → Bool := fun _ _ _ _ => true) :
+    UnderdampedLangevinDiffusionTerm X Args :=
+  ofPathWithSide path gamma u argsValid true
+
+end UnderdampedLangevinDiffusionTerm
+
 /-- Simple wrapper for forwarding term behavior. -/
 structure WrapTerm (Term : Type) where
   term : Term
