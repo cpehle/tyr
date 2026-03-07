@@ -6,6 +6,7 @@ import Lean.Elab.Tactic
 import Lean.Elab.Deriving
 import Tyr.Basic
 import Tyr.TensorStruct
+import Tyr.Torch
 
 /-!
 # Tyr.Widget
@@ -107,6 +108,11 @@ structure TensorDisplayProps where
   dtype : String
   device : String
   values : Array Float
+  requiresGrad : Bool
+  numel : UInt64
+  stats : String
+  gradValues : Option (Array Float) := none
+  gradStats : Option String := none
   name : Option String := none  -- Optional name for the tensor
   axisNames : Option (Array String) := none  -- Optional axis names
   deriving ToJson, FromJson, Server.RpcEncodable
@@ -175,12 +181,20 @@ function useTheme() {
   };
 }
 
-// Diverging colormap: red (negative) <- white (zero) -> blue (positive)
-function valueToColor(v, absMax) {
+// Diverging and categorical colormap
+function valueToColor(v, absMax, isCategorical) {
   if (!isFinite(v)) {
     if (v === Infinity) return '#0066ff';
     if (v === -Infinity) return '#ff0066';
     return '#888888';
+  }
+  if (isCategorical) {
+    let hash = Math.floor(v) * 2654435761;
+    hash = hash ^ (hash >> 16);
+    const r = (hash & 0xFF0000) >> 16;
+    const g = (hash & 0x00FF00) >> 8;
+    const b = hash & 0x0000FF;
+    return `rgb(${r % 155 + 100}, ${g % 155 + 100}, ${b % 155 + 100})`;
   }
   const norm = Math.max(-1, Math.min(1, v / (absMax + 1e-8)));
   if (norm >= 0) {
@@ -197,6 +211,9 @@ function formatValue(v) {
     if (v === Infinity) return '+∞';
     if (v === -Infinity) return '-∞';
     return 'NaN';
+  }
+  if (Number.isInteger(v)) {
+    return v.toString();
   }
   if (Math.abs(v) < 0.001 || Math.abs(v) >= 10000) {
     return v.toExponential(2);
@@ -234,7 +251,7 @@ function AxisLabel({ text, position, orientation, theme }) {
 // Single 2D facet with axis annotations
 // fullRows/fullCols: actual tensor dimensions (for stride calculation)
 // displayRows/displayCols: how many rows/cols to actually render
-function Facet({ values, displayRows, displayCols, fullRows, fullCols, absMax, offset = 0, rowAxisLabel, colAxisLabel, showIndices = true, theme }) {
+function Facet({ values, displayRows, displayCols, fullRows, fullCols, absMax, isCategorical, offset = 0, rowAxisLabel, colAxisLabel, showIndices = true, theme }) {
   const [hovered, setHovered] = useState(null);
 
   // Use full dimensions for stride if provided, otherwise use display dimensions
@@ -307,7 +324,7 @@ function Facet({ values, displayRows, displayCols, fullRows, fullCols, absMax, o
             y: AXIS_LABEL_HEIGHT + row * CELL_SIZE,
             width: CELL_SIZE,
             height: CELL_SIZE,
-            fill: valueToColor(v, absMax),
+            fill: valueToColor(v, absMax, isCategorical),
             stroke: isHovered ? (theme?.isDark ? '#fff' : '#000') : 'none',
             strokeWidth: isHovered ? 1.5 : 0,
             style: { cursor: 'crosshair' },
@@ -387,7 +404,8 @@ function Collapsible({ title, children, defaultOpen = true, depth = 0, theme }) 
 }
 
 // Render a module node (recursive)
-function ModuleNodeView({ node, name, depth = 0, theme }) {
+function ModuleNodeView({ node, name, depth = 0, theme, filterText, isVisible }) {
+  if (isVisible && !isVisible(node, name)) return null;
   if (node.tensor) {
     const props = node.tensor;
     return e('div', { style: { marginLeft: depth * 12 } },
@@ -399,16 +417,25 @@ function ModuleNodeView({ node, name, depth = 0, theme }) {
           marginBottom: 2
         }
       }, name),
-      e(TensorView, { ...props, compact: depth > 0, theme })
+      e(TensorView, { ...props, compact: depth > 0, theme, filterText, isVisible })
     );
   }
 
   if (node.group) {
     const [groupName, children] = node.group;
+    const computeParams = (n) => {
+      let count = 0;
+      if (n.tensor && n.tensor.requiresGrad && n.tensor.numel) count += n.tensor.numel;
+      else if (n.group) n.group[1].forEach(c => count += computeParams(c[1]));
+      return count;
+    };
+    const params = computeParams(node);
+    const paramStr = params > 0 ? ` [${params.toLocaleString()} params]` : '';
+
     return e(Collapsible, {
-      title: `${name || groupName} (${children.length} items)`,
+      title: `${name || groupName} (${children.length} items)${paramStr}`,
       depth,
-      defaultOpen: depth < 2,
+      defaultOpen: depth < 2 || !!filterText,
       theme
     },
       children.map(([childName, childNode], i) =>
@@ -417,7 +444,9 @@ function ModuleNodeView({ node, name, depth = 0, theme }) {
           node: childNode,
           name: childName,
           depth: depth + 1,
-          theme
+          theme,
+          filterText,
+          isVisible
         })
       )
     );
@@ -441,22 +470,24 @@ function ModuleNodeView({ node, name, depth = 0, theme }) {
 }
 
 // Main tensor display
-function TensorView({ shape, dtype, device, values, name, axisNames, compact = false, theme }) {
-  // Compute statistics
-  const stats = useMemo(() => {
-    let absMax = 0, minVal = Infinity, maxVal = -Infinity, sum = 0, count = 0;
-    for (let i = 0; i < values.length; i++) {
-      const v = values[i];
-      if (isFinite(v)) {
-        absMax = Math.max(absMax, Math.abs(v));
-        minVal = Math.min(minVal, v);
-        maxVal = Math.max(maxVal, v);
-        sum += v;
-        count++;
-      }
+function TensorView({ shape, dtype, device, values, gradValues, requiresGrad, stats, gradStats, numel, name, axisNames, compact = false, theme }) {
+  const [showGrad, setShowGrad] = useState(false);
+
+  // Parse stats from JSON
+  const parsedStats = useMemo(() => {
+    const s = showGrad && gradStats ? gradStats : stats;
+    try {
+      if (typeof s === 'string') return JSON.parse(s);
+      return s;
+    } catch {
+      return { min: 0, max: 0, mean: 0 };
     }
-    return { absMax, minVal, maxVal, mean: count > 0 ? sum / count : 0 };
-  }, [values]);
+  }, [stats, gradStats, showGrad]);
+
+  const activeValues = showGrad && gradValues ? gradValues : values;
+
+  const absMax = Math.max(Math.abs(parsedStats?.min || 0), Math.abs(parsedStats?.max || 0));
+  const isCategorical = !showGrad && (dtype.toLowerCase().includes('int') || dtype.toLowerCase().includes('bool'));
 
   const ndim = shape.length;
   const getAxisLabel = (i) => axisNames?.[i] || `axis${i}`;
@@ -503,14 +534,45 @@ function TensorView({ shape, dtype, device, values, name, axisNames, compact = f
         fontSize: 9,
         fontFamily: 'monospace'
       }
-    }, `[${formatValue(stats.minVal)} .. ${formatValue(stats.maxVal)}]`)
+    }, `[${formatValue(parsedStats?.min || 0)} .. ${formatValue(parsedStats?.max || 0)}]`),
+
+    // Requires Grad info & Toggle
+    !compact && requiresGrad && e('div', {
+      style: { display: 'flex', alignItems: 'center' }
+    },
+      e('span', {
+        style: {
+          background: theme?.badgeBg || '#e3f2fd',
+          color: theme?.badgeText || '#1565c0',
+          padding: '2px 6px',
+          borderRadius: 3,
+          fontSize: 9,
+          fontWeight: 'bold',
+          marginLeft: 4
+        }
+      }, 'requires_grad'),
+      e('button', {
+        style: {
+          background: 'none',
+          border: `1px solid ${theme?.border || '#ccc'}`,
+          borderRadius: 3,
+          fontSize: 9,
+          padding: '2px 6px',
+          marginLeft: 4,
+          cursor: 'pointer',
+          color: showGrad ? '#fff' : (theme?.text || '#333'),
+          backgroundColor: showGrad ? (theme?.badgeText || '#1565c0') : 'transparent'
+        },
+        onClick: () => setShowGrad(!showGrad)
+      }, 'show_grad')
+    )
   );
 
   // 0D: scalar
   if (ndim === 0) {
     return e('div', { style: { fontFamily: 'monospace', padding: compact ? 4 : 8, color: theme?.text } },
       e(Header),
-      e('div', { style: { fontSize: 14, fontWeight: 500 } }, formatValue(values[0]))
+      e('div', { style: { fontSize: 14, fontWeight: 500 } }, formatValue(activeValues[0]))
     );
   }
 
@@ -522,12 +584,13 @@ function TensorView({ shape, dtype, device, values, name, axisNames, compact = f
     return e('div', { style: { fontFamily: 'monospace', padding: compact ? 4 : 8 } },
       e(Header),
       e(Facet, {
-        values,
+        values: activeValues,
         displayRows: 1,
         displayCols: displayLen,
         fullRows: 1,
         fullCols: len,
-        absMax: stats.absMax,
+        absMax,
+        isCategorical,
         offset: 0,
         colAxisLabel: `${getAxisLabel(0)}:${len}`,
         showIndices: displayLen <= 64,
@@ -548,12 +611,13 @@ function TensorView({ shape, dtype, device, values, name, axisNames, compact = f
     return e('div', { style: { fontFamily: 'monospace', padding: compact ? 4 : 8 } },
       e(Header),
       e(Facet, {
-        values,
+        values: activeValues,
         displayRows,
         displayCols,
         fullRows: rows,
         fullCols: cols,
-        absMax: stats.absMax,
+        absMax,
+        isCategorical,
         offset: 0,
         rowAxisLabel: `${getAxisLabel(0)}:${rows}`,
         colAxisLabel: `${getAxisLabel(1)}:${cols}`,
@@ -621,12 +685,13 @@ function TensorView({ shape, dtype, device, values, name, axisNames, compact = f
             }
           }, getSliceLabel(i)),
           e(Facet, {
-            values,
+            values: activeValues,
             displayRows,
             displayCols,
             fullRows: rows,
             fullCols: cols,
-            absMax: stats.absMax,
+            absMax,
+            isCategorical,
             offset: i * sliceSize,
             rowAxisLabel: i === 0 ? `${getAxisLabel(ndim-2)}` : null,
             colAxisLabel: i === 0 ? `${getAxisLabel(ndim-1)}` : null,
@@ -645,11 +710,57 @@ function TensorView({ shape, dtype, device, values, name, axisNames, compact = f
 // Main export - handles both single tensor and module tree
 export default function Widget(props) {
   const theme = useTheme();
+  const [filterText, setFilterText] = useState('');
 
   // Check if this is a module tree or single tensor
   if (props.root) {
+    const computeTotalParams = (node) => {
+      let count = 0;
+      if (node.tensor && node.tensor.requiresGrad) {
+        count += node.tensor.numel || 0;
+      } else if (node.group) {
+        node.group[1].forEach(child => count += computeTotalParams(child[1]));
+      }
+      return count;
+    };
+
+    const isVisible = (node, name) => {
+      if (!filterText) return true;
+      const lowerFilter = filterText.toLowerCase();
+      if (name && name.toLowerCase().includes(lowerFilter)) return true;
+      if (node.group && node.group[0].toLowerCase().includes(lowerFilter)) return true;
+      if (node.group) {
+        return node.group[1].some(child => isVisible(child[1], child[0]));
+      }
+      return false;
+    };
+
+    const totalParams = useMemo(() => computeTotalParams(props.root), [props.root]);
+
     return e('div', { style: { padding: 8 } },
-      e(ModuleNodeView, { node: props.root, name: null, depth: 0, theme })
+      e('div', { style: { marginBottom: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center' } },
+        e('input', {
+          type: 'text',
+          placeholder: 'Search modules...',
+          value: filterText,
+          onChange: (ev) => setFilterText(ev.target.value),
+          style: {
+            padding: '4px 8px',
+            borderRadius: 4,
+            border: `1px solid ${theme.border}`,
+            background: theme.backgroundAlt,
+            color: theme.text,
+            width: 200,
+            fontFamily: 'monospace',
+            outline: 'none',
+            fontSize: 12
+          }
+        }),
+        totalParams > 0 && e('div', {
+          style: { fontFamily: 'monospace', fontSize: 12, color: theme.textSubtle }
+        }, `Trainable params: ${totalParams.toLocaleString()}`)
+      ),
+      e(ModuleNodeView, { node: props.root, name: null, depth: 0, theme, filterText, isVisible })
     );
   }
 
@@ -663,8 +774,21 @@ def tensorToProps {s : Shape} (t : T s) : TensorDisplayProps :=
   let shape := t.runtimeShape
   let dtype := toString t.dtype
   let device := t.deviceStr
+  let requiresGrad := t.requires_grad
+  let stats := t.stats
   let values := t.getValues 10000  -- Get up to 10k values
-  { shape, dtype, device, values := values.toList.toArray }
+  let numel := shape.foldl (· * ·) 1
+  let gradValues : Option (Array Float) :=
+    if requiresGrad then
+      let g := autograd.grad_of t
+      some (g.getValues 10000).toList.toArray
+    else none
+  let gradStats : Option String :=
+    if requiresGrad then
+      let g := autograd.grad_of t
+      some g.stats
+    else none
+  { shape, dtype, device, requiresGrad, numel, stats, values := values.toList.toArray, gradValues, gradStats }
 
 /-- Convert a tensor with name and axis labels -/
 def tensorToPropsNamed {s : Shape} (t : T s) (name : String) (axisNames : Array String := #[]) : TensorDisplayProps :=
