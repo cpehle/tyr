@@ -276,6 +276,31 @@ private def solveStepTo (ts : Array Time) (saveat : SaveAt) :
   | _, _ =>
       LeanTest.fail "Expected ts/ys output for degenerate-interval SubSaveAt"
 
+@[test] def testEmptyLeafSubSaveAtRejected : IO Unit := do
+  -- Diffrax parity: constructing an empty SubSaveAt leaf is invalid.
+  let term : ODETerm Float Unit := { vectorField := fun _t _y _ => 1.0 }
+  let solver :=
+    Euler.solver (Term := ODETerm Float Unit) (Y := Float) (VF := Float) (Args := Unit)
+  let emptyLeaf : SubSaveAt := {}
+  let validLeaf : SubSaveAt := { ts := some #[0.25] }
+  let saveat : SaveAt := {
+    t1 := false
+    subs := #[emptyLeaf, validLeaf]
+  }
+  let sol :=
+    diffeqsolve
+      (Term := ODETerm Float Unit)
+      (Y := Float)
+      (VF := Float)
+      (Control := Time)
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      term solver 0.0 1.0 (some 0.1) (0.0 : Float) () (saveat := saveat)
+  LeanTest.assertTrue (sol.result == Result.internalError)
+    "Empty SubSaveAt leaf should be rejected with internalError"
+  LeanTest.assertTrue (sol.ts.isNone && sol.ys.isNone)
+    "Empty SubSaveAt leaf rejection should not produce saved ts/ys"
+
 def run : IO Unit := do
   testSaveAtSubsIgnoresSyntheticRootPayload
   testNestedContainerSubSaveAtPayloadIgnored
@@ -284,5 +309,6 @@ def run : IO Unit := do
   testSaveAtStepsSkipVsTsParity
   testDegenerateIntervalRootSaveAtParity
   testDegenerateIntervalSubSaveAtParity
+  testEmptyLeafSubSaveAtRejected
 
 end Tests.DiffEqSaveAtParity

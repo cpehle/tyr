@@ -104,6 +104,29 @@ private def payloadTreeSubs (saveat : SaveAt) : Array SubSaveAt := Id.run do
     out := out ++ SaveAt.SubSaveAt.flatten root
   return out
 
+private def isExplicitlyEmptyLeaf (sub : SubSaveAt) : Bool :=
+  sub.subs.size == 0 &&
+  !sub.t0 &&
+  !sub.t1 &&
+  sub.ts.isNone &&
+  !sub.steps.enabled &&
+  !sub.dense &&
+  !sub.solverState &&
+  !sub.controllerState &&
+  !sub.madeJump
+
+/--
+Detects explicitly empty `SubSaveAt` leaves inside `SaveAt.subs`.
+
+These leaves are rejected for diffrax parity: a `SubSaveAt` leaf must request at
+least one saved payload or state.
+-/
+def hasEmptyLeafSub (saveat : SaveAt) : Bool :=
+  if saveat.subs.size == 0 then
+    false
+  else
+    (payloadTreeSubs saveat).any isExplicitlyEmptyLeaf
+
 private def payloadLeaves (saveat : SaveAt) : Array SubSaveAt :=
   (payloadTreeSubs saveat).filter (fun sub => sub.subs.size == 0)
 

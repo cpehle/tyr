@@ -325,41 +325,113 @@ private def eventMaskHitOption {Y Args : Type}
     (mask : Array Bool) : Option (Array Bool) :=
   if events.size == 0 || !(mask.any (fun hit => hit)) then none else some mask
 
-private def progressMeterStart (mode : ProgressMeter) (t0 t1 : Time) : Unit := Id.run do
+private def clampProgressUnitInterval (value : Time) : Time :=
+  if value < 0.0 then
+    0.0
+  else if value > 1.0 then
+    1.0
+  else
+    value
+
+private def solveProgressFraction (t0 t1 tNow : Time) : Time :=
+  if t1 == t0 then
+    1.0
+  else
+    clampProgressUnitInterval ((tNow - t0) / (t1 - t0))
+
+private def progressMeterMinimumIncrease : Time :=
+  0.0999
+
+private def progressMeterTerminalTol : Time :=
+  1.0e-12
+
+private def progressMeterReachedTerminal (progress : Time) : Bool :=
+  progress >= 1.0 - progressMeterTerminalTol
+
+private structure ProgressMeterRuntime where
+  mode : ProgressMeter
+  t0 : Time
+  t1 : Time
+  lastProgress : Time := 0.0
+  renderedUpdates : Nat := 0
+  renderedCloseTerminal : Nat := 0
+  renderedPoints : Nat := 0
+
+private def progressMeterStart (mode : ProgressMeter) (t0 t1 : Time) : ProgressMeterRuntime := Id.run do
   if mode.textEnabled then
     if mode == .tqdm then
       dbg_trace "[DiffEq progress_meter=tqdm] using text compatibility fallback."
-    dbg_trace s!"[DiffEq progress_meter=text] start t0={t0} t1={t1}"
+    dbg_trace "[DiffEq progress_meter=text] 0.00%"
+    return {
+      mode := mode
+      t0 := t0
+      t1 := t1
+      renderedPoints := 1
+    }
+  return {
+    mode := mode
+    t0 := t0
+    t1 := t1
+  }
 
-private def progressMeterShouldLogUpdate (attempted : Nat) : Bool :=
-  attempted == 1 || attempted % 64 == 0
+private def progressMeterShouldRenderUpdate (lastProgress nextProgress : Time) : Bool :=
+  (nextProgress - lastProgress > progressMeterMinimumIncrease) || progressMeterReachedTerminal nextProgress
 
 private def progressMeterUpdate
-    (mode : ProgressMeter)
+    (state : ProgressMeterRuntime)
     (attempted : Nat)
-    (tNow : Time) : Unit := Id.run do
-  if mode.textEnabled && progressMeterShouldLogUpdate attempted then
-    dbg_trace s!"[DiffEq progress_meter=text] update steps={attempted} t={tNow}"
+    (tNow : Time) : ProgressMeterRuntime := Id.run do
+  if state.mode.textEnabled then
+    let progress := solveProgressFraction state.t0 state.t1 tNow
+    if progressMeterShouldRenderUpdate state.lastProgress progress then
+      dbg_trace s!"[DiffEq progress_meter=text] {100.0 * progress}% (steps={attempted})"
+      return {
+        state with
+        lastProgress := progress
+        renderedUpdates := state.renderedUpdates + 1
+        renderedPoints := state.renderedPoints + 1
+      }
+    else
+      return state
+  else
+    return state
 
 private def progressMeterClose
-    (mode : ProgressMeter)
+    (state : ProgressMeterRuntime)
     (result : Result)
-    (numSteps numAcceptedSteps numRejectedSteps : Nat) : Unit := Id.run do
-  if mode.textEnabled then
+    (numSteps numAcceptedSteps numRejectedSteps : Nat) : ProgressMeterRuntime := Id.run do
+  if state.mode.textEnabled then
+    let mut next := state
+    if !progressMeterReachedTerminal state.lastProgress then
+      dbg_trace "[DiffEq progress_meter=text] 100.00% (close)"
+      next := {
+        next with
+        lastProgress := 1.0
+        renderedCloseTerminal := 1
+        renderedPoints := next.renderedPoints + 1
+      }
     dbg_trace
       s!"[DiffEq progress_meter=text] close steps={numSteps} accepted={numAcceptedSteps} rejected={numRejectedSteps} result={repr result}"
+    return next
+  else
+    return state
 
-private def progressMeterStats (mode : ProgressMeter) (numSteps : Nat) : List (String × Nat) :=
-  if mode.textEnabled then
+private def progressMeterStats
+    (state : ProgressMeterRuntime)
+    (numSteps : Nat) : List (String × Nat) :=
+  if state.mode.textEnabled then
     let aliasStats :=
-      if mode == .tqdm then
+      if state.mode == .tqdm then
         [("progress_meter_tqdm_alias", 1)]
       else
         []
     [
       ("progress_meter_start", 1),
       ("progress_meter_updates", numSteps),
-      ("progress_meter_close", 1)
+      ("progress_meter_close", 1),
+      ("progress_meter_rendered_updates", state.renderedUpdates),
+      ("progress_meter_rendered_close_terminal", state.renderedCloseTerminal),
+      ("progress_meter_rendered_points", state.renderedPoints)
     ] ++ aliasStats
   else
     []
@@ -501,6 +573,7 @@ def diffeqsolve {Term Y VF Control Args Controller : Type}
   let saveMadeJump := saveat.effectiveMadeJump
   let isUnbounded := maxStepsOpt.isNone
   let saveConfigIncompatibleWithUnbounded := isUnbounded && (saveSteps || saveDense)
+  let hasEmptyLeafSub := saveat.hasEmptyLeafSub
   let saveValue : Time → Y → Y :=
     match saveFn with
     | none => fun _ y => y
@@ -521,7 +594,7 @@ def diffeqsolve {Term Y VF Control Args Controller : Type}
       match sub.ts with
       | none => false
       | some ts => !(isMonotoneInSolveDirection t0 t1 ts))
-  if controllerInvalid.isSome || outOfRange || badDirection || saveConfigIncompatibleWithUnbounded then
+  if controllerInvalid.isSome || outOfRange || badDirection || saveConfigIncompatibleWithUnbounded || hasEmptyLeafSub then
     exact maybeThrowOnFailure throwOnFailure {
       t0 := t0
       t1 := t1
@@ -557,6 +630,7 @@ def diffeqsolve {Term Y VF Control Args Controller : Type}
           (denseInterp : Option (DenseInterpolation Y)) =>
         let terminalTol : Time := 1.0e-6
         let forward := tf >= t0
+        let clippedTerminal := !timesWithinTol tf t1 terminalTol
         let timeNotPastTerminal : Time → Bool :=
           if forward then
             fun t => t <= tf + terminalTol
@@ -601,7 +675,9 @@ def diffeqsolve {Term Y VF Control Args Controller : Type}
             if sub.t1 then
               let t1AlreadySaved :=
                 match subTs.back? with
-                | some lastT => timesWithinTol lastT tf terminalTol
+                | some lastT =>
+                    timesWithinTol lastT tf terminalTol &&
+                      (clippedTerminal || cadence != 0)
                 | none => false
               if !t1AlreadySaved then
                 subTs := subTs.push tf
@@ -614,6 +690,10 @@ def diffeqsolve {Term Y VF Control Args Controller : Type}
         else
           (some flatTs, some flatYs)
     if t0 == t1 then
+      let result0 := if terminateAtStart then Result.eventOccurred else Result.successful
+      let progressState0 := progressMeterStart progress_meter t0 t1
+      let progressStateF := progressMeterClose progressState0 result0 0 0 0
+      let stats0 := stepStats0 ++ progressMeterStats progressStateF 0
       let denseInterp :=
         if saveDense || saveatTs.isSome then
           some (constantInterpolation y0)
@@ -628,8 +708,8 @@ def diffeqsolve {Term Y VF Control Args Controller : Type}
         ts := tsOut
         ys := ysOut
         interpolation := denseInterp
-        stats := stepStats0
-        result := if terminateAtStart then Result.eventOccurred else Result.successful
+        stats := stats0
+        result := result0
         solverState := if saveSolverState then initialSolverState else none
         controllerState := if saveControllerState then initialControllerState else none
         madeJump := if saveMadeJump then some initialMadeJump else none
@@ -652,6 +732,9 @@ def diffeqsolve {Term Y VF Control Args Controller : Type}
       | some st => st
       | none => solver.init terms t0 t1 y0 args
     if terminateAtStart then
+      let progressState0 := progressMeterStart progress_meter t0 t1
+      let progressStateF := progressMeterClose progressState0 Result.eventOccurred 0 0 0
+      let stats0 := stepStats0 ++ progressMeterStats progressStateF 0
       let denseInterp :=
         if saveDense || saveatTs.isSome then
           some (constantInterpolation y0)
@@ -666,7 +749,7 @@ def diffeqsolve {Term Y VF Control Args Controller : Type}
         ts := tsOut
         ys := ysOut
         interpolation := denseInterp
-        stats := stepStats0
+        stats := stats0
         result := Result.eventOccurred
         solverState := if saveSolverState then some initState else none
         controllerState := if saveControllerState then some initCtrl.state else none
@@ -681,12 +764,13 @@ def diffeqsolve {Term Y VF Control Args Controller : Type}
     let stepTsInit := #[t0]
     let stepYsInit := #[y0]
     let eventMaskLastInit := eventMask0
-    let _ := progressMeterStart progress_meter t0 t1
+    let progressStateInit := progressMeterStart progress_meter t0 t1
     let loopResult :
         (Time × Y × solver.SolverState ×
           StepSizeState (StepSizeController.State (C := Controller)) ×
           Bool × Array Time × Array Y × Array (DenseInterpolation Y) ×
-          Array Time × Array Y × Result × Nat × Nat × Nat × Array Bool × Array Bool) := Id.run do
+          Array Time × Array Y × Result × Nat × Nat × Nat × Array Bool × Array Bool ×
+          ProgressMeterRuntime) := Id.run do
       let mut attempted := 0
       let mut accepted := 0
       let mut rejected := 0
@@ -704,6 +788,7 @@ def diffeqsolve {Term Y VF Control Args Controller : Type}
       let mut eventMaskLastAcc := eventMaskLastInit
       let mut result := Result.successful
       let mut continueLoop := true
+      let mut progressState := progressStateInit
       while continueLoop do
         match maxStepsOpt with
         | some maxStepBudget =>
@@ -728,9 +813,9 @@ def diffeqsolve {Term Y VF Control Args Controller : Type}
               else
                 if tCandidate < t1 then t1 else tCandidate
             let attemptedNext := attempted + 1
-            let _ := progressMeterUpdate progress_meter attemptedNext tNext
             if tNext == t then
               attempted := attemptedNext
+              progressState := progressMeterUpdate progressState attemptedNext t
               result := Result.dtMinReached
               continueLoop := false
             else
@@ -740,6 +825,7 @@ def diffeqsolve {Term Y VF Control Args Controller : Type}
                 y := step.y1
                 state := step.solverState
                 attempted := attemptedNext
+                progressState := progressMeterUpdate progressState attemptedNext tNext
                 result := step.result
                 continueLoop := false
               else
@@ -750,6 +836,7 @@ def diffeqsolve {Term Y VF Control Args Controller : Type}
                   y := step.y1
                   state := step.solverState
                   attempted := attemptedNext
+                  progressState := progressMeterUpdate progressState attemptedNext tNext
                   result := decision.result
                   continueLoop := false
                 else if decision.accept then
@@ -823,17 +910,21 @@ def diffeqsolve {Term Y VF Control Args Controller : Type}
                     t := tNext
                     y := step.y1
                     madeJump := madeJumpNext
+                  progressState := progressMeterUpdate progressState attemptedNext t
                 else
                   let ctrlStateNext := { dt := decision.dt, state := decision.state }
                   attempted := attemptedNext
                   rejected := rejected + 1
                   ctrlState := ctrlStateNext
+                  progressState := progressMeterUpdate progressState attemptedNext t
       pure
         (t, y, state, ctrlState, madeJump, denseTs, denseYs, denseSegs, stepTs, stepYs,
-          result, attempted, accepted, rejected, eventMaskAcc, eventMaskLastAcc)
+          result, attempted, accepted, rejected, eventMaskAcc, eventMaskLastAcc, progressState)
     let (tf, yf, statef, ctrlState, madeJumpf, denseTs, denseYs, denseSegs, stepTs, stepYs,
-        result, numSteps, numAcceptedSteps, numRejectedSteps, eventMaskF, eventMaskLastF) := loopResult
-    let _ := progressMeterClose progress_meter result numSteps numAcceptedSteps numRejectedSteps
+        result, numSteps, numAcceptedSteps, numRejectedSteps, eventMaskF, eventMaskLastF,
+        progressStateRaw) := loopResult
+    let progressStateF :=
+      progressMeterClose progressStateRaw result numSteps numAcceptedSteps numRejectedSteps
     let denseInterp :=
       if saveDense || saveatTs.isSome then
         if denseSegs.size > 0 then
@@ -848,7 +939,7 @@ def diffeqsolve {Term Y VF Control Args Controller : Type}
         ("num_steps", numSteps),
         ("num_accepted_steps", numAcceptedSteps),
         ("num_rejected_steps", numRejectedSteps)
-      ] ++ progressMeterStats progress_meter numSteps
+      ] ++ progressMeterStats progressStateF numSteps
     exact maybeThrowOnFailure throwOnFailure {
       t0 := t0
       t1 := tf

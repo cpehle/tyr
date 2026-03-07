@@ -53,6 +53,30 @@ private def assertProgressStatsForMode
       LeanTest.assertTrue (getStat "progress_meter_tqdm_alias" stats == 1)
         s!"{label}: .tqdm should emit compatibility alias stat"
 
+private def assertRenderedCadenceForMode
+    (label : String)
+    (mode : ProgressMeter)
+    (stats : List (String × Nat))
+    (expectedRenderedUpdates expectedRenderedClose expectedRenderedPoints : Nat) : IO Unit := do
+  let renderedUpdates := getStat "progress_meter_rendered_updates" stats
+  let renderedClose := getStat "progress_meter_rendered_close_terminal" stats
+  let renderedPoints := getStat "progress_meter_rendered_points" stats
+  match mode with
+  | .none =>
+      LeanTest.assertTrue (renderedUpdates == 0)
+        s!"{label}: .none should not render progress updates"
+      LeanTest.assertTrue (renderedClose == 0)
+        s!"{label}: .none should not render terminal close update"
+      LeanTest.assertTrue (renderedPoints == 0)
+        s!"{label}: .none should not render progress points"
+  | .text | .tqdm =>
+      LeanTest.assertTrue (renderedUpdates == expectedRenderedUpdates)
+        s!"{label}: rendered update count mismatch: expected {expectedRenderedUpdates}, got {renderedUpdates}"
+      LeanTest.assertTrue (renderedClose == expectedRenderedClose)
+        s!"{label}: rendered close-terminal count mismatch: expected {expectedRenderedClose}, got {renderedClose}"
+      LeanTest.assertTrue (renderedPoints == expectedRenderedPoints)
+        s!"{label}: rendered point count mismatch: expected {expectedRenderedPoints}, got {renderedPoints}"
+
 private def assertSavedSeriesApproxEq {S C : Type}
     (label : String)
     (a b : Solution Float S C) : IO Unit := do
@@ -128,6 +152,66 @@ private def solveLinearWithSaveSteps
     term solver 0.0 6.0 (some 1.0) (0.0 : Float) ()
     (saveat := { t1 := false, steps := (2 : Nat) })
     (event := event)
+    (maxSteps := 16)
+    (progress_meter := mode)
+
+private def solveLinearFineCadence
+    (mode : ProgressMeter)
+    (event : Option (EventSpec Float Unit) := none) :=
+  let term : ODETerm Float Unit := { vectorField := fun _t _y _ => 1.0 }
+  let solver :=
+    Euler.solver (Term := ODETerm Float Unit) (Y := Float) (VF := Float) (Args := Unit)
+  diffeqsolve
+    (Term := ODETerm Float Unit)
+    (Y := Float)
+    (VF := Float)
+    (Control := Time)
+    (Args := Unit)
+    (Controller := ConstantStepSize)
+    term solver 0.0 1.0 (some 0.01) (0.0 : Float) ()
+    (saveat := { t1 := true })
+    (event := event)
+    (maxSteps := 256)
+    (progress_meter := mode)
+
+private def solveDegenerateInterval
+    (mode : ProgressMeter)
+    (event : Option (EventSpec Float Unit) := none) :=
+  let term : ODETerm Float Unit := { vectorField := fun _t _y _ => 1.0 }
+  let solver :=
+    Euler.solver (Term := ODETerm Float Unit) (Y := Float) (VF := Float) (Args := Unit)
+  diffeqsolve
+    (Term := ODETerm Float Unit)
+    (Y := Float)
+    (VF := Float)
+    (Control := Time)
+    (Args := Unit)
+    (Controller := ConstantStepSize)
+    term solver 2.0 2.0 (some 0.1) (3.0 : Float) ()
+    (saveat := { t1 := true })
+    (event := event)
+    (maxSteps := 8)
+    (progress_meter := mode)
+
+private def solveTerminateAtStart
+    (mode : ProgressMeter) :=
+  let term : ODETerm Float Unit := { vectorField := fun _t _y _ => 1.0 }
+  let solver :=
+    Euler.solver (Term := ODETerm Float Unit) (Y := Float) (VF := Float) (Args := Unit)
+  let ev : EventSpec Float Unit := {
+    condition := .boolean (fun _t _y _ => true)
+    terminate := true
+  }
+  diffeqsolve
+    (Term := ODETerm Float Unit)
+    (Y := Float)
+    (VF := Float)
+    (Control := Time)
+    (Args := Unit)
+    (Controller := ConstantStepSize)
+    term solver 0.0 6.0 (some 1.0) (0.0 : Float) ()
+    (saveat := { t1 := true })
+    (event := some ev)
     (maxSteps := 16)
     (progress_meter := mode)
 
@@ -211,8 +295,95 @@ private def assertCoreParityAcrossModes {S C : Type}
   | none =>
       LeanTest.fail "event + saveat.steps parity: expected saved times"
 
+@[test] def testProgressMeterRenderedCadenceAndCloseParity : IO Unit := do
+  /-
+  Diffrax reference: `../diffrax/test/test_progress_meter.py`.
+  Text meter output cadence is progress-based (minimum increase), and close forces a
+  terminal 100% emission when solve termination occurs before `t1`.
+  -/
+  let earlyEvent : EventSpec Float Unit := {
+    condition := .real (fun t _y _ => t - 0.35)
+    terminate := true
+  }
+
+  let fullNone := solveLinearFineCadence .none
+  let fullText := solveLinearFineCadence .text
+  let fullTqdm := solveLinearFineCadence .tqdm
+  LeanTest.assertTrue (fullNone.result == Result.successful)
+    s!"rendered cadence full run: .none result mismatch: {repr fullNone.result}"
+  LeanTest.assertTrue (fullText.result == Result.successful)
+    s!"rendered cadence full run: .text result mismatch: {repr fullText.result}"
+  LeanTest.assertTrue (fullTqdm.result == Result.successful)
+    s!"rendered cadence full run: .tqdm result mismatch: {repr fullTqdm.result}"
+  assertRenderedCadenceForMode "rendered cadence full run .none" .none fullNone.stats 0 0 0
+  assertRenderedCadenceForMode "rendered cadence full run .text" .text fullText.stats 10 0 11
+  assertRenderedCadenceForMode "rendered cadence full run .tqdm" .tqdm fullTqdm.stats 10 0 11
+  LeanTest.assertTrue
+    (getStat "progress_meter_rendered_updates" fullText.stats
+      < getStat "num_steps" fullText.stats)
+    "rendered cadence full run: .text rendered updates should be throttled below attempted steps"
+  LeanTest.assertTrue
+    (getStat "progress_meter_rendered_updates" fullText.stats
+      == getStat "progress_meter_rendered_updates" fullTqdm.stats)
+    "rendered cadence full run: .text/.tqdm rendered update counts should match"
+  LeanTest.assertTrue
+    (getStat "progress_meter_rendered_points" fullText.stats
+      == getStat "progress_meter_rendered_points" fullTqdm.stats)
+    "rendered cadence full run: .text/.tqdm rendered point counts should match"
+
+  let eventNone := solveLinearFineCadence .none (event := some earlyEvent)
+  let eventText := solveLinearFineCadence .text (event := some earlyEvent)
+  let eventTqdm := solveLinearFineCadence .tqdm (event := some earlyEvent)
+  LeanTest.assertTrue (eventNone.result == Result.eventOccurred)
+    s!"rendered cadence event run: .none result mismatch: {repr eventNone.result}"
+  LeanTest.assertTrue (eventText.result == Result.eventOccurred)
+    s!"rendered cadence event run: .text result mismatch: {repr eventText.result}"
+  LeanTest.assertTrue (eventTqdm.result == Result.eventOccurred)
+    s!"rendered cadence event run: .tqdm result mismatch: {repr eventTqdm.result}"
+  LeanTest.assertTrue (approx eventText.t1 0.35 1.0e-6)
+    s!"rendered cadence event run: expected .text terminal time near 0.35, got {eventText.t1}"
+  LeanTest.assertTrue (approx eventText.t1 eventTqdm.t1 1.0e-10)
+    s!"rendered cadence event run: terminal-time mismatch .text/.tqdm: {eventText.t1} vs {eventTqdm.t1}"
+  assertRenderedCadenceForMode "rendered cadence event run .none" .none eventNone.stats 0 0 0
+  assertRenderedCadenceForMode "rendered cadence event run .text" .text eventText.stats 3 1 5
+  assertRenderedCadenceForMode "rendered cadence event run .tqdm" .tqdm eventTqdm.stats 3 1 5
+
+@[test] def testProgressMeterDegenerateIntervalParity : IO Unit := do
+  let solNone := solveDegenerateInterval .none
+  let solText := solveDegenerateInterval .text
+  let solTqdm := solveDegenerateInterval .tqdm
+
+  assertCoreParityAcrossModes
+    "degenerate interval parity" solNone solText solTqdm Result.successful
+  LeanTest.assertTrue (approx solNone.t1 2.0 1.0e-12)
+    s!"degenerate interval parity: expected terminal t1=2.0, got {solNone.t1}"
+  LeanTest.assertTrue (getStat "num_steps" solNone.stats == 0)
+    "degenerate interval parity: expected zero attempted steps"
+  assertRenderedCadenceForMode "degenerate interval parity .none" .none solNone.stats 0 0 0
+  assertRenderedCadenceForMode "degenerate interval parity .text" .text solText.stats 0 1 2
+  assertRenderedCadenceForMode "degenerate interval parity .tqdm" .tqdm solTqdm.stats 0 1 2
+
+@[test] def testProgressMeterTerminateAtStartParity : IO Unit := do
+  let solNone := solveTerminateAtStart .none
+  let solText := solveTerminateAtStart .text
+  let solTqdm := solveTerminateAtStart .tqdm
+
+  assertCoreParityAcrossModes
+    "terminate-at-start parity" solNone solText solTqdm Result.eventOccurred
+  LeanTest.assertTrue (approx solNone.t1 0.0 1.0e-12)
+    s!"terminate-at-start parity: expected terminal t1=0.0, got {solNone.t1}"
+  LeanTest.assertTrue (getStat "num_steps" solNone.stats == 0)
+    "terminate-at-start parity: expected zero attempted steps"
+  assertEventMaskParity "terminate-at-start parity" solNone solText solTqdm
+  assertRenderedCadenceForMode "terminate-at-start parity .none" .none solNone.stats 0 0 0
+  assertRenderedCadenceForMode "terminate-at-start parity .text" .text solText.stats 0 1 2
+  assertRenderedCadenceForMode "terminate-at-start parity .tqdm" .tqdm solTqdm.stats 0 1 2
+
 def run : IO Unit := do
   testProgressMeterSaveAtStepsParity
   testProgressMeterEventTerminationSaveAtStepsParity
+  testProgressMeterRenderedCadenceAndCloseParity
+  testProgressMeterDegenerateIntervalParity
+  testProgressMeterTerminateAtStartParity
 
 end Tests.DiffEqProgressMeterParity2
