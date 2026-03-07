@@ -110,6 +110,56 @@ private def leafHits (tree : EventMaskTree) : Array Bool :=
   | _, _ =>
       LeanTest.fail "Expected tree-shaped tie-time masks"
 
+/--
+Tie-time selection parity with diffrax event-mask flatten semantics:
+- `../diffrax/diffrax/_integrate.py` commits only the first triggered leaf in
+  flattened traversal order.
+-/
+@[test] def testEventTreeTieTimeTerminatingPrefersFirstLeaf : IO Unit := do
+  let term : ODETerm Float Unit := { vectorField := fun _t _y _ => 1.0 }
+  let solver :=
+    Euler.solver (Term := ODETerm Float Unit) (Y := Float) (VF := Float) (Args := Unit)
+  let evStopA : EventSpec Float Unit := {
+    condition := .boolean (fun t _y _ => t >= 0.5)
+    terminate := true
+  }
+  let evStopB : EventSpec Float Unit := {
+    condition := .boolean (fun t _y _ => t >= 0.5)
+    terminate := true
+  }
+  let eventTree : EventTree Float Unit :=
+    .branch #[
+      .leaf evStopA,
+      .branch #[.leaf evStopB]
+    ]
+  let treeSol :=
+    diffeqsolveEventTree
+      (Term := ODETerm Float Unit)
+      (Y := Float)
+      (VF := Float)
+      (Control := Time)
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      term solver 0.0 1.0 (some 0.1) (0.0 : Float) () eventTree
+      (saveat := { t1 := true })
+  let sol := treeSol.base
+  LeanTest.assertTrue (sol.result == Result.eventOccurred)
+    "Tie-time terminating events should stop solve"
+  LeanTest.assertTrue (approx sol.t1 0.5 1.0e-12)
+    s!"Expected tie-time termination at t=0.5, got {sol.t1}"
+  match treeSol.eventMaskTree, treeSol.eventMaskLastTree with
+  | some maskTree, some lastTree =>
+      let hits := leafHits maskTree
+      let lastHits := leafHits lastTree
+      LeanTest.assertTrue (hits.size == 2 && lastHits.size == 2)
+        s!"Expected two leaf mask entries, got {hits.size}/{lastHits.size}"
+      LeanTest.assertTrue (hits[0]! && !hits[1]!)
+        s!"Tie-time terminating events should commit only first flattened leaf, got {hits}"
+      LeanTest.assertTrue (lastHits[0]! && !lastHits[1]!)
+        s!"Tie-time terminating events should record only first leaf in eventMaskLast, got {lastHits}"
+  | _, _ =>
+      LeanTest.fail "Expected tree-shaped masks for tie-time terminating events"
+
 @[test] def testBaseDiffeqsolveEventTreeParameterParity : IO Unit := do
   let term : ODETerm Float Unit := { vectorField := fun _t _y _ => 1.0 }
   let solver :=
@@ -166,6 +216,7 @@ private def leafHits (tree : EventMaskTree) : Array Bool :=
 def run : IO Unit := do
   testEventTreeEarliestRootMaskParity
   testEventTreeTieTimeMaskParity
+  testEventTreeTieTimeTerminatingPrefersFirstLeaf
   testBaseDiffeqsolveEventTreeParameterParity
 
 end Tests.DiffEqEventTreeParity
