@@ -67,4 +67,26 @@ def testManifoldLinearBenchmarkPositive : IO Unit := do
   LeanTest.assertTrue (elapsedMs > 0.0)
     s!"Expected positive benchmark elapsed time, got {elapsedMs}"
 
+@[test]
+def testHyperbolicVectorConstraintAfterUpdate : IO Unit := do
+  let p0 ← ManifoldVectorParam.init (V := Tyr.AD.Hyperbolic) 6
+  let g ← randn #[7] false
+  let p1 := ManifoldVectorParam.applyDualMapUpdate p0 g 0.02
+  let coords := VectorManifoldCarrier.toVector p1.value
+  let inner := Tyr.AD.Hyperbolic.minkowskiInner coords coords
+  LeanTest.assertTrue (Float.abs (inner + 1.0) < 1e-4)
+    s!"HyperbolicVector should preserve <x,x>_L = -1 after update, got {inner}"
+
+@[test]
+def testHyperbolicVectorBenchmarkPositive : IO Unit := do
+  let mut p ← ManifoldVectorParam.init (V := Tyr.AD.Hyperbolic) 8
+  let t0 ← IO.monoNanosNow
+  for _ in [:3] do
+    let g ← randn #[9] false
+    p := ManifoldVectorParam.applyDualMapUpdate p g 0.01
+  let t1 ← IO.monoNanosNow
+  let elapsedMs := (t1.toFloat - t0.toFloat) / 1000000.0
+  LeanTest.assertTrue (elapsedMs > 0.0)
+    s!"Expected positive hyperbolic-vector benchmark elapsed time, got {elapsedMs}"
+
 end Tests.ModularManifold

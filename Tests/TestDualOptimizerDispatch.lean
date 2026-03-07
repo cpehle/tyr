@@ -121,6 +121,29 @@ def testStepMatrixSingleGrassmannConstraint : IO Unit := do
   | _ => LeanTest.fail "Expected generic manifold state after Grassmann step"
 
 @[test]
+def testStepMatrixSingleOrthogonalSquareConstraint : IO Unit := do
+  let pRaw ← randn #[6, 6] false
+  let p := autograd.set_requires_grad
+    (autograd.detach (Tyr.AD.Orthogonal.project 6 pRaw).matrix) true
+  let g ← randn #[6, 6] false
+
+  let cfg : Config := {
+    matrixOptimizer := .manifoldMuon
+    matrixManifold := .orthogonal
+    matrixLr := 0.02
+  }
+  let st0 := initMatrixParamState cfg p
+  let (p1, st1) ← stepMatrixSingle p g st0 cfg 0 1.0 1.0
+
+  let qtq := nn.mm (nn.transpose2d p1) p1
+  let I := eye 6
+  LeanTest.assertTrue (allclose qtq I (rtol := 1e-4) (atol := 1e-5))
+    "Generic orthogonal path should preserve Q^T Q ≈ I for square matrices"
+  match st1 with
+  | .genericManifold _ => pure ()
+  | _ => LeanTest.fail "Expected generic manifold state after orthogonal step"
+
+@[test]
 def testMatrixBackendOpsComposable : IO Unit := do
   let cfg : Config := {
     matrixOptimizer := .manifoldMuon
