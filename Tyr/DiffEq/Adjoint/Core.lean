@@ -640,9 +640,13 @@ def implicitAdjointUnsupportedReason
         some "Adjoint solve failed: `ImplicitAdjoint` without backsolve fallback is not implemented yet."
 
 private def implicitAdjointSaveAtContractHolds (saveat : SaveAt) : Bool :=
+  let hasTs :=
+    match saveat.ts with
+    | some ts => ts.size != 0
+    | none => false
   saveat.t1 &&
     !saveat.t0 &&
-    saveat.ts.isNone &&
+    !hasTs &&
     !saveat.steps.enabled &&
     !saveat.dense &&
     !saveat.solverState &&
@@ -652,11 +656,15 @@ private def implicitAdjointSaveAtContractHolds (saveat : SaveAt) : Bool :=
 
 def implicitAdjointSaveAtUnsupportedReason
     (saveat : SaveAt) : Option String :=
+  let hasTs :=
+    match saveat.ts with
+    | some ts => ts.size != 0
+    | none => false
   if implicitAdjointSaveAtContractHolds saveat then
     none
   else
     some
-      s!"Adjoint solve failed: can only use `ImplicitAdjoint` with `saveat.t1 := true` and all other save fields disabled (Diffrax parity: `saveat=SaveAt(t1=True)`). Got `t0={saveat.t0}`, `t1={saveat.t1}`, `ts?={saveat.ts.isSome}`, `steps?={saveat.steps.enabled}`, `dense={saveat.dense}`, `solverState={saveat.solverState}`, `controllerState={saveat.controllerState}`, `madeJump={saveat.madeJump}`, `subs={saveat.subs.size}`."
+      s!"Adjoint solve failed: can only use `ImplicitAdjoint` with `saveat.t1 := true` and all other save fields disabled (Diffrax parity: `saveat=SaveAt(t1=True)`). Got `t0={saveat.t0}`, `t1={saveat.t1}`, `ts?={hasTs}`, `steps?={saveat.steps.enabled}`, `dense={saveat.dense}`, `solverState={saveat.solverState}`, `controllerState={saveat.controllerState}`, `madeJump={saveat.madeJump}`, `subs={saveat.subs.size}`."
 
 private def diffeqsolveDirectAdjointWithReportCore
     {Y Args : Type}

@@ -88,6 +88,37 @@ section
     | some _ => pure ()
     | none => LeanTest.fail "Expected adjoint result for default implicit saveat config"
 
+  @[test] def testImplicitAdjointAllowsEmptyTsSaveAt : IO Unit := do
+    let term : ODETerm Float Float := { vectorField := fun _t y a => a * y }
+    let solver :=
+      RK4.solver
+        (Term := ODETerm Float Float)
+        (Y := Float)
+        (VF := Float)
+        (Args := Float)
+    let adjSolver :=
+      RK4.solver
+        (Term := ODETerm (AdjointState Float Float) Float)
+        (Y := AdjointState Float Float)
+        (VF := AdjointState Float Float)
+        (Args := Float)
+    let adjoint : BacksolveAdjoint Float Float := { adjSolver := adjSolver }
+    let (sol, adjOpt, errOpt) :=
+      diffeqsolveImplicitAdjoint
+        (Controller := ConstantStepSize)
+        (mode := {})
+        term solver adjoint 0.0 1.0 (some 0.01) 2.0 0.3 1.0
+        (saveat := { t1 := true, ts := some #[] })
+    LeanTest.assertTrue (sol.result == Result.successful)
+      "ImplicitAdjoint should treat `saveat.ts := #[]` like no `ts` and still succeed"
+    LeanTest.assertTrue errOpt.isNone
+      "ImplicitAdjoint empty-ts saveat run should not report unsupported errors"
+    LeanTest.assertTrue (getStat "unsupported_implicit_adjoint_saveat" sol.stats == 0)
+      "ImplicitAdjoint empty-ts saveat run should not mark unsupported_implicit_adjoint_saveat stat"
+    match adjOpt with
+    | some _ => pure ()
+    | none => LeanTest.fail "Expected adjoint result for implicit saveat config with empty ts"
+
   @[test] def testBacksolveAdjointRejectsSubSaveAt : IO Unit := do
     let term : ODETerm Float Float := { vectorField := fun _t y a => a * y }
     let solver :=
@@ -118,6 +149,7 @@ end
 def run : IO Unit := do
   testImplicitAdjointRejectsNonT1SaveAt
   testImplicitAdjointDefaultSaveAtStillWorks
+  testImplicitAdjointAllowsEmptyTsSaveAt
   testBacksolveAdjointRejectsSubSaveAt
 
 end Tests.DiffEqAdjointParity
