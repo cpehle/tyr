@@ -894,42 +894,48 @@ instance [VirtualBrownianTreeOps BM1] [VirtualBrownianTreeOps BM2] :
     { dt := t1 - t0, W := (leftInc.W, rightInc.W), H := (leftInc.H, rightInc.H),
       K := (leftInc.K, rightInc.K) }
 
+private def buildFinFromChildren [VirtualBrownianTreeOps BM]
+    (path : VirtualBrownianTree (Fin n → BM))
+    (t0 t1 : Time) : Vector n (BrownianIncrement Time BM) :=
+  vectorOfFn fun i =>
+    let childPath := splitFin path i
+    VirtualBrownianTreeOps.increment (BM := BM) childPath t0 t1
+
+private def buildFinFromChildrenST [VirtualBrownianTreeOps BM]
+    (path : VirtualBrownianTree (Fin n → BM))
+    (t0 t1 : Time) : Vector n (SpaceTimeLevyArea Time BM) :=
+  vectorOfFn fun i =>
+    let childPath := splitFin path i
+    VirtualBrownianTreeOps.incrementSpaceTime (BM := BM) childPath t0 t1
+
+private def buildFinFromChildrenSTT [VirtualBrownianTreeOps BM]
+    (path : VirtualBrownianTree (Fin n → BM))
+    (t0 t1 : Time) : Vector n (SpaceTimeTimeLevyArea Time BM) :=
+  vectorOfFn fun i =>
+    let childPath := splitFin path i
+    VirtualBrownianTreeOps.incrementSpaceTimeTime (BM := BM) childPath t0 t1
+
 instance [VirtualBrownianTreeOps BM] : VirtualBrownianTreeOps (Fin n → BM) where
   increment path t0 t1 :=
+    let children := buildFinFromChildren path t0 t1
     {
       dt := t1 - t0
-      W := fun i =>
-        let childPath := splitFin path i
-        let childInc := VirtualBrownianTreeOps.increment (BM := BM) childPath t0 t1
-        childInc.W
+      W := fun i => (children.get i).W
     }
   incrementSpaceTime path t0 t1 :=
+    let children := buildFinFromChildrenST path t0 t1
     {
       dt := t1 - t0
-      W := fun i =>
-        let childPath := splitFin path i
-        let childInc := VirtualBrownianTreeOps.incrementSpaceTime (BM := BM) childPath t0 t1
-        childInc.W
-      H := fun i =>
-        let childPath := splitFin path i
-        let childInc := VirtualBrownianTreeOps.incrementSpaceTime (BM := BM) childPath t0 t1
-        childInc.H
+      W := fun i => (children.get i).W
+      H := fun i => (children.get i).H
     }
   incrementSpaceTimeTime path t0 t1 :=
+    let children := buildFinFromChildrenSTT path t0 t1
     {
       dt := t1 - t0
-      W := fun i =>
-        let childPath := splitFin path i
-        let childInc := VirtualBrownianTreeOps.incrementSpaceTimeTime (BM := BM) childPath t0 t1
-        childInc.W
-      H := fun i =>
-        let childPath := splitFin path i
-        let childInc := VirtualBrownianTreeOps.incrementSpaceTimeTime (BM := BM) childPath t0 t1
-        childInc.H
-      K := fun i =>
-        let childPath := splitFin path i
-        let childInc := VirtualBrownianTreeOps.incrementSpaceTimeTime (BM := BM) childPath t0 t1
-        childInc.K
+      W := fun i => (children.get i).W
+      H := fun i => (children.get i).H
+      K := fun i => (children.get i).K
     }
 
 instance [VirtualBrownianTreeOps BM] : VirtualBrownianTreeOps (Vector n BM) where
