@@ -2212,6 +2212,57 @@ private def evaluateDenseFloat {S C : Type}
   LeanTest.assertTrue (sol.result.message.contains "minimum step size")
     s!"Expected failure message to mention minimum step size, got: {sol.result.message}"
 
+@[test] def testDiffeqsolveOrErrorSuccess : IO Unit := do
+  let term : ODETerm Float Unit := { vectorField := fun _t y _ => -y }
+  let solver :=
+    Euler.solver (Term := ODETerm Float Unit) (Y := Float) (VF := Float) (Args := Unit)
+  match diffeqsolveOrError
+      (Term := ODETerm Float Unit)
+      (Y := Float)
+      (VF := Float)
+      (Control := Time)
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      term solver 0.0 1.0 (some 0.1) (1.0 : Float) ()
+      (saveat := { t1 := true }) with
+  | .error err =>
+      LeanTest.fail s!"Expected successful except result, got error: {err.message}"
+  | .ok sol =>
+      LeanTest.assertTrue (sol.result == Result.successful)
+        "diffeqsolveOrError successful path should preserve successful result"
+      match sol.ys with
+      | some ys =>
+          if ys.size == 0 then
+            LeanTest.fail "Expected saved y for diffeqsolveOrError success test"
+          else
+            let y1 := ys[ys.size - 1]!
+            let expected := Float.pow (1.0 - 0.1) 10.0
+            LeanTest.assertTrue (approx y1 expected 1e-5)
+              s!"diffeqsolveOrError y1 expected {expected}, got {y1}"
+      | none =>
+          LeanTest.fail "Expected ys for diffeqsolveOrError success test"
+
+@[test] def testDiffeqsolveOrErrorFailure : IO Unit := do
+  let term : ODETerm Float Unit := { vectorField := fun _t y _ => -y }
+  let solver :=
+    Euler.solver (Term := ODETerm Float Unit) (Y := Float) (VF := Float) (Args := Unit)
+  match diffeqsolveOrError
+      (Term := ODETerm Float Unit)
+      (Y := Float)
+      (VF := Float)
+      (Control := Time)
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      term solver 0.0 1.0 (some 0.0) (1.0 : Float) ()
+      (saveat := { t1 := true }) with
+  | .ok _ =>
+      LeanTest.fail "Expected diffeqsolveOrError to return error on dt0=0"
+  | .error err =>
+      LeanTest.assertTrue (err.result == Result.dtMinReached)
+        s!"Expected dtMinReached in solve error, got {repr err.result}"
+      LeanTest.assertTrue (err.message.contains "minimum step size")
+        s!"Expected dtMinReached message in solve error, got: {err.message}"
+
 @[test] def testMaxStepsReached : IO Unit := do
   let term : ODETerm Float Unit := { vectorField := fun _t _y _ => 1.0 }
   let solver :=
@@ -2929,6 +2980,8 @@ def run : IO Unit := do
   testUnderdampedLangevinTerms
   testSaveFnTransformsOutputs
   testFailureResultMessage
+  testDiffeqsolveOrErrorSuccess
+  testDiffeqsolveOrErrorFailure
   testMaxStepsReached
   testUnsafeBrownianPathStructuredIncrements
   testEulerPairStatePyTree

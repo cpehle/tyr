@@ -55,7 +55,19 @@ structure Solution (Y SolverState ControllerState : Type) where
   eventMaskLast : Option (Array Bool) := none
   deriving Inhabited
 
+structure SolveError where
+  result : Result
+  message : String
+  deriving Repr, Inhabited
+
 namespace Solution
+
+def toExcept (sol : Solution Y SolverState ControllerState) :
+    Except SolveError (Solution Y SolverState ControllerState) :=
+  if sol.result.isOkay then
+    Except.ok sol
+  else
+    Except.error { result := sol.result, message := sol.result.message }
 
 def evaluate [Inhabited Y] (sol : Solution Y SolverState ControllerState) (t0 : Time)
     (t1 : Option Time := none) (left : Bool := true) : Y :=

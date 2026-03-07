@@ -251,7 +251,7 @@ Reviewed: 2026-03-06 (`Tyr/DiffEq/*` vs `../diffrax/diffrax/*`, `../diffrax/docs
   Refs: `Tyr/DiffEq/Integrate.lean`, `../diffrax/diffrax/_integrate.py`, `../diffrax/diffrax/_progress_meter.py`
 - [~] `DX20` [Medium] Added `maxStepsOpt := none` unbounded-step compatibility mode with explicit save-config guards (`saveat.steps`, `saveat.dense`) and regression tests; implementation currently uses a high safety cap to preserve structural termination.
   Refs: `Tyr/DiffEq/Integrate.lean`, `../diffrax/diffrax/_integrate.py`
-- [ ] `DX21` [Low] Replace `panic!`-based `throwOnFailure`/error surfacing with catchable solve-error semantics so failure paths are testable and match exception-style parity expectations.
+- [~] `DX21` [Low] Added catchable solve-error surface (`diffeqsolveOrError` + `Solution.toExcept`) with regression tests; legacy `throwOnFailure` panic path still remains for backward compatibility.
   Refs: `Tyr/DiffEq/Integrate.lean`, `Tyr/DiffEq/Solution.lean`, `Tests/TestDiffEq.lean`
 
 

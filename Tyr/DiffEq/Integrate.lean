@@ -721,5 +721,55 @@ def diffeqsolve {Term Y VF Control Args Controller : Type}
       eventMaskLast := eventMaskHitOption activeEvents eventMaskLastF
     }
 
+def diffeqsolveOrError {Term Y VF Control Args Controller : Type}
+    [DiffEqSpace Y]
+    [DiffEqSeminorm Y]
+    [DiffEqElem Y]
+    [Inhabited Y]
+    [StepSizeController Controller]
+    [StepSizeControllerValidation Controller]
+    [Inhabited Controller]
+    (terms : Term)
+    (solver : AbstractSolver Term Y VF Control Args)
+    (t0 t1 : Time)
+    (dt0 : Option Time)
+    (y0 : Y)
+    (args : Args)
+    (saveat : SaveAt := {})
+    (maxSteps : Nat := 4096)
+    (controller : Controller := default)
+    (event : Option (EventSpec Y Args) := none)
+    (initialSolverState : Option solver.SolverState := none)
+    (initialControllerState :
+      Option (StepSizeController.State (C := Controller)) := none)
+    (initialMadeJump : Bool := false)
+    (events : Array (EventSpec Y Args) := #[])
+    (saveFn : Option (Time → Y → Args → Y) := none)
+    (maxStepsOpt : Option Nat := some maxSteps)
+    (progress_meter : ProgressMeter := .none) :
+    Except SolveError (Solution Y solver.SolverState (StepSizeController.State (C := Controller))) :=
+  let sol :=
+    diffeqsolve
+      (Term := Term)
+      (Y := Y)
+      (VF := VF)
+      (Control := Control)
+      (Args := Args)
+      (Controller := Controller)
+      terms solver t0 t1 dt0 y0 args
+      (saveat := saveat)
+      (maxSteps := maxSteps)
+      (controller := controller)
+      (event := event)
+      (initialSolverState := initialSolverState)
+      (initialControllerState := initialControllerState)
+      (initialMadeJump := initialMadeJump)
+      (events := events)
+      (saveFn := saveFn)
+      (throwOnFailure := false)
+      (maxStepsOpt := maxStepsOpt)
+      (progress_meter := progress_meter)
+  sol.toExcept
+
 end DiffEq
 end torch
