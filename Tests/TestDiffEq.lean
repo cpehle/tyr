@@ -2822,6 +2822,75 @@ private def evaluateDenseFloat {S C : Type}
   LeanTest.assertTrue (approx y1.2 expected1 1e-6)
     s!"Pair EulerMaruyama component 1 expected {expected1}, got {y1.2}"
 
+@[test] def testEulerMaruyamaFinStatePyTree : IO Unit := do
+  let i0 : Fin 3 := ⟨0, by decide⟩
+  let i1 : Fin 3 := ⟨1, by decide⟩
+  let i2 : Fin 3 := ⟨2, by decide⟩
+  let drift : ODETerm (Fin 3 → Float) Unit := {
+    vectorField := fun _t _y _ => fun _ => 0.0
+  }
+  let bm : VirtualBrownianTree (Fin 3 → Float) := {
+    t0 := 0.0
+    t1 := 1.0
+    tol := 1.0e-6
+    maxDepth := 22
+    seed := 24681
+    shape := fun _ => (0.0 : Float)
+  }
+  let bmPath := (VirtualBrownianTree.toAbstract bm).toPath
+  let sigma : Fin 3 → Float := fun i =>
+    if i.1 == 0 then
+      0.5
+    else if i.1 == 1 then
+      -1.2
+    else
+      2.0
+  let diffusion : ControlTerm (Fin 3 → Float) (Fin 3 → Float) (Fin 3 → Float) Unit :=
+    ControlTerm.ofPath
+      (fun _t _y _ => sigma)
+      bmPath
+      (fun vf control => fun i => vf i * control i)
+  let terms : MultiTerm (ODETerm (Fin 3 → Float) Unit)
+      (ControlTerm (Fin 3 → Float) (Fin 3 → Float) (Fin 3 → Float) Unit) :=
+    { term1 := drift, term2 := diffusion }
+  let solver :=
+    EulerMaruyama.solver
+      (Drift := ODETerm (Fin 3 → Float) Unit)
+      (Diffusion := ControlTerm (Fin 3 → Float) (Fin 3 → Float) (Fin 3 → Float) Unit)
+      (Y := (Fin 3 → Float))
+      (VFd := (Fin 3 → Float))
+      (VFg := (Fin 3 → Float))
+      (Control := (Fin 3 → Float))
+      (Args := Unit)
+  let y0 : Fin 3 → Float := fun i =>
+    if i.1 == 0 then
+      1.5
+    else if i.1 == 1 then
+      -0.25
+    else
+      0.75
+  let sol :=
+    diffeqsolve
+      (Term := MultiTerm (ODETerm (Fin 3 → Float) Unit)
+        (ControlTerm (Fin 3 → Float) (Fin 3 → Float) (Fin 3 → Float) Unit))
+      (Y := (Fin 3 → Float))
+      (VF := ((Fin 3 → Float) × (Fin 3 → Float)))
+      (Control := (Time × (Fin 3 → Float)))
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      terms solver 0.0 1.0 (some 1.0) y0 () (saveat := { t1 := true })
+  let y1 ← finalSaved "Fin EulerMaruyama PyTree" sol
+  let dW := (VirtualBrownianTree.increment bm 0.0 1.0).W
+  let expected0 := (y0 i0) + (sigma i0) * (dW i0)
+  let expected1 := (y0 i1) + (sigma i1) * (dW i1)
+  let expected2 := (y0 i2) + (sigma i2) * (dW i2)
+  LeanTest.assertTrue (approx (y1 i0) expected0 1e-6)
+    s!"Fin EulerMaruyama component 0 expected {expected0}, got {y1 i0}"
+  LeanTest.assertTrue (approx (y1 i1) expected1 1e-6)
+    s!"Fin EulerMaruyama component 1 expected {expected1}, got {y1 i1}"
+  LeanTest.assertTrue (approx (y1 i2) expected2 1e-6)
+    s!"Fin EulerMaruyama component 2 expected {expected2}, got {y1 i2}"
+
 @[test] def testProgressMeterDefaultParity : IO Unit := do
   let term : ODETerm Float Unit := { vectorField := fun _t y _ => -y }
   let solver :=
@@ -2933,6 +3002,76 @@ private def evaluateDenseFloat {S C : Type}
   let ratio2 := if errFine <= 1.0e-16 then 0.0 else errMedium / errFine
   LeanTest.assertTrue (ratio1 > 1.5 && ratio2 > 1.5)
     s!"Euler error ratios should show ~first-order trend: {ratio1}, {ratio2}"
+
+private def deterministicEndpointError
+    (label : String)
+    (solver : AbstractSolver (ODETerm Float Unit) Float Float Time Unit)
+    (dt : Float) : IO Float := do
+  let term : ODETerm Float Unit := { vectorField := fun _t y _ => -y }
+  let sol :=
+    diffeqsolve
+      (Term := ODETerm Float Unit)
+      (Y := Float)
+      (VF := Float)
+      (Control := Time)
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      term solver 0.0 1.0 (some dt) (1.0 : Float) () (saveat := { t1 := true })
+  let y1 ← finalSaved label sol
+  let exact := Float.exp (-1.0)
+  pure (Float.abs (y1 - exact))
+
+@[test] def testHeunGlobalOrderTrendDeterministic : IO Unit := do
+  let solver :=
+    Heun.solver
+      (Term := ODETerm Float Unit)
+      (Y := Float)
+      (VF := Float)
+      (Control := Time)
+      (Args := Unit)
+  let errCoarse ← deterministicEndpointError "Heun coarse" solver 0.2
+  let errMedium ← deterministicEndpointError "Heun medium" solver 0.1
+  let errFine ← deterministicEndpointError "Heun fine" solver 0.05
+  LeanTest.assertTrue (errCoarse > errMedium && errMedium > errFine)
+    s!"Heun errors should decrease with dt: {errCoarse}, {errMedium}, {errFine}"
+  let ratio1 := if errMedium <= 1.0e-16 then 0.0 else errCoarse / errMedium
+  let ratio2 := if errFine <= 1.0e-16 then 0.0 else errMedium / errFine
+  LeanTest.assertTrue (ratio1 > 3.0 && ratio2 > 3.0)
+    s!"Heun error ratios should show ~second-order trend: {ratio1}, {ratio2}"
+
+@[test] def testMidpointGlobalOrderTrendDeterministic : IO Unit := do
+  let solver :=
+    Midpoint.solver
+      (Term := ODETerm Float Unit)
+      (Y := Float)
+      (VF := Float)
+      (Args := Unit)
+  let errCoarse ← deterministicEndpointError "Midpoint coarse" solver 0.2
+  let errMedium ← deterministicEndpointError "Midpoint medium" solver 0.1
+  let errFine ← deterministicEndpointError "Midpoint fine" solver 0.05
+  LeanTest.assertTrue (errCoarse > errMedium && errMedium > errFine)
+    s!"Midpoint errors should decrease with dt: {errCoarse}, {errMedium}, {errFine}"
+  let ratio1 := if errMedium <= 1.0e-16 then 0.0 else errCoarse / errMedium
+  let ratio2 := if errFine <= 1.0e-16 then 0.0 else errMedium / errFine
+  LeanTest.assertTrue (ratio1 > 3.0 && ratio2 > 3.0)
+    s!"Midpoint error ratios should show ~second-order trend: {ratio1}, {ratio2}"
+
+@[test] def testBosh3GlobalOrderTrendDeterministic : IO Unit := do
+  let solver :=
+    Bosh3.solver
+      (Term := ODETerm Float Unit)
+      (Y := Float)
+      (VF := Float)
+      (Args := Unit)
+  let errCoarse ← deterministicEndpointError "Bosh3 coarse" solver 0.25
+  let errMedium ← deterministicEndpointError "Bosh3 medium" solver 0.125
+  let errFine ← deterministicEndpointError "Bosh3 fine" solver 0.0625
+  LeanTest.assertTrue (errCoarse > errMedium && errMedium > errFine)
+    s!"Bosh3 errors should decrease with dt: {errCoarse}, {errMedium}, {errFine}"
+  let ratio1 := if errMedium <= 1.0e-16 then 0.0 else errCoarse / errMedium
+  let ratio2 := if errFine <= 1.0e-16 then 0.0 else errMedium / errFine
+  LeanTest.assertTrue (ratio1 > 4.5 && ratio2 > 4.5)
+    s!"Bosh3 error ratios should show high-order trend: {ratio1}, {ratio2}"
 
 @[test] def testRK4GlobalOrderTrend : IO Unit := do
   let term : ODETerm Float Unit := { vectorField := fun _t y _ => -y }
@@ -3410,9 +3549,13 @@ def run : IO Unit := do
   testEulerPairStatePyTree
   testEulerFinStatePyTree
   testEulerMaruyamaPairStatePyTree
+  testEulerMaruyamaFinStatePyTree
   testProgressMeterDefaultParity
   testProgressMeterTextAndTqdmCompatibility
   testEulerGlobalOrderTrend
+  testHeunGlobalOrderTrendDeterministic
+  testMidpointGlobalOrderTrendDeterministic
+  testBosh3GlobalOrderTrendDeterministic
   testRK4GlobalOrderTrend
   testDenseInterpolationErrorTrend
   testKvaerno3DenseInterpolationTrend
