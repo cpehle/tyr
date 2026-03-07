@@ -90,6 +90,18 @@ Deterministic order-trend checks inspired by:
   let errFine ← endpointError "Midpoint fine" solver 0.05
   assertTrend "Midpoint order trend" errCoarse errMedium errFine 3.0 3.0 2.5e-4
 
+@[test] def testRalstonOrderTrendDeterministic : IO Unit := do
+  let solver :=
+    Ralston.solver
+      (Term := ODETerm Float Unit)
+      (Y := Float)
+      (VF := Float)
+      (Args := Unit)
+  let errCoarse ← endpointError "Ralston coarse" solver 0.2
+  let errMedium ← endpointError "Ralston medium" solver 0.1
+  let errFine ← endpointError "Ralston fine" solver 0.05
+  assertTrend "Ralston order trend" errCoarse errMedium errFine 3.0 3.0 2.5e-4
+
 @[test] def testBosh3OrderTrendDeterministic : IO Unit := do
   let solver :=
     Bosh3.solver
@@ -105,6 +117,7 @@ Deterministic order-trend checks inspired by:
 def run : IO Unit := do
   testHeunOrderTrendDeterministic
   testMidpointOrderTrendDeterministic
+  testRalstonOrderTrendDeterministic
   testBosh3OrderTrendDeterministic
 
 end Tests.DiffEqOrderParity2
