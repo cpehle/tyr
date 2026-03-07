@@ -126,6 +126,46 @@ section
         LeanTest.assertTrue (approx adj.adjArgs fdA 1.0e-3)
           s!"adjoint da expected {fdA}, got {adj.adjArgs}"
 
+  @[test] def testBacksolveAdjointTerminalOnlySave : IO Unit := do
+    let term : ODETerm Float Float := { vectorField := fun _t y a => a * y }
+    let solver :=
+      RK4.solver
+        (Term := ODETerm Float Float)
+        (Y := Float)
+        (VF := Float)
+        (Args := Float)
+    let adjSolver :=
+      RK4.solver
+        (Term := ODETerm (AdjointState Float Float) Float)
+        (Y := AdjointState Float Float)
+        (VF := AdjointState Float Float)
+        (Args := Float)
+    let y0 := 2.0
+    let a := 0.3
+    let t0 := 0.0
+    let t1 := 1.0
+    let dt0 := some 0.01
+    let sol :=
+      diffeqsolve
+        (Term := ODETerm Float Float)
+        (Y := Float)
+        (VF := Float)
+        (Control := Time)
+        (Args := Float)
+        (Controller := ConstantStepSize)
+        term solver t0 t1 dt0 y0 a (saveat := { t1 := true })
+    let adjY1 := 1.0
+    match backsolveAdjoint term adjSolver sol a adjY1 with
+    | none =>
+        LeanTest.fail "Expected adjoint result for terminal-only save"
+    | some adj => do
+        let exactDy0 := Float.exp (a * (t1 - t0))
+        let exactDa := (t1 - t0) * y0 * exactDy0
+        LeanTest.assertTrue (approx adj.adjY0 exactDy0 1.0e-2)
+          s!"terminal-only backsolve dy0 expected {exactDy0}, got {adj.adjY0}"
+        LeanTest.assertTrue (approx adj.adjArgs exactDa 1.0e-2)
+          s!"terminal-only backsolve da expected {exactDa}, got {adj.adjArgs}"
+
   @[test] def testBacksolveAdjointWrapper : IO Unit := do
     let term : ODETerm Float Float := { vectorField := fun _t y a => a * y }
     let solver :=

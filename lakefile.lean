@@ -9,7 +9,15 @@ def tyrLeanSharedLibRPath : String := run_io do
   }
   let leanPrefix := out.stdout.trimAscii.toString
   if out.exitCode == 0 && !leanPrefix.isEmpty then
-    pure s!"{leanPrefix}/lib"
+    let leanSharedDir : FilePath := leanPrefix / "lib" / "lean"
+    if ← leanSharedDir.pathExists then
+      pure leanSharedDir.toString
+    else
+      let leanLibDir : FilePath := leanPrefix / "lib"
+      if ← leanLibDir.pathExists then
+        pure leanLibDir.toString
+      else
+        pure "@loader_path"
   else
     pure "@loader_path"
 
@@ -361,19 +369,19 @@ lean_exe TestDataLoader where
 
 /-- Differential equation baseline test executable. -/
 lean_exe TestDiffEq where
-  root := `Tests.TestDiffEq
+  root := `Tests.RunTestDiffEq
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
 /-- Adjoint differential equation test executable. -/
 lean_exe TestDiffEqAdjoint where
-  root := `Tests.TestDiffEqAdjoint
+  root := `Tests.RunTestDiffEqAdjoint
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
 /-- Core adjoint differential equation test executable. -/
 lean_exe TestDiffEqAdjointCore where
-  root := `Tests.TestDiffEqAdjointCore
+  root := `Tests.RunTestDiffEqAdjointCore
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 

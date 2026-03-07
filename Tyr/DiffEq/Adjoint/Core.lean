@@ -238,8 +238,35 @@ def backsolveAdjoint
           none
         else if ts.size != ys.size then
           none
+        else if Float.abs (ts[ts.size - 1]! - sol.t1) != 0.0 then
+          none
         else
           let adjTerm := adjointTerm term
+          let runSegment :=
+            fun (tStart tStop : Time) (yStart : Y) (adjYStart : Y) (adjArgsStart : Args) =>
+              let dtAbs := Float.abs (tStart - tStop)
+              if dtAbs == 0.0 then
+                some ({ y := yStart, adjY := adjYStart, adjArgs := adjArgsStart } : AdjointState Y Args)
+              else
+                let state0 : AdjointState Y Args :=
+                  { y := yStart, adjY := adjYStart, adjArgs := adjArgsStart }
+                let adjSol :=
+                  diffeqsolve
+                    (Term := ODETerm (AdjointState Y Args) Args)
+                    (Y := AdjointState Y Args)
+                    (VF := AdjointState Y Args)
+                    (Control := Time)
+                    (Args := Args)
+                    (Controller := ConstantStepSize)
+                    adjTerm adjSolver tStart tStop (some dtAbs) state0 args
+                    (saveat := { t1 := true }) (maxSteps := 1)
+                match adjSol.ys with
+                | some ysAdj =>
+                    if ysAdj.size == 0 then
+                      none
+                    else
+                      some ysAdj[ysAdj.size - 1]!
+                | none => none
           Id.run do
             let numSegs := ts.size - 1
             let mut adjY := adjY1
@@ -251,29 +278,19 @@ def backsolveAdjoint
                 let t1 := ts[i]!
                 let t0 := ts[i - 1]!
                 let y1 := ys[i]!
-                let dtAbs := Float.abs (t1 - t0)
-                if dtAbs != 0.0 then
-                  let state0 : AdjointState Y Args :=
-                    { y := y1, adjY := adjY, adjArgs := adjArgs }
-                  let adjSol :=
-                    diffeqsolve
-                      (Term := ODETerm (AdjointState Y Args) Args)
-                      (Y := AdjointState Y Args)
-                      (VF := AdjointState Y Args)
-                      (Control := Time)
-                      (Args := Args)
-                      (Controller := ConstantStepSize)
-                      adjTerm adjSolver t1 t0 (some dtAbs) state0 args
-                      (saveat := { t1 := true }) (maxSteps := 1)
-                  match adjSol.ys with
-                  | some ysAdj =>
-                      if ysAdj.size == 0 then
-                        ok := false
-                      else
-                        let state1 := ysAdj[ysAdj.size - 1]!
-                        adjY := state1.adjY
-                        adjArgs := state1.adjArgs
-                  | none => ok := false
+                match runSegment t1 t0 y1 adjY adjArgs with
+                | some state1 =>
+                    adjY := state1.adjY
+                    adjArgs := state1.adjArgs
+                | none =>
+                    ok := false
+            if ok && Float.abs (ts[0]! - sol.t0) != 0.0 then
+              match runSegment ts[0]! sol.t0 ys[0]! adjY adjArgs with
+              | some state0 =>
+                  adjY := state0.adjY
+                  adjArgs := state0.adjArgs
+              | none =>
+                  ok := false
             if ok then
               return some { adjY0 := adjY, adjArgs := adjArgs }
             else
