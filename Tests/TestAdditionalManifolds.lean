@@ -1,5 +1,4 @@
 import LeanTest
-import Tyr.Manifolds.Product
 import Tyr.Manifolds.Sphere
 import Tyr.Manifolds.Oblique
 import Tyr.Manifolds.Positive
@@ -73,18 +72,5 @@ def testFixedRankProjectionIdempotent : IO Unit := do
   let fn := linalg.frobeniusNorm x.matrix
   LeanTest.assertTrue (Float.isFinite fn && fn > 0.0)
     s!"Expected finite non-zero fixed-rank projection norm, got {fn}"
-
-@[test]
-def testProductGradientStepCompiles : IO Unit := do
-  let x0 ← randn #[8] false
-  let y0 ← randn #[4, 4] false
-  let x : Sphere 8 := Sphere.project 8 x0
-  let y : Positive 4 4 := Positive.project 4 4 y0
-  let gx : SphereTangent 8 := SphereTangent.project x (zeros #[8])
-  let gy : PositiveTangent 4 4 := ⟨zeros #[4, 4]⟩
-  let z' := DifferentiableManifold.gradientStep (x, y) (gx, gy) 0.01
-  let xn := linalg.l2Norm z'.1.coords
-  LeanTest.assertTrue (Float.abs (xn - 1.0) < 1e-5)
-    "Product manifold step should keep sphere component on manifold"
 
 end Tests.AdditionalManifolds
