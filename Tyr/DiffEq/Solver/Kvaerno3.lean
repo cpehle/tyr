@@ -18,6 +18,11 @@ private def a41 : Float := (6.0 * gamma - 1.0) / (12.0 * gamma)
 private def a42 : Float := -1.0 / ((24.0 * gamma - 12.0) * gamma)
 private def a43 : Float := (-6.0 * gamma * gamma + 6.0 * gamma - 1.0) / (6.0 * gamma - 3.0)
 
+private def canonicalDenseKind (_kind : ImplicitRKDenseKind) : ImplicitRKDenseKind :=
+  -- Diffrax Kvaerno3 always uses third-order Hermite local interpolation from stage slopes.
+  -- Keep Tyr aligned by canonicalizing Kvaerno3 dense output to Hermite.
+  .hermite
+
 def kvaerno3Tableau : ButcherTableau 4 := {
   a := vec4
     #[]
@@ -37,7 +42,7 @@ def Kvaerno3.solver (cfg : Kvaerno3 := {}) {Term Y VF Args : Type}
   ImplicitRK.solver {
     tableau := kvaerno3Tableau
     rootFinder := cfg.rootFinder
-    denseKind := cfg.denseKind
+    denseKind := canonicalDenseKind cfg.denseKind
   }
 
 instance : ImplicitSolver Kvaerno3 := ⟨True.intro⟩
