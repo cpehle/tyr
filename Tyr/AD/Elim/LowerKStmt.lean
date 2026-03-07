@@ -88,6 +88,24 @@ private def decodeCumsumAxis? (opName : OpName) : Option ReduceAxis :=
 private def decodeCumprodAxis? (opName : OpName) : Option ReduceAxis :=
   allKStmtReduceAxes.find? (fun axis => kstmtCumprodOpName axis == opName)
 
+private def decodeMmaTranspose? (opName : OpName) : Option MMATranspose :=
+  allKStmtMMATransposes.find? (fun trans => kstmtMmaOpName trans == opName)
+
+private def decodeMMTransposeFromContractAxes?
+    (lhsContract rhsContract lhsBatch rhsBatch : Array Nat) : Option MMATranspose :=
+  if !lhsBatch.isEmpty || !rhsBatch.isEmpty then
+    none
+  else if lhsContract == #[1] && rhsContract == #[0] then
+    some .AB
+  else if lhsContract == #[1] && rhsContract == #[1] then
+    some .ABt
+  else if lhsContract == #[0] && rhsContract == #[0] then
+    some .AtB
+  else if lhsContract == #[0] && rhsContract == #[1] then
+    some .AtBt
+  else
+    none
+
 /-- True iff `opName` can be lowered into a concrete `KStmt` constructor. -/
 def isKStmtLowerableOpName (opName : OpName) : Bool :=
   (decodeUnaryOp? opName).isSome ||
@@ -98,6 +116,8 @@ def isKStmtLowerableOpName (opName : OpName) : Bool :=
   (decodeBinaryBroadcast? opName).isSome ||
   (decodeCumsumAxis? opName).isSome ||
   (decodeCumprodAxis? opName).isSome ||
+  (decodeMmaTranspose? opName).isSome ||
+  isDotGeneralOpName opName ||
   opName == kstmtTransposeOpName ||
   opName == kstmtSwapLayoutOpName ||
   opName == kstmtConvertOpName ||
@@ -172,6 +192,27 @@ private def lowerEqnToKStmt (idx0 : Nat) (eqn : JEqn) : Except String KStmt := d
   if let some axis := decodeCumprodAxis? eqn.op then
     let invars ← requireInVarArity idx0 eqn 1
     return .cumprod axis dst invars[0]!
+
+  if isDotGeneralOpName eqn.op then
+    let invars ← requireInVarArity idx0 eqn 2
+    let lhsContract := (eqn.params.findNats? .lhsContract).getD #[]
+    let rhsContract := (eqn.params.findNats? .rhsContract).getD #[]
+    let lhsBatch := (eqn.params.findNats? .lhsBatch).getD #[]
+    let rhsBatch := (eqn.params.findNats? .rhsBatch).getD #[]
+    match decodeMMTransposeFromContractAxes? lhsContract rhsContract lhsBatch rhsBatch with
+    | some trans =>
+      return .mm trans dst invars[0]! invars[1]!
+    | none =>
+      if lhsContract.isEmpty && rhsContract.isEmpty && lhsBatch.isEmpty && rhsBatch.isEmpty then
+        return .outer dst invars[0]! invars[1]!
+      else
+        throw <|
+          malformedEqnError idx0 eqn
+            s!"dot-general parameters are not representable as KStmt mm/outer: lhsContract={lhsContract}, rhsContract={rhsContract}, lhsBatch={lhsBatch}, rhsBatch={rhsBatch}"
+
+  if let some trans := decodeMmaTranspose? eqn.op then
+    let invars ← requireInVarArity idx0 eqn 3
+    return .mma trans dst invars[0]! invars[1]! invars[2]!
 
   throw <|
     malformedEqnError idx0 eqn "unsupported op name for KStmt lowering"
