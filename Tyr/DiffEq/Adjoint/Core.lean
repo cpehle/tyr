@@ -555,7 +555,7 @@ private def recursiveCheckpointBackprop
               (Control := Time)
               (Args := Args)
               (Controller := Controller)
-              term solver segT0 segT1 dt0 segY0 args (saveat := { steps := true })
+              term solver segT0 segT1 dt0 segY0 args (saveat := { t0 := true, steps := true })
               (maxSteps := maxSteps)
               (controller := controller)
           if segSol.result != Result.successful then
@@ -875,7 +875,7 @@ def diffeqsolveRecursiveCheckpointAdjoint
                   some
                     "Adjoint solve failed: primal solve did not finish successfully before recursive checkpoint backpropagation.")
             else
-              let saveatInternal := { saveat with steps := true, ts := none, dense := false }
+              let saveatInternal := { saveat with t0 := true, steps := true, ts := none, dense := false }
               let solSteps :=
                 diffeqsolve
                   (Term := ODETerm Y Args)
