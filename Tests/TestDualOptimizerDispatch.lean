@@ -74,6 +74,28 @@ def testMatrixBackendSpecPerLabelDispatch : IO Unit := do
     "Expected default non-manifold backend for unspecified label"
 
 @[test]
+def testManifoldMuonConfigForwardsSolverKnobs : IO Unit := do
+  let cfg : Config := {
+    matrixOptimizer := .manifoldMuon
+    matrixManifold := .stiefel
+    manifoldSolver := .fixedPoint
+    manifoldMinSolveSteps := 3
+    manifoldSolveResidualTol := 1e-3
+    manifoldSolveDualDeltaTol := 2e-3
+    manifoldFixedPointDamping := 0.25
+  }
+  let mcfg := getManifoldMuonConfigAtStep cfg 7
+  LeanTest.assertTrue (mcfg.solver == .fixedPoint)
+    "Expected solver kind to be forwarded to manifold-Muon config"
+  LeanTest.assertEqual mcfg.minSolveSteps 3
+  LeanTest.assertTrue (Float.abs (mcfg.solveResidualTol - 1e-3) < 1e-12)
+    s!"Expected residual tolerance 1e-3, got {mcfg.solveResidualTol}"
+  LeanTest.assertTrue (Float.abs (mcfg.solveDualDeltaTol - 2e-3) < 1e-12)
+    s!"Expected dual-delta tolerance 2e-3, got {mcfg.solveDualDeltaTol}"
+  LeanTest.assertTrue (Float.abs (mcfg.fixedPointDamping - 0.25) < 1e-12)
+    s!"Expected fixed-point damping 0.25, got {mcfg.fixedPointDamping}"
+
+@[test]
 def testStepMatrixSingleStiefelConstraint : IO Unit := do
   let pRaw ← randn #[8, 4] false
   let p := autograd.set_requires_grad
@@ -142,6 +164,27 @@ def testStepMatrixSingleOrthogonalSquareConstraint : IO Unit := do
   match st1 with
   | .genericManifold _ => pure ()
   | _ => LeanTest.fail "Expected generic manifold state after orthogonal step"
+
+@[test]
+def testStepMatrixSingleOrthogonalNonSquareFails : IO Unit := do
+  let pRaw ← randn #[8, 4] false
+  let p := autograd.set_requires_grad
+    (autograd.detach (Tyr.AD.Stiefel.project 8 4 pRaw).matrix) true
+  let g ← randn #[8, 4] false
+
+  let cfg : Config := {
+    matrixOptimizer := .manifoldMuon
+    matrixManifold := .orthogonal
+    matrixLr := 0.02
+  }
+  let st0 := initMatrixParamState cfg p
+  let threw ← try
+      let _ ← stepMatrixSingle p g st0 cfg 0 1.0 1.0
+      pure false
+    catch _ =>
+      pure true
+  LeanTest.assertTrue threw
+    "Expected non-square orthogonal manifold step to fail fast"
 
 @[test]
 def testMatrixBackendOpsComposable : IO Unit := do

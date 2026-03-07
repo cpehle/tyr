@@ -5,6 +5,9 @@ import Tests.TestCheckpoint
 import Tests.TestModelIO
 import Tests.TestPipeline
 import Tests.TestAutoGrad
+import Tests.TestManifoldMuon
+import Tests.TestDualOptimizerDispatch
+import Tests.TestModularManifold
 import Tests.TestGPUAutoGrad
 import Tests.TestModularNorm
 import Tests.TestMctxImport

@@ -22,6 +22,24 @@ def testStiefelLinearConstraintAfterUpdate : IO Unit := do
     "StiefelLinear weight should remain on Stiefel after dual-map update"
 
 @[test]
+def testStiefelLinearWeightIsTrainableLeaf : IO Unit := do
+  let layer ← ManifoldLinear.init (M := Tyr.AD.Stiefel) 8 16 true
+  let w0 := MatrixManifoldCarrier.toMatrix layer.weight
+  LeanTest.assertTrue (torch.T.requires_grad w0)
+    "Expected manifold-linear weight to require gradients after init"
+  LeanTest.assertTrue (autograd.is_leaf w0)
+    "Expected manifold-linear weight to be a leaf tensor after init"
+
+  let gW ← randn #[16, 8] false
+  let gB ← randn #[16] false
+  let layer' := ManifoldLinear.applyDualMapUpdate layer gW (some gB) 0.02
+  let w1 := MatrixManifoldCarrier.toMatrix layer'.weight
+  LeanTest.assertTrue (torch.T.requires_grad w1)
+    "Expected manifold-linear weight to require gradients after update"
+  LeanTest.assertTrue (autograd.is_leaf w1)
+    "Expected manifold-linear weight to remain a leaf tensor after update"
+
+@[test]
 def testGrassmannLinearConstraintAfterUpdate : IO Unit := do
   let layer ← ManifoldLinear.init (M := Tyr.AD.Grassmann) 6 12 true
   let gW ← randn #[12, 6] false
@@ -70,9 +88,19 @@ def testManifoldLinearBenchmarkPositive : IO Unit := do
 @[test]
 def testHyperbolicVectorConstraintAfterUpdate : IO Unit := do
   let p0 ← ManifoldVectorParam.init (V := Tyr.AD.Hyperbolic) 6
+  let v0 := VectorManifoldCarrier.toVector p0.value
+  LeanTest.assertTrue (torch.T.requires_grad v0)
+    "Expected hyperbolic manifold vector to require gradients after init"
+  LeanTest.assertTrue (autograd.is_leaf v0)
+    "Expected hyperbolic manifold vector to be a leaf tensor after init"
+
   let g ← randn #[7] false
   let p1 := ManifoldVectorParam.applyDualMapUpdate p0 g 0.02
   let coords := VectorManifoldCarrier.toVector p1.value
+  LeanTest.assertTrue (torch.T.requires_grad coords)
+    "Expected hyperbolic manifold vector to require gradients after update"
+  LeanTest.assertTrue (autograd.is_leaf coords)
+    "Expected hyperbolic manifold vector to remain a leaf tensor after update"
   let inner := Tyr.AD.Hyperbolic.minkowskiInner coords coords
   LeanTest.assertTrue (Float.abs (inner + 1.0) < 1e-4)
     s!"HyperbolicVector should preserve <x,x>_L = -1 after update, got {inner}"
