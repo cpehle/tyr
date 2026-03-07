@@ -189,6 +189,10 @@ private def finalSavedValue {S C : Type}
   assertApprox "LinearInterpolation slope in [0,2]" (interp.derivative 1.0 true) 2.0 1e-12
   assertApprox "LinearInterpolation slope in [2,3]" (interp.derivative 2.5 true) (-3.0) 1e-12
   assertApprox "LinearInterpolation slope in [3,5]" (interp.derivative 4.0 true) 4.0 1e-12
+  assertApprox "LinearInterpolation left derivative at knot t=2" (interp.derivative 2.0 true) 2.0 1e-12
+  assertApprox "LinearInterpolation right derivative at knot t=2" (interp.derivative 2.0 false) (-3.0) 1e-12
+  assertApprox "LinearInterpolation left derivative at knot t=3" (interp.derivative 3.0 true) (-3.0) 1e-12
+  assertApprox "LinearInterpolation right derivative at knot t=3" (interp.derivative 3.0 false) 4.0 1e-12
 
   let inc := interp.evaluate 1.5 (some 4.5) true
   let diff := interp.evaluate 4.5 none true - interp.evaluate 1.5 none true

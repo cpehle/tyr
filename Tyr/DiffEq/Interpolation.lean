@@ -314,7 +314,7 @@ namespace LinearInterpolation
 private def clampIndex (n : Nat) (i : Nat) : Nat :=
   if i < n then i else if n == 0 then 0 else n - 1
 
-private def findBracket (ts : Array Time) (t : Time) : Nat :=
+private def findBracket (ts : Array Time) (t : Time) (left : Bool) : Nat :=
   let n := ts.size
   if n <= 1 then
     0
@@ -322,17 +322,20 @@ private def findBracket (ts : Array Time) (t : Time) : Nat :=
     let rec go (i : Nat) : Nat :=
       if h : i + 1 < n then
         let t1 := ts[i + 1]!
-        if t <= t1 then i else go (i + 1)
+        if left then
+          if t <= t1 then i else go (i + 1)
+        else
+          if t < t1 then i else go (i + 1)
       else
         n - 2
     go 0
 
 def toDense [DiffEqSpace Y] [Inhabited Y] (interp : LinearInterpolation Y) : DenseInterpolation Y := by
-  let evalAt := fun (t : Time) =>
+  let evalAt := fun (t : Time) (left : Bool) =>
     if interp.ts.size == 0 then
       panic! "LinearInterpolation requires at least one point."
     else
-      let i := findBracket interp.ts t
+      let i := findBracket interp.ts t left
       let i0 := clampIndex interp.ts.size i
       let i1 := clampIndex interp.ts.size (i0 + 1)
       let t0 := interp.ts.getD i0 0.0
@@ -345,16 +348,16 @@ def toDense [DiffEqSpace Y] [Inhabited Y] (interp : LinearInterpolation Y) : Den
         let theta := (t - t0) / (t1 - t0)
         DiffEqSpace.add y0 (DiffEqSpace.scale theta (DiffEqSpace.sub y1 y0))
   exact {
-    evaluate := fun t0 t1 _left =>
+    evaluate := fun t0 t1 left =>
       match t1 with
-      | none => evalAt t0
+      | none => evalAt t0 left
       | some t1 =>
-          DiffEqSpace.sub (evalAt t1) (evalAt t0)
-    derivative := fun t _left =>
+          DiffEqSpace.sub (evalAt t1 left) (evalAt t0 left)
+    derivative := fun t left =>
       if interp.ts.size <= 1 then
         panic! "LinearInterpolation derivative requires at least two points."
       else
-        let i := findBracket interp.ts t
+        let i := findBracket interp.ts t left
         let i0 := clampIndex interp.ts.size i
         let i1 := clampIndex interp.ts.size (i0 + 1)
         let t0 := interp.ts.getD i0 0.0
