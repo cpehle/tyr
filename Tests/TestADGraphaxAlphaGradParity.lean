@@ -507,12 +507,26 @@ def testGraphaxParityScanAndCondExtractionFromFnBody : IO Unit := do
       "scan should propagate carry input."
     LeanTest.assertTrue (edges.any (fun e => e.src == 2 && e.dst == 3))
       "scan should propagate data input."
-    LeanTest.assertTrue
-      (edges.all (fun e =>
-        match e.map.repr with
+    let carryEdge? := edges.find? (fun e => e.src == 1 && e.dst == 3)
+    let dataEdge? := edges.find? (fun e => e.src == 2 && e.dst == 3)
+    match carryEdge? with
+    | none =>
+      LeanTest.fail "Missing carry edge for scan."
+    | some e =>
+      LeanTest.assertTrue
+        (match e.map.repr with
         | Tyr.AD.Sparse.SparseMapTag.semantic (.unary op .x .carry) => op == scanAliasOpName
-        | _ => false))
-      "scan alias rule should emit carry-tagged semantic maps."
+        | _ => false)
+        "scan carry input should emit carry-tagged semantic map."
+    match dataEdge? with
+    | none =>
+      LeanTest.fail "Missing data edge for scan."
+    | some e =>
+      LeanTest.assertTrue
+        (match e.map.repr with
+        | Tyr.AD.Sparse.SparseMapTag.semantic (.unary op .x .projection) => op == scanAliasOpName
+        | _ => false)
+        "scan data input should emit projection-tagged semantic map."
 
   let condPred : Lean.IR.VarId := { idx := 10 }
   let condTrue : Lean.IR.VarId := { idx := 11 }
