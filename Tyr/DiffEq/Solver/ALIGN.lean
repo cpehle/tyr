@@ -23,27 +23,33 @@ private structure ALIGNCoeffs where
   a1 : Float
   b1 : Float
   aa : Float
+  chh : Float
   deriving Inhabited
 
 private def alignCoeffs (h gamma taylorThreshold : Float) : ALIGNCoeffs :=
   let gh := gamma * h
-  if Float.abs gh < taylorThreshold then
+  if Float.abs gamma <= 1.0e-12 || Float.abs gh < taylorThreshold then
     let gh2 := gh * gh
+    let gh3 := gh2 * gh
+    let gh4 := gh3 * gh
     {
       beta := 1.0 - gh + 0.5 * gh2
       a1 := h * (1.0 - 0.5 * gh + gh2 / 6.0)
       b1 := h * (0.5 - gh / 6.0 + gh2 / 24.0)
       aa := 1.0 - 0.5 * gh + gh2 / 6.0
+      chh := h * (1.0 - 0.5 * gh + (3.0 / 20.0) * gh2 - gh3 / 30.0 + gh4 / 168.0)
     }
   else
     let beta := Float.exp (-gh)
     let a1 := (1.0 - beta) / gamma
     let b1 := (beta + gh - 1.0) / (gamma * gh)
+    let chh := 6.0 * (beta * (gh + 2.0) + gh - 2.0) / ((gh * gh) * gamma)
     {
       beta := beta
       a1 := a1
       b1 := b1
-      aa := a1 / h
+      aa := if Float.abs h <= 1.0e-12 then 1.0 else a1 / h
+      chh := chh
     }
 
 def ALIGN.solver (cfg : ALIGN := {}) {X Args : Type}
@@ -92,6 +98,13 @@ def ALIGN.solver (cfg : ALIGN := {}) {X Args : Type}
             let v0 := y0.2
             let h := driftInst.contr drift t0 t1
             let dW := diffInst.contr diffusion t0 t1
+            let zeroControl : X := 0.0 * dW
+            let dHOpt := diffusion.controlH?.map (fun controlH => controlH t0 t1)
+            let dH : X :=
+              match dHOpt with
+              | some hCtrl => hCtrl
+              | none => zeroControl
+            let hasHControl := dHOpt.isSome
             let gamma := drift.gamma t0 x0 v0 args
             let u := drift.u t0 x0 v0 args
             let rho := Float.sqrt (2.0 * gamma * u)
@@ -99,14 +112,22 @@ def ALIGN.solver (cfg : ALIGN := {}) {X Args : Type}
             let f0 := drift.gradPotential t0 x0 args
 
             let xDrift := coeffs.a1 * v0 - coeffs.b1 * ((u * h) * f0)
-            let xDiff := (rho * coeffs.b1) * dW
+            let xDiff :=
+              if hasHControl then
+                rho * (coeffs.b1 * dW + coeffs.chh * dH)
+              else
+                rho * (coeffs.b1 * dW)
             let x1 := x0 + (xDrift + xDiff)
 
             let f1 := drift.gradPotential t1 x1 args
             let vDrift :=
               coeffs.beta * v0 -
                 u * (((coeffs.a1 - coeffs.b1) * f0) + coeffs.b1 * f1)
-            let vDiff := (rho * coeffs.aa) * dW
+            let vDiff :=
+              if hasHControl then
+                rho * (coeffs.aa * dW - (gamma * coeffs.chh) * dH)
+              else
+                rho * (coeffs.aa * dW)
             let v1 := vDrift + vDiff
 
             let y1 : X × X := (x1, v1)

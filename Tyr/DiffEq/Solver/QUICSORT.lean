@@ -6,8 +6,8 @@ namespace DiffEq
 /-! ## QUICSORT Solver (underdamped Langevin SRK, staged)
 
 Staged underdamped implementation inspired by diffrax QUICSORT updates.
-This version uses the Brownian increment channel and omits high-order
-space-time-time Levy corrections.
+Includes explicit handling for richer Brownian controls (`W/H/K`) when
+available, with `W`-only fallback behavior.
 -/
 
 attribute [local instance] _root_.torch.DiffEq.DiffEqArithmetic.hAddInst
@@ -133,27 +133,31 @@ def QUICSORT.solver (cfg : QUICSORT := {}) {X Args : Type}
             let v0 := y0.2
             let h := driftInst.contr drift t0 t1
             let dW := diffInst.contr diffusion t0 t1
+            let dH := UnderdampedLangevinDiffusionTerm.controlH diffusion t0 t1
+            let dK := UnderdampedLangevinDiffusionTerm.controlK diffusion t0 t1
             let gamma := drift.gamma t0 x0 v0 args
             let u := drift.u t0 x0 v0 args
             let rho := Float.sqrt (2.0 * gamma * u)
             let uh := u * h
             let coeffs := quicsortCoeffs h gamma cfg.taylorThreshold
-            let rhoW := rho * dW
+            let rhoWK := rho * (dW - 12.0 * dK)
+            let vTilde := v0 + rho * (dH + 6.0 * dK)
 
-            let xL := x0 + coeffs.aL * v0 + coeffs.bL * rhoW
+            let xL := x0 + coeffs.aL * vTilde + coeffs.bL * rhoWK
             let fLUh := uh * drift.gradPotential (t0 + lCoeff * h) xL args
 
-            let xR := x0 + coeffs.aR * v0 + coeffs.bR * rhoW - coeffs.aThird * fLUh
+            let xR := x0 + coeffs.aR * vTilde + coeffs.bR * rhoWK - coeffs.aThird * fLUh
             let fRUh := uh * drift.gradPotential (t0 + rCoeff * h) xR args
 
             let x1 :=
-              x0 + coeffs.a1 * v0 + coeffs.b1 * rhoW -
+              x0 + coeffs.a1 * vTilde + coeffs.b1 * rhoWK -
               0.5 * (coeffs.aR * fLUh + coeffs.aL * fRUh)
 
-            let v1 :=
-              coeffs.beta1 * v0 -
+            let vTildeOut :=
+              coeffs.beta1 * vTilde -
               0.5 * (coeffs.betaR * fLUh + coeffs.betaL * fRUh) +
-              coeffs.aDivH * rhoW
+              coeffs.aDivH * rhoWK
+            let v1 := vTildeOut - rho * (dH - 6.0 * dK)
 
             let y1 : X × X := (x1, v1)
             let dense := { t0 := t0, t1 := t1, y0 := y0, y1 := y1 }

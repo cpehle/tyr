@@ -56,6 +56,10 @@ private def assertFiniteVector2 (label : String) (v : Vector 2 Float) : IO Unit 
   LeanTest.assertTrue (Float.isFinite x0 && Float.isFinite x1)
     s!"{label}: expected finite vector entries, got {x0}, {x1}"
 
+private def assertFinitePair (label : String) (y : Float × Float) : IO Unit := do
+  LeanTest.assertTrue (Float.isFinite y.1 && Float.isFinite y.2)
+    s!"{label}: expected finite pair entries, got ({y.1}, {y.2})"
+
 private def mkUnderdampedSingleStepTerms :
     MultiTerm (UnderdampedLangevinDriftTerm Float Unit)
       (UnderdampedLangevinDiffusionTerm Float Unit) :=
@@ -218,6 +222,68 @@ private def solveUnderdampedEndpoint
     s!"{label}: solve should succeed"
   finalSavedPair label sol
 
+private def mkUnderdampedLevyControlTerms (withH : Bool) :
+    MultiTerm (UnderdampedLangevinDriftTerm Float Unit)
+      (UnderdampedLangevinDiffusionTerm Float Unit) :=
+  let gammaConst := 0.7
+  let uConst := 0.6
+  let drift : UnderdampedLangevinDriftTerm Float Unit := {
+    gradPotential := fun _t _x _ => 0.0
+    gamma := fun _t _x _v _ => gammaConst
+    u := fun _t _x _v _ => uConst
+  }
+  let diffusionBase : UnderdampedLangevinDiffusionTerm Float Unit := {
+    control := fun t0 t1 => t1 - t0
+    gamma := fun _t _x _v _ => gammaConst
+    u := fun _t _x _v _ => uConst
+  }
+  let diffusion :=
+    if withH then
+      UnderdampedLangevinDiffusionTerm.withControlH diffusionBase
+        (fun t0 t1 =>
+          let dt := t1 - t0
+          0.9 * dt + 0.4 * (t0 + t1) * dt)
+    else
+      diffusionBase
+  { term1 := drift, term2 := diffusion }
+
+private def solveUnderdampedLevyControlEndpoint
+    (label : String)
+    (solver : AbstractSolver
+      (MultiTerm (UnderdampedLangevinDriftTerm Float Unit)
+        (UnderdampedLangevinDiffusionTerm Float Unit))
+      (Float × Float)
+      ((Float × Float) × Scalar)
+      (Time × Float)
+      Unit)
+    (withH : Bool)
+    (dt : Float) : IO (Float × Float) := do
+  let terms := mkUnderdampedLevyControlTerms withH
+  let hProbe := UnderdampedLangevinDiffusionTerm.controlH terms.term2 0.0 dt
+  let kProbe := UnderdampedLangevinDiffusionTerm.controlK terms.term2 0.0 dt
+  if withH then
+    LeanTest.assertTrue (Float.abs hProbe > 1.0e-12)
+      s!"{label}: expected nonzero H probe when richer controls are enabled, got H={hProbe}"
+  else
+    LeanTest.assertTrue (Float.abs hProbe <= 1.0e-12)
+      s!"{label}: expected zero H probe for W-only controls, got H={hProbe}"
+  LeanTest.assertTrue (Float.abs kProbe <= 1.0e-12)
+    s!"{label}: expected zero K probe for ALIGN-focused controls, got K={kProbe}"
+  let sol :=
+    diffeqsolve
+      (Term := MultiTerm (UnderdampedLangevinDriftTerm Float Unit)
+        (UnderdampedLangevinDiffusionTerm Float Unit))
+      (Y := (Float × Float))
+      (VF := ((Float × Float) × Scalar))
+      (Control := (Time × Float))
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      terms solver 0.0 1.0 (some dt) ((0.15, -0.2) : Float × Float) ()
+      (saveat := { t1 := true })
+  LeanTest.assertTrue (sol.result == Result.successful)
+    s!"{label}: solve should succeed"
+  finalSavedPair label sol
+
 private def assertSelfConvergence
     (label : String)
     (solver : AbstractSolver
@@ -268,6 +334,48 @@ Deterministic underdamped-Langevin self-convergence checks guided by:
     "QUICSORT underdamped taylor-threshold parity"
     (QUICSORT.solver { taylorThreshold := 0.0 })
     (QUICSORT.solver { taylorThreshold := 100.0 })
+
+/--
+Deterministic richer-control parity for underdamped ALIGN:
+- identical `W` control with and without explicit `H` input should diverge,
+- and richer-control endpoints should stay stable under step refinement.
+-/
+private def assertLevyControlParityAndStability
+    (label : String)
+    (solver : AbstractSolver
+      (MultiTerm (UnderdampedLangevinDriftTerm Float Unit)
+        (UnderdampedLangevinDiffusionTerm Float Unit))
+      (Float × Float)
+      ((Float × Float) × Scalar)
+      (Time × Float)
+      Unit)
+    (minDelta : Float := 1.0e-4)
+    (maxRefineDrift : Float := 0.35) : IO Unit := do
+  let yWCoarse ← solveUnderdampedLevyControlEndpoint
+    s!"{label} W-only coarse" solver false 0.05
+  let yWHCoarse ← solveUnderdampedLevyControlEndpoint
+    s!"{label} W/H coarse" solver true 0.05
+  let yWHFine ← solveUnderdampedLevyControlEndpoint
+    s!"{label} W/H fine" solver true 0.025
+
+  assertFinitePair s!"{label} W-only coarse" yWCoarse
+  assertFinitePair s!"{label} W/H coarse" yWHCoarse
+  assertFinitePair s!"{label} W/H fine" yWHFine
+
+  let deltaWH := pairL2 yWCoarse yWHCoarse
+  LeanTest.assertTrue (deltaWH > minDelta)
+    s!"{label}: expected W-only vs W/H endpoint delta > {minDelta}, got {deltaWH}"
+
+  let deltaRefine := pairL2 yWHCoarse yWHFine
+  LeanTest.assertTrue (deltaRefine < maxRefineDrift)
+    s!"{label}: richer-control coarse/fine endpoint drift too large ({deltaRefine})"
+
+@[test] def testALIGNUnderdampedLevyControlParityAndStability : IO Unit := do
+  assertLevyControlParityAndStability
+    "ALIGN levy-control"
+    (ALIGN.solver { taylorThreshold := 0.1 })
+    1.0e-4
+    0.35
 
 /--
 Structured-state underdamped shape/branch parity inspired by:
@@ -329,6 +437,7 @@ def run : IO Unit := do
   testALIGNUnderdampedTaylorThresholdParity
   testShOULDUnderdampedTaylorThresholdParity
   testQUICSORTUnderdampedTaylorThresholdParity
+  testALIGNUnderdampedLevyControlParityAndStability
   testUnderdampedVectorStateShapeParity
   testALIGNUnderdampedSelfConvergence
   testShOULDUnderdampedSelfConvergence
