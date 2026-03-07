@@ -36,6 +36,12 @@ inductive OpParamKey where
   | lhsBatch
   | rhsBatch
   | variant
+  | controlStaticArgCount
+  | condPredicateCount
+  | condDataInputCount
+  | scanCarryInputCount
+  | scanDataInputCount
+  | scanCarryOutputCount
   | custom (name : String)
   deriving Repr, BEq, Inhabited, DecidableEq, Hashable
 
@@ -56,6 +62,12 @@ def OpParamKey.toString : OpParamKey → String
   | .lhsBatch => "lhsBatch"
   | .rhsBatch => "rhsBatch"
   | .variant => "variant"
+  | .controlStaticArgCount => "controlStaticArgCount"
+  | .condPredicateCount => "condPredicateCount"
+  | .condDataInputCount => "condDataInputCount"
+  | .scanCarryInputCount => "scanCarryInputCount"
+  | .scanDataInputCount => "scanDataInputCount"
+  | .scanCarryOutputCount => "scanCarryOutputCount"
   | .custom name => name
 
 instance : ToString OpParamKey := ⟨OpParamKey.toString⟩

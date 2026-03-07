@@ -60,6 +60,9 @@ def runCoreM (x : CoreM α) : IO α := do
   | .ok value => pure value
   | .error msg => throw (IO.userError msg)
 
+private def jaxprFingerprint (jaxpr : LeanJaxpr) : String :=
+  reprStr jaxpr
+
 private def sampleKStmtLoweredJaxpr : LeanJaxpr :=
   {
     invars := #[{ id := 0 }, { id := 1 }]
@@ -81,6 +84,73 @@ private def sampleKStmtLoweredJaxpr : LeanJaxpr :=
   }
 
 @[test]
+def testBuildFromKStmtsWrapperParityWithManualPath : IO Unit := do
+  let cfg : BuildConfig := { requireRuleCoverage := false }
+  let v0 : VarId := { idx := 0 }
+  let v1 : VarId := { idx := 1 }
+  let v2 : VarId := { idx := 2 }
+  let stmts := #[
+    KStmt.unary .Exp v1 v0,
+    KStmt.binary .Add v2 v1 v0
+  ]
+
+  let built ← runCoreM (buildFromKStmts cfg stmts)
+  let manual : Except BuildError LeanJaxpr :=
+    match fromKStmts stmts with
+    | .error msgs =>
+      .error (.conversion (String.intercalate "\n" msgs.toList))
+    | .ok jaxpr =>
+      match validate jaxpr with
+      | .error errs => .error (.validation errs)
+      | .ok () => .ok jaxpr
+
+  match built, manual with
+  | .ok lhs, .ok rhs =>
+    LeanTest.assertEqual (jaxprFingerprint lhs) (jaxprFingerprint rhs)
+      "buildFromKStmts should match manual fromKStmts+validate path when coverage is disabled."
+  | .error lhsErr, .error rhsErr =>
+    LeanTest.assertEqual (buildErrorToString lhsErr) (buildErrorToString rhsErr)
+      "buildFromKStmts should preserve manual conversion/validation error messages."
+  | .ok _, .error rhsErr =>
+    LeanTest.fail s!"buildFromKStmts succeeded but manual path failed: {buildErrorToString rhsErr}"
+  | .error lhsErr, .ok _ =>
+    LeanTest.fail s!"buildFromKStmts failed but manual path succeeded: {buildErrorToString lhsErr}"
+
+@[test]
+def testBuildFromFnBodyWrapperParityWithManualPath : IO Unit := do
+  let cfg : BuildConfig := { requireRuleCoverage := false }
+  let x : Lean.IR.VarId := { idx := 0 }
+  let y : Lean.IR.VarId := { idx := 1 }
+  let p : Lean.IR.Param := { x := x, borrow := false, ty := Lean.IR.IRType.object }
+  let declName := `test.build_from_fnbody_wrapper_parity
+  let body : Lean.IR.FnBody :=
+    .vdecl y Lean.IR.IRType.object (Lean.IR.Expr.fap declName #[Lean.IR.Arg.var x]) (
+      .ret (.var y)
+    )
+
+  let built ← runCoreM (buildFromFnBody cfg declName #[p] body)
+  let manual : Except BuildError LeanJaxpr :=
+    match fromFnBody declName #[p] body with
+    | .error msg =>
+      .error (.conversion msg)
+    | .ok jaxpr =>
+      match validate jaxpr with
+      | .error errs => .error (.validation errs)
+      | .ok () => .ok jaxpr
+
+  match built, manual with
+  | .ok lhs, .ok rhs =>
+    LeanTest.assertEqual (jaxprFingerprint lhs) (jaxprFingerprint rhs)
+      "buildFromFnBody should match manual fromFnBody+validate path when coverage is disabled."
+  | .error lhsErr, .error rhsErr =>
+    LeanTest.assertEqual (buildErrorToString lhsErr) (buildErrorToString rhsErr)
+      "buildFromFnBody should preserve manual conversion/validation error messages."
+  | .ok _, .error rhsErr =>
+    LeanTest.fail s!"buildFromFnBody succeeded but manual path failed: {buildErrorToString rhsErr}"
+  | .error lhsErr, .ok _ =>
+    LeanTest.fail s!"buildFromFnBody failed but manual path succeeded: {buildErrorToString lhsErr}"
+
+@[test]
 def testExtractLocalJacEdgesReportsMissingRules : IO Unit := do
   let res ← runCoreM (extractLocalJacEdges sampleKStmtLoweredJaxpr)
   match res with
@@ -94,21 +164,24 @@ def testExtractLocalJacEdgesReportsMissingRules : IO Unit := do
       s!"Expected unsupported-op diagnostic, got: {first.message}"
 
 @[test]
-def testExtractLocalJacEdgesSucceedsWithKStmtRulePack : IO Unit := do
+def testExtractLocalJacEdgesSucceedsWithKStmtSemanticsPack : IO Unit := do
   let res ← runCoreM (do
-    registerKStmtUnaryBinaryPlaceholderRules
+    registerKStmtAllSupportedSemanticsRules
     extractLocalJacEdges sampleKStmtLoweredJaxpr
   )
   match res with
   | .error errs =>
-    LeanTest.fail s!"extractLocalJacEdges should succeed after rule-pack registration, got: {errs.map ruleExecutionErrorToString}"
+    LeanTest.fail s!"extractLocalJacEdges should succeed after semantics-pack registration, got: {errs.map ruleExecutionErrorToString}"
   | .ok edges =>
-    LeanTest.assertEqual edges.size 3 "Default placeholder rules should emit one edge per input var"
+    LeanTest.assertEqual edges.size 3 "Semantics pack should emit one edge per input var"
     let pairs := edges.map (fun e => (e.src, e.dst))
     LeanTest.assertEqual pairs #[(0, 2), (2, 3), (1, 3)]
       "Edge endpoints should follow equation/invar traversal order"
-    LeanTest.assertTrue (edges.all (fun e => e.map.repr == Tyr.AD.Sparse.SparseMapTag.identityLike))
-      "Registered KStmt placeholder rule-pack should emit identity-like maps"
+    LeanTest.assertTrue (edges.all (fun e =>
+      match e.map.repr with
+      | .semantic _ => true
+      | _ => false))
+      "Registered KStmt semantics pack should emit structured semantic maps."
 
 @[test]
 def testBuildAndExtractFromKStmtsHonorsCoverage : IO Unit := do
@@ -130,12 +203,12 @@ def testBuildAndExtractFromKStmtsHonorsCoverage : IO Unit := do
     LeanTest.fail s!"Expected build coverage failure, got: {buildExtractErrorToString err}"
 
   let withRules ← runCoreM (do
-    registerKStmtUnaryBinaryPlaceholderRules
+    registerKStmtAllSupportedSemanticsRules
     buildAndExtractFromKStmts {} stmts
   )
   match withRules with
   | .error err =>
-    LeanTest.fail s!"buildAndExtractFromKStmts should succeed with rule-pack, got: {buildExtractErrorToString err}"
+    LeanTest.fail s!"buildAndExtractFromKStmts should succeed with semantics-pack, got: {buildExtractErrorToString err}"
   | .ok (_jaxpr, edges) =>
     LeanTest.assertEqual edges.size 3 "Expected extracted local-Jac edges from two lowered equations"
 
@@ -163,15 +236,67 @@ def testBuildAndExtractFromKStmtsExtendedSubsetWithAllSupportedPack : IO Unit :=
     LeanTest.fail s!"Expected build coverage failure for structural subset, got: {buildExtractErrorToString err}"
 
   let withRules ← runCoreM (do
-    registerKStmtAllSupportedPlaceholderRules
+    registerKStmtAllSupportedSemanticsRules
     buildAndExtractFromKStmts {} stmts
   )
   match withRules with
   | .error err =>
-    LeanTest.fail s!"All-supported placeholder pack should cover structural subset, got: {buildExtractErrorToString err}"
+    LeanTest.fail s!"All-supported semantics pack should cover structural subset, got: {buildExtractErrorToString err}"
   | .ok (_jaxpr, edges) =>
     LeanTest.assertEqual edges.size 5
-      "Expected placeholder edges for broadcast/reduce/transpose/concatCols (1+1+1+2)"
+      "Expected semantic edges for broadcast/reduce/transpose/concatCols (1+1+1+2)"
+
+@[test]
+def testBuildAndExtractFromKStmtsMMAAndDotGeneralWithShapeAwareMaps : IO Unit := do
+  let a : VarId := { idx := 0 }
+  let b : VarId := { idx := 1 }
+  let c : VarId := { idx := 2 }
+  let mmOut : VarId := { idx := 3 }
+  let mmaOut : VarId := { idx := 4 }
+  let stmts := #[
+    KStmt.declRT a .Float16 8 16 .Row,
+    KStmt.declRT b .Float16 16 4 .Col,
+    KStmt.declRT c .Float16 8 4 .Row,
+    KStmt.declRT mmOut .Float16 8 4 .Row,
+    KStmt.declRT mmaOut .Float16 8 4 .Row,
+    KStmt.mm .AB mmOut a b,
+    KStmt.mma .AB mmaOut a b c
+  ]
+
+  let res ← runCoreM (do
+    registerKStmtAllSupportedSemanticsRules
+    buildAndExtractFromKStmts {} stmts
+  )
+  match res with
+  | .error err =>
+    LeanTest.fail s!"All-semantics pack should cover mm/mma path, got: {buildExtractErrorToString err}"
+  | .ok (_jaxpr, edges) =>
+    LeanTest.assertEqual edges.size 5
+      "Expected `mm` (2 edges) + `mma` (3 edges) local-Jac edges."
+
+    match findEdge? edges a.idx mmOut.idx with
+    | none => LeanTest.fail "Missing dot-general lhs edge a -> mmOut"
+    | some e =>
+      LeanTest.assertEqual e.map.inDim? (some 128)
+        "dot-general lhs edge should carry flattened source dim 8*16=128."
+      LeanTest.assertEqual e.map.outDim? (some 32)
+        "dot-general lhs edge should carry flattened output dim 8*4=32."
+      LeanTest.assertTrue
+        (match e.map.repr with
+        | .semantic (.dotGeneral _) => true
+        | _ => false)
+        s!"Expected dot-general semantic repr, got: {e.map.repr}"
+
+    match findEdge? edges c.idx mmaOut.idx with
+    | none => LeanTest.fail "Missing mma accumulation edge c -> mmaOut"
+    | some e =>
+      LeanTest.assertEqual e.map.inDim? (some 32)
+        "mma accumulation edge should carry flattened source dim 8*4=32."
+      LeanTest.assertEqual e.map.outDim? (some 32)
+        "mma accumulation edge should carry flattened output dim 8*4=32."
+      LeanTest.assertTrue
+        (e.map.repr == .semantic (.binary (kstmtMmaOpName .AB) .accum .inject))
+        s!"Expected mma accumulation semantic repr, got: {e.map.repr}"
 
 @[test]
 def testBuildAndExtractFromKStmtsLinearSemanticsRules : IO Unit := do
@@ -213,7 +338,7 @@ def testBuildAndExtractFromKStmtsLinearSemanticsRules : IO Unit := do
         s!"Unexpected right-Sub weight: {edgeWeight? e}"
 
 @[test]
-def testBuildAndExtractFromKStmtsHybridRulesCoverExpAndAdd : IO Unit := do
+def testBuildAndExtractFromKStmtsSemanticsPackCoverExpAndAdd : IO Unit := do
   let v0 : VarId := { idx := 0 }
   let v1 : VarId := { idx := 1 }
   let v2 : VarId := { idx := 2 }
@@ -223,19 +348,19 @@ def testBuildAndExtractFromKStmtsHybridRulesCoverExpAndAdd : IO Unit := do
   ]
 
   let res ← runCoreM (do
-    registerKStmtUnaryBinaryHybridRules
+    registerKStmtAllSupportedSemanticsRules
     buildAndExtractFromKStmts {} stmts
   )
   match res with
   | .error err =>
-    LeanTest.fail s!"Hybrid rule-pack should cover Exp/Add path, got: {buildExtractErrorToString err}"
+    LeanTest.fail s!"Semantics pack should cover Exp/Add path, got: {buildExtractErrorToString err}"
   | .ok (_jaxpr, edges) =>
     LeanTest.assertEqual edges.size 3 "Expected one unary edge + two binary edges"
     match findEdge? edges 0 1 with
     | none => LeanTest.fail "Missing expected Exp edge 0 -> 1"
     | some e =>
       LeanTest.assertTrue (e.map.repr == unaryTag .Exp)
-        s!"Exp should use symbolic semantic map in hybrid pack, got: {e.map.repr}"
+        s!"Exp should use symbolic semantic map in semantics pack, got: {e.map.repr}"
       LeanTest.assertTrue (approx ((edgeWeight? e).getD 0.0) 1.0)
         s!"Unexpected Exp weight: {edgeWeight? e}"
 
@@ -252,7 +377,7 @@ def testBuildAndExtractFromKStmtsHybridRulesCoverExpAndAdd : IO Unit := do
         s!"Unexpected right-Add weight: {edgeWeight? e}"
 
 @[test]
-def testBuildAndExtractFromKStmtsStructuralSemanticsInHybridPack : IO Unit := do
+def testBuildAndExtractFromKStmtsStructuralSemanticsInAllSemanticsPack : IO Unit := do
   let v0 : VarId := { idx := 0 }
   let v1 : VarId := { idx := 1 }
   let v2 : VarId := { idx := 2 }
@@ -272,12 +397,12 @@ def testBuildAndExtractFromKStmtsStructuralSemanticsInHybridPack : IO Unit := do
   ]
 
   let res ← runCoreM (do
-    registerKStmtAllSupportedHybridRules
+    registerKStmtAllSupportedSemanticsRules
     buildAndExtractFromKStmts {} stmts
   )
   match res with
   | .error err =>
-    LeanTest.fail s!"Hybrid pack should include structural semantics, got: {buildExtractErrorToString err}"
+    LeanTest.fail s!"All-semantics pack should include structural semantics, got: {buildExtractErrorToString err}"
   | .ok (_jaxpr, edges) =>
     LeanTest.assertEqual edges.size 9
       "Expected structural-edge extraction (1+1+1+2+2+1+1)"
@@ -394,7 +519,7 @@ def testBuildAndExtractFromKStmtsGraphaxAlphaGradSemanticsRules : IO Unit := do
         s!"Unexpected Max-right repr: {e.map.repr}"
 
 @[test]
-def testExtractNoGradControlRulesStopGradientAndIota : IO Unit := do
+def testExtractNoGradControlRulesStopGradientIotaDevicePutPjit : IO Unit := do
   let jaxpr : LeanJaxpr := {
     invars := #[{ id := 0 }]
     eqns := #[
@@ -411,13 +536,25 @@ def testExtractNoGradControlRulesStopGradientAndIota : IO Unit := do
         source := { decl := `test.no_grad_control, line? := some 41 }
       },
       {
-        op := kstmtBinaryOpName .Add
-        invars := #[{ id := 1 }, { id := 2 }]
+        op := devicePutOpName
+        invars := #[{ id := 1 }]
         outvars := #[{ id := 3 }]
         source := { decl := `test.no_grad_control, line? := some 42 }
+      },
+      {
+        op := pjitOpName
+        invars := #[{ id := 3 }]
+        outvars := #[{ id := 4 }]
+        source := { decl := `test.no_grad_control, line? := some 43 }
+      },
+      {
+        op := kstmtBinaryOpName .Add
+        invars := #[{ id := 4 }, { id := 2 }]
+        outvars := #[{ id := 5 }]
+        source := { decl := `test.no_grad_control, line? := some 44 }
       }
     ]
-    outvars := #[{ id := 3 }]
+    outvars := #[{ id := 5 }]
   }
 
   let res ← runCoreM (do
@@ -430,12 +567,16 @@ def testExtractNoGradControlRulesStopGradientAndIota : IO Unit := do
     LeanTest.fail s!"No-grad/control rule-pack should extract successfully, got: {errs.map ruleExecutionErrorToString}"
   | .ok edges =>
     LeanTest.assertEqual edges.size 2
-      "stop_gradient and iota should contribute zero local-Jac edges; Add should contribute two."
+      "stop_gradient/iota/device_put/pjit should contribute zero local-Jac edges; Add should contribute two."
     LeanTest.assertTrue ((findEdge? edges 0 1).isNone)
       "stop_gradient should block local-Jac edge from input to its output."
-    LeanTest.assertTrue ((findEdge? edges 1 3).isSome)
-      "Add should include lhs edge from stop_gradient output."
-    LeanTest.assertTrue ((findEdge? edges 2 3).isSome)
+    LeanTest.assertTrue ((findEdge? edges 1 3).isNone)
+      "device_put should emit no local-Jac edge."
+    LeanTest.assertTrue ((findEdge? edges 3 4).isNone)
+      "pjit should emit no local-Jac edge."
+    LeanTest.assertTrue ((findEdge? edges 4 5).isSome)
+      "Add should include lhs edge from pjit output."
+    LeanTest.assertTrue ((findEdge? edges 2 5).isSome)
       "Add should include rhs edge from iota output."
 
 @[test]
@@ -495,5 +636,243 @@ def testExtractDotGeneralRules : IO Unit := do
           rhsBatch := #[]
         }))
         s!"Unexpected dot_general rhs repr: {e.map.repr}"
+
+@[test]
+def testExtractCommunicationAliasRules : IO Unit := do
+  let jaxpr : LeanJaxpr := {
+    invars := #[{ id := 0 }]
+    eqns := #[
+      {
+        op := allGatherOpName
+        invars := #[{ id := 0 }]
+        outvars := #[{ id := 1 }]
+        source := { decl := `test.communication_alias, line? := some 70 }
+      },
+      {
+        op := `jax.lax.reduce_scatter
+        invars := #[{ id := 1 }]
+        outvars := #[{ id := 2 }]
+        source := { decl := `test.communication_alias, line? := some 71 }
+      }
+    ]
+    outvars := #[{ id := 2 }]
+  }
+
+  let res ← runCoreM (do
+    registerGraphaxAlphaGradCommunicationRules
+    extractLocalJacEdges jaxpr
+  )
+  match res with
+  | .error errs =>
+    LeanTest.fail s!"Communication alias rules should extract successfully, got: {errs.map ruleExecutionErrorToString}"
+  | .ok edges =>
+    LeanTest.assertEqual edges.size 2
+      "Communication unary aliases should preserve one edge per equation."
+    LeanTest.assertTrue ((findEdge? edges 0 1).isSome)
+      "all_gather should emit a unary local-Jac edge."
+    LeanTest.assertTrue ((findEdge? edges 1 2).isSome)
+      "reduce_scatter should emit a unary local-Jac edge."
+    LeanTest.assertTrue
+      (edges.all (fun e =>
+        match e.map.repr with
+        | .semantic (.unary _ .x .none) => true
+        | _ => false))
+      "Communication aliases should use unary structured semantic tags."
+
+@[test]
+def testExtractStructuralAliasRules : IO Unit := do
+  let jaxpr : LeanJaxpr := {
+    invars := #[{ id := 0 }, { id := 1 }]
+    eqns := #[
+      {
+        op := reshapeAliasOpName
+        invars := #[{ id := 0 }]
+        outvars := #[{ id := 2 }]
+        source := { decl := `test.structural_alias, line? := some 80 }
+      },
+      {
+        op := `jax.lax.slice_in_dim_p
+        invars := #[{ id := 2 }]
+        outvars := #[{ id := 3 }]
+        source := { decl := `test.structural_alias, line? := some 81 }
+      },
+      {
+        op := concatenateAliasOpName
+        invars := #[{ id := 3 }, { id := 1 }]
+        outvars := #[{ id := 4 }]
+        source := { decl := `test.structural_alias, line? := some 82 }
+      }
+    ]
+    outvars := #[{ id := 4 }]
+  }
+
+  let res ← runCoreM (do
+    registerGraphaxAlphaGradStructuralAliasRules
+    extractLocalJacEdges jaxpr
+  )
+  match res with
+  | .error errs =>
+    LeanTest.fail s!"Structural alias rules should extract successfully, got: {errs.map ruleExecutionErrorToString}"
+  | .ok edges =>
+    LeanTest.assertEqual edges.size 4
+      "reshape(1) + slice_in_dim(1) + concatenate(2) should produce four local-Jac edges."
+    LeanTest.assertTrue ((findEdge? edges 0 2).isSome)
+      "reshape alias should emit unary local-Jac edge."
+    LeanTest.assertTrue ((findEdge? edges 2 3).isSome)
+      "slice_in_dim alias should emit unary local-Jac edge."
+    LeanTest.assertTrue ((findEdge? edges 3 4).isSome)
+      "concatenate alias should emit edge for first input."
+    LeanTest.assertTrue ((findEdge? edges 1 4).isSome)
+      "concatenate alias should emit edge for second input."
+    LeanTest.assertTrue
+      (edges.all (fun e =>
+        match e.map.repr with
+        | .semantic _ => true
+        | _ => false))
+      "Structural aliases should emit structured semantic tags."
+
+@[test]
+def testBuildAndExtractFromFnBodyGraphaxAliasPath : IO Unit := do
+  let x : Lean.IR.VarId := { idx := 0 }
+  let y : Lean.IR.VarId := { idx := 1 }
+  let z : Lean.IR.VarId := { idx := 2 }
+  let w : Lean.IR.VarId := { idx := 3 }
+  let u : Lean.IR.VarId := { idx := 4 }
+  let v : Lean.IR.VarId := { idx := 5 }
+  let p : Lean.IR.Param := { x := x, borrow := false, ty := Lean.IR.IRType.object }
+  let body : Lean.IR.FnBody :=
+    .vdecl y Lean.IR.IRType.object (Lean.IR.Expr.fap stopGradientOpName #[Lean.IR.Arg.var x]) (
+      .vdecl z Lean.IR.IRType.object (Lean.IR.Expr.fap allGatherOpName #[Lean.IR.Arg.var y]) (
+        .vdecl w Lean.IR.IRType.object (Lean.IR.Expr.fap reshapeAliasOpName #[Lean.IR.Arg.var z]) (
+          .vdecl u Lean.IR.IRType.object (Lean.IR.Expr.fap iotaOpName #[]) (
+            .vdecl v Lean.IR.IRType.object (Lean.IR.Expr.fap `jax.lax.dot_general #[Lean.IR.Arg.var w, Lean.IR.Arg.var u]) (
+              .ret (.var v)
+            )
+          )
+        )
+      )
+    )
+
+  let res ← runCoreM (do
+    registerGraphaxAlphaGradParityRules
+    buildAndExtractFromFnBody {} `test.fnbody_graphax_alias_path #[p] body
+  )
+  match res with
+  | .error err =>
+    LeanTest.fail s!"FnBody alias path should build+extract successfully, got: {buildExtractErrorToString err}"
+  | .ok (_jaxpr, edges) =>
+    LeanTest.assertEqual edges.size 4
+      "stop_gradient/iota should emit no edges; all_gather/reshape/dot_general should emit 1+1+2 edges."
+    LeanTest.assertTrue ((findEdge? edges 2 3).isSome)
+      "all_gather should emit unary edge."
+    LeanTest.assertTrue ((findEdge? edges 3 4).isSome)
+      "reshape should emit unary edge."
+    LeanTest.assertTrue ((findEdge? edges 4 6).isSome)
+      "dot_general should emit lhs edge."
+    LeanTest.assertTrue ((findEdge? edges 5 6).isSome)
+      "dot_general should emit rhs edge."
+    LeanTest.assertTrue ((findEdge? edges 1 2).isNone)
+      "stop_gradient should emit no edge."
+
+@[test]
+def testBuildAndExtractFromFnBodyPadSelectDynamicUpdateIndexAliasPath : IO Unit := do
+  let x : Lean.IR.VarId := { idx := 0 }
+  let y : Lean.IR.VarId := { idx := 1 }
+  let s : Lean.IR.VarId := { idx := 2 }
+  let p0 : Lean.IR.Param := { x := x, borrow := false, ty := Lean.IR.IRType.object }
+  let p1 : Lean.IR.Param := { x := y, borrow := false, ty := Lean.IR.IRType.object }
+  let p2 : Lean.IR.Param := { x := s, borrow := false, ty := Lean.IR.IRType.object }
+  let a : Lean.IR.VarId := { idx := 3 }
+  let b : Lean.IR.VarId := { idx := 4 }
+  let c : Lean.IR.VarId := { idx := 5 }
+  let body : Lean.IR.FnBody :=
+    .vdecl a Lean.IR.IRType.object (Lean.IR.Expr.fap `jax.lax.pad_p #[Lean.IR.Arg.var x, Lean.IR.Arg.var y]) (
+      .vdecl b Lean.IR.IRType.object (Lean.IR.Expr.fap `jax.lax.select_p #[Lean.IR.Arg.var s, Lean.IR.Arg.var a, Lean.IR.Arg.var x]) (
+        .vdecl c Lean.IR.IRType.object (Lean.IR.Expr.fap `jax.lax.dynamic_update_index_in_dim_p #[Lean.IR.Arg.var b, Lean.IR.Arg.var y, Lean.IR.Arg.var s]) (
+          .ret (.var c)
+        )
+      )
+    )
+
+  let res ← runCoreM (do
+    registerGraphaxAlphaGradParityRules
+    buildAndExtractFromFnBody {} `test.fnbody_pad_select_dynamic_update_index_alias_path #[p0, p1, p2] body
+  )
+  match res with
+  | .error err =>
+    LeanTest.fail s!"FnBody pad/select/dynamic_update_index alias path should build+extract successfully, got: {buildExtractErrorToString err}"
+  | .ok (_jaxpr, edges) =>
+    LeanTest.assertEqual edges.size 6
+      "pad(2) + select(data-only=2) + dynamic_update_index_in_dim(2) should produce six edges."
+    LeanTest.assertTrue ((findEdge? edges 1 4).isSome)
+      "pad should emit edge from base operand."
+    LeanTest.assertTrue ((findEdge? edges 2 4).isSome)
+      "pad should emit edge from padding-value operand."
+    LeanTest.assertTrue ((findEdge? edges 4 5).isSome)
+      "select should emit edge from first data operand."
+    LeanTest.assertTrue ((findEdge? edges 1 5).isSome)
+      "select should emit edge from second data operand."
+    LeanTest.assertTrue ((findEdge? edges 3 5).isNone)
+      "select should not emit edge from selector operand."
+    LeanTest.assertTrue ((findEdge? edges 5 6).isSome)
+      "dynamic_update_index_in_dim should emit edge from base operand."
+    LeanTest.assertTrue ((findEdge? edges 2 6).isSome)
+      "dynamic_update_index_in_dim should emit edge from update operand."
+    LeanTest.assertTrue ((findEdge? edges 3 6).isNone)
+      "dynamic_update_index_in_dim should not emit edge from index operand."
+
+@[test]
+def testExtractDynamicAliasRules : IO Unit := do
+  let jaxpr : LeanJaxpr := {
+    invars := #[{ id := 0 }, { id := 1 }, { id := 2 }]
+    eqns := #[
+      {
+        op := dynamicSliceAliasOpName
+        invars := #[{ id := 0 }, { id := 2 }]
+        outvars := #[{ id := 3 }]
+        source := { decl := `test.dynamic_alias, line? := some 90 }
+      },
+      {
+        op := dynamicUpdateSliceAliasOpName
+        invars := #[{ id := 3 }, { id := 1 }, { id := 2 }]
+        outvars := #[{ id := 4 }]
+        source := { decl := `test.dynamic_alias, line? := some 91 }
+      },
+      {
+        op := `jax.lax.dynamic_update_index_in_dim_p
+        invars := #[{ id := 4 }, { id := 1 }, { id := 2 }]
+        outvars := #[{ id := 5 }]
+        source := { decl := `test.dynamic_alias, line? := some 92 }
+      }
+    ]
+    outvars := #[{ id := 5 }]
+  }
+
+  let res ← runCoreM (do
+    registerGraphaxAlphaGradDynamicAliasRules
+    extractLocalJacEdges jaxpr
+  )
+  match res with
+  | .error errs =>
+    LeanTest.fail s!"Dynamic alias rules should extract successfully, got: {errs.map ruleExecutionErrorToString}"
+  | .ok edges =>
+    LeanTest.assertEqual edges.size 5
+      "dynamic_slice(1) + dynamic_update_slice(2) + dynamic_update_index_in_dim(2) should produce five local-Jac edges."
+    LeanTest.assertTrue ((findEdge? edges 0 3).isSome)
+      "dynamic_slice alias should emit base-operand edge."
+    LeanTest.assertTrue ((findEdge? edges 2 3).isNone)
+      "dynamic_slice alias should not emit index edge."
+    LeanTest.assertTrue ((findEdge? edges 3 4).isSome)
+      "dynamic_update_slice alias should emit base edge."
+    LeanTest.assertTrue ((findEdge? edges 1 4).isSome)
+      "dynamic_update_slice alias should emit update edge."
+    LeanTest.assertTrue ((findEdge? edges 2 4).isNone)
+      "dynamic_update_slice alias should not emit index edge."
+    LeanTest.assertTrue ((findEdge? edges 4 5).isSome)
+      "dynamic_update_index_in_dim alias should emit base edge."
+    LeanTest.assertTrue ((findEdge? edges 1 5).isSome)
+      "dynamic_update_index_in_dim alias should emit update edge."
+    LeanTest.assertTrue ((findEdge? edges 2 5).isNone)
+      "dynamic_update_index_in_dim alias should not emit index edge."
 
 end Tests.ADJaxprLikeExtract

@@ -41,6 +41,241 @@ private def scalarJacMap (tag : Tyr.AD.Sparse.SparseMapTag) (weight : Float) : S
     entries := #[({ src := 0, dst := 0, weight := weight } : Tyr.AD.Sparse.SparseEntry)]
   }
 
+private def shapeFlatDim? (shape? : Option (Array Nat)) : Option Nat :=
+  match shape? with
+  | some dims =>
+    if dims.isEmpty then
+      some 1
+    else
+      some (dims.foldl (init := 1) (· * ·))
+  | none => none
+
+private def varFlatDim? (v : JVar) : Option Nat :=
+  shapeFlatDim? v.metaInfo.shape
+
+private def diagEntries (n : Nat) (weight : Float) : Array Tyr.AD.Sparse.SparseEntry :=
+  (Array.range n).map fun i =>
+    ({ src := i, dst := i, weight := weight } : Tyr.AD.Sparse.SparseEntry)
+
+private def shapeAwareJacMap
+    (tag : Tyr.AD.Sparse.SparseMapTag)
+    (inDim? outDim? : Option Nat)
+    (weight : Float) :
+    SparseLinearMap :=
+  match inDim?, outDim? with
+  | some inDim, some outDim =>
+    if inDim = 0 || outDim = 0 then
+      scalarJacMap tag weight
+    else
+      {
+        repr := tag
+        inDim? := some inDim
+        outDim? := some outDim
+        entries := diagEntries (min inDim outDim) weight
+      }
+  | _, _ =>
+    scalarJacMap tag weight
+
+private def unaryJacMapForVars
+    (inv outv : JVar)
+    (tag : Tyr.AD.Sparse.SparseMapTag)
+    (weight : Float) :
+    SparseLinearMap :=
+  shapeAwareJacMap tag (varFlatDim? inv) (varFlatDim? outv) weight
+
+private def binaryJacMapForVars
+    (inv outv : JVar)
+    (tag : Tyr.AD.Sparse.SparseMapTag)
+    (weight : Float) :
+    SparseLinearMap :=
+  shapeAwareJacMap tag (varFlatDim? inv) (varFlatDim? outv) weight
+
+private def shapeDimAt? (v : JVar) (idx : Nat) : Option Nat := do
+  let shape ← v.metaInfo.shape
+  shape[idx]?
+
+private def shapeRowsCols? (v : JVar) : Option (Nat × Nat) := do
+  let r ← shapeDimAt? v 0
+  let c ← shapeDimAt? v 1
+  some (r, c)
+
+private def buildSparseMap
+    (tag : Tyr.AD.Sparse.SparseMapTag)
+    (inDim outDim : Nat)
+    (entries : Array Tyr.AD.Sparse.SparseEntry) :
+    SparseLinearMap :=
+  {
+    repr := tag
+    inDim? := some inDim
+    outDim? := some outDim
+    entries := entries
+  }
+
+private def transposeEntries (rows cols : Nat) : Array Tyr.AD.Sparse.SparseEntry := Id.run do
+  let mut entries : Array Tyr.AD.Sparse.SparseEntry := #[]
+  for i in [:rows] do
+    for j in [:cols] do
+      entries := entries.push {
+        src := i * cols + j
+        dst := j * rows + i
+        weight := 1.0
+      }
+  return entries
+
+private def sliceRowsEntries
+    (rows cols startRow outRows outCols : Nat) :
+    Array Tyr.AD.Sparse.SparseEntry := Id.run do
+  let mut entries : Array Tyr.AD.Sparse.SparseEntry := #[]
+  for i in [:outRows] do
+    for j in [:outCols] do
+      let srcRow := startRow + i
+      if srcRow < rows && j < cols then
+        entries := entries.push {
+          src := srcRow * cols + j
+          dst := i * outCols + j
+          weight := 1.0
+        }
+  return entries
+
+private def sliceColsEntries
+    (rows cols startCol outRows outCols : Nat) :
+    Array Tyr.AD.Sparse.SparseEntry := Id.run do
+  let mut entries : Array Tyr.AD.Sparse.SparseEntry := #[]
+  for i in [:outRows] do
+    for j in [:outCols] do
+      let srcCol := startCol + j
+      if i < rows && srcCol < cols then
+        entries := entries.push {
+          src := i * cols + srcCol
+          dst := i * outCols + j
+          weight := 1.0
+        }
+  return entries
+
+private def concatColsEntriesLhs
+    (rows lhsCols outCols : Nat) :
+    Array Tyr.AD.Sparse.SparseEntry := Id.run do
+  let mut entries : Array Tyr.AD.Sparse.SparseEntry := #[]
+  for i in [:rows] do
+    for j in [:lhsCols] do
+      entries := entries.push {
+        src := i * lhsCols + j
+        dst := i * outCols + j
+        weight := 1.0
+      }
+  return entries
+
+private def concatColsEntriesRhs
+    (rows rhsCols outCols offset : Nat) :
+    Array Tyr.AD.Sparse.SparseEntry := Id.run do
+  let mut entries : Array Tyr.AD.Sparse.SparseEntry := #[]
+  for i in [:rows] do
+    for j in [:rhsCols] do
+      let dstCol := offset + j
+      if dstCol < outCols then
+        entries := entries.push {
+          src := i * rhsCols + j
+          dst := i * outCols + dstCol
+          weight := 1.0
+        }
+  return entries
+
+private def broadcastEntries
+    (axis : BroadcastAxis)
+    (inDim outRows outCols : Nat) :
+    Array Tyr.AD.Sparse.SparseEntry := Id.run do
+  let mut entries : Array Tyr.AD.Sparse.SparseEntry := #[]
+  if inDim = 0 then
+    return entries
+  for i in [:outRows] do
+    for j in [:outCols] do
+      let srcIdx :=
+        match axis with
+        | .Row =>
+          if inDim = outCols then j
+          else if inDim = outRows then i
+          else j % inDim
+        | .Col =>
+          if inDim = outRows then i
+          else if inDim = outCols then j
+          else i % inDim
+      entries := entries.push {
+        src := srcIdx
+        dst := i * outCols + j
+        weight := 1.0
+      }
+  return entries
+
+private def reduceSumEntries
+    (axis : ReduceAxis)
+    (rows cols outDim : Nat) :
+    Array Tyr.AD.Sparse.SparseEntry := Id.run do
+  let mut entries : Array Tyr.AD.Sparse.SparseEntry := #[]
+  for i in [:rows] do
+    for j in [:cols] do
+      let dst :=
+        match axis with
+        | .Row =>
+          if outDim = cols then j else j % outDim
+        | .Col =>
+          if outDim = rows then i else i % outDim
+        | .Full => 0
+      entries := entries.push {
+        src := i * cols + j
+        dst := dst
+        weight := 1.0
+      }
+  return entries
+
+private def cumsumRowEntries (rows cols : Nat) : Array Tyr.AD.Sparse.SparseEntry := Id.run do
+  let mut entries : Array Tyr.AD.Sparse.SparseEntry := #[]
+  for i in [:rows] do
+    for j in [:cols] do
+      for k in [0:i+1] do
+        entries := entries.push {
+          src := k * cols + j
+          dst := i * cols + j
+          weight := 1.0
+        }
+  return entries
+
+private def cumsumColEntries (rows cols : Nat) : Array Tyr.AD.Sparse.SparseEntry := Id.run do
+  let mut entries : Array Tyr.AD.Sparse.SparseEntry := #[]
+  for i in [:rows] do
+    for j in [:cols] do
+      for k in [0:j+1] do
+        entries := entries.push {
+          src := i * cols + k
+          dst := i * cols + j
+          weight := 1.0
+        }
+  return entries
+
+private def cumsumFullEntries (inDim outDim : Nat) : Array Tyr.AD.Sparse.SparseEntry := Id.run do
+  let mut entries : Array Tyr.AD.Sparse.SparseEntry := #[]
+  let n := min inDim outDim
+  for dst in [:n] do
+    for src in [0:dst+1] do
+      entries := entries.push { src := src, dst := dst, weight := 1.0 }
+  return entries
+
+/--
+If an op name is `jax.lax.<prim>`, return the corresponding
+`jax.lax.<prim>_p` alias used in some Graphax/AlphaGrad source paths.
+-/
+private def jaxLaxPrimAlias? (op : OpName) : Option OpName :=
+  match op with
+  | .str (.str (.str .anonymous "jax") "lax") base =>
+    some (Lean.Name.str (Lean.Name.str (Lean.Name.str .anonymous "jax") "lax") s!"{base}_p")
+  | _ => none
+
+private def registerAliasWithLaxPrimVariant (op : OpName) (rule : LocalJacRule) :
+    Lean.CoreM Unit := do
+  registerLocalJacRule op rule
+  match jaxLaxPrimAlias? op with
+  | some prim => registerLocalJacRule prim rule
+  | none => pure ()
+
 private def requireUnaryShape (op : OpName) (eqn : JEqn) : Except RuleError (JVar × JVar) := do
   let outv ←
     match eqn.outvars[0]? with
@@ -78,6 +313,31 @@ private def requireBinaryShape (op : OpName) (eqn : JEqn) : Except RuleError (JV
       .error (.malformedEqn s!"Binary rule `{op}` expects exactly two input variables, got {eqn.invars.size}.")
     else
       .ok (a, b, outv)
+
+private def requireTernaryShape (op : OpName) (eqn : JEqn) : Except RuleError (JVar × JVar × JVar × JVar) := do
+  let outv ←
+    match eqn.outvars[0]? with
+    | some v => .ok v
+    | none => .error (.malformedEqn s!"Ternary rule `{op}` requires one output variable.")
+  if eqn.outvars.size != 1 then
+    .error (.malformedEqn s!"Ternary rule `{op}` expects exactly one output variable, got {eqn.outvars.size}.")
+  else
+    let a ←
+      match eqn.invars[0]? with
+      | some v => .ok v
+      | none => .error (.malformedEqn s!"Ternary rule `{op}` requires three input variables.")
+    let b ←
+      match eqn.invars[1]? with
+      | some v => .ok v
+      | none => .error (.malformedEqn s!"Ternary rule `{op}` requires three input variables.")
+    let c ←
+      match eqn.invars[2]? with
+      | some v => .ok v
+      | none => .error (.malformedEqn s!"Ternary rule `{op}` requires three input variables.")
+    if eqn.invars.size != 3 then
+      .error (.malformedEqn s!"Ternary rule `{op}` expects exactly three input variables, got {eqn.invars.size}.")
+    else
+      .ok (a, b, c, outv)
 
 private def requireNullaryShape (op : OpName) (eqn : JEqn) : Except RuleError JVar := do
   let outv ←
@@ -155,7 +415,11 @@ private def unaryConstRule
     LocalJacRule :=
   fun eqn _ctx => do
     let (inv, outv) ← requireUnaryShape (kstmtUnaryOpName op) eqn
-    .ok #[{ src := inv.id, dst := outv.id, map := scalarJacMap jacTag jacWeight }]
+    .ok #[{
+      src := inv.id
+      dst := outv.id
+      map := unaryJacMapForVars inv outv jacTag jacWeight
+    }]
 
 private def binaryConstRule
     (op : BinaryOp)
@@ -165,8 +429,8 @@ private def binaryConstRule
   fun eqn _ctx => do
     let (a, b, outv) ← requireBinaryShape (kstmtBinaryOpName op) eqn
     .ok #[
-      { src := a.id, dst := outv.id, map := scalarJacMap left.1 left.2 },
-      { src := b.id, dst := outv.id, map := scalarJacMap right.1 right.2 }
+      { src := a.id, dst := outv.id, map := binaryJacMapForVars a outv left.1 left.2 },
+      { src := b.id, dst := outv.id, map := binaryJacMapForVars b outv right.1 right.2 }
     ]
 
 private def unarySemanticsRule? (op : UnaryOp) : Option LocalJacRule :=
@@ -192,7 +456,11 @@ private def unarySymbolicRule
     LocalJacRule :=
   fun eqn _ctx => do
     let (inv, outv) ← requireUnaryShape opName eqn
-    .ok #[{ src := inv.id, dst := outv.id, map := scalarJacMap jacTag jacWeight }]
+    .ok #[{
+      src := inv.id
+      dst := outv.id
+      map := unaryJacMapForVars inv outv jacTag jacWeight
+    }]
 
 private def binarySymbolicRule
     (opName : OpName)
@@ -202,8 +470,8 @@ private def binarySymbolicRule
   fun eqn _ctx => do
     let (a, b, outv) ← requireBinaryShape opName eqn
     .ok #[
-      { src := a.id, dst := outv.id, map := scalarJacMap left.1 left.2 },
-      { src := b.id, dst := outv.id, map := scalarJacMap right.1 right.2 }
+      { src := a.id, dst := outv.id, map := binaryJacMapForVars a outv left.1 left.2 },
+      { src := b.id, dst := outv.id, map := binaryJacMapForVars b outv right.1 right.2 }
     ]
 
 private def reduceJacTag (op : ReduceOp) (axis : ReduceAxis) : Tyr.AD.Sparse.SparseMapTag :=
@@ -297,7 +565,7 @@ private def dotGeneralRule (opName : OpName) : LocalJacRule :=
     let rhsBatch := (eqn.params.findNats? .rhsBatch).getD #[]
     let variant := (eqn.params.findName? .variant).getD (atomName "generic")
     .ok #[
-      { src := a.id, dst := outv.id, map := scalarJacMap (.semantic (.dotGeneral {
+      { src := a.id, dst := outv.id, map := binaryJacMapForVars a outv (.semantic (.dotGeneral {
           variant := variant
           arg := .lhs
           lhsContract := lhsContract
@@ -305,7 +573,7 @@ private def dotGeneralRule (opName : OpName) : LocalJacRule :=
           lhsBatch := lhsBatch
           rhsBatch := rhsBatch
         })) 1.0 },
-      { src := b.id, dst := outv.id, map := scalarJacMap (.semantic (.dotGeneral {
+      { src := b.id, dst := outv.id, map := binaryJacMapForVars b outv (.semantic (.dotGeneral {
           variant := variant
           arg := .rhs
           lhsContract := lhsContract
@@ -313,6 +581,28 @@ private def dotGeneralRule (opName : OpName) : LocalJacRule :=
           lhsBatch := lhsBatch
           rhsBatch := rhsBatch
         })) 1.0 }
+    ]
+
+private def mmaRule (trans : MMATranspose) : LocalJacRule :=
+  fun eqn _ctx => do
+    let opName := kstmtMmaOpName trans
+    let (a, b, c, outv) ← requireTernaryShape opName eqn
+    .ok #[
+      {
+        src := a.id
+        dst := outv.id
+        map := binaryJacMapForVars a outv (.semantic (.binary opName .a .rhsValue)) 1.0
+      },
+      {
+        src := b.id
+        dst := outv.id
+        map := binaryJacMapForVars b outv (.semantic (.binary opName .b .lhsValue)) 1.0
+      },
+      {
+        src := c.id
+        dst := outv.id
+        map := binaryJacMapForVars c outv (.semantic (.binary opName .accum .inject)) 1.0
+      }
     ]
 
 private def stopGradientNoGradRule (opName : OpName) : LocalJacRule :=
@@ -325,6 +615,221 @@ private def iotaNoGradRule (opName : OpName) : LocalJacRule :=
     let _outv ← requireNullaryShape opName eqn
     .ok #[]
 
+private def requireAtLeastOneOutput (op : OpName) (eqn : JEqn) : Except RuleError Unit := do
+  if eqn.outvars.isEmpty then
+    .error (.malformedEqn s!"No-grad rule `{op}` requires at least one output variable.")
+  else
+    .ok ()
+
+private def requireAtLeastOneInputOneOutput
+    (op : OpName)
+    (eqn : JEqn) :
+    Except RuleError (Array JVar × JVar) := do
+  if eqn.invars.isEmpty then
+    .error (.malformedEqn s!"Variadic rule `{op}` expects at least one input variable, got 0.")
+  else
+    let outv ←
+      match eqn.outvars[0]? with
+      | some v => .ok v
+      | none => .error (.malformedEqn s!"Variadic rule `{op}` requires one output variable.")
+    if eqn.outvars.size != 1 then
+      .error (.malformedEqn s!"Variadic rule `{op}` expects exactly one output variable, got {eqn.outvars.size}.")
+    else
+      .ok (eqn.invars, outv)
+
+private def devicePutNoGradRule (opName : OpName) : LocalJacRule :=
+  fun eqn _ctx => do
+    let _ ← requireAtLeastOneOutput opName eqn
+    .ok #[]
+
+private def pjitNoGradRule (opName : OpName) : LocalJacRule :=
+  fun eqn _ctx => do
+    let _ ← requireAtLeastOneOutput opName eqn
+    .ok #[]
+
+private def binaryNoGradRule (opName : OpName) : LocalJacRule :=
+  fun eqn _ctx => do
+    let (_a, _b, _outv) ← requireBinaryShape opName eqn
+    .ok #[]
+
+private def unarySemanticAliasRule
+    (opName semanticOp : OpName)
+    (mode : Tyr.AD.Sparse.JacMode := .none) :
+    LocalJacRule :=
+  unarySymbolicRule opName (.semantic (.unary semanticOp .x mode))
+
+private def binarySemanticAliasRule
+    (opName semanticOp : OpName)
+    (leftMode : Tyr.AD.Sparse.JacMode := .none)
+    (rightMode : Tyr.AD.Sparse.JacMode := .none) :
+    LocalJacRule :=
+  binarySymbolicRule
+    opName
+    ((.semantic (.binary semanticOp .a leftMode)), 1.0)
+    ((.semantic (.binary semanticOp .b rightMode)), 1.0)
+
+private def communicationUnaryRule (opName : OpName) : LocalJacRule :=
+  unarySemanticAliasRule opName opName
+
+private def structuralUnaryAliasRule
+    (opName : OpName)
+    (mode : Tyr.AD.Sparse.JacMode) :
+    LocalJacRule :=
+  unarySemanticAliasRule opName opName mode
+
+private def concatLikeStructuralRule (opName : OpName) : LocalJacRule :=
+  fun eqn _ctx => do
+    let (invars, outv) ← requireAtLeastOneInputOneOutput opName eqn
+    let edges := invars.map fun inv =>
+      {
+        src := inv.id
+        dst := outv.id
+        map := binaryJacMapForVars inv outv (.semantic (.unary opName .x .inject)) 1.0
+      }
+    .ok edges
+
+private def reductionUnaryAliasRule (opName : OpName) : LocalJacRule :=
+  unarySemanticAliasRule opName opName .contract
+
+private def selectNAliasRule (opName : OpName) : LocalJacRule :=
+  fun eqn _ctx => do
+    if eqn.invars.size < 2 then
+      .error (.malformedEqn s!"Control rule `{opName}` expects at least two input variables, got {eqn.invars.size}.")
+    else
+      let outv ←
+        match eqn.outvars[0]? with
+        | some v => .ok v
+        | none => .error (.malformedEqn s!"Control rule `{opName}` requires one output variable.")
+      if eqn.outvars.size != 1 then
+        .error (.malformedEqn s!"Control rule `{opName}` expects exactly one output variable, got {eqn.outvars.size}.")
+      else
+        let mut edges : Array LocalJacEdge := #[]
+        for i in [1:eqn.invars.size] do
+          let inv := eqn.invars[i]!
+          edges := edges.push {
+            src := inv.id
+            dst := outv.id
+            map := binaryJacMapForVars inv outv (.semantic (.unary opName .x .mask)) 1.0
+          }
+        .ok edges
+
+private def condAliasRule (opName : OpName) : LocalJacRule :=
+  fun eqn _ctx => do
+    let (invars, outv) ← requireAtLeastOneInputOneOutput opName eqn
+    if invars.size < 2 then
+      .error (.malformedEqn s!"Control-flow rule `{opName}` expects predicate plus at least one data input, got {invars.size}.")
+    else
+      let mut edges : Array LocalJacEdge := #[]
+      for i in [1:invars.size] do
+        let inv := invars[i]!
+        edges := edges.push {
+          src := inv.id
+          dst := outv.id
+          map := binaryJacMapForVars inv outv (.semantic (.unary opName .x .projection)) 1.0
+        }
+      .ok edges
+
+private def scanAliasRule (opName : OpName) : LocalJacRule :=
+  fun eqn _ctx => do
+    let (invars, outv) ← requireAtLeastOneInputOneOutput opName eqn
+    let edges := invars.map fun inv =>
+      {
+        src := inv.id
+        dst := outv.id
+        map := binaryJacMapForVars inv outv (.semantic (.unary opName .x .carry)) 1.0
+      }
+    .ok edges
+
+private def dynamicProjectionAliasRule (opName : OpName) : LocalJacRule :=
+  fun eqn _ctx => do
+    let outv ←
+      match eqn.outvars[0]? with
+      | some v => .ok v
+      | none => .error (.malformedEqn s!"Dynamic-projection rule `{opName}` requires one output variable.")
+    if eqn.outvars.size != 1 then
+      .error (.malformedEqn s!"Dynamic-projection rule `{opName}` expects exactly one output variable, got {eqn.outvars.size}.")
+    else
+      let inv ←
+        match eqn.invars[0]? with
+        | some v => .ok v
+        | none => .error (.malformedEqn s!"Dynamic-projection rule `{opName}` expects at least one input variable.")
+      .ok #[{
+        src := inv.id
+        dst := outv.id
+        map := binaryJacMapForVars inv outv (.semantic (.unary opName .x .projection)) 1.0
+      }]
+
+private def dynamicUpdateAliasRule (opName : OpName) : LocalJacRule :=
+  fun eqn _ctx => do
+    let outv ←
+      match eqn.outvars[0]? with
+      | some v => .ok v
+      | none => .error (.malformedEqn s!"Dynamic-update rule `{opName}` requires one output variable.")
+    if eqn.outvars.size != 1 then
+      .error (.malformedEqn s!"Dynamic-update rule `{opName}` expects exactly one output variable, got {eqn.outvars.size}.")
+    else
+      let base ←
+        match eqn.invars[0]? with
+        | some v => .ok v
+        | none => .error (.malformedEqn s!"Dynamic-update rule `{opName}` expects at least two input variables.")
+      let update ←
+        match eqn.invars[1]? with
+        | some v => .ok v
+        | none => .error (.malformedEqn s!"Dynamic-update rule `{opName}` expects at least two input variables.")
+      .ok #[
+        {
+          src := base.id
+          dst := outv.id
+          map := binaryJacMapForVars base outv (.semantic (.binary opName .lhs .projection)) 1.0
+        },
+        {
+          src := update.id
+          dst := outv.id
+          map := binaryJacMapForVars update outv (.semantic (.binary opName .rhs .inject)) 1.0
+        }
+      ]
+
+private def graphaxUnaryAliasSpecs : Array (UnaryOp × Array OpName) := #[
+  (.Neg, #[`jax.lax.neg, `Graphax.neg]),
+  (.Abs, #[`jax.lax.abs, `Graphax.abs]),
+  (.Exp, #[`jax.lax.exp, `Graphax.exp]),
+  (.Log, #[`jax.lax.log, `Graphax.log]),
+  (.Sqrt, #[`jax.lax.sqrt, `Graphax.sqrt]),
+  (.Rsqrt, #[`jax.lax.rsqrt, `Graphax.rsqrt]),
+  (.Square, #[`jax.lax.square, `Graphax.square]),
+  (.Sin, #[`jax.lax.sin, `Graphax.sin]),
+  (.Cos, #[`jax.lax.cos, `Graphax.cos]),
+  (.Tanh, #[`jax.lax.tanh, `Graphax.tanh]),
+  (.Sigmoid, #[`jax.lax.logistic, `Graphax.logistic, `jax.nn.sigmoid, `Graphax.sigmoid])
+]
+
+private def graphaxBinaryAliasSpecs : Array (BinaryOp × Array OpName) := #[
+  (.Add, #[`jax.lax.add, `jax.lax.add_any, `Graphax.add, `Graphax.add_any]),
+  (.Sub, #[`jax.lax.sub, `Graphax.sub]),
+  (.Mul, #[`jax.lax.mul, `Graphax.mul]),
+  (.Div, #[`jax.lax.div, `Graphax.div]),
+  (.Max, #[`jax.lax.max, `Graphax.max]),
+  (.Min, #[`jax.lax.min, `Graphax.min])
+]
+
+private def graphaxStructuralUnaryAliasSpecs :
+    Array (OpName × Tyr.AD.Sparse.JacMode) := #[
+  (transposeAliasOpName, .permute),
+  (reshapeAliasOpName, .projection),
+  (squeezeAliasOpName, .projection),
+  (broadcastInDimAliasOpName, .expand),
+  (sliceAliasOpName, .projection),
+  (sliceInDimAliasOpName, .projection),
+  (convertElementTypeAliasOpName, .cast),
+  (`Graphax.transpose, .permute),
+  (`Graphax.reshape, .projection),
+  (`Graphax.squeeze, .projection),
+  (`Graphax.broadcast_in_dim, .expand),
+  (`Graphax.slice, .projection),
+  (`Graphax.slice_in_dim, .projection),
+  (`Graphax.convert_element_type, .cast)
+]
+
 private def cumsumStructuralRule (axis : ReduceAxis) : LocalJacRule :=
   unarySymbolicRule
     (kstmtCumsumOpName axis)
@@ -334,6 +839,12 @@ private def cumprodStructuralRule (axis : ReduceAxis) : LocalJacRule :=
   unarySymbolicRule
     (kstmtCumprodOpName axis)
     (.semantic (.cumprod (reduceAxisTagName axis) .x .prefixProduct))
+
+private def padAliasRule (opName : OpName) : LocalJacRule :=
+  binarySymbolicRule
+    opName
+    (.semantic (.binary opName .lhs .projection), 1.0)
+    (.semantic (.binary opName .rhs .inject), 1.0)
 
 /-- Register placeholder local-Jac rules for every KStmt unary and binary op. -/
 def registerKStmtUnaryBinaryPlaceholderRules : Lean.CoreM Unit := do
@@ -411,6 +922,8 @@ def registerKStmtStructuralSemanticsRules : Lean.CoreM Unit := do
   registerLocalJacRule kstmtConcatColsOpName concatColsStructuralRule
   registerLocalJacRule kstmtOuterOpName outerStructuralRule
   registerLocalJacRule kstmtDotGeneralOpName (dotGeneralRule kstmtDotGeneralOpName)
+  for trans in allKStmtMMATransposes do
+    registerLocalJacRule (kstmtMmaOpName trans) (mmaRule trans)
 
   for axis in allKStmtBroadcastAxes do
     registerLocalJacRule (kstmtBroadcastOpName axis) (broadcastStructuralRule axis)
@@ -444,16 +957,109 @@ def registerKStmtAllSupportedHybridRules : Lean.CoreM Unit := do
   registerKStmtStructuralSemanticsRules
 
 /--
+Register explicit semantic local-Jac rules for all currently lowered KStmt ops,
+without placeholder fallback.
+-/
+def registerKStmtAllSupportedSemanticsRules : Lean.CoreM Unit := do
+  registerKStmtGraphaxAlphaGradSemanticsRules
+  registerKStmtStructuralSemanticsRules
+
+/--
 Register no-grad/control primitive semantics used in Graphax/AlphaGrad-style
 LeanJaxpr paths:
 - `stop_gradient` emits no local-Jacobian edges.
 - `iota` emits no local-Jacobian edges.
+- `device_put` emits no local-Jacobian edges.
+- `pjit` emits no local-Jacobian edges.
 -/
 def registerGraphaxAlphaGradNoGradControlRules : Lean.CoreM Unit := do
   for op in allStopGradientOpNames do
     registerLocalJacRule op (stopGradientNoGradRule op)
   for op in allIotaOpNames do
     registerLocalJacRule op (iotaNoGradRule op)
+  for op in allDevicePutOpNames do
+    registerLocalJacRule op (devicePutNoGradRule op)
+  for op in allPjitOpNames do
+    registerLocalJacRule op (pjitNoGradRule op)
+
+/--
+Register Graphax/JAX primitive aliases that are not emitted by current KStmt
+lowering but should map to the same local-Jacobian semantics in LeanJaxpr paths.
+-/
+def registerGraphaxAlphaGradPrimitiveAliasRules : Lean.CoreM Unit := do
+  for entry in graphaxUnaryAliasSpecs do
+    let op := entry.1
+    let aliases := entry.2
+    match unarySemanticsRule? op with
+    | some rule =>
+      for alias in aliases do
+        registerAliasWithLaxPrimVariant alias rule
+    | none => pure ()
+
+  for entry in graphaxBinaryAliasSpecs do
+    let op := entry.1
+    let aliases := entry.2
+    match binarySemanticsRule? op with
+    | some rule =>
+      for alias in aliases do
+        registerAliasWithLaxPrimVariant alias rule
+    | none => pure ()
+
+  for op in allGraphaxExtraUnaryAliasOpNames do
+    registerLocalJacRule op (unarySemanticAliasRule op op)
+
+  for op in allGraphaxExtraBinaryAliasOpNames do
+    registerLocalJacRule op (binarySemanticAliasRule op op)
+
+  for op in allGraphaxZeroBinaryAliasOpNames do
+    registerLocalJacRule op (binaryNoGradRule op)
+
+/--
+Register communication primitive aliases with unary structured semantic tags.
+These preserve dependency edges while keeping local-Jac metadata explicit.
+-/
+def registerGraphaxAlphaGradCommunicationRules : Lean.CoreM Unit := do
+  for op in allCommunicationUnaryOpNames do
+    registerLocalJacRule op (communicationUnaryRule op)
+
+/--
+Register structural alias rules used by Graphax/JAX source-path primitives that
+do not flow through the current KStmt constructor set.
+-/
+def registerGraphaxAlphaGradStructuralAliasRules : Lean.CoreM Unit := do
+  for entry in graphaxStructuralUnaryAliasSpecs do
+    registerAliasWithLaxPrimVariant entry.1 (structuralUnaryAliasRule entry.1 entry.2)
+  for op in allPadAliasOpNames do
+    registerLocalJacRule op (padAliasRule op)
+  for op in allConcatLikeAliasOpNames do
+    registerLocalJacRule op (concatLikeStructuralRule op)
+
+/--
+Register source-path reduction/control aliases that are part of Graphax/JAX
+primitive coverage but outside current KStmt naming.
+- `select`/`select_n`: selector input excluded, data inputs propagated.
+- `cond`: predicate input excluded, data inputs propagated.
+- `scan`: all inputs (data/carry) propagated.
+-/
+def registerGraphaxAlphaGradReductionControlAliasRules : Lean.CoreM Unit := do
+  for op in allReductionUnaryAliasOpNames do
+    registerLocalJacRule op (reductionUnaryAliasRule op)
+  for op in allSelectNAliasOpNames do
+    registerLocalJacRule op (selectNAliasRule op)
+  for op in allScanAliasOpNames do
+    registerLocalJacRule op (scanAliasRule op)
+  for op in allCondAliasOpNames do
+    registerLocalJacRule op (condAliasRule op)
+
+/--
+Register dynamic/update structural aliases from Graphax/JAX source paths.
+These rules keep index operands non-differentiated in local-Jac extraction.
+-/
+def registerGraphaxAlphaGradDynamicAliasRules : Lean.CoreM Unit := do
+  for op in allDynamicProjectionAliasOpNames do
+    registerLocalJacRule op (dynamicProjectionAliasRule op)
+  for op in allDynamicUpdateAliasOpNames do
+    registerLocalJacRule op (dynamicUpdateAliasRule op)
 
 /-- Register dedicated dot-general local-Jacobian semantics (not outer-only approximation). -/
 def registerGraphaxAlphaGradDotGeneralRules : Lean.CoreM Unit := do
@@ -469,8 +1075,13 @@ Register a parity-oriented semantic pack aligned with Graphax/AlphaGrad overlap:
 -/
 def registerGraphaxAlphaGradParityRules : Lean.CoreM Unit := do
   registerKStmtGraphaxAlphaGradSemanticsRules
+  registerGraphaxAlphaGradPrimitiveAliasRules
   registerKStmtStructuralSemanticsRules
+  registerGraphaxAlphaGradStructuralAliasRules
+  registerGraphaxAlphaGradReductionControlAliasRules
+  registerGraphaxAlphaGradDynamicAliasRules
   registerGraphaxAlphaGradNoGradControlRules
+  registerGraphaxAlphaGradCommunicationRules
   registerGraphaxAlphaGradDotGeneralRules
 
 /-- Register placeholder local-Jac rules for an explicit op-name list. -/
