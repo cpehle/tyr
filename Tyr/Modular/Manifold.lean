@@ -33,6 +33,26 @@ instance : MatrixManifoldCarrier Grassmann where
     let tg := GrassmannTangent.project x g
     exact DualMapGeometry.dualMapStep x tg lr
 
+/-- Vector-manifold carrier interface where ambient dimension may differ from intrinsic one. -/
+class VectorManifoldCarrier (V : UInt64 → Type) where
+  /-- Ambient coordinate dimension for intrinsic manifold dimension `n`. -/
+  ambientDim : UInt64 → UInt64
+  /-- Project ambient vector coordinates to the manifold. -/
+  project : (n : UInt64) → T #[ambientDim n] → V n
+  /-- Convert manifold value to ambient coordinates. -/
+  toVector : {n : UInt64} → V n → T #[ambientDim n]
+  /-- Take one geometry-aware step on the manifold. -/
+  dualMapStep : {n : UInt64} → V n → T #[ambientDim n] → Float → V n
+
+instance : VectorManifoldCarrier Hyperbolic where
+  ambientDim n := n + 1
+  project := Hyperbolic.project
+  toVector := fun x => x.coords
+  dualMapStep := by
+    intro n x g lr
+    let tg := HyperbolicTangent.project x g
+    exact DualMapGeometry.dualMapStep x tg lr
+
 /--
 Linear layer whose weight is stored on a matrix manifold.
 
@@ -91,6 +111,27 @@ def applyDualMapUpdate [MatrixManifoldCarrier M] {in_dim out_dim : UInt64}
 
 end ManifoldLinear
 
+/-- Single vector parameter living natively on a vector manifold. -/
+structure ManifoldVectorParam (V : UInt64 → Type) [VectorManifoldCarrier V] (n : UInt64) where
+  value : V n
+
+namespace ManifoldVectorParam
+
+/-- Initialize from random ambient coordinates projected to manifold. -/
+def init [VectorManifoldCarrier V] (n : UInt64) : IO (ManifoldVectorParam V n) := do
+  let d := (VectorManifoldCarrier.ambientDim (V := V) n)
+  let v ← randn #[d] false
+  pure { value := VectorManifoldCarrier.project n v }
+
+/-- Apply one dual-map manifold update for this vector parameter. -/
+def applyDualMapUpdate [VectorManifoldCarrier V] {n : UInt64}
+    (p : ManifoldVectorParam V n)
+    (grad : T #[(VectorManifoldCarrier.ambientDim (V := V) n)])
+    (lr : Float) : ManifoldVectorParam V n :=
+  { value := VectorManifoldCarrier.dualMapStep p.value grad lr }
+
+end ManifoldVectorParam
+
 instance [MatrixManifoldCarrier M] (in_dim out_dim : UInt64) :
     TensorStruct (ManifoldLinear M in_dim out_dim) where
   map f lin :=
@@ -117,6 +158,22 @@ instance [MatrixManifoldCarrier M] (in_dim out_dim : UInt64) :
     match lin.bias with
     | some b => f b acc
     | none => acc
+
+instance [VectorManifoldCarrier V] (n : UInt64) : TensorStruct (ManifoldVectorParam V n) where
+  map f p :=
+    let n' := n
+    let v := VectorManifoldCarrier.toVector p.value
+    { value := VectorManifoldCarrier.project n' (f v) }
+  mapM f p := do
+    let n' := n
+    let v' ← f (VectorManifoldCarrier.toVector p.value)
+    pure { value := VectorManifoldCarrier.project n' v' }
+  zipWith f a b :=
+    let n' := n
+    let av := VectorManifoldCarrier.toVector a.value
+    let bv := VectorManifoldCarrier.toVector b.value
+    { value := VectorManifoldCarrier.project n' (f av bv) }
+  fold f init p := f (VectorManifoldCarrier.toVector p.value) init
 
 instance [MatrixManifoldCarrier M] (in_dim out_dim : UInt64) :
     NormedModule (ManifoldLinear M in_dim out_dim) where
@@ -157,11 +214,33 @@ instance [MatrixManifoldCarrier M] (in_dim out_dim : UInt64) :
       | none => none
     { lin with weight, bias }
 
+instance [VectorManifoldCarrier V] (n : UInt64) :
+    NormedModule (ManifoldVectorParam V n) where
+  norm p := linalg.l2Norm (VectorManifoldCarrier.toVector p.value)
+  dualNorm p := linalg.l2Norm (VectorManifoldCarrier.toVector p.value)
+  nu _ := 1.0
+  mu _ := 1.0
+  normalize p :=
+    let n' := n
+    let v := VectorManifoldCarrier.toVector p.value
+    let d := linalg.l2Norm v
+    let v' := if d == 0.0 then v else mul_scalar v (1.0 / d)
+    { value := VectorManifoldCarrier.project n' v' }
+  normalizeDual p :=
+    let n' := n
+    let v := VectorManifoldCarrier.toVector p.value
+    let d := linalg.l2Norm v
+    let v' := if d == 0.0 then v else mul_scalar v (1.0 / d)
+    { value := VectorManifoldCarrier.project n' v' }
+
 /-- Convenience alias: manifold-linear with Stiefel-constrained weights. -/
 abbrev StiefelLinear (in_dim out_dim : UInt64) := ManifoldLinear Stiefel in_dim out_dim
 
 /-- Convenience alias: manifold-linear with Grassmann-constrained weights. -/
 abbrev GrassmannLinear (in_dim out_dim : UInt64) := ManifoldLinear Grassmann in_dim out_dim
+
+/-- Convenience alias: single hyperbolic vector parameter. -/
+abbrev HyperbolicVector (n : UInt64) := ManifoldVectorParam Hyperbolic n
 
 private def meanOrOne (xs : Array Float) : Float :=
   if xs.isEmpty then 1.0 else xs.foldl (fun acc x => acc + x) 0.0 / xs.size.toFloat

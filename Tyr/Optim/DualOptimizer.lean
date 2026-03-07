@@ -338,10 +338,18 @@ private def stepOnManifoldFamily {m n : UInt64}
     let g := Tyr.AD.StiefelTangent.project x ambientGrad
     (Tyr.AD.DualMapGeometry.dualMapStep x g lr).matrix
   | .orthogonal =>
-    -- Orthogonal is represented through the Stiefel(n,n) style matrix path.
-    let x : Tyr.AD.Stiefel m n := ⟨param⟩
-    let g := Tyr.AD.StiefelTangent.project x ambientGrad
-    (Tyr.AD.DualMapGeometry.dualMapStep x g lr).matrix
+    -- Orthogonal requires square matrices; otherwise fall back to Stiefel.
+    if h : m = n then
+      let pSquare : T #[n, n] := by simpa [h] using param
+      let gSquare : T #[n, n] := by simpa [h] using ambientGrad
+      let x : Tyr.AD.Orthogonal n := ⟨pSquare⟩
+      let tg := Tyr.AD.OrthogonalTangent.fromAmbient x gSquare
+      let x' := Tyr.AD.DualMapGeometry.dualMapStep x tg lr
+      (by simpa [h] using x'.matrix : T #[m, n])
+    else
+      let x : Tyr.AD.Stiefel m n := ⟨param⟩
+      let g := Tyr.AD.StiefelTangent.project x ambientGrad
+      (Tyr.AD.DualMapGeometry.dualMapStep x g lr).matrix
   | .grassmann =>
     let x : Tyr.AD.Grassmann m n := ⟨param⟩
     let g := Tyr.AD.GrassmannTangent.project x ambientGrad
