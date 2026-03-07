@@ -14,12 +14,15 @@ class MatrixManifoldCarrier (M : UInt64 → UInt64 → Type) where
   project : (m n : UInt64) → T #[m, n] → M m n
   /-- Convert manifold value to its ambient matrix representation. -/
   toMatrix : {m n : UInt64} → M m n → T #[m, n]
+  /-- Wrap an already-valid ambient matrix without re-projecting. -/
+  fromAmbientUnchecked : {m n : UInt64} → T #[m, n] → M m n
   /-- Take one geometry-aware step and retract on-manifold. -/
   dualMapStep : {m n : UInt64} → M m n → T #[m, n] → Float → M m n
 
 instance : MatrixManifoldCarrier Stiefel where
   project := Stiefel.project
   toMatrix := fun x => x.matrix
+  fromAmbientUnchecked := fun x => ⟨x⟩
   dualMapStep := by
     intro m n x g lr
     let tg := StiefelTangent.project x g
@@ -28,6 +31,7 @@ instance : MatrixManifoldCarrier Stiefel where
 instance : MatrixManifoldCarrier Grassmann where
   project := Grassmann.project
   toMatrix := fun x => x.matrix
+  fromAmbientUnchecked := fun x => ⟨x⟩
   dualMapStep := by
     intro m n x g lr
     let tg := GrassmannTangent.project x g
@@ -41,6 +45,8 @@ class VectorManifoldCarrier (V : UInt64 → Type) where
   project : (n : UInt64) → T #[ambientDim n] → V n
   /-- Convert manifold value to ambient coordinates. -/
   toVector : {n : UInt64} → V n → T #[ambientDim n]
+  /-- Wrap already-valid ambient coordinates without re-projecting. -/
+  fromAmbientUnchecked : {n : UInt64} → T #[ambientDim n] → V n
   /-- Take one geometry-aware step on the manifold. -/
   dualMapStep : {n : UInt64} → V n → T #[ambientDim n] → Float → V n
 
@@ -48,6 +54,7 @@ instance : VectorManifoldCarrier Hyperbolic where
   ambientDim n := n + 1
   project := Hyperbolic.project
   toVector := fun x => x.coords
+  fromAmbientUnchecked := fun x => ⟨x⟩
   dualMapStep := by
     intro n x g lr
     let tg := HyperbolicTangent.project x g
@@ -68,7 +75,7 @@ namespace ManifoldLinear
 
 private def makeLeafWeight [MatrixManifoldCarrier M] {in_dim out_dim : UInt64}
     (w : M out_dim in_dim) : M out_dim in_dim :=
-  MatrixManifoldCarrier.project out_dim in_dim
+  MatrixManifoldCarrier.fromAmbientUnchecked
     (autograd.set_requires_grad (autograd.detach (MatrixManifoldCarrier.toMatrix w)) true)
 
 /-- Initialize manifold-linear weights by projecting a random matrix. -/
@@ -117,18 +124,26 @@ structure ManifoldVectorParam (V : UInt64 → Type) [VectorManifoldCarrier V] (n
 
 namespace ManifoldVectorParam
 
+/-- Ensure manifold-vector value is represented by a trainable leaf tensor. -/
+private def makeLeafValue [VectorManifoldCarrier V] {n : UInt64}
+    (v : V n) : V n :=
+  VectorManifoldCarrier.fromAmbientUnchecked
+    (autograd.set_requires_grad (autograd.detach (VectorManifoldCarrier.toVector v)) true)
+
 /-- Initialize from random ambient coordinates projected to manifold. -/
 def init [VectorManifoldCarrier V] (n : UInt64) : IO (ManifoldVectorParam V n) := do
   let d := (VectorManifoldCarrier.ambientDim (V := V) n)
-  let v ← randn #[d] false
-  pure { value := VectorManifoldCarrier.project n v }
+  let vRaw ← randn #[d] false
+  let v := makeLeafValue (VectorManifoldCarrier.project n vRaw)
+  pure { value := v }
 
 /-- Apply one dual-map manifold update for this vector parameter. -/
 def applyDualMapUpdate [VectorManifoldCarrier V] {n : UInt64}
     (p : ManifoldVectorParam V n)
     (grad : T #[(VectorManifoldCarrier.ambientDim (V := V) n)])
     (lr : Float) : ManifoldVectorParam V n :=
-  { value := VectorManifoldCarrier.dualMapStep p.value grad lr }
+  let v' := VectorManifoldCarrier.dualMapStep p.value grad lr
+  { value := makeLeafValue v' }
 
 end ManifoldVectorParam
 
@@ -136,19 +151,19 @@ instance [MatrixManifoldCarrier M] (in_dim out_dim : UInt64) :
     TensorStruct (ManifoldLinear M in_dim out_dim) where
   map f lin :=
     let w := MatrixManifoldCarrier.toMatrix lin.weight
-    let weight := MatrixManifoldCarrier.project out_dim in_dim (f w)
+    let weight := MatrixManifoldCarrier.fromAmbientUnchecked (f w)
     let bias := lin.bias.map f
     { weight, bias }
   mapM f lin := do
     let w' ← f (MatrixManifoldCarrier.toMatrix lin.weight)
-    let weight := MatrixManifoldCarrier.project out_dim in_dim w'
+    let weight := MatrixManifoldCarrier.fromAmbientUnchecked w'
     let bias ← match lin.bias with
       | some b => some <$> f b
       | none => pure none
     pure { weight, bias }
   zipWith f a b :=
     let w := f (MatrixManifoldCarrier.toMatrix a.weight) (MatrixManifoldCarrier.toMatrix b.weight)
-    let weight := MatrixManifoldCarrier.project out_dim in_dim w
+    let weight := MatrixManifoldCarrier.fromAmbientUnchecked w
     let bias := match a.bias, b.bias with
       | some x, some y => some (f x y)
       | _, _ => none
@@ -161,18 +176,15 @@ instance [MatrixManifoldCarrier M] (in_dim out_dim : UInt64) :
 
 instance [VectorManifoldCarrier V] (n : UInt64) : TensorStruct (ManifoldVectorParam V n) where
   map f p :=
-    let n' := n
     let v := VectorManifoldCarrier.toVector p.value
-    { value := VectorManifoldCarrier.project n' (f v) }
+    { value := VectorManifoldCarrier.fromAmbientUnchecked (f v) }
   mapM f p := do
-    let n' := n
     let v' ← f (VectorManifoldCarrier.toVector p.value)
-    pure { value := VectorManifoldCarrier.project n' v' }
+    pure { value := VectorManifoldCarrier.fromAmbientUnchecked v' }
   zipWith f a b :=
-    let n' := n
     let av := VectorManifoldCarrier.toVector a.value
     let bv := VectorManifoldCarrier.toVector b.value
-    { value := VectorManifoldCarrier.project n' (f av bv) }
+    { value := VectorManifoldCarrier.fromAmbientUnchecked (f av bv) }
   fold f init p := f (VectorManifoldCarrier.toVector p.value) init
 
 instance [MatrixManifoldCarrier M] (in_dim out_dim : UInt64) :

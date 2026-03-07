@@ -80,6 +80,16 @@ structure Config where
   manifoldDualAscentSteps : Nat := 2
   /-- Dual-ascent learning rate for specialized manifold-Muon. -/
   manifoldDualAscentLr : Float := 0.1
+  /-- Inner solver backend for specialized manifold-Muon. -/
+  manifoldSolver : torch.Optim.ManifoldMuon.SolverKind := .dualAscent
+  /-- Minimum inner iterations before solver convergence checks. -/
+  manifoldMinSolveSteps : Nat := 1
+  /-- Tangent residual tolerance for specialized manifold-Muon inner solve. -/
+  manifoldSolveResidualTol : Float := 1e-4
+  /-- Dual-delta tolerance for specialized manifold-Muon inner solve. -/
+  manifoldSolveDualDeltaTol : Float := 1e-5
+  /-- Damping for specialized manifold-Muon fixed-point inner solve. -/
+  manifoldFixedPointDamping : Float := 0.5
   /-- Whether manifold matrix paths use distributed collectives. -/
   manifoldDistributed : Bool := false
   /-- Enable modular-budget multipliers on group learning rates. -/
@@ -243,6 +253,11 @@ def getManifoldMuonConfigAtStep (cfg : Config) (step : Nat) : torch.Optim.Manifo
     numIters := cfg.manifoldNumIters
     dualAscentSteps := cfg.manifoldDualAscentSteps
     dualAscentLr := cfg.manifoldDualAscentLr
+    solver := cfg.manifoldSolver
+    minSolveSteps := cfg.manifoldMinSolveSteps
+    solveResidualTol := cfg.manifoldSolveResidualTol
+    solveDualDeltaTol := cfg.manifoldSolveDualDeltaTol
+    fixedPointDamping := cfg.manifoldFixedPointDamping
     distributed := cfg.manifoldDistributed
   }
 
@@ -331,29 +346,27 @@ private def stepOnManifoldFamily {m n : UInt64}
     (param : T #[m, n])
     (ambientGrad : T #[m, n])
     (lr : Float)
-    : T #[m, n] :=
+    : IO (T #[m, n]) := do
   match family with
   | .stiefel =>
     let x : Tyr.AD.Stiefel m n := ⟨param⟩
     let g := Tyr.AD.StiefelTangent.project x ambientGrad
-    (Tyr.AD.DualMapGeometry.dualMapStep x g lr).matrix
+    pure (Tyr.AD.DualMapGeometry.dualMapStep x g lr).matrix
   | .orthogonal =>
-    -- Orthogonal requires square matrices; otherwise fall back to Stiefel.
+    -- Orthogonal requires square matrices.
     if h : m = n then
       let pSquare : T #[n, n] := by simpa [h] using param
       let gSquare : T #[n, n] := by simpa [h] using ambientGrad
       let x : Tyr.AD.Orthogonal n := ⟨pSquare⟩
       let tg := Tyr.AD.OrthogonalTangent.fromAmbient x gSquare
       let x' := Tyr.AD.DualMapGeometry.dualMapStep x tg lr
-      (by simpa [h] using x'.matrix : T #[m, n])
+      pure (by simpa [h] using x'.matrix : T #[m, n])
     else
-      let x : Tyr.AD.Stiefel m n := ⟨param⟩
-      let g := Tyr.AD.StiefelTangent.project x ambientGrad
-      (Tyr.AD.DualMapGeometry.dualMapStep x g lr).matrix
+      throw <| IO.userError s!"MatrixManifoldFamily.orthogonal requires square matrices, got {m}x{n}"
   | .grassmann =>
     let x : Tyr.AD.Grassmann m n := ⟨param⟩
     let g := Tyr.AD.GrassmannTangent.project x ambientGrad
-    (Tyr.AD.DualMapGeometry.dualMapStep x g lr).matrix
+    pure (Tyr.AD.DualMapGeometry.dualMapStep x g lr).matrix
 
 /--
 Single matrix step for the generic manifold path using `DualMapGeometry`.
@@ -377,7 +390,7 @@ def stepGenericManifoldSingle {m n : UInt64}
   let nesterovGrad := mul_scalar gRaw (1.0 - momentum) + mul_scalar newMomentum momentum
   let aspectScale := NorMuon.aspectRatioScale #[m, n]
   let effectiveLr := cfg.matrixLr * lrMul * aspectScale
-  let updated := stepOnManifoldFamily cfg.matrixManifold param nesterovGrad effectiveLr
+  let updated ← stepOnManifoldFamily cfg.matrixManifold param nesterovGrad effectiveLr
   let newParam := autograd.set_requires_grad (autograd.detach updated) true
   let newState : GenericManifoldState m n := {
     momentumBuffer := some newMomentum
