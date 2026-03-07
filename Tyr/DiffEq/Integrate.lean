@@ -228,7 +228,7 @@ private def eventHitAtStart {Y Args : Type}
     (args : Args) : Bool :=
   match ev.condition with
   | .boolean cond => booleanHitAtStart (cond t0 y0 args) ev.direction
-  | .real cond => cond t0 y0 args == 0.0
+  | .real _ => false
 
 private def initialEventMask {Y Args : Type}
     (events : Array (EventSpec Y Args))
@@ -525,9 +525,6 @@ def diffeqsolve {Term Y VF Control Args Controller : Type}
                     subYs := subYs.push (evalFromDense t)
             let cadence : Nat := sub.steps
             if cadence != 0 then
-              if !(subTs.any (fun t => t == t0)) then
-                subTs := subTs.push t0
-                subYs := subYs.push (saveValue t0 y0)
               for i in [:stepCount] do
                 if i > 0 && i % cadence == 0 then
                   let tStep := allStepTs[i]!

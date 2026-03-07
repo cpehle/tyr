@@ -768,9 +768,9 @@ private def evaluateDenseFloat {S C : Type}
   match sol.ts with
   | none => LeanTest.fail "Expected ts for StepTo solve"
   | some ts =>
-      if ts.size == 3 then
+      if ts.size == 2 then
         let ok :=
-          approx ts[0]! 0.0 1e-12 && approx ts[1]! 0.5 1e-12 && approx ts[2]! 1.0 1e-12
+          approx ts[0]! 0.5 1e-12 && approx ts[1]! 1.0 1e-12
         LeanTest.assertTrue ok s!"StepTo ts mismatch: {ts}"
       else
         LeanTest.fail s!"Unexpected ts size for StepTo: {ts.size}"
@@ -793,9 +793,9 @@ private def evaluateDenseFloat {S C : Type}
   match sol.ts with
   | none => LeanTest.fail "Expected ts for reverse StepTo solve"
   | some ts =>
-      if ts.size == 3 then
+      if ts.size == 2 then
         let ok :=
-          approx ts[0]! 1.0 1e-12 && approx ts[1]! 0.6 1e-12 && approx ts[2]! 0.0 1e-12
+          approx ts[0]! 0.6 1e-12 && approx ts[1]! 0.0 1e-12
         LeanTest.assertTrue ok s!"Reverse StepTo ts mismatch: {ts}"
       else
         LeanTest.fail s!"Unexpected ts size for reverse StepTo: {ts.size}"
@@ -1019,10 +1019,10 @@ private def evaluateDenseFloat {S C : Type}
   match sol.ts, sol.ys with
   | some ts, some ys =>
       LeanTest.assertTrue (ts.size == ys.size) s!"SaveAt(steps) size mismatch {ts.size}/{ys.size}"
-      LeanTest.assertTrue (ts.size == getStat "num_steps" sol.stats + 1)
-        s!"SaveAt(steps) expected ts size {getStat "num_steps" sol.stats + 1}, got {ts.size}"
-      LeanTest.assertTrue (approx ts[0]! 0.0 1e-12)
-        s!"SaveAt(steps) ts[0] expected 0.0, got {ts[0]!}"
+      LeanTest.assertTrue (ts.size == getStat "num_steps" sol.stats)
+        s!"SaveAt(steps) expected ts size {getStat "num_steps" sol.stats}, got {ts.size}"
+      LeanTest.assertTrue (approx ts[0]! 0.2 1e-12)
+        s!"SaveAt(steps) ts[0] expected first accepted step at 0.2, got {ts[0]!}"
       let last := ts[ts.size - 1]!
       LeanTest.assertTrue (approx last 1.0 1e-12)
         s!"SaveAt(steps) ts[end] expected 1.0, got {last}"
@@ -1561,7 +1561,7 @@ private def evaluateDenseFloat {S C : Type}
     "Nested mixed ts+steps payload solve should succeed"
   match sol.ts, sol.ys with
   | some ts, some ys =>
-      let expectedTs : Array Time := #[0.5, 0.0, 0.5, 1.0]
+      let expectedTs : Array Time := #[0.5, 0.5, 1.0]
       LeanTest.assertTrue (ts.size == expectedTs.size)
         s!"Expected {expectedTs.size} mixed nested payload times, got {ts.size}"
       LeanTest.assertTrue (ys.size == expectedTs.size)

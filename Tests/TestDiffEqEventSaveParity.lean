@@ -60,6 +60,11 @@ private def assertNoSavesAfterTerminal {S C : Type}
   | _, _ =>
       LeanTest.fail s!"{label}: expected ts/ys outputs"
 
+private def getStat (key : String) (stats : List (String × Nat)) : Nat :=
+  match stats.find? (fun entry => entry.fst == key) with
+  | some (_, value) => value
+  | none => 0
+
 @[test] def testEventSaveTsIgnoresPostEventTimes : IO Unit := do
   let saveat : SaveAt := {
     t1 := false
@@ -137,10 +142,82 @@ private def assertNoSavesAfterTerminal {S C : Type}
   | none =>
       LeanTest.fail "saveat.subs: expected saved times"
 
+@[test] def testBooleanEventAtStartTerminatesWithoutStepping : IO Unit := do
+  let term : ODETerm Float Unit := { vectorField := fun _t _y _ => 1.0 }
+  let solver :=
+    Euler.solver (Term := ODETerm Float Unit) (Y := Float) (VF := Float) (Args := Unit)
+  let ev : EventSpec Float Unit := {
+    condition := .boolean (fun t _y _ => t >= 0.0)
+    terminate := true
+  }
+  let sol :=
+    diffeqsolve
+      (Term := ODETerm Float Unit)
+      (Y := Float)
+      (VF := Float)
+      (Control := Time)
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      term solver 0.0 1.0 (some 0.1) (0.0 : Float) ()
+      (saveat := { t1 := true })
+      (event := some ev)
+  LeanTest.assertTrue (sol.result == Result.eventOccurred)
+    "Boolean event true at start should terminate immediately"
+  LeanTest.assertTrue (approx sol.t1 0.0 1.0e-12)
+    s!"Expected terminal time at t0=0.0, got {sol.t1}"
+  LeanTest.assertTrue (getStat "num_steps" sol.stats == 0)
+    s!"Boolean start-hit should not attempt steps, got num_steps={getStat "num_steps" sol.stats}"
+  match sol.ts, sol.ys with
+  | some ts, some ys =>
+      LeanTest.assertTrue (ts.size == 1 && ys.size == 1)
+        s!"Expected one saved t/y at t0, got sizes {ts.size}/{ys.size}"
+      LeanTest.assertTrue (approx ts[0]! 0.0 1.0e-12)
+        s!"Expected saved time t0=0.0, got {ts[0]!}"
+      LeanTest.assertTrue (approx ys[0]! 0.0 1.0e-12)
+        s!"Expected saved state y0=0.0, got {ys[0]!}"
+  | _, _ =>
+      LeanTest.fail "Boolean start-hit should produce a single saved endpoint"
+
+@[test] def testRealEventAtStartRunsStepThenLocalizes : IO Unit := do
+  let term : ODETerm Float Unit := { vectorField := fun _t _y _ => 1.0 }
+  let solver :=
+    Euler.solver (Term := ODETerm Float Unit) (Y := Float) (VF := Float) (Args := Unit)
+  let ev : EventSpec Float Unit := {
+    condition := .real (fun _t y _ => y)
+    terminate := true
+  }
+  let sol :=
+    diffeqsolve
+      (Term := ODETerm Float Unit)
+      (Y := Float)
+      (VF := Float)
+      (Control := Time)
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      term solver 0.0 1.0 (some 0.5) (0.0 : Float) ()
+      (saveat := { t1 := true })
+      (event := some ev)
+  LeanTest.assertTrue (sol.result == Result.eventOccurred)
+    "Real event with cond(t0)=0 should terminate via step sign-change localization"
+  LeanTest.assertTrue (approx sol.t1 0.0 1.0e-6)
+    s!"Expected localized root at t0=0.0, got {sol.t1}"
+  LeanTest.assertTrue (getStat "num_steps" sol.stats > 0)
+    "Real start-root should not short-circuit before stepping"
+  match sol.eventMask, sol.eventMaskLast with
+  | some mask, some lastMask =>
+      LeanTest.assertTrue (mask.size == 1 && lastMask.size == 1)
+        s!"Expected single-event masks, got {mask.size}/{lastMask.size}"
+      LeanTest.assertTrue (mask[0]! && lastMask[0]!)
+        "Localized real start-root should be recorded in event masks"
+  | _, _ =>
+      LeanTest.fail "Expected event masks for real start-root case"
+
 def run : IO Unit := do
   testEventSaveTsIgnoresPostEventTimes
   testEventSaveStepsStopsAtEvent
   testEventSaveStepsCadenceHonorsT1FlagAtEvent
   testEventSaveSubsIgnorePostEventTimes
+  testBooleanEventAtStartTerminatesWithoutStepping
+  testRealEventAtStartRunsStepThenLocalizes
 
 end Tests.DiffEqEventSaveParity
