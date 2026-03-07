@@ -508,6 +508,25 @@ def testVertexOrderHelpers : IO Unit := do
   | .error _ => pure ()
 
 @[test]
+def testLeanJaxprVertexPartitions : IO Unit := do
+  let jaxpr : LeanJaxpr := {
+    constvars := #[{ id := 7 }]
+    invars := #[{ id := 0 }, { id := 1 }]
+    eqns := #[
+      { op := `test.eqn0, invars := #[{ id := 0 }], outvars := #[{ id := 2 }] },
+      { op := `test.eqn1, invars := #[{ id := 2 }, { id := 1 }], outvars := #[{ id := 3 }, { id := 4 }] }
+    ]
+    outvars := #[{ id := 4 }]
+  }
+  let parts := jaxpr.vertexPartitions
+  LeanTest.assertEqual parts.inputs #[7, 0, 1]
+    "Input partition should preserve constvars/invars declaration order"
+  LeanTest.assertEqual parts.outputs #[4]
+    "Output partition should preserve declared outputs"
+  LeanTest.assertEqual parts.eliminable #[2, 3]
+    "Eliminable partition should include non-output eqn results in eqn-topological order"
+
+@[test]
 def testValidateTopologicalFailure : IO Unit := do
   let jaxpr : LeanJaxpr := {
     invars := #[{ id := 0 }]

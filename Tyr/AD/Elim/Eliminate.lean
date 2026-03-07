@@ -92,6 +92,29 @@ def validateEliminationOrder (g : ElimGraph) (order : Array JVarId) : Except Str
     seen := seen.insert v
   return .ok ()
 
+/--
+Validate a complete Graphax-style elimination order against the graph's explicit
+`eliminable` partition.
+-/
+def validateCompleteEliminationOrder
+    (g : ElimGraph)
+    (order : Array JVarId) :
+    Except String Unit := Id.run do
+  let mut seen : Std.HashSet JVarId := {}
+  let allowed : Std.HashSet JVarId :=
+    g.eliminable.foldl (init := {}) fun acc v => acc.insert v
+  for v in order do
+    if seen.contains v then
+      return .error s!"Elimination order contains duplicate vertex {v}."
+    if !allowed.contains v then
+      return .error s!"Elimination order references non-eliminable vertex {v}."
+    seen := seen.insert v
+  if order.size != g.eliminable.size then
+    let missing := g.eliminable.filter (fun v => !seen.contains v)
+    return .error
+      s!"Elimination order length {order.size} does not match eliminable vertex count {g.eliminable.size}. Missing eliminable vertices: {missing}."
+  return .ok ()
+
 /-- Run elimination in the given order after basic order validation. -/
 def runElimination (g : ElimGraph) (order : Array JVarId) : Except String ElimRunResult := do
   validateEliminationOrder g order
@@ -102,6 +125,28 @@ def runElimination (g : ElimGraph) (order : Array JVarId) : Except String ElimRu
     graph := graph'
     steps := steps.push stats
   return { graph := graph, steps := steps }
+
+/--
+Run elimination after enforcing that the order covers the graph's explicit
+eliminable set exactly once.
+-/
+def runCompleteElimination (g : ElimGraph) (order : Array JVarId) : Except String ElimRunResult := do
+  validateCompleteEliminationOrder g order
+  let mut graph := g
+  let mut steps : Array ElimStepStats := #[]
+  for v in order do
+    let (graph', stats) ← eliminateVertex graph v
+    graph := graph'
+    steps := steps.push stats
+  return { graph := graph, steps := steps }
+
+/-- Run complete elimination in the graph's deterministic forward eliminable order. -/
+def runForwardElimination (g : ElimGraph) : Except String ElimRunResult :=
+  runCompleteElimination g (forwardEliminationOrder g)
+
+/-- Run complete elimination in the graph's deterministic reverse eliminable order. -/
+def runReverseElimination (g : ElimGraph) : Except String ElimRunResult :=
+  runCompleteElimination g (reverseEliminationOrder g)
 
 /-- Convenience entrypoint from local Jacobian edges. -/
 def runEliminationOnEdges

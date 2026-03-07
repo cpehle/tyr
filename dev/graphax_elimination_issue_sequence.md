@@ -28,6 +28,7 @@ Progress update (2026-03-06):
 - Issue 20: advanced further (source-path structural alias rules now cover `transpose`/`reshape`/`squeeze`/`broadcast_in_dim`/`slice`/`concatenate`/`convert_element_type` with parity tests).
 - Issue 20: advanced further (dynamic/update source-path aliases now cover `dynamic_slice`/`dynamic_update_slice` plus gather/scatter family with explicit non-diff index handling in parity tests).
 - Issue 20: advanced further (key structural KStmt rules now emit exact sparse payload entries when shape metadata is available: `broadcast`, `binaryBroadcast`, `reduce_sum`, `transpose`, `sliceRows`, `sliceCols`, `concatCols`, `cumsum`).
+- Issue 20: advanced further (source-path structural alias rules now also emit exact sparse payload entries for shape-aware `broadcast_in_dim`, `slice`/`slice_in_dim`, `transpose`, and `concatenate` cases, with focused extraction regressions).
 - Issue 21: advanced (parity rule-pack now includes explicit no-grad/control rules for `stop_gradient` and `iota`, plus dedicated dot-general semantics and extraction tests).
 - Issue 21: advanced further (Graphax/JAX alias coverage now includes extra unary/binary primitives and communication-collective unary aliases, with parity tests gating extraction behavior).
 - Issue 21: advanced further (source-path reduction/control aliases now include `reduce_*` and `select_n` semantics with parity tests).
@@ -41,11 +42,12 @@ Progress update (2026-03-06):
 - Issue 21: advanced further with explicit support-matrix gate tests that enforce declared op-family registration for the parity pack, including `scan`/`cond` control-flow aliases under strict no-fallback semantics.
 - Issue 22: advanced (action-space compatibility layer now supports full-vertex and explicit restricted action tables, with root/recurrent mask-semantics diagnostics and strict `ActionId0 -> VertexId1` boundary checks).
 - Issue 23: advanced (DAG keying now canonicalizes sparse maps via shape + sorted sparse entries, removing `repr`-string dependence for transposition identity).
+- Issue 8/9/15: advanced further (LeanJaxpr-derived elimination graphs now carry explicit `inputs` / `outputs` / `eliminable` partitions, complete-order validation over the eliminable set, direct forward/reverse elimination entrypoints for Jaxpr/KStmt paths, and higher-level policy resolution/execution for Graphax-style `forward` / `reverse`, explicit custom orders, and AlphaGrad action orders).
 - DAG-MCTS execution is now policy-selectable (`alphaZero` and `gumbelMuZero`) through a shared DAG search entrypoint.
 
 Immediate next priorities (2026-03-07):
 1. Extend dot-general lowering beyond current representable `mm`/outer-like contraction subsets (including richer contract/batch patterns).
-2. Expand exact sparse payload coverage to remaining structural primitives and alias paths.
+2. Expand exact sparse payload coverage to remaining structural primitives and alias paths (`pad`, reduction aliases, and higher-rank/value-dependent transforms).
 3. Move `scan`/`cond` from metadata-aware dependency routing to full subjaxpr/body-aware local-Jac semantics.
 
 ## Issue 1: Bootstrap LeanJaxpr + Policy Modules

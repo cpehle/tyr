@@ -96,6 +96,43 @@ def testRunEliminationOnEdges : IO Unit := do
     LeanTest.assertTrue (!(hasVertex res.graph 2)) "Eliminated vertex should be removed from incident edges"
 
 @[test]
+def testPartitionedGraphForwardReverseAndCompleteValidation : IO Unit := do
+  let edges : Array LocalJacEdge := #[
+    mkEdge 1 2 "m12",
+    mkEdge 2 4 "m24"
+  ]
+  match ofLocalJacEdgesWithPartitions edges #[1] #[4] #[2, 3] with
+  | .error msg =>
+    LeanTest.fail s!"Partitioned graph build should succeed, got: {msg}"
+  | .ok g =>
+    LeanTest.assertTrue (hasVertex g 3)
+      "Partition-only eliminable vertices should still be visible in the graph domain"
+    LeanTest.assertTrue (isBoundaryVertex g 1)
+      "Input partition vertex should be treated as a boundary vertex"
+    LeanTest.assertTrue (!(isBoundaryVertex g 2))
+      "Eliminable interior vertex should not be treated as a boundary vertex"
+    LeanTest.assertEqual (forwardEliminationOrder g) #[2, 3]
+      "Forward elimination order should preserve explicit eliminable order"
+    LeanTest.assertEqual (reverseEliminationOrder g) #[3, 2]
+      "Reverse elimination order should reverse the explicit eliminable order"
+
+    match validateCompleteEliminationOrder g #[2] with
+    | .ok () =>
+      LeanTest.fail "Complete elimination validation should reject missing eliminable vertices"
+    | .error msg =>
+      LeanTest.assertTrue (msg.contains "Missing eliminable vertices: #[3]")
+        s!"Unexpected missing-vertex diagnostic: {msg}"
+
+    match runForwardElimination g with
+    | .error msg =>
+      LeanTest.fail s!"runForwardElimination should succeed, got: {msg}"
+    | .ok res =>
+      LeanTest.assertEqual res.steps.size 2
+        "Forward elimination should visit every eliminable vertex exactly once"
+      LeanTest.assertTrue (!(hasVertex res.graph 2))
+        "Eliminated interior vertex should be removed from the final graph"
+
+@[test]
 def testEliminateVertexRejectsSparseDimMismatch : IO Unit := do
   let edges : Array LocalJacEdge := #[
     mkShapedEdge 1 2 "m12" 1 2,

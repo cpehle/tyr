@@ -5,6 +5,7 @@ namespace Tests.ADElimOrderPolicy
 
 open LeanTest
 open Tyr.AD.Elim
+open Tyr.AD.JaxprLike
 
 private def approx (a b : Float) (tol : Float := 1e-9) : Bool :=
   Float.abs (a - b) < tol
@@ -134,5 +135,70 @@ def testActionFeasibleWithEliminationAndConstraints : IO Unit := do
   LeanTest.assertTrue
     (!(actionFeasible 4 isEliminated constraintFeasible 4))
     "Out-of-range actions should be infeasible"
+
+private def sampleGraph : ElimGraph :=
+  match ofLocalJacEdgesWithPartitions
+      #[{ src := 1, dst := 2 }, { src := 2, dst := 4 }]
+      #[1]
+      #[4]
+      #[2, 3] with
+  | .ok g => g
+  | .error msg => panic! msg
+
+@[test]
+def testNormalizeOrderPolicyAgainstGraphForwardReverse : IO Unit := do
+  match normalizeOrderPolicyAgainstGraph sampleGraph .forward with
+  | .error msg =>
+    LeanTest.fail s!"Forward policy should normalize against graph, got: {msg}"
+  | .ok normalized =>
+    LeanTest.assertEqual normalized.baseOrder1? (some #[2, 3])
+      "Forward policy should resolve to the graph's eliminable forward order"
+
+  match normalizeOrderPolicyAgainstGraph sampleGraph .reverse with
+  | .error msg =>
+    LeanTest.fail s!"Reverse policy should normalize against graph, got: {msg}"
+  | .ok normalized =>
+    LeanTest.assertEqual normalized.baseOrder1? (some #[3, 2])
+      "Reverse policy should resolve to the graph's eliminable reverse order"
+
+@[test]
+def testNormalizeOrderPolicyAgainstGraphExplicitAndAlphaGradValidation : IO Unit := do
+  match normalizeOrderPolicyAgainstGraph sampleGraph (.explicitVertex #[2, 3]) with
+  | .error msg =>
+    LeanTest.fail s!"Explicit eliminable order should normalize, got: {msg}"
+  | .ok normalized =>
+    LeanTest.assertEqual normalized.baseOrder1? (some #[2, 3])
+      "Explicit order should be preserved after graph-aware normalization"
+
+  expectErrorEq
+    (normalizeOrderPolicyAgainstGraph sampleGraph (.explicitVertex #[1, 2]))
+    "Custom order references non-eliminable vertex 1."
+
+  match normalizeOrderPolicyAgainstGraph sampleGraph (.alphaGradAction #[1, 2]) with
+  | .error msg =>
+    LeanTest.fail s!"AlphaGrad actions should normalize against graph eliminables, got: {msg}"
+  | .ok normalized =>
+    LeanTest.assertEqual normalized.baseOrder1? (some #[2, 3])
+      "AlphaGrad action order should convert to the corresponding eliminable vertex order"
+
+  expectErrorEq
+    (normalizeOrderPolicyAgainstGraph sampleGraph (.alphaGradAction #[0, 1]))
+    "Custom order references non-eliminable vertex 1."
+
+@[test]
+def testNormalizeOrderPolicyAgainstGraphHeuristicAliasesAndUnresolved : IO Unit := do
+  match normalizeOrderPolicyAgainstGraph sampleGraph (.heuristic "fwd") with
+  | .error msg =>
+    LeanTest.fail s!"Heuristic alias `fwd` should normalize, got: {msg}"
+  | .ok normalized =>
+    LeanTest.assertEqual normalized.baseOrder1? (some #[2, 3])
+      "Heuristic alias `fwd` should resolve to forward eliminable order"
+
+  match normalizeOrderPolicyAgainstGraph sampleGraph (.heuristic "markowitz") with
+  | .error msg =>
+    LeanTest.fail s!"Unknown heuristic names should remain representable, got: {msg}"
+  | .ok normalized =>
+    LeanTest.assertEqual normalized.baseOrder1? none
+      "Unimplemented heuristics should remain unresolved until a scheduler is wired"
 
 end Tests.ADElimOrderPolicy

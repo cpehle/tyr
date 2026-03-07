@@ -259,6 +259,233 @@ private def cumsumFullEntries (inDim outDim : Nat) : Array Tyr.AD.Sparse.SparseE
       entries := entries.push { src := src, dst := dst, weight := 1.0 }
   return entries
 
+private def fillEntries (outDim : Nat) : Array Tyr.AD.Sparse.SparseEntry :=
+  (Array.range outDim).map fun dst =>
+    ({ src := 0, dst := dst, weight := 1.0 } : Tyr.AD.Sparse.SparseEntry)
+
+private def sliceVectorEntries
+    (inDim start size : Nat) :
+    Array Tyr.AD.Sparse.SparseEntry := Id.run do
+  let mut entries : Array Tyr.AD.Sparse.SparseEntry := #[]
+  for i in [:size] do
+    let src := start + i
+    if src < inDim then
+      entries := entries.push {
+        src := src
+        dst := i
+        weight := 1.0
+      }
+  return entries
+
+private def concatRowsEntries
+    (rows cols outCols rowOffset : Nat) :
+    Array Tyr.AD.Sparse.SparseEntry := Id.run do
+  let mut entries : Array Tyr.AD.Sparse.SparseEntry := #[]
+  for i in [:rows] do
+    for j in [:cols] do
+      entries := entries.push {
+        src := i * cols + j
+        dst := (rowOffset + i) * outCols + j
+        weight := 1.0
+      }
+  return entries
+
+private def concatVectorEntries
+    (len offset : Nat) :
+    Array Tyr.AD.Sparse.SparseEntry :=
+  (Array.range len).map fun i =>
+    ({ src := i, dst := offset + i, weight := 1.0 } : Tyr.AD.Sparse.SparseEntry)
+
+private def concatColsEntries
+    (rows cols outCols colOffset : Nat) :
+    Array Tyr.AD.Sparse.SparseEntry := Id.run do
+  let mut entries : Array Tyr.AD.Sparse.SparseEntry := #[]
+  for i in [:rows] do
+    for j in [:cols] do
+      entries := entries.push {
+        src := i * cols + j
+        dst := i * outCols + (colOffset + j)
+        weight := 1.0
+      }
+  return entries
+
+private def exactUnaryMapOrFallback
+    (inv outv : JVar)
+    (tag : Tyr.AD.Sparse.SparseMapTag)
+    (entries? : Option (Array Tyr.AD.Sparse.SparseEntry)) :
+    SparseLinearMap :=
+  match entries?, varFlatDim? inv, varFlatDim? outv with
+  | some entries, some inDim, some outDim =>
+    buildSparseMap tag inDim outDim entries
+  | _, _, _ =>
+    unaryJacMapForVars inv outv tag 1.0
+
+private def exactBinaryMapOrFallback
+    (inv outv : JVar)
+    (tag : Tyr.AD.Sparse.SparseMapTag)
+    (entries? : Option (Array Tyr.AD.Sparse.SparseEntry)) :
+    SparseLinearMap :=
+  match entries?, varFlatDim? inv, varFlatDim? outv with
+  | some entries, some inDim, some outDim =>
+    buildSparseMap tag inDim outDim entries
+  | _, _, _ =>
+    binaryJacMapForVars inv outv tag 1.0
+
+private def transposeAliasEntries? (inv outv : JVar) : Option (Array Tyr.AD.Sparse.SparseEntry) := do
+  let (rows, cols) ← shapeRowsCols? inv
+  let (outRows, outCols) ← shapeRowsCols? outv
+  let inDim ← varFlatDim? inv
+  let outDim ← varFlatDim? outv
+  if
+      inDim = 0 || outDim = 0 ||
+      inDim != outDim ||
+      inDim != rows * cols ||
+      outRows != cols ||
+      outCols != rows then
+    none
+  else
+    some (transposeEntries rows cols)
+
+private def broadcastAliasEntries? (inv outv : JVar) : Option (Array Tyr.AD.Sparse.SparseEntry) := do
+  let inShape ← inv.metaInfo.shape
+  let outShape ← outv.metaInfo.shape
+  let inDim ← varFlatDim? inv
+  let outDim ← varFlatDim? outv
+  if inDim = 0 || outDim = 0 then
+    none
+  else if outShape.size = 1 then
+    let outLen := outShape.getD 0 1
+    if inDim = outLen then
+      some (diagEntries inDim 1.0)
+    else if inDim = 1 then
+      some (fillEntries outDim)
+    else
+      none
+  else if outShape.size >= 2 then
+    let outRows := outShape.getD 0 1
+    let outCols := outShape.getD 1 1
+    if inShape.size >= 2 && inShape.getD 0 1 = outRows && inShape.getD 1 1 = outCols then
+      some (diagEntries inDim 1.0)
+    else if inDim = 1 then
+      some (fillEntries outDim)
+    else if inDim = outCols then
+      some (broadcastEntries .Row inDim outRows outCols)
+    else if inDim = outRows then
+      some (broadcastEntries .Col inDim outRows outCols)
+    else if
+        inShape.size >= 2 &&
+        inShape.getD 0 1 = 1 &&
+        inShape.getD 1 1 = outCols then
+      some (broadcastEntries .Row inDim outRows outCols)
+    else if
+        inShape.size >= 2 &&
+        inShape.getD 1 1 = 1 &&
+        inShape.getD 0 1 = outRows then
+      some (broadcastEntries .Col inDim outRows outCols)
+    else
+      none
+  else
+    none
+
+private def sliceAliasEntries? (eqn : JEqn) (inv outv : JVar) :
+    Option (Array Tyr.AD.Sparse.SparseEntry) := do
+  let inDim ← varFlatDim? inv
+  let outDim ← varFlatDim? outv
+  let inShape ← inv.metaInfo.shape
+  let outShape ← outv.metaInfo.shape
+  match eqn.params.findNat? .startRow, eqn.params.findNat? .numRows,
+      eqn.params.findNat? .startCol, eqn.params.findNat? .numCols with
+  | some startRow, some numRows, _, _ =>
+    if inShape.size >= 2 && outShape.size >= 2 then
+      let rows := inShape.getD 0 1
+      let cols := inShape.getD 1 1
+      let outRows := outShape.getD 0 1
+      let outCols := outShape.getD 1 1
+      if outRows = numRows && outCols = cols then
+        some (sliceRowsEntries rows cols startRow outRows outCols)
+      else
+        none
+    else if outDim = numRows then
+      some (sliceVectorEntries inDim startRow outDim)
+    else
+      none
+  | _, _, some startCol, some numCols =>
+    if inShape.size >= 2 && outShape.size >= 2 then
+      let rows := inShape.getD 0 1
+      let cols := inShape.getD 1 1
+      let outRows := outShape.getD 0 1
+      let outCols := outShape.getD 1 1
+      if outCols = numCols && outRows = rows then
+        some (sliceColsEntries rows cols startCol outRows outCols)
+      else
+        none
+    else if outDim = numCols then
+      some (sliceVectorEntries inDim startCol outDim)
+    else
+      none
+  | _, _, _, _ => none
+
+private def concatAliasEntries?
+    (invars : Array JVar)
+    (outv : JVar) :
+    Option (Array (Array Tyr.AD.Sparse.SparseEntry)) := do
+  let outShape ← outv.metaInfo.shape
+  let outDim ← varFlatDim? outv
+  let inShapes? := invars.map (·.metaInfo.shape)
+  let inDims? := invars.map varFlatDim?
+  if inShapes?.any Option.isNone || inDims?.any Option.isNone then
+    none
+  else
+    let inShapes := inShapes?.map Option.get!
+    let inDims := inDims?.map Option.get!
+    if outShape.size = 1 && inShapes.all (fun s => s.size = 1) then
+      let total := inDims.foldl (init := 0) (· + ·)
+      if total != outDim then
+        none
+      else
+        let init : Nat × Array (Array Tyr.AD.Sparse.SparseEntry) := (0, #[])
+        let (_, maps) :=
+          inDims.foldl
+            (init := init)
+            fun (state : Nat × Array (Array Tyr.AD.Sparse.SparseEntry)) len =>
+              let offset := state.1
+              let entries := concatVectorEntries len offset
+              (offset + len, state.2.push entries)
+        some maps
+    else if outShape.size >= 2 && inShapes.all (fun s => s.size >= 2) then
+      let outRows := outShape.getD 0 1
+      let outCols := outShape.getD 1 1
+      let sameRows := inShapes.all (fun s => s.getD 0 1 = outRows)
+      let sameCols := inShapes.all (fun s => s.getD 1 1 = outCols)
+      let totalCols := inShapes.foldl (init := 0) fun acc s => acc + s.getD 1 1
+      let totalRows := inShapes.foldl (init := 0) fun acc s => acc + s.getD 0 1
+      if sameRows && totalCols = outCols then
+        let init : Nat × Array (Array Tyr.AD.Sparse.SparseEntry) := (0, #[])
+        let (_, maps) :=
+          inShapes.foldl
+            (init := init)
+            fun (state : Nat × Array (Array Tyr.AD.Sparse.SparseEntry)) shape =>
+              let rows := shape.getD 0 1
+              let cols := shape.getD 1 1
+              let offset := state.1
+              (offset + cols, state.2.push (concatColsEntries rows cols outCols offset))
+        some maps
+      else if sameCols && totalRows = outRows then
+        let init : Nat × Array (Array Tyr.AD.Sparse.SparseEntry) := (0, #[])
+        let (_, maps) :=
+          inShapes.foldl
+            (init := init)
+            fun (state : Nat × Array (Array Tyr.AD.Sparse.SparseEntry)) shape =>
+              let rows := shape.getD 0 1
+              let cols := shape.getD 1 1
+              let offset := state.1
+              (offset + rows, state.2.push (concatRowsEntries rows cols outCols offset))
+        some maps
+      else
+        none
+    else
+      none
+
 /--
 If an op name is `jax.lax.<prim>`, return the corresponding
 `jax.lax.<prim>_p` alias used in some Graphax/AlphaGrad source paths.
@@ -807,16 +1034,46 @@ private def structuralUnaryAliasRule
     (opName : OpName)
     (mode : Tyr.AD.Sparse.JacMode) :
     LocalJacRule :=
-  unarySemanticAliasRule opName opName mode
+  fun eqn _ctx => do
+    let (inv, outv) ← requireUnaryShape opName eqn
+    let tag : Tyr.AD.Sparse.SparseMapTag := .semantic (.unary opName .x mode)
+    let entries? :=
+      if opName == transposeAliasOpName || opName == `jax.lax.transpose_p || opName == `Graphax.transpose then
+        transposeAliasEntries? inv outv
+      else if
+          opName == broadcastInDimAliasOpName ||
+          opName == `jax.lax.broadcast_in_dim_p ||
+          opName == `Graphax.broadcast_in_dim then
+        broadcastAliasEntries? inv outv
+      else if
+          opName == sliceAliasOpName ||
+          opName == `jax.lax.slice_p ||
+          opName == sliceInDimAliasOpName ||
+          opName == `jax.lax.slice_in_dim_p ||
+          opName == `Graphax.slice ||
+          opName == `Graphax.slice_in_dim then
+        sliceAliasEntries? eqn inv outv
+      else
+        none
+    .ok #[{
+      src := inv.id
+      dst := outv.id
+      map := exactUnaryMapOrFallback inv outv tag entries?
+    }]
 
 private def concatLikeStructuralRule (opName : OpName) : LocalJacRule :=
   fun eqn _ctx => do
     let (invars, outv) ← requireAtLeastOneInputOneOutput opName eqn
-    let edges := invars.map fun inv =>
-      {
+    let exactEntries? := concatAliasEntries? invars outv
+    let mut edges : Array LocalJacEdge := #[]
+    for h : idx in [:invars.size] do
+      let inv := invars[idx]
+      let tag : Tyr.AD.Sparse.SparseMapTag := .semantic (.unary opName .x .inject)
+      let entries? := exactEntries?.bind (·[idx]?)
+      edges := edges.push {
         src := inv.id
         dst := outv.id
-        map := binaryJacMapForVars inv outv (.semantic (.unary opName .x .inject)) 1.0
+        map := exactBinaryMapOrFallback inv outv tag entries?
       }
     .ok edges
 

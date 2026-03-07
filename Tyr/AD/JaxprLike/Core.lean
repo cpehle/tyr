@@ -1,3 +1,4 @@
+import Std.Data.HashSet
 import Lean.Compiler.IR.Basic
 
 /-!
@@ -189,6 +190,22 @@ structure LeanJaxpr where
   outvars : Array JVar := #[]
   deriving Repr, Inhabited
 
+/-- Explicit graph partitions used by Graphax-style elimination helpers. -/
+structure VertexPartitions where
+  inputs : Array JVarId := #[]
+  outputs : Array JVarId := #[]
+  eliminable : Array JVarId := #[]
+  deriving Repr, Inhabited
+
+private def dedupPreserveOrder (xs : Array JVarId) : Array JVarId := Id.run do
+  let mut seen : Std.HashSet JVarId := {}
+  let mut out : Array JVarId := #[]
+  for x in xs do
+    if !seen.contains x then
+      seen := seen.insert x
+      out := out.push x
+  return out
+
 /-- Graphax-style vertex numbering: equation index -> 1-based vertex ID. -/
 def eqnVertexId1 (eqnIdx0 : Nat) : Nat :=
   eqnIdx0 + 1
@@ -200,5 +217,35 @@ def vertexToEqnIdx0? (vertexId1 : Nat) : Option Nat :=
 /-- Default eliminable vertex set for a fully eliminable equation sequence. -/
 def eliminableVertices1 (jaxpr : LeanJaxpr) : Array Nat :=
   (Array.range jaxpr.eqns.size).map eqnVertexId1
+
+/-- Input-like graph vertices (`constvars ++ invars`) in declaration order. -/
+def LeanJaxpr.inputVertices (jaxpr : LeanJaxpr) : Array JVarId :=
+  dedupPreserveOrder <| (jaxpr.constvars ++ jaxpr.invars).map (·.id)
+
+/-- Output boundary graph vertices in declaration order. -/
+def LeanJaxpr.outputVertices (jaxpr : LeanJaxpr) : Array JVarId :=
+  dedupPreserveOrder <| jaxpr.outvars.map (·.id)
+
+/--
+Eliminable graph vertices in equation-topological order.
+This tracks produced variables that are not final outputs.
+-/
+def LeanJaxpr.eliminableGraphVertices (jaxpr : LeanJaxpr) : Array JVarId := Id.run do
+  let outputs : Std.HashSet JVarId :=
+    jaxpr.outputVertices.foldl (init := {}) fun acc v => acc.insert v
+  let mut out : Array JVarId := #[]
+  for eqn in jaxpr.eqns do
+    for outvar in eqn.outvars do
+      if !outputs.contains outvar.id then
+        out := out.push outvar.id
+  return out
+
+/-- Graph partitions derived from normalized `LeanJaxpr` boundaries. -/
+def LeanJaxpr.vertexPartitions (jaxpr : LeanJaxpr) : VertexPartitions :=
+  {
+    inputs := jaxpr.inputVertices
+    outputs := jaxpr.outputVertices
+    eliminable := jaxpr.eliminableGraphVertices
+  }
 
 end Tyr.AD.JaxprLike
