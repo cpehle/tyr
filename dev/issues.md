@@ -144,8 +144,8 @@ Reviewed: 2026-03-06 (`Tyr/DiffEq/*` vs `../diffrax/diffrax/*`, `../diffrax/docs
   Refs: `Tyr/DiffEq/Integrate.lean`, `Tyr/DiffEq/SaveAt.lean`, `Tyr/DiffEq/Solver/ReversibleHeun.lean`, `../diffrax/diffrax/_integrate.py`
 - [~] `DX05` [High] Added adjoint-mode dispatch APIs with explicit unsupported-matrix reporting and implemented recursive-checkpoint recomputation/backprop, with new implicit-adjoint mode tests; forward/implicit parity still remains open.
   Refs: `Tyr/DiffEq/Adjoint/Core.lean`, `../diffrax/diffrax/_adjoint.py`
-- [~] `DX06` [Medium] Expanded Brownian support beyond scalar `Float` with shape-aware sampling (`Fin n → BM`) and pair-valued `UnsafeBrownianPath`/`VirtualBrownianTree` conveniences, with structured-control increment regression tests; broader PyTree/Lévy-area generalization is still pending.
-  Refs: `Tyr/DiffEq/Brownian.lean`, `../diffrax/diffrax/_brownian/path.py`, `../diffrax/diffrax/_brownian/tree.py`, `../diffrax/diffrax/_custom_types.py`
+- [~] `DX06` [Medium] Expanded Brownian support beyond scalar `Float` with shape-aware sampling (`Fin n → BM`) and pair-valued `UnsafeBrownianPath`/`VirtualBrownianTree` conveniences; added structured-state arithmetic instances (`(Y1 × Y2)`, `Fin n → Y`) and PyTree ODE/SDE regression solves, but broader container PyTree/Lévy-area generalization is still pending.
+  Refs: `Tyr/DiffEq/Brownian.lean`, `Tyr/DiffEq/Types.lean`, `Tests/TestDiffEq.lean`, `../diffrax/diffrax/_brownian/path.py`, `../diffrax/diffrax/_brownian/tree.py`, `../diffrax/diffrax/_custom_types.py`
 - [x] `DX07` [Medium] Solver coverage gaps closed with wrappers and umbrella exports for `SemiImplicitEuler`, `SlowRK`, `SPaRK`, `HalfSolver`, `ALIGN`, `ShOULD`, and `QUICSORT`.
   Refs: `Tyr/DiffEq/Solver/*.lean`, `Tyr/DiffEq.lean`, `../diffrax/diffrax/_solver/semi_implicit_euler.py`, `../diffrax/diffrax/_solver/slowrk.py`, `../diffrax/diffrax/_solver/spark.py`, `../diffrax/diffrax/_solver/base.py`, `../diffrax/diffrax/_solver/align.py`, `../diffrax/diffrax/_solver/should.py`, `../diffrax/diffrax/_solver/quicsort.py`
 - [~] `DX08` [Medium] Milstein now supports control-aware Jacobian-product interfaces, user-injected autodiff/JVP-style callbacks, and stronger finite-difference fallbacks for non-scalar controls, with JVP-wrapper regression tests; full autodiff parity remains pending.
@@ -160,8 +160,10 @@ Reviewed: 2026-03-06 (`Tyr/DiffEq/*` vs `../diffrax/diffrax/*`, `../diffrax/docs
   Refs: `Tyr/DiffEq/Integrate.lean`, `Tyr/DiffEq/Solution.lean`, `../diffrax/diffrax/_integrate.py`, `../diffrax/diffrax/_solution.py`
 - [x] `DX13` [Low] Added recursive PyTree term-structure parity via native product-term (`T1 × T2`) support, `TermTree` metadata propagation, and solver-side inferred tree/depth/leaf metadata.
   Refs: `Tyr/DiffEq/Term.lean`, `Tyr/DiffEq/Solver/Base.lean`, `../diffrax/diffrax/_term.py`, `../diffrax/diffrax/_solver/base.py`
-- [ ] `DX14` [Medium] Add dedicated convergence/order regression suite (ODE local/global order, SDE strong order, dense interpolation error) against analytical/reference trajectories; current tests are mostly single-step/single-trajectory correctness checks.
+- [~] `DX14` [Medium] Added initial convergence/order regressions (Euler first-order trend, RK4 high-order trend, dense interpolation error trend, EM strong-order trend, and Milstein-vs-EM pathwise advantage over seeded Brownian ensembles); full solver-by-solver order certification and broader statistical coverage are still pending.
   Refs: `Tests/TestDiffEq.lean`, `Tyr/DiffEq/Solver/*.lean`, `../diffrax/diffrax/_solver/*`
+- [ ] `DX15` [Low] Add weak-order/statistical SDE correctness tests (moment and expectation convergence over Monte Carlo ensembles); current SDE coverage emphasizes pathwise/strong-order checks only.
+  Refs: `Tests/TestDiffEq.lean`, `Tyr/DiffEq/Solver/SDE.lean`, `../diffrax/docs/*`
 
 
 ## Completed (This Pass)

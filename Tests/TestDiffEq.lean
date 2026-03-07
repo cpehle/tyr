@@ -15,6 +15,27 @@ private def getStat (name : String) (stats : List (String × Nat)) : Nat :=
   | some (_, v) => v
   | none => 0
 
+private def finalSaved {Y S C : Type} [Inhabited Y]
+    (label : String) (sol : Solution Y S C) : IO Y := do
+  match sol.ys with
+  | some ys =>
+      if ys.size > 0 then
+        pure ys[ys.size - 1]!
+      else
+        LeanTest.fail s!"{label}: empty ys"
+        pure default
+  | none =>
+      LeanTest.fail s!"{label}: expected ys"
+      pure default
+
+private def evaluateDenseFloat {S C : Type}
+    (label : String) (sol : Solution Float S C) (t : Time) : IO Float := do
+  match sol.interpolation with
+  | some interp => pure (interp.evaluate t none true)
+  | none =>
+      LeanTest.fail s!"{label}: expected dense interpolation"
+      pure 0.0
+
 /-- Basic ODE test inspired by Diffrax test_integrate.py::test_basic. -/
 @[test] def testHeunODE : IO Unit := do
   let term : ODETerm Float Unit := { vectorField := fun _t y _ => -y }
@@ -1682,6 +1703,277 @@ private def getStat (name : String) (stats : List (String × Nat)) : Nat :=
   LeanTest.assertTrue (Float.isFinite (fA.W i0) && Float.isFinite (fA.W i1))
     "UnsafeBrownianPath Fin increments should be finite"
 
+@[test] def testEulerPairStatePyTree : IO Unit := do
+  let term : ODETerm (Float × Float) Unit := {
+    vectorField := fun _t y _ => (-y.1, 2.0 * y.2)
+  }
+  let solver :=
+    Euler.solver
+      (Term := ODETerm (Float × Float) Unit)
+      (Y := (Float × Float))
+      (VF := (Float × Float))
+      (Args := Unit)
+  let sol :=
+    diffeqsolve
+      (Term := ODETerm (Float × Float) Unit)
+      (Y := (Float × Float))
+      (VF := (Float × Float))
+      (Control := Time)
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      term solver 0.0 1.0 (some 0.1) ((1.0, 1.0) : Float × Float) ()
+      (saveat := { t1 := true })
+  let y1 ← finalSaved "pair Euler PyTree" sol
+  let expected0 := Float.pow 0.9 10.0
+  let expected1 := Float.pow 1.2 10.0
+  LeanTest.assertTrue (approx y1.1 expected0 1e-6)
+    s!"Pair Euler component 0 expected {expected0}, got {y1.1}"
+  LeanTest.assertTrue (approx y1.2 expected1 1e-5)
+    s!"Pair Euler component 1 expected {expected1}, got {y1.2}"
+
+@[test] def testEulerFinStatePyTree : IO Unit := do
+  let i0 : Fin 3 := ⟨0, by decide⟩
+  let i1 : Fin 3 := ⟨1, by decide⟩
+  let i2 : Fin 3 := ⟨2, by decide⟩
+  let coeff : Fin 3 → Float := fun i =>
+    if i.1 == 0 then
+      -1.0
+    else if i.1 == 1 then
+      0.5
+    else
+      2.0
+  let term : ODETerm (Fin 3 → Float) Unit := {
+    vectorField := fun _t y _ => fun i => (coeff i) * (y i)
+  }
+  let solver :=
+    Euler.solver
+      (Term := ODETerm (Fin 3 → Float) Unit)
+      (Y := (Fin 3 → Float))
+      (VF := (Fin 3 → Float))
+      (Args := Unit)
+  let sol :=
+    diffeqsolve
+      (Term := ODETerm (Fin 3 → Float) Unit)
+      (Y := (Fin 3 → Float))
+      (VF := (Fin 3 → Float))
+      (Control := Time)
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      term solver 0.0 1.0 (some 0.1) (fun _ => (1.0 : Float)) () (saveat := { t1 := true })
+  let y1 ← finalSaved "Fin Euler PyTree" sol
+  let expected0 := Float.pow 0.9 10.0
+  let expected1 := Float.pow 1.05 10.0
+  let expected2 := Float.pow 1.2 10.0
+  LeanTest.assertTrue (approx (y1 i0) expected0 1e-6)
+    s!"Fin Euler component 0 expected {expected0}, got {y1 i0}"
+  LeanTest.assertTrue (approx (y1 i1) expected1 1e-6)
+    s!"Fin Euler component 1 expected {expected1}, got {y1 i1}"
+  LeanTest.assertTrue (approx (y1 i2) expected2 1e-5)
+    s!"Fin Euler component 2 expected {expected2}, got {y1 i2}"
+
+@[test] def testEulerMaruyamaPairStatePyTree : IO Unit := do
+  let drift : ODETerm (Float × Float) Unit := {
+    vectorField := fun _t y _ => (-y.1, 0.5 * y.2)
+  }
+  let bm : ScalarBrownianPath := { t0 := 0.0, t1 := 1.0, seed := 24680 }
+  let bmPath := (ScalarBrownianPath.toAbstract bm).toPath
+  let diffusion : ControlTerm (Float × Float) (Float × Float) Float Unit :=
+    ControlTerm.ofPath
+      (fun _t y _ => (y.1, -2.0 * y.2))
+      bmPath
+      (fun vf control => (vf.1 * control, vf.2 * control))
+  let terms : MultiTerm (ODETerm (Float × Float) Unit)
+      (ControlTerm (Float × Float) (Float × Float) Float Unit) :=
+    { term1 := drift, term2 := diffusion }
+  let solver :=
+    EulerMaruyama.solver
+      (Drift := ODETerm (Float × Float) Unit)
+      (Diffusion := ControlTerm (Float × Float) (Float × Float) Float Unit)
+      (Y := (Float × Float))
+      (VFd := (Float × Float))
+      (VFg := (Float × Float))
+      (Control := Float)
+      (Args := Unit)
+  let sol :=
+    diffeqsolve
+      (Term := MultiTerm (ODETerm (Float × Float) Unit)
+        (ControlTerm (Float × Float) (Float × Float) Float Unit))
+      (Y := (Float × Float))
+      (VF := ((Float × Float) × (Float × Float)))
+      (Control := (Time × Float))
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      terms solver 0.0 1.0 (some 1.0) ((1.0, 2.0) : Float × Float) ()
+      (saveat := { t1 := true })
+  let y1 ← finalSaved "pair EulerMaruyama PyTree" sol
+  let dW := (ScalarBrownianPath.increment bm 0.0 1.0).W
+  let expected0 := dW
+  let expected1 := 3.0 - 4.0 * dW
+  LeanTest.assertTrue (approx y1.1 expected0 1e-6)
+    s!"Pair EulerMaruyama component 0 expected {expected0}, got {y1.1}"
+  LeanTest.assertTrue (approx y1.2 expected1 1e-6)
+    s!"Pair EulerMaruyama component 1 expected {expected1}, got {y1.2}"
+
+@[test] def testEulerGlobalOrderTrend : IO Unit := do
+  let term : ODETerm Float Unit := { vectorField := fun _t y _ => -y }
+  let solver :=
+    Euler.solver (Term := ODETerm Float Unit) (Y := Float) (VF := Float) (Args := Unit)
+  let solve := fun (dt : Float) =>
+    diffeqsolve
+      (Term := ODETerm Float Unit)
+      (Y := Float)
+      (VF := Float)
+      (Control := Time)
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      term solver 0.0 1.0 (some dt) (1.0 : Float) () (saveat := { t1 := true })
+  let yCoarse ← finalSaved "Euler order coarse" (solve 0.2)
+  let yMedium ← finalSaved "Euler order medium" (solve 0.1)
+  let yFine ← finalSaved "Euler order fine" (solve 0.05)
+  let exact := Float.exp (-1.0)
+  let errCoarse := Float.abs (yCoarse - exact)
+  let errMedium := Float.abs (yMedium - exact)
+  let errFine := Float.abs (yFine - exact)
+  LeanTest.assertTrue (errCoarse > errMedium && errMedium > errFine)
+    s!"Euler errors should decrease with dt: {errCoarse}, {errMedium}, {errFine}"
+  let ratio1 := if errMedium <= 1.0e-16 then 0.0 else errCoarse / errMedium
+  let ratio2 := if errFine <= 1.0e-16 then 0.0 else errMedium / errFine
+  LeanTest.assertTrue (ratio1 > 1.5 && ratio2 > 1.5)
+    s!"Euler error ratios should show ~first-order trend: {ratio1}, {ratio2}"
+
+@[test] def testRK4GlobalOrderTrend : IO Unit := do
+  let term : ODETerm Float Unit := { vectorField := fun _t y _ => -y }
+  let solver :=
+    RK4.solver (Term := ODETerm Float Unit) (Y := Float) (VF := Float) (Args := Unit)
+  let solve := fun (dt : Float) =>
+    diffeqsolve
+      (Term := ODETerm Float Unit)
+      (Y := Float)
+      (VF := Float)
+      (Control := Time)
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      term solver 0.0 1.0 (some dt) (1.0 : Float) () (saveat := { t1 := true })
+  let yCoarse ← finalSaved "RK4 order coarse" (solve 0.25)
+  let yMedium ← finalSaved "RK4 order medium" (solve 0.125)
+  let yFine ← finalSaved "RK4 order fine" (solve 0.0625)
+  let exact := Float.exp (-1.0)
+  let errCoarse := Float.abs (yCoarse - exact)
+  let errMedium := Float.abs (yMedium - exact)
+  let errFine := Float.abs (yFine - exact)
+  LeanTest.assertTrue (errCoarse > errMedium && errMedium > errFine)
+    s!"RK4 errors should decrease with dt: {errCoarse}, {errMedium}, {errFine}"
+  let ratio1 := if errMedium <= 1.0e-16 then 0.0 else errCoarse / errMedium
+  let ratio2 := if errFine <= 1.0e-16 then 0.0 else errMedium / errFine
+  LeanTest.assertTrue (ratio1 > 8.0 && ratio2 > 8.0)
+    s!"RK4 error ratios should show high-order trend: {ratio1}, {ratio2}"
+
+@[test] def testDenseInterpolationErrorTrend : IO Unit := do
+  let term : ODETerm Float Unit := { vectorField := fun _t y _ => -y }
+  let solver :=
+    RK4.solver (Term := ODETerm Float Unit) (Y := Float) (VF := Float) (Args := Unit)
+  let solve := fun (dt : Float) =>
+    diffeqsolve
+      (Term := ODETerm Float Unit)
+      (Y := Float)
+      (VF := Float)
+      (Control := Time)
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      term solver 0.0 1.0 (some dt) (1.0 : Float) () (saveat := { dense := true, t1 := false })
+  let yCoarse ← evaluateDenseFloat "dense coarse" (solve 0.25) 0.37
+  let yFine ← evaluateDenseFloat "dense fine" (solve 0.125) 0.37
+  let exact := Float.exp (-0.37)
+  let errCoarse := Float.abs (yCoarse - exact)
+  let errFine := Float.abs (yFine - exact)
+  LeanTest.assertTrue (errCoarse > errFine)
+    s!"Dense interpolation error should decrease with dt: {errCoarse} vs {errFine}"
+  LeanTest.assertTrue (errFine < 5.0e-4)
+    s!"Dense interpolation fine error too large: {errFine}"
+
+@[test] def testSDEStrongOrderTrendAndMilsteinAdvantage : IO Unit := do
+  let mu := 0.2
+  let sigma := 0.3
+  let drift : ODETerm Float Unit := { vectorField := fun _t y _ => mu * y }
+  let solverEM :=
+    EulerMaruyama.solver
+      (Drift := ODETerm Float Unit)
+      (Diffusion := ControlTerm Float Float Float Unit)
+      (Y := Float)
+      (VFd := Float)
+      (VFg := Float)
+      (Control := Float)
+      (Args := Unit)
+  let solverMil :=
+    Milstein.solver
+      (Drift := ODETerm Float Unit)
+      (Diffusion := ControlTerm Float Float Float Unit)
+      (Y := Float)
+      (VFd := Float)
+      (VFg := Float)
+      (Control := Float)
+      (Args := Unit)
+  let seeds : Array UInt64 := #[1001, 2002, 3003, 4004, 5005, 6006, 7007, 8008]
+  let mut sumErrCoarse := 0.0
+  let mut sumErrMedium := 0.0
+  let mut sumErrFine := 0.0
+  let mut sumErrMilstein := 0.0
+  for seed in seeds do
+    let bm : VirtualBrownianTree Float := {
+      t0 := 0.0
+      t1 := 1.0
+      tol := 1.0e-6
+      maxDepth := 22
+      seed := seed
+      shape := 0.0
+    }
+    let bmPath := (VirtualBrownianTree.toAbstract bm).toPath
+    let diffusion : ControlTerm Float Float Float Unit :=
+      ControlTerm.ofPath (fun _t y _ => sigma * y) bmPath (fun vf control => vf * control)
+    let terms : MultiTerm (ODETerm Float Unit) (ControlTerm Float Float Float Unit) :=
+      { term1 := drift, term2 := diffusion }
+    let solveEM := fun (dt : Float) =>
+      diffeqsolve
+        (Term := MultiTerm (ODETerm Float Unit) (ControlTerm Float Float Float Unit))
+        (Y := Float)
+        (VF := (Float × Float))
+        (Control := (Time × Float))
+        (Args := Unit)
+        (Controller := ConstantStepSize)
+        terms solverEM 0.0 1.0 (some dt) (1.0 : Float) () (saveat := { t1 := true })
+    let solveMil := fun (dt : Float) =>
+      diffeqsolve
+        (Term := MultiTerm (ODETerm Float Unit) (ControlTerm Float Float Float Unit))
+        (Y := Float)
+        (VF := (Float × Float))
+        (Control := (Time × Float))
+        (Args := Unit)
+        (Controller := ConstantStepSize)
+        terms solverMil 0.0 1.0 (some dt) (1.0 : Float) () (saveat := { t1 := true })
+    let yCoarse ← finalSaved "EM strong coarse" (solveEM 0.25)
+    let yMedium ← finalSaved "EM strong medium" (solveEM 0.125)
+    let yFine ← finalSaved "EM strong fine" (solveEM 0.0625)
+    let yMilstein ← finalSaved "Milstein comparison" (solveMil 0.125)
+    let wT := (VirtualBrownianTree.increment bm 0.0 1.0).W
+    let exact := Float.exp ((mu - 0.5 * sigma * sigma) + sigma * wT)
+    sumErrCoarse := sumErrCoarse + Float.abs (yCoarse - exact)
+    sumErrMedium := sumErrMedium + Float.abs (yMedium - exact)
+    sumErrFine := sumErrFine + Float.abs (yFine - exact)
+    sumErrMilstein := sumErrMilstein + Float.abs (yMilstein - exact)
+  let n := Float.ofNat seeds.size
+  let errCoarse := sumErrCoarse / n
+  let errMedium := sumErrMedium / n
+  let errFine := sumErrFine / n
+  let errMilstein := sumErrMilstein / n
+  LeanTest.assertTrue (errCoarse > errMedium && errMedium > errFine)
+    s!"Mean Euler-Maruyama errors should decrease with dt: {errCoarse}, {errMedium}, {errFine}"
+  let ratio1 := if errMedium <= 1.0e-16 then 0.0 else errCoarse / errMedium
+  let ratio2 := if errFine <= 1.0e-16 then 0.0 else errMedium / errFine
+  LeanTest.assertTrue (ratio1 > 1.1 && ratio2 > 1.1)
+    s!"Mean Euler-Maruyama strong-order trend too weak: ratios {ratio1}, {ratio2}"
+  LeanTest.assertTrue (errMilstein < errMedium)
+    s!"Mean Milstein error should improve over EM at same dt: {errMilstein} vs {errMedium}"
+
 def run : IO Unit := do
   testHeunODE
   testEulerODE
@@ -1739,5 +2031,12 @@ def run : IO Unit := do
   testSaveFnTransformsOutputs
   testFailureResultMessage
   testUnsafeBrownianPathStructuredIncrements
+  testEulerPairStatePyTree
+  testEulerFinStatePyTree
+  testEulerMaruyamaPairStatePyTree
+  testEulerGlobalOrderTrend
+  testRK4GlobalOrderTrend
+  testDenseInterpolationErrorTrend
+  testSDEStrongOrderTrendAndMilsteinAdvantage
 
 end Tests.DiffEq
