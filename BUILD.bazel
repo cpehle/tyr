@@ -62,8 +62,43 @@ lean_binary(
 )
 
 lean_binary(
+    name = "RunRiemannianNanoGPT",
+    srcs = ["Examples/GPT/RunRiemannianNanoGPT.lean"],
+    deps = [":Examples"],
+    cc_deps = ["//cc:TyrC"],
+)
+
+lean_binary(
     name = "TrainNanoChat",
     srcs = ["Examples/NanoChat/TrainNanoChat.lean"],
+    deps = [":Examples"],
+    cc_deps = ["//cc:TyrC"],
+)
+
+lean_binary(
+    name = "AlphaGradRoeFlux1dA0",
+    srcs = ["Examples/AlphaGradPort/RoeFlux1dA0.lean"],
+    deps = [":Examples"],
+    cc_deps = ["//cc:TyrC"],
+)
+
+lean_binary(
+    name = "AlphaGradPortSweep",
+    srcs = ["Examples/AlphaGradPort/TaskSweep.lean"],
+    deps = [":Examples"],
+    cc_deps = ["//cc:TyrC"],
+)
+
+lean_binary(
+    name = "AlphaGradPolicyTrain",
+    srcs = ["Examples/AlphaGradPort/PolicyTrainMain.lean"],
+    deps = [":Examples"],
+    cc_deps = ["//cc:TyrC"],
+)
+
+lean_binary(
+    name = "AlphaGradPolicySweep",
+    srcs = ["Examples/AlphaGradPort/PolicySweepMain.lean"],
     deps = [":Examples"],
     cc_deps = ["//cc:TyrC"],
 )
@@ -191,6 +226,13 @@ lean_binary(
 lean_binary(
     name = "TestGPUKernels",
     srcs = ["Tests/TestGPUKernels.lean"],
+    deps = [":Tests"],
+    cc_deps = ["//cc:TyrC"],
+)
+
+lean_binary(
+    name = "RunRiemannianNanoGPTTests",
+    srcs = ["Tests/RunRiemannianNanoGPTTests.lean"],
     deps = [":Tests"],
     cc_deps = ["//cc:TyrC"],
 )
