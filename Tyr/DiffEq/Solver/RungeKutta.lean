@@ -20,6 +20,7 @@ inductive ExplicitRKDenseKind where
   | hermite
   | splitAtStage (stage : Nat) (tag : String)
   | dopri5Poly4
+  | tsit5Poly4
   deriving Repr, BEq, Inhabited
 
 structure ExplicitRK (s : Nat) where
@@ -118,6 +119,51 @@ private def dopri5Poly4DenseInfo [DiffEqSpace Y]
   else
     .hermite fallback
 
+private def tsit5Poly4DenseInfo [DiffEqSpace Y]
+    (t0 t1 : Time) (y0 : Y) (ks : Array Y) (fallback : LocalHermiteDenseInfo Y) :
+    DenseInfo Y :=
+  if ks.size == 7 then
+    -- Diffrax Tsit5 dense interpolation, rewritten into quartic power basis.
+    let c4Weights : Array Time := #[
+      -1.0530884977290216,
+      0.1017,
+      2.490627285651252793,
+      -16.54810288924490272,
+      47.37952196281928122,
+      -34.87065786149660974,
+      2.5
+    ]
+    let c3Weights : Array Time := #[
+      2.91325546182191264,
+      -0.2234,
+      -5.9410338721315048,
+      30.33818863028232116,
+      -88.17890489476640425,
+      65.09189467479367863,
+      -4.0
+    ]
+    let c2Weights : Array Time := #[
+      -2.7637061972748258,
+      0.1317,
+      3.93029623689475116,
+      -12.41107716693367635,
+      37.50931341651104134,
+      -27.89652628919728627,
+      1.5
+    ]
+    let c1Weights : Array Time := #[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+    .poly4 {
+      t0 := t0
+      t1 := t1
+      c4 := weightedSumArray c4Weights ks y0
+      c3 := weightedSumArray c3Weights ks y0
+      c2 := weightedSumArray c2Weights ks y0
+      c1 := weightedSumArray c1Weights ks y0
+      c0 := y0
+    }
+  else
+    .hermite fallback
+
 private def denseInfo {s : Nat} [DiffEqSpace Y] (rk : ExplicitRK s)
     (t0 t1 : Time) (y0 y1 : Y) (dt : Time) (ks : Array Y) (m0 m1 : Y) :
     DenseInfo Y :=
@@ -142,6 +188,8 @@ private def denseInfo {s : Nat} [DiffEqSpace Y] (rk : ExplicitRK s)
         .hermite base
   | .dopri5Poly4 =>
       dopri5Poly4DenseInfo t0 t1 y0 y1 ks base
+  | .tsit5Poly4 =>
+      tsit5Poly4DenseInfo t0 t1 y0 ks base
 
 def solver {s : Nat} {Term Y VF Args : Type}
     [TermLike Term Y VF Time Args]

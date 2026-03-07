@@ -9,7 +9,7 @@ structure Tsit5 where
   deriving Inhabited
 
 def tsit5DenseKind : ExplicitRKDenseKind :=
-  .splitAtStage 2 "tsit5-stage3-split-hermite"
+  .tsit5Poly4
 
 def Tsit5.solver {Term Y VF Args : Type}
     [TermLike Term Y VF Time Args]

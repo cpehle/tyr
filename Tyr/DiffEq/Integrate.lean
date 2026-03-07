@@ -259,8 +259,10 @@ private def maybeThrowOnFailure {Y SolverState ControllerState : Type}
     (throwOnFailure : Bool)
     (sol : Solution Y SolverState ControllerState) :
     Solution Y SolverState ControllerState :=
-  if throwOnFailure && sol.result.isFailure then
-    panic! sol.result.message
+  if throwOnFailure then
+    match sol.toExcept with
+    | .ok okSol => okSol
+    | .error _ => sol
   else
     sol
 

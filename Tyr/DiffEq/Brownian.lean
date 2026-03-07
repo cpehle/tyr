@@ -49,6 +49,9 @@ class SpaceTimeTimeLevyAreaBuild (Control BM : Type) where
 class BrownianSample (BM : Type) where
   sampleScaledNormal : PRNGKey → Float → BM
 
+private def vectorOfFn (f : Fin n → α) : Vector n α :=
+  { data := Array.ofFn f, size_eq := by simp }
+
 instance : BrownianIncrementLike (BrownianIncrement Time BM) BM where
   dt inc := inc.dt
   W inc := inc.W
@@ -89,6 +92,12 @@ instance [BrownianSample BM] : BrownianSample (Fin n → BM) where
   sampleScaledNormal key scale := fun i =>
     let idx : UInt32 := UInt32.ofNat i.1
     BrownianSample.sampleScaledNormal (BM := BM) (PRNGKey.foldIn key idx) scale
+
+instance [BrownianSample BM] : BrownianSample (Vector n BM) where
+  sampleScaledNormal key scale :=
+    vectorOfFn fun i =>
+      let idx : UInt32 := UInt32.ofNat i.1
+      BrownianSample.sampleScaledNormal (BM := BM) (PRNGKey.foldIn key idx) scale
 
 instance [DiffEqSpace BM] : DiffEqSpace (BrownianIncrement Time BM) where
   add a b := { dt := a.dt + b.dt, W := DiffEqSpace.add a.W b.W }
@@ -834,6 +843,13 @@ private def splitFin (path : VirtualBrownianTree (Fin n → BM)) (i : Fin n) :
   let childSeed := (PRNGKey.foldIn root idx).state
   mkChildPath path childSeed (path.shape i)
 
+private def splitVector (path : VirtualBrownianTree (Vector n BM)) (i : Fin n) :
+    VirtualBrownianTree BM :=
+  let root := PRNGKey.foldIn (baseKey path.seed) 0x56545645
+  let idx : UInt32 := UInt32.ofNat i.1
+  let childSeed := (PRNGKey.foldIn root idx).state
+  mkChildPath path childSeed (path.shape.get i)
+
 instance : VirtualBrownianTreeOps Float where
   increment := incrementFloatCore
   incrementSpaceTime := incrementSpaceTimeFloatCore
@@ -892,6 +908,44 @@ instance [VirtualBrownianTreeOps BM] : VirtualBrownianTreeOps (Fin n → BM) whe
         childInc.H
       K := fun i =>
         let childPath := splitFin path i
+        let childInc := VirtualBrownianTreeOps.incrementSpaceTimeTime (BM := BM) childPath t0 t1
+        childInc.K
+    }
+
+instance [VirtualBrownianTreeOps BM] : VirtualBrownianTreeOps (Vector n BM) where
+  increment path t0 t1 :=
+    {
+      dt := t1 - t0
+      W := vectorOfFn fun i =>
+        let childPath := splitVector path i
+        let childInc := VirtualBrownianTreeOps.increment (BM := BM) childPath t0 t1
+        childInc.W
+    }
+  incrementSpaceTime path t0 t1 :=
+    {
+      dt := t1 - t0
+      W := vectorOfFn fun i =>
+        let childPath := splitVector path i
+        let childInc := VirtualBrownianTreeOps.incrementSpaceTime (BM := BM) childPath t0 t1
+        childInc.W
+      H := vectorOfFn fun i =>
+        let childPath := splitVector path i
+        let childInc := VirtualBrownianTreeOps.incrementSpaceTime (BM := BM) childPath t0 t1
+        childInc.H
+    }
+  incrementSpaceTimeTime path t0 t1 :=
+    {
+      dt := t1 - t0
+      W := vectorOfFn fun i =>
+        let childPath := splitVector path i
+        let childInc := VirtualBrownianTreeOps.incrementSpaceTimeTime (BM := BM) childPath t0 t1
+        childInc.W
+      H := vectorOfFn fun i =>
+        let childPath := splitVector path i
+        let childInc := VirtualBrownianTreeOps.incrementSpaceTimeTime (BM := BM) childPath t0 t1
+        childInc.H
+      K := vectorOfFn fun i =>
+        let childPath := splitVector path i
         let childInc := VirtualBrownianTreeOps.incrementSpaceTimeTime (BM := BM) childPath t0 t1
         childInc.K
     }

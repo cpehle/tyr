@@ -83,10 +83,9 @@ def derivative [Inhabited Y] (sol : Solution Y SolverState ControllerState) (t :
 
 def ensureOkay (sol : Solution Y SolverState ControllerState) :
     Solution Y SolverState ControllerState :=
-  if sol.result.isOkay then
-    sol
-  else
-    panic! sol.result.message
+  match sol.toExcept with
+  | .ok okSol => okSol
+  | .error _ => sol
 
 end Solution
 

@@ -67,6 +67,50 @@ instance [DiffEqSpace α] : DiffEqSpace (Fin n → α) where
   sub f g := fun i => DiffEqSpace.sub (f i) (g i)
   scale s f := fun i => DiffEqSpace.scale s (f i)
 
+instance [DiffEqSpace α] : DiffEqSpace (Vector n α) where
+  add x y := Vector.zipWith DiffEqSpace.add x y
+  sub x y := Vector.zipWith DiffEqSpace.sub x y
+  scale s x := Vector.map (DiffEqSpace.scale s) x
+
+instance [DiffEqSpace α] : DiffEqSpace (List α) where
+  add x y :=
+    if x.length == y.length then
+      List.zipWith DiffEqSpace.add x y
+    else
+      panic! "DiffEqSpace.add: List length mismatch"
+  sub x y :=
+    if x.length == y.length then
+      List.zipWith DiffEqSpace.sub x y
+    else
+      panic! "DiffEqSpace.sub: List length mismatch"
+  scale s x := x.map (DiffEqSpace.scale s)
+
+instance [DiffEqSpace α] : DiffEqSpace (Array α) where
+  add x y :=
+    if x.size == y.size then
+      Array.zipWith DiffEqSpace.add x y
+    else
+      panic! "DiffEqSpace.add: Array size mismatch"
+  sub x y :=
+    if x.size == y.size then
+      Array.zipWith DiffEqSpace.sub x y
+    else
+      panic! "DiffEqSpace.sub: Array size mismatch"
+  scale s x := x.map (DiffEqSpace.scale s)
+
+instance [DiffEqSpace α] : DiffEqSpace (Option α) where
+  add x y :=
+    match x, y with
+    | some x, some y => some (DiffEqSpace.add x y)
+    | none, none => none
+    | _, _ => panic! "DiffEqSpace.add: Option shape mismatch"
+  sub x y :=
+    match x, y with
+    | some x, some y => some (DiffEqSpace.sub x y)
+    | none, none => none
+    | _, _ => panic! "DiffEqSpace.sub: Option shape mismatch"
+  scale s x := x.map (DiffEqSpace.scale s)
+
 instance : DiffEqSeminorm Float where
   rms x := Float.abs x
 
@@ -78,6 +122,21 @@ instance [DiffEqSeminorm α] : DiffEqSeminorm (Fin n → α) where
     (List.finRange n).foldl
       (fun acc i => max acc (DiffEqSeminorm.rms (x i)))
       0.0
+
+instance [DiffEqSeminorm α] : DiffEqSeminorm (Vector n α) where
+  rms x := Vector.foldl (fun acc xi => max acc (DiffEqSeminorm.rms xi)) 0.0 x
+
+instance [DiffEqSeminorm α] : DiffEqSeminorm (List α) where
+  rms x := x.foldl (fun acc xi => max acc (DiffEqSeminorm.rms xi)) 0.0
+
+instance [DiffEqSeminorm α] : DiffEqSeminorm (Array α) where
+  rms x := x.foldl (fun acc xi => max acc (DiffEqSeminorm.rms xi)) 0.0
+
+instance [DiffEqSeminorm α] : DiffEqSeminorm (Option α) where
+  rms x :=
+    match x with
+    | some x => DiffEqSeminorm.rms x
+    | none => 0.0
 
 /-! Element-wise operations used for adaptive step size control. -/
 class DiffEqElem (α : Type) where
@@ -103,6 +162,54 @@ instance [DiffEqElem α] : DiffEqElem (Fin n → α) where
   max x y := fun i => DiffEqElem.max (x i) (y i)
   addScalar s x := fun i => DiffEqElem.addScalar s (x i)
   div x y := fun i => DiffEqElem.div (x i) (y i)
+
+instance [DiffEqElem α] : DiffEqElem (Vector n α) where
+  abs x := Vector.map DiffEqElem.abs x
+  max x y := Vector.zipWith DiffEqElem.max x y
+  addScalar s x := Vector.map (DiffEqElem.addScalar s) x
+  div x y := Vector.zipWith DiffEqElem.div x y
+
+instance [DiffEqElem α] : DiffEqElem (List α) where
+  abs x := x.map DiffEqElem.abs
+  max x y :=
+    if x.length == y.length then
+      List.zipWith DiffEqElem.max x y
+    else
+      panic! "DiffEqElem.max: List length mismatch"
+  addScalar s x := x.map (DiffEqElem.addScalar s)
+  div x y :=
+    if x.length == y.length then
+      List.zipWith DiffEqElem.div x y
+    else
+      panic! "DiffEqElem.div: List length mismatch"
+
+instance [DiffEqElem α] : DiffEqElem (Array α) where
+  abs x := x.map DiffEqElem.abs
+  max x y :=
+    if x.size == y.size then
+      Array.zipWith DiffEqElem.max x y
+    else
+      panic! "DiffEqElem.max: Array size mismatch"
+  addScalar s x := x.map (DiffEqElem.addScalar s)
+  div x y :=
+    if x.size == y.size then
+      Array.zipWith DiffEqElem.div x y
+    else
+      panic! "DiffEqElem.div: Array size mismatch"
+
+instance [DiffEqElem α] : DiffEqElem (Option α) where
+  abs x := x.map DiffEqElem.abs
+  max x y :=
+    match x, y with
+    | some x, some y => some (DiffEqElem.max x y)
+    | none, none => none
+    | _, _ => panic! "DiffEqElem.max: Option shape mismatch"
+  addScalar s x := x.map (DiffEqElem.addScalar s)
+  div x y :=
+    match x, y with
+    | some x, some y => some (DiffEqElem.div x y)
+    | none, none => none
+    | _, _ => panic! "DiffEqElem.div: Option shape mismatch"
 
 private def tensorMaximum {s : Shape} (a b : T s) : T s :=
   where_ (gt a b) a b

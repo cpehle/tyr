@@ -1855,6 +1855,27 @@ private def evaluateDenseFloat {S C : Type}
   LeanTest.assertTrue (approx (f01.W i2) ((f05.W i2) + (f51.W i2)) 1e-6)
     "Fin Brownian component 2 not additive"
 
+@[test] def testBrownianVectorStructuredIncrements : IO Unit := do
+  let vecTree : VirtualBrownianTree (Vector 3 Float) := {
+    t0 := 0.0
+    t1 := 1.0
+    tol := 1.0e-3
+    seed := 44455
+    shape := torch.Vector.replicate 3 (0.0 : Float)
+  }
+  let v01 := VirtualBrownianTree.increment vecTree 0.0 1.0
+  let v05 := VirtualBrownianTree.increment vecTree 0.0 0.5
+  let v51 := VirtualBrownianTree.increment vecTree 0.5 1.0
+  let i0 : Fin 3 := ⟨0, by decide⟩
+  let i1 : Fin 3 := ⟨1, by decide⟩
+  let i2 : Fin 3 := ⟨2, by decide⟩
+  LeanTest.assertTrue (approx (v01.W.get i0) ((v05.W.get i0) + (v51.W.get i0)) 1e-6)
+    "Vector Brownian component 0 not additive"
+  LeanTest.assertTrue (approx (v01.W.get i1) ((v05.W.get i1) + (v51.W.get i1)) 1e-6)
+    "Vector Brownian component 1 not additive"
+  LeanTest.assertTrue (approx (v01.W.get i2) ((v05.W.get i2) + (v51.W.get i2)) 1e-6)
+    "Vector Brownian component 2 not additive"
+
 @[test] def testStructuredSpaceTimeLevyPairAndFin : IO Unit := do
   let pairTree : VirtualBrownianTree (Float × Float) := {
     t0 := 0.0
@@ -1909,6 +1930,39 @@ private def evaluateDenseFloat {S C : Type}
     "Fin space-time W sign failed"
   LeanTest.assertTrue (approx (f01.H i0) (-(f10.H i0)) 1e-6 && approx (f01.H i1) (-(f10.H i1)) 1e-6)
     "Fin space-time H sign failed"
+
+@[test] def testContainerArithmeticInstances : IO Unit := do
+  let xList : List Float := [1.0, 2.0, 3.0]
+  let yList : List Float := [0.5, -1.0, 4.0]
+  let zList := DiffEqSpace.add xList yList
+  let dList := DiffEqSpace.sub xList yList
+  let sList := DiffEqSpace.scale 2.0 xList
+  LeanTest.assertTrue (zList == [1.5, 1.0, 7.0]) s!"List add mismatch: {zList}"
+  LeanTest.assertTrue (dList == [0.5, 3.0, -1.0]) s!"List sub mismatch: {dList}"
+  LeanTest.assertTrue (sList == [2.0, 4.0, 6.0]) s!"List scale mismatch: {sList}"
+
+  let xArr : Array Float := #[1.0, 2.0]
+  let yArr : Array Float := #[3.0, -5.0]
+  let zArr := DiffEqSpace.add xArr yArr
+  let mArr := DiffEqElem.max xArr yArr
+  LeanTest.assertTrue (zArr == #[4.0, -3.0]) s!"Array add mismatch: {zArr}"
+  LeanTest.assertTrue (mArr == #[3.0, 2.0]) s!"Array max mismatch: {mArr}"
+
+  let xVec : Vector 3 Float := ⟨#[1.0, 2.0, 3.0], by decide⟩
+  let yVec : Vector 3 Float := ⟨#[2.0, -1.0, 0.5], by decide⟩
+  let zVec := DiffEqSpace.add xVec yVec
+  let scaledVec := DiffEqSpace.scale 0.5 zVec
+  LeanTest.assertTrue (approx (scaledVec.get ⟨0, by decide⟩) 1.5 1e-12)
+    "Vector arithmetic mismatch at index 0"
+  LeanTest.assertTrue (approx (scaledVec.get ⟨1, by decide⟩) 0.5 1e-12)
+    "Vector arithmetic mismatch at index 1"
+  LeanTest.assertTrue (approx (scaledVec.get ⟨2, by decide⟩) 1.75 1e-12)
+    "Vector arithmetic mismatch at index 2"
+
+  let someAdd := DiffEqSpace.add (some (2.0 : Float)) (some (-0.25))
+  LeanTest.assertTrue (someAdd == some 1.75) s!"Option add mismatch: {someAdd}"
+  LeanTest.assertTrue (approx (DiffEqSeminorm.rms (none : Option Float)) 0.0 1e-12)
+    "Option seminorm for none should be zero"
 
 @[test] def testMilsteinAutodiffJvpWrapper : IO Unit := do
   let drift : ODETerm Float Unit := { vectorField := fun _t y _ => -y }
@@ -2337,6 +2391,35 @@ private def evaluateDenseFloat {S C : Type}
   LeanTest.assertTrue sol.result.isFailure "dt0=0 result should be marked as failure"
   LeanTest.assertTrue (sol.result.message.contains "minimum step size")
     s!"Expected failure message to mention minimum step size, got: {sol.result.message}"
+
+@[test] def testThrowOnFailureFailureIsCatchable : IO Unit := do
+  let term : ODETerm Float Unit := { vectorField := fun _t y _ => -y }
+  let solver :=
+    Euler.solver (Term := ODETerm Float Unit) (Y := Float) (VF := Float) (Args := Unit)
+  let sol :=
+    diffeqsolve
+      (Term := ODETerm Float Unit)
+      (Y := Float)
+      (VF := Float)
+      (Control := Time)
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      term solver 0.0 1.0 (some 0.0) (1.0 : Float) ()
+      (saveat := { t1 := true })
+      (throwOnFailure := true)
+  LeanTest.assertTrue (sol.result == Result.dtMinReached)
+    "throwOnFailure=true should preserve failure result without panicking"
+  let ensured := sol.ensureOkay
+  LeanTest.assertTrue (ensured.result == sol.result)
+    "ensureOkay should preserve failure solutions without panicking"
+  match sol.toExcept with
+  | .ok _ =>
+      LeanTest.fail "Expected Solution.toExcept to return error for failed solve"
+  | .error err =>
+      LeanTest.assertTrue (err.result == Result.dtMinReached)
+        s!"Expected dtMinReached in solve error, got {repr err.result}"
+      LeanTest.assertTrue (err.message.contains "minimum step size")
+        s!"Expected dtMinReached message in solve error, got: {err.message}"
 
 @[test] def testDiffeqsolveOrErrorSuccess : IO Unit := do
   let term : ODETerm Float Unit := { vectorField := fun _t y _ => -y }
@@ -2862,6 +2945,45 @@ private def evaluateDenseFloat {S C : Type}
   LeanTest.assertTrue (errPoly < 0.75 * errHermite)
     s!"Dopri5 dense polynomial improvement should be meaningful: {errPoly} vs {errHermite}"
 
+@[test] def testTsit5DenseImprovesOverHermiteFallback : IO Unit := do
+  let term : ODETerm Float Unit := { vectorField := fun _t y _ => -y }
+  let solverPoly :=
+    Tsit5.solver (Term := ODETerm Float Unit) (Y := Float) (VF := Float) (Args := Unit)
+  let solverHermite :=
+    ExplicitRK.solver
+      (Term := ODETerm Float Unit)
+      (Y := Float)
+      (VF := Float)
+      (Args := Unit)
+      { tableau := tsit5Tableau, denseKind := .splitAtStage 2 "tsit5-stage3-split-hermite" }
+  let solvePoly :=
+    diffeqsolve
+      (Term := ODETerm Float Unit)
+      (Y := Float)
+      (VF := Float)
+      (Control := Time)
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      term solverPoly 0.0 1.0 (some 0.25) (1.0 : Float) () (saveat := { dense := true, t1 := false })
+  let solveHermite :=
+    diffeqsolve
+      (Term := ODETerm Float Unit)
+      (Y := Float)
+      (VF := Float)
+      (Control := Time)
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      term solverHermite 0.0 1.0 (some 0.25) (1.0 : Float) () (saveat := { dense := true, t1 := false })
+  let yPoly ← evaluateDenseFloat "Tsit5 dense poly" solvePoly 0.37
+  let yHermite ← evaluateDenseFloat "Tsit5 dense hermite fallback" solveHermite 0.37
+  let exact := Float.exp (-0.37)
+  let errPoly := Float.abs (yPoly - exact)
+  let errHermite := Float.abs (yHermite - exact)
+  LeanTest.assertTrue (errPoly < errHermite)
+    s!"Tsit5 dense polynomial should improve over Hermite fallback: {errPoly} vs {errHermite}"
+  LeanTest.assertTrue (errPoly < 0.9 * errHermite)
+    s!"Tsit5 dense polynomial improvement should be meaningful: {errPoly} vs {errHermite}"
+
 private def deterministicWeakSeeds (count : Nat) : Array UInt64 :=
   Id.run do
     let mut seeds := #[]
@@ -3097,7 +3219,9 @@ def run : IO Unit := do
   testEventTiePrefersTerminating
   testEventMaskExcludesLaterSameStepRoots
   testBrownianPairAndFinStructuredIncrements
+  testBrownianVectorStructuredIncrements
   testStructuredSpaceTimeLevyPairAndFin
+  testContainerArithmeticInstances
   testMilsteinAutodiffJvpWrapper
   testStratonovichMilsteinAutodiffJvpWrapper
   testControlTermToODEConversion
@@ -3120,6 +3244,7 @@ def run : IO Unit := do
   testDenseInterpolationErrorTrend
   testDopri5DenseInterpolationErrorTrend
   testDopri5DenseImprovesOverHermiteFallback
+  testTsit5DenseImprovesOverHermiteFallback
   testSDEWeakMomentConvergenceEulerMaruyama
   testSDEStrongOrderTrendAndMilsteinAdvantage
 

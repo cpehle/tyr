@@ -213,7 +213,7 @@ Reviewed: 2026-03-06 (`Tyr/DiffEq/*` vs `../diffrax/diffrax/*`, `../diffrax/docs
 
 - [~] `DX01` [High] Event parity now includes real-condition directionality (`up`/`down`/either), boolean edge-direction filtering (`false→true`/`true→false`), multi-event solve args, chosen-root-time mask commitment, and terminating-on-tie preference with regressions; richer event-tree semantics still remain.
   Refs: `Tyr/DiffEq/Integrate.lean`, `Tyr/DiffEq/Solution.lean`, `Tyr/DiffEq/RootFinder.lean`, `../diffrax/diffrax/_event.py`, `../diffrax/diffrax/_integrate.py`
-- [~] `DX02` [High] Replaced global piecewise-linear dense output with per-step interpolation assembly, upgraded RK local dense interpolation to cubic Hermite, and added solver-specific Dopri5 quartic dense interpolation; Tsit5/Kvaerno/KenCarp-specific dense formulas are still pending.
+- [~] `DX02` [High] Replaced global piecewise-linear dense output with per-step interpolation assembly, upgraded RK local dense interpolation to cubic Hermite, and added solver-specific quartic dense interpolation for both Dopri5 and Tsit5 (with Hermite-fallback comparison regressions); Kvaerno/KenCarp-specific dense formulas are still pending.
   Refs: `Tyr/DiffEq/Integrate.lean`, `Tyr/DiffEq/Interpolation.lean`, `Tyr/DiffEq/Solver/RungeKutta.lean`, `../diffrax/diffrax/_global_interpolation.py`, `../diffrax/diffrax/_local_interpolation.py`, `../diffrax/diffrax/_solver/*`
 - [~] `DX03` [High] Added integer `steps=n`, nested `SubSaveAt` aggregation, custom save transform support (`saveFn`), solve-direction monotonic validation for `saveat.ts`, and deterministic nested payload traversal/output tests (including mixed `ts+steps`); full diffrax-style `SubSaveAt` payload-tree parity is still pending.
   Refs: `Tyr/DiffEq/SaveAt.lean`, `Tyr/DiffEq/Integrate.lean`, `../diffrax/diffrax/_saveat.py`, `../diffrax/diffrax/_integrate.py`
@@ -221,7 +221,7 @@ Reviewed: 2026-03-06 (`Tyr/DiffEq/*` vs `../diffrax/diffrax/*`, `../diffrax/docs
   Refs: `Tyr/DiffEq/Integrate.lean`, `Tyr/DiffEq/SaveAt.lean`, `Tyr/DiffEq/Solver/ReversibleHeun.lean`, `../diffrax/diffrax/_integrate.py`
 - [~] `DX05` [High] Added adjoint-mode dispatch APIs with explicit unsupported-matrix reporting, recursive-checkpoint recomputation/backprop, forward-mode inferred-`dt0` support (when explicitly allowed), and improved implicit recursive-fallback diagnostics/tests; full forward/implicit parity still remains open.
   Refs: `Tyr/DiffEq/Adjoint/Core.lean`, `../diffrax/diffrax/_adjoint.py`
-- [~] `DX06` [Medium] Expanded Brownian support beyond scalar `Float` with shape-aware sampling (`Fin n → BM`), pair-valued `UnsafeBrownianPath`/`VirtualBrownianTree` conveniences, pair `VirtualBrownianTreeOps` dt normalization, structured space-time Lévy regressions, and structured-state arithmetic instances (`(Y1 × Y2)`, `Fin n → Y`); broader container PyTree/Lévy-area generalization is still pending.
+- [~] `DX06` [Medium] Expanded Brownian support beyond scalar `Float` with shape-aware sampling (`Fin n → BM`, `Vector n BM`), pair-valued `UnsafeBrownianPath`/`VirtualBrownianTree` conveniences, pair `VirtualBrownianTreeOps` dt normalization, structured space-time Lévy regressions, and broader structured-state arithmetic instances (`(Y1 × Y2)`, `Fin n → Y`, `Vector/List/Array/Option`); broader container PyTree/Lévy-area generalization is still pending.
   Refs: `Tyr/DiffEq/Brownian.lean`, `Tyr/DiffEq/Types.lean`, `Tests/TestDiffEq.lean`, `../diffrax/diffrax/_brownian/path.py`, `../diffrax/diffrax/_brownian/tree.py`, `../diffrax/diffrax/_custom_types.py`
 - [x] `DX07` [Medium] Solver coverage gaps closed with wrappers and umbrella exports for `SemiImplicitEuler`, `SlowRK`, `SPaRK`, `HalfSolver`, `ALIGN`, `ShOULD`, and `QUICSORT`.
   Refs: `Tyr/DiffEq/Solver/*.lean`, `Tyr/DiffEq.lean`, `../diffrax/diffrax/_solver/semi_implicit_euler.py`, `../diffrax/diffrax/_solver/slowrk.py`, `../diffrax/diffrax/_solver/spark.py`, `../diffrax/diffrax/_solver/base.py`, `../diffrax/diffrax/_solver/align.py`, `../diffrax/diffrax/_solver/should.py`, `../diffrax/diffrax/_solver/quicsort.py`
@@ -251,7 +251,7 @@ Reviewed: 2026-03-06 (`Tyr/DiffEq/*` vs `../diffrax/diffrax/*`, `../diffrax/docs
   Refs: `Tyr/DiffEq/Integrate.lean`, `../diffrax/diffrax/_integrate.py`, `../diffrax/diffrax/_progress_meter.py`
 - [~] `DX20` [Medium] Added `maxStepsOpt := none` unbounded-step compatibility mode with explicit save-config guards (`saveat.steps`, `saveat.dense`) and regression tests; implementation currently uses a high safety cap to preserve structural termination.
   Refs: `Tyr/DiffEq/Integrate.lean`, `../diffrax/diffrax/_integrate.py`
-- [~] `DX21` [Low] Added catchable solve-error surface (`diffeqsolveOrError` + `Solution.toExcept`) with regression tests; legacy `throwOnFailure` panic path still remains for backward compatibility.
+- [x] `DX21` [Low] Added catchable solve-error surface (`diffeqsolveOrError` + `Solution.toExcept`) and removed panic-based failure escalation from `throwOnFailure`/`ensureOkay`, with regression coverage for catchable failure semantics.
   Refs: `Tyr/DiffEq/Integrate.lean`, `Tyr/DiffEq/Solution.lean`, `Tests/TestDiffEq.lean`
 
 
