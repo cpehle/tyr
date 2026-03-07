@@ -94,6 +94,30 @@ private def assertNoSavesAfterTerminal {S C : Type}
   | none =>
       LeanTest.fail "saveat.steps: expected saved times"
 
+@[test] def testEventSaveStepsCadenceHonorsT1FlagAtEvent : IO Unit := do
+  let solNoT1 := solveLinearEvent { t1 := false, steps := (3 : Nat) }
+  let solWithT1 := solveLinearEvent { t1 := true, steps := (3 : Nat) }
+  assertEventOccurredAndMasked "saveat.steps(3,t1=false)" solNoT1
+  assertEventOccurredAndMasked "saveat.steps(3,t1=true)" solWithT1
+  assertNoSavesAfterTerminal "saveat.steps(3,t1=false)" solNoT1
+  assertNoSavesAfterTerminal "saveat.steps(3,t1=true)" solWithT1
+  match solNoT1.ts with
+  | some ts =>
+      LeanTest.assertTrue (ts.any (fun t => approx t 3.0 1.0e-12))
+        "saveat.steps(3,t1=false): expected cadence save at t=3.0"
+      LeanTest.assertTrue (!(ts.any (fun t => approx t solNoT1.t1 1.0e-4)))
+        "saveat.steps(3,t1=false): should not force terminal event time when t1=false"
+  | none =>
+      LeanTest.fail "saveat.steps(3,t1=false): expected saved times"
+  match solWithT1.ts with
+  | some ts =>
+      LeanTest.assertTrue (ts.any (fun t => approx t 3.0 1.0e-12))
+        "saveat.steps(3,t1=true): expected cadence save at t=3.0"
+      LeanTest.assertTrue (ts.any (fun t => approx t solWithT1.t1 1.0e-4))
+        "saveat.steps(3,t1=true): expected terminal event time when t1=true"
+  | none =>
+      LeanTest.fail "saveat.steps(3,t1=true): expected saved times"
+
 @[test] def testEventSaveSubsIgnorePostEventTimes : IO Unit := do
   let tsSub : SubSaveAt := { ts := some #[0.5, 3.5, 5.5] }
   let stepsSub : SubSaveAt := { steps := (2 : Nat) }
@@ -116,6 +140,7 @@ private def assertNoSavesAfterTerminal {S C : Type}
 def run : IO Unit := do
   testEventSaveTsIgnoresPostEventTimes
   testEventSaveStepsStopsAtEvent
+  testEventSaveStepsCadenceHonorsT1FlagAtEvent
   testEventSaveSubsIgnorePostEventTimes
 
 end Tests.DiffEqEventSaveParity

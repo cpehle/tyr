@@ -80,8 +80,34 @@ private def assertSavedTsYsEq {S C : Type}
     "Nested SubSaveAt container solve should succeed"
   assertSavedTsYsEq "Nested SubSaveAt container payload suppression" sol #[0.6]
 
+@[test] def testReverseTimeNestedSubSaveAtUsesPerLeafTsMonotonicity : IO Unit := do
+  let term : ODETerm Float Unit := { vectorField := fun _t _y _ => 1.0 }
+  let solver :=
+    Euler.solver (Term := ODETerm Float Unit) (Y := Float) (VF := Float) (Args := Unit)
+  let earlyLeaf : SubSaveAt := { ts := some #[0.4, 0.2] }
+  let lateLeaf : SubSaveAt := { ts := some #[0.8, 0.6] }
+  let saveat : SaveAt := {
+    t1 := false
+    -- Each leaf is monotone in reverse-time solve direction; sibling concatenation is
+    -- intentionally non-monotone and should still be accepted.
+    subs := #[earlyLeaf, lateLeaf]
+  }
+  let sol :=
+    diffeqsolve
+      (Term := ODETerm Float Unit)
+      (Y := Float)
+      (VF := Float)
+      (Control := Time)
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      term solver 1.0 0.0 (some 0.1) (1.0 : Float) () (saveat := saveat)
+  LeanTest.assertTrue (sol.result == Result.successful)
+    "Reverse-time nested SubSaveAt solve should succeed with per-leaf monotone ts"
+  assertSavedTsYsEq "Reverse-time nested SubSaveAt per-leaf ts monotonicity" sol #[0.4, 0.2, 0.8, 0.6]
+
 def run : IO Unit := do
   testSaveAtSubsIgnoresSyntheticRootPayload
   testNestedContainerSubSaveAtPayloadIgnored
+  testReverseTimeNestedSubSaveAtUsesPerLeafTsMonotonicity
 
 end Tests.DiffEqSaveAtParity

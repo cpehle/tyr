@@ -263,12 +263,6 @@ private def eventMaskHitOption {Y Args : Type}
     (mask : Array Bool) : Option (Array Bool) :=
   if events.size == 0 || !(mask.any (fun hit => hit)) then none else some mask
 
-/-!
-`max_steps=None` parity mode is implemented with a large finite cap so the core solver
-loop remains structurally terminating.
--/
-private def unboundedStepSafetyCap : Nat := 1000000
-
 private def progressMeterStart (mode : ProgressMeter) (t0 t1 : Time) : Unit := Id.run do
   if mode.textEnabled then
     if mode == .tqdm then
@@ -439,10 +433,6 @@ def diffeqsolve {Term Y VF Control Args Controller : Type}
   let saveControllerState := saveat.effectiveControllerState
   let saveMadeJump := saveat.effectiveMadeJump
   let isUnbounded := maxStepsOpt.isNone
-  let maxStepBudget :=
-    match maxStepsOpt with
-    | some n => n
-    | none => unboundedStepSafetyCap
   let saveConfigIncompatibleWithUnbounded := isUnbounded && (saveSteps || saveDense)
   let saveValue : Time → Y → Y :=
     match saveFn with
@@ -452,17 +442,18 @@ def diffeqsolve {Term Y VF Control Args Controller : Type}
     [("num_steps", 0), ("num_accepted_steps", 0), ("num_rejected_steps", 0)]
   let controllerInvalid :=
     (inferInstance : StepSizeControllerValidation Controller).validate controller t0 t1 dt0
+  let tmin := if t0 <= t1 then t0 else t1
+  let tmax := if t0 <= t1 then t1 else t0
   let outOfRange :=
-    match saveatTs with
-    | none => false
-    | some ts =>
-        let tmin := if t0 <= t1 then t0 else t1
-        let tmax := if t0 <= t1 then t1 else t0
-        ts.foldl (init := false) (fun acc t => acc || t < tmin || t > tmax)
+    payloadSubs.any (fun sub =>
+      match sub.ts with
+      | none => false
+      | some ts => ts.any (fun t => t < tmin || t > tmax))
   let badDirection :=
-    match saveatTs with
-    | none => false
-    | some ts => !(isMonotoneInSolveDirection t0 t1 ts)
+    payloadSubs.any (fun sub =>
+      match sub.ts with
+      | none => false
+      | some ts => !(isMonotoneInSolveDirection t0 t1 ts))
   if controllerInvalid.isSome || outOfRange || badDirection || saveConfigIncompatibleWithUnbounded then
     exact maybeThrowOnFailure throwOnFailure {
       t0 := t0
@@ -543,14 +534,6 @@ def diffeqsolve {Term Y VF Control Args Controller : Type}
                   let yStep := allStepYs[i]!
                   subTs := subTs.push tStep
                   subYs := subYs.push (saveValue tStep yStep)
-              match subTs.back? with
-              | some lastT =>
-                  if lastT != tf then
-                    subTs := subTs.push tf
-                    subYs := subYs.push (saveValue tf yf)
-              | none =>
-                  subTs := subTs.push tf
-                  subYs := subYs.push (saveValue tf yf)
             if sub.t1 then
               let t1AlreadySavedBySteps :=
                 if sub.steps.enabled then
@@ -638,121 +621,157 @@ def diffeqsolve {Term Y VF Control Args Controller : Type}
     let stepYsInit := #[y0]
     let eventMaskLastInit := eventMask0
     let _ := progressMeterStart progress_meter t0 t1
-    let rec loop (attempted : Nat) (accepted : Nat) (rejected : Nat) (t : Time) (y : Y)
-        (state : solver.SolverState)
-        (ctrlState : StepSizeState (StepSizeController.State (C := Controller)))
-        (madeJump : Bool)
-        (denseTs : Array Time) (denseYs : Array Y)
-        (denseSegs : Array (DenseInterpolation Y))
-        (stepTs : Array Time) (stepYs : Array Y)
-        (eventMaskAcc : Array Bool)
-        (eventMaskLastAcc : Array Bool) :
+    let loopResult :
         (Time × Y × solver.SolverState ×
           StepSizeState (StepSizeController.State (C := Controller)) ×
           Bool × Array Time × Array Y × Array (DenseInterpolation Y) ×
-          Array Time × Array Y × Result × Nat × Nat × Nat × Array Bool × Array Bool) :=
-      if attempted >= maxStepBudget then
-        (t, y, state, ctrlState, madeJump, denseTs, denseYs, denseSegs, stepTs, stepYs,
-          Result.maxStepsReached, attempted, accepted, rejected, eventMaskAcc, eventMaskLastAcc)
-      else if rejected >= maxStepBudget then
-        (t, y, state, ctrlState, madeJump, denseTs, denseYs, denseSegs, stepTs, stepYs,
-          Result.maxStepsRejected, attempted, accepted, rejected, eventMaskAcc, eventMaskLastAcc)
-      else
-        let dt := ctrlState.dt
-        let done := if dt > 0.0 then t >= t1 else t <= t1
-        if done then
-          (t, y, state, ctrlState, madeJump, denseTs, denseYs, denseSegs, stepTs, stepYs,
-            Result.successful, attempted, accepted, rejected, eventMaskAcc, eventMaskLastAcc)
-        else
-          let tCandidate := t + dt
-          let tNext :=
-            if dt > 0.0 then
-              if tCandidate > t1 then t1 else tCandidate
-            else
-              if tCandidate < t1 then t1 else tCandidate
-          let attemptedNext := attempted + 1
-          let _ := progressMeterUpdate progress_meter attemptedNext tNext
-          if tNext == t then
-            (t, y, state, ctrlState, madeJump, denseTs, denseYs, denseSegs, stepTs, stepYs,
-              Result.dtMinReached, attemptedNext, accepted, rejected, eventMaskAcc, eventMaskLastAcc)
+          Array Time × Array Y × Result × Nat × Nat × Nat × Array Bool × Array Bool) := Id.run do
+      let mut attempted := 0
+      let mut accepted := 0
+      let mut rejected := 0
+      let mut t := t0
+      let mut y := y0
+      let mut state := initState
+      let mut ctrlState := initCtrl
+      let mut madeJump := initialMadeJump
+      let mut denseTs := denseTsInit
+      let mut denseYs := denseYsInit
+      let mut denseSegs := denseSegsInit
+      let mut stepTs := stepTsInit
+      let mut stepYs := stepYsInit
+      let mut eventMaskAcc := eventMask0
+      let mut eventMaskLastAcc := eventMaskLastInit
+      let mut result := Result.successful
+      let mut continueLoop := true
+      while continueLoop do
+        match maxStepsOpt with
+        | some maxStepBudget =>
+            if attempted >= maxStepBudget then
+              result := Result.maxStepsReached
+              continueLoop := false
+            else if rejected >= maxStepBudget then
+              result := Result.maxStepsRejected
+              continueLoop := false
+        | none => pure ()
+        if continueLoop then
+          let dt := ctrlState.dt
+          let done := if dt > 0.0 then t >= t1 else t <= t1
+          if done then
+            result := Result.successful
+            continueLoop := false
           else
-            let step := solver.step terms t tNext y args state madeJump
-            if step.result != Result.successful then
-              (tNext, step.y1, step.solverState, ctrlState, madeJump, denseTs, denseYs, denseSegs,
-                stepTs, stepYs, step.result, attemptedNext, accepted, rejected,
-                eventMaskAcc, eventMaskLastAcc)
-            else
-              let decision :=
-                StepSizeController.adapt controller ctrlState t tNext y step.y1 step.yError errorOrder
-              if decision.result != Result.successful then
-                (tNext, step.y1, step.solverState, ctrlState, madeJump, denseTs, denseYs, denseSegs,
-                  stepTs, stepYs, decision.result, attemptedNext, accepted, rejected,
-                  eventMaskAcc, eventMaskLastAcc)
-              else if decision.accept then
-                let ctrlState := { dt := decision.dt, state := decision.state }
-                let denseStep := solver.interpolation step.denseInfo
-                let madeJumpNext := decision.madeJump
-                let acceptedNext := accepted + 1
-                let forward := tNext >= t
-                let stepHits : Array (StepEventHit Y) := Id.run do
-                  let mut hits : Array (StepEventHit Y) := #[]
-                  for i in [:activeEvents.size] do
-                    match activeEvents[i]? with
-                    | none => pure ()
-                    | some ev =>
-                        match stepEventHit? denseStep ev i t tNext y step.y1 args with
-                        | none => pure ()
-                        | some hit => hits := hits.push hit
-                  return hits
-                let chosenHit? := chooseStepEventHit? forward stepHits
-                let stepMaskChosen :=
-                  match chosenHit? with
-                  | none => Array.replicate activeEvents.size false
-                  | some chosen => maskAtEventTime activeEvents stepHits chosen
-                -- Only hits at the chosen event time are considered committed for this step.
-                -- Later roots in the same coarse step are re-evaluated after localization restart.
-                let eventMaskAcc := mergeEventMasks eventMaskAcc stepMaskChosen
-                let eventMaskLastAcc :=
-                  match chosenHit? with
-                  | none => eventMaskLastAcc
-                  | some _ => stepMaskChosen
-                let chosenTerminates := anyTerminatingEvent activeEvents stepMaskChosen
-                let (eventHit, chosenTime, chosenY, chosenTol) :=
-                  match chosenHit? with
-                  | none => (false, tNext, step.y1, 0.0)
-                  | some chosen => (true, chosen.time, chosen.y, chosen.tol)
-                let noProgressEvent := eventHit && hasNoTimeProgress t chosenTime chosenTol
-                let restartAtLocalized := eventHit && !chosenTerminates && !noProgressEvent
-                let stepOutTime :=
-                  if restartAtLocalized || chosenTerminates then chosenTime else tNext
-                let stepOutY :=
-                  if restartAtLocalized || chosenTerminates then chosenY else step.y1
-                let denseTs := denseTs.push stepOutTime
-                let denseYs := denseYs.push stepOutY
-                let denseSegs := denseSegs.push denseStep
-                let stepTs := stepTs.push stepOutTime
-                let stepYs := stepYs.push stepOutY
-                if eventHit then
-                  if chosenTerminates then
-                    (stepOutTime, stepOutY, step.solverState, ctrlState, true,
-                      denseTs, denseYs, denseSegs, stepTs, stepYs,
-                      Result.eventOccurred, attemptedNext, acceptedNext, rejected,
-                      eventMaskAcc, eventMaskLastAcc)
-                  else
-                    loop attemptedNext acceptedNext 0 stepOutTime stepOutY
-                      step.solverState ctrlState true
-                      denseTs denseYs denseSegs stepTs stepYs eventMaskAcc eventMaskLastAcc
-                else
-                  loop attemptedNext acceptedNext 0 tNext step.y1 step.solverState ctrlState madeJumpNext
-                    denseTs denseYs denseSegs stepTs stepYs eventMaskAcc eventMaskLastAcc
+            let tCandidate := t + dt
+            let tNext :=
+              if dt > 0.0 then
+                if tCandidate > t1 then t1 else tCandidate
               else
-                let ctrlState := { dt := decision.dt, state := decision.state }
-                loop attemptedNext accepted (rejected + 1) t y state ctrlState madeJump
-                  denseTs denseYs denseSegs stepTs stepYs eventMaskAcc eventMaskLastAcc
+                if tCandidate < t1 then t1 else tCandidate
+            let attemptedNext := attempted + 1
+            let _ := progressMeterUpdate progress_meter attemptedNext tNext
+            if tNext == t then
+              attempted := attemptedNext
+              result := Result.dtMinReached
+              continueLoop := false
+            else
+              let step := solver.step terms t tNext y args state madeJump
+              if step.result != Result.successful then
+                t := tNext
+                y := step.y1
+                state := step.solverState
+                attempted := attemptedNext
+                result := step.result
+                continueLoop := false
+              else
+                let decision :=
+                  StepSizeController.adapt controller ctrlState t tNext y step.y1 step.yError errorOrder
+                if decision.result != Result.successful then
+                  t := tNext
+                  y := step.y1
+                  state := step.solverState
+                  attempted := attemptedNext
+                  result := decision.result
+                  continueLoop := false
+                else if decision.accept then
+                  let ctrlStateNext := { dt := decision.dt, state := decision.state }
+                  let denseStep := solver.interpolation step.denseInfo
+                  let madeJumpNext := decision.madeJump
+                  let acceptedNext := accepted + 1
+                  let forward := tNext >= t
+                  let stepHits : Array (StepEventHit Y) := Id.run do
+                    let mut hits : Array (StepEventHit Y) := #[]
+                    for i in [:activeEvents.size] do
+                      match activeEvents[i]? with
+                      | none => pure ()
+                      | some ev =>
+                          match stepEventHit? denseStep ev i t tNext y step.y1 args with
+                          | none => pure ()
+                          | some hit => hits := hits.push hit
+                    return hits
+                  let chosenHit? := chooseStepEventHit? forward stepHits
+                  let stepMaskChosen :=
+                    match chosenHit? with
+                    | none => Array.replicate activeEvents.size false
+                    | some chosen => maskAtEventTime activeEvents stepHits chosen
+                  -- Only hits at the chosen event time are considered committed for this step.
+                  -- Later roots in the same coarse step are re-evaluated after localization restart.
+                  let eventMaskAccNext := mergeEventMasks eventMaskAcc stepMaskChosen
+                  let eventMaskLastAccNext :=
+                    match chosenHit? with
+                    | none => eventMaskLastAcc
+                    | some _ => stepMaskChosen
+                  let chosenTerminates := anyTerminatingEvent activeEvents stepMaskChosen
+                  let (eventHit, chosenTime, chosenY, chosenTol) :=
+                    match chosenHit? with
+                    | none => (false, tNext, step.y1, 0.0)
+                    | some chosen => (true, chosen.time, chosen.y, chosen.tol)
+                  let noProgressEvent := eventHit && hasNoTimeProgress t chosenTime chosenTol
+                  let restartAtLocalized := eventHit && !chosenTerminates && !noProgressEvent
+                  let stepOutTime :=
+                    if restartAtLocalized || chosenTerminates then chosenTime else tNext
+                  let stepOutY :=
+                    if restartAtLocalized || chosenTerminates then chosenY else step.y1
+                  let denseTsNext := denseTs.push stepOutTime
+                  let denseYsNext := denseYs.push stepOutY
+                  let denseSegsNext := denseSegs.push denseStep
+                  let stepTsNext := stepTs.push stepOutTime
+                  let stepYsNext := stepYs.push stepOutY
+                  attempted := attemptedNext
+                  accepted := acceptedNext
+                  rejected := 0
+                  state := step.solverState
+                  ctrlState := ctrlStateNext
+                  eventMaskAcc := eventMaskAccNext
+                  eventMaskLastAcc := eventMaskLastAccNext
+                  denseTs := denseTsNext
+                  denseYs := denseYsNext
+                  denseSegs := denseSegsNext
+                  stepTs := stepTsNext
+                  stepYs := stepYsNext
+                  if eventHit then
+                    if chosenTerminates then
+                      t := stepOutTime
+                      y := stepOutY
+                      madeJump := true
+                      result := Result.eventOccurred
+                      continueLoop := false
+                    else
+                      t := stepOutTime
+                      y := stepOutY
+                      madeJump := true
+                  else
+                    t := tNext
+                    y := step.y1
+                    madeJump := madeJumpNext
+                else
+                  let ctrlStateNext := { dt := decision.dt, state := decision.state }
+                  attempted := attemptedNext
+                  rejected := rejected + 1
+                  ctrlState := ctrlStateNext
+      pure
+        (t, y, state, ctrlState, madeJump, denseTs, denseYs, denseSegs, stepTs, stepYs,
+          result, attempted, accepted, rejected, eventMaskAcc, eventMaskLastAcc)
     let (tf, yf, statef, ctrlState, madeJumpf, denseTs, denseYs, denseSegs, stepTs, stepYs,
-        result, numSteps, numAcceptedSteps, numRejectedSteps, eventMaskF, eventMaskLastF) :=
-      loop 0 0 0 t0 y0 initState initCtrl initialMadeJump
-        denseTsInit denseYsInit denseSegsInit stepTsInit stepYsInit eventMask0 eventMaskLastInit
+        result, numSteps, numAcceptedSteps, numRejectedSteps, eventMaskF, eventMaskLastF) := loopResult
     let _ := progressMeterClose progress_meter result numSteps numAcceptedSteps numRejectedSteps
     let denseInterp :=
       if saveDense || saveatTs.isSome then

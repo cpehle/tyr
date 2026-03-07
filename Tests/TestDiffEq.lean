@@ -2596,6 +2596,46 @@ private def evaluateDenseFloat {S C : Type}
         LeanTest.fail "Empty ys for maxStepsOpt=none success test"
   | none => LeanTest.fail "Expected ys for maxStepsOpt=none success test"
 
+@[test] def testMaxStepsNoneCanExceedLegacySafetyCap : IO Unit := do
+  -- diffrax `_integrate.py` supports `max_steps=None` without a fixed internal cap.
+  -- Keep this above the previous Tyr compatibility cap to avoid regressions.
+  let legacyCap : Nat := 1000000
+  let targetSteps : Nat := legacyCap + 1
+  let term : ODETerm Float Unit := { vectorField := fun _t _y _ => 0.0 }
+  let solver :=
+    Euler.solver (Term := ODETerm Float Unit) (Y := Float) (VF := Float) (Args := Unit)
+  let tFinal := Float.ofNat targetSteps
+  let sol :=
+    diffeqsolve
+      (Term := ODETerm Float Unit)
+      (Y := Float)
+      (VF := Float)
+      (Control := Time)
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      term solver 0.0 tFinal (some 1.0) (0.0 : Float) ()
+      (saveat := { t1 := true })
+      (maxSteps := 3)
+      (maxStepsOpt := none)
+  let steps := getStat "num_steps" sol.stats
+  LeanTest.assertTrue (sol.result == Result.successful)
+    s!"Expected successful solve when maxStepsOpt=none exceeds legacy internal cap; got result={repr sol.result}, num_steps={steps}"
+  LeanTest.assertTrue (steps == targetSteps)
+    s!"Expected num_steps={targetSteps} in unbounded mode test, got {steps}"
+  LeanTest.assertTrue (getStat "num_accepted_steps" sol.stats == targetSteps)
+    s!"Expected num_accepted_steps={targetSteps}, got {getStat "num_accepted_steps" sol.stats}"
+  LeanTest.assertTrue (getStat "num_rejected_steps" sol.stats == 0)
+    s!"Expected num_rejected_steps=0, got {getStat "num_rejected_steps" sol.stats}"
+  match sol.ys with
+  | some ys =>
+      if ys.size > 0 then
+        let y1 := ys[ys.size - 1]!
+        LeanTest.assertTrue (approx y1 0.0 1e-12)
+          s!"Expected y(t1)=0.0 in unbounded legacy-cap regression test, got {y1}"
+      else
+        LeanTest.fail "Empty ys for maxStepsOpt=none legacy-cap regression test"
+  | none => LeanTest.fail "Expected ys for maxStepsOpt=none legacy-cap regression test"
+
 @[test] def testMaxStepsNoneRejectsSaveatSteps : IO Unit := do
   let term : ODETerm Float Unit := { vectorField := fun _t y _ => -y }
   let solver :=
@@ -3362,6 +3402,10 @@ def run : IO Unit := do
   testDiffeqsolveOrErrorSuccess
   testDiffeqsolveOrErrorFailure
   testMaxStepsReached
+  testMaxStepsNoneParitySuccess
+  testMaxStepsNoneCanExceedLegacySafetyCap
+  testMaxStepsNoneRejectsSaveatSteps
+  testMaxStepsNoneRejectsDenseSave
   testUnsafeBrownianPathStructuredIncrements
   testEulerPairStatePyTree
   testEulerFinStatePyTree
