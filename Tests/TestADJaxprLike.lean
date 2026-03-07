@@ -538,4 +538,66 @@ def testValidateOutvarAvailabilityFailure : IO Unit := do
     let hasOutErr := errs.any (fun e => e.contains "output 0 references unavailable variable ID 99")
     LeanTest.assertTrue hasOutErr s!"Expected unavailable-output diagnostic, got: {errs}"
 
+@[test]
+def testFromFnBodyCanonicalDotGeneralAndControlMetadata : IO Unit := do
+  let x0 : Lean.IR.VarId := { idx := 0 }
+  let x1 : Lean.IR.VarId := { idx := 1 }
+  let pred : Lean.IR.VarId := { idx := 2 }
+  let vDot : Lean.IR.VarId := { idx := 3 }
+  let vScan : Lean.IR.VarId := { idx := 4 }
+  let vCond : Lean.IR.VarId := { idx := 5 }
+  let params : Array Param := #[
+    { x := x0, borrow := false, ty := IRType.object },
+    { x := x1, borrow := false, ty := IRType.object },
+    { x := pred, borrow := false, ty := IRType.object }
+  ]
+  let body : FnBody :=
+    .vdecl vDot IRType.object (Expr.fap `jax.lax.dot_general #[Arg.var x0, Arg.var x1]) (
+      .vdecl vScan IRType.object (Expr.fap scanAliasOpName #[Arg.var x0, Arg.var x1, Arg.erased]) (
+        .vdecl vCond IRType.object (Expr.fap condAliasOpName #[Arg.var pred, Arg.var vScan, Arg.var vDot, Arg.erased, Arg.erased]) (
+          .ret (.var vCond)
+        )
+      )
+    )
+  match fromFnBody `test.canonical_dot_general_and_control_metadata params body with
+  | .error msg =>
+    LeanTest.fail s!"fromFnBody should lower canonical dot_general/control metadata, got: {msg}"
+  | .ok jaxpr =>
+    LeanTest.assertEqual jaxpr.eqns.size 3 "Expected three lowered equations"
+    let dotEqn := jaxpr.eqns[0]!
+    let scanEqn := jaxpr.eqns[1]!
+    let condEqn := jaxpr.eqns[2]!
+    LeanTest.assertEqual dotEqn.op kstmtDotGeneralOpName
+      "dot_general aliases should canonicalize to `kstmtDotGeneralOpName`."
+    LeanTest.assertEqual (dotEqn.params.findName? .variant) (some `jax.lax.dot_general)
+      "dot_general alias lowering should preserve raw op name in `.variant`."
+    LeanTest.assertEqual (dotEqn.params.findNats? .lhsContract) (some #[])
+      "dot_general default lhs contract should be explicit."
+    LeanTest.assertEqual (dotEqn.params.findNats? .rhsContract) (some #[])
+      "dot_general default rhs contract should be explicit."
+    LeanTest.assertEqual (dotEqn.params.findNats? .lhsBatch) (some #[])
+      "dot_general default lhs batch should be explicit."
+    LeanTest.assertEqual (dotEqn.params.findNats? .rhsBatch) (some #[])
+      "dot_general default rhs batch should be explicit."
+
+    LeanTest.assertEqual scanEqn.op scanAliasOpName
+      "scan aliases should canonicalize to `scanAliasOpName`."
+    LeanTest.assertEqual (scanEqn.params.findNat? .controlStaticArgCount) (some 1)
+      "scan lowering should record erased/static control-arg count."
+    LeanTest.assertEqual (scanEqn.params.findNat? .scanCarryInputCount) (some 1)
+      "scan lowering should record carry-input count."
+    LeanTest.assertEqual (scanEqn.params.findNat? .scanDataInputCount) (some 1)
+      "scan lowering should record data-input count."
+    LeanTest.assertEqual (scanEqn.params.findNat? .scanCarryOutputCount) (some 1)
+      "scan lowering should record carry-output count."
+
+    LeanTest.assertEqual condEqn.op condAliasOpName
+      "cond aliases should canonicalize to `condAliasOpName`."
+    LeanTest.assertEqual (condEqn.params.findNat? .controlStaticArgCount) (some 2)
+      "cond lowering should record erased/static control-arg count."
+    LeanTest.assertEqual (condEqn.params.findNat? .condPredicateCount) (some 1)
+      "cond lowering should record predicate-input count."
+    LeanTest.assertEqual (condEqn.params.findNat? .condDataInputCount) (some 2)
+      "cond lowering should record data-input count."
+
 end Tests.ADJaxprLike

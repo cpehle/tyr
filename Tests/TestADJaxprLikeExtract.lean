@@ -25,6 +25,9 @@ private def edgeWeight? (e : LocalJacEdge) : Option Float :=
   else
     none
 
+private def hasEntry (entries : Array SparseEntry) (src dst : Nat) (weight : Float := 1.0) : Bool :=
+  entries.any (fun e => e.src = src && e.dst = dst && approx e.weight weight)
+
 private def atomName (value : String) : Lean.Name :=
   Lean.Name.str Lean.Name.anonymous value
 
@@ -462,6 +465,123 @@ def testBuildAndExtractFromKStmtsStructuralSemanticsInAllSemanticsPack : IO Unit
         s!"Unexpected cumprod repr: {e.map.repr}"
 
 @[test]
+def testBuildAndExtractFromKStmtsStructuralExactSparsePayloads : IO Unit := do
+  let v0 : VarId := { idx := 0 }
+  let v1 : VarId := { idx := 1 }
+  let v2 : VarId := { idx := 2 }
+  let v3 : VarId := { idx := 3 }
+  let v4 : VarId := { idx := 4 }
+  let v5 : VarId := { idx := 5 }
+  let v6 : VarId := { idx := 6 }
+  let v7 : VarId := { idx := 7 }
+  let stmts := #[
+    KStmt.declRV v0 .Float32 3,
+    KStmt.declRT v1 .Float32 2 3 .Row,
+    KStmt.broadcast .Row v1 v0,
+    KStmt.declRV v2 .Float32 2,
+    KStmt.reduce .Sum .Col v2 v1,
+    KStmt.declRT v3 .Float32 3 2 .Row,
+    KStmt.transpose v3 v1,
+    KStmt.declRT v4 .Float32 1 3 .Row,
+    KStmt.sliceRows v4 v1 1 1,
+    KStmt.declRT v6 .Float32 1 3 .Row,
+    KStmt.sliceRows v6 v1 0 1,
+    KStmt.declRT v5 .Float32 1 6 .Row,
+    KStmt.concatCols v5 v4 v6,
+    KStmt.declRT v7 .Float32 2 3 .Row,
+    KStmt.cumsum .Col v7 v1
+  ]
+
+  let res ← runCoreM (do
+    registerKStmtAllSupportedSemanticsRules
+    buildAndExtractFromKStmts {} stmts
+  )
+  match res with
+  | .error err =>
+    LeanTest.fail s!"Structural exact-payload extraction should succeed, got: {buildExtractErrorToString err}"
+  | .ok (_jaxpr, edges) =>
+    match findEdge? edges 0 1 with
+    | none => LeanTest.fail "Missing broadcast edge 0 -> 1"
+    | some e =>
+      LeanTest.assertEqual e.map.inDim? (some 3) "Broadcast input dim should be explicit."
+      LeanTest.assertEqual e.map.outDim? (some 6) "Broadcast output dim should be explicit."
+      LeanTest.assertEqual e.map.entries.size 6 "Broadcast map should materialize six sparse entries."
+      LeanTest.assertTrue (hasEntry e.map.entries 0 0)
+        s!"Broadcast map missing expected entry src=0,dst=0: {reprStr e.map.entries}"
+      LeanTest.assertTrue (hasEntry e.map.entries 0 3)
+        s!"Broadcast map missing expected entry src=0,dst=3: {reprStr e.map.entries}"
+      LeanTest.assertTrue (hasEntry e.map.entries 2 5)
+        s!"Broadcast map missing expected entry src=2,dst=5: {reprStr e.map.entries}"
+
+    match findEdge? edges 1 2 with
+    | none => LeanTest.fail "Missing reduce edge 1 -> 2"
+    | some e =>
+      LeanTest.assertEqual e.map.inDim? (some 6) "Reduce input dim should be explicit."
+      LeanTest.assertEqual e.map.outDim? (some 2) "Reduce output dim should be explicit."
+      LeanTest.assertEqual e.map.entries.size 6 "Reduce-sum map should materialize six sparse entries."
+      LeanTest.assertTrue (hasEntry e.map.entries 0 0)
+        s!"Reduce map missing expected entry src=0,dst=0: {reprStr e.map.entries}"
+      LeanTest.assertTrue (hasEntry e.map.entries 2 0)
+        s!"Reduce map missing expected entry src=2,dst=0: {reprStr e.map.entries}"
+      LeanTest.assertTrue (hasEntry e.map.entries 5 1)
+        s!"Reduce map missing expected entry src=5,dst=1: {reprStr e.map.entries}"
+
+    match findEdge? edges 1 3 with
+    | none => LeanTest.fail "Missing transpose edge 1 -> 3"
+    | some e =>
+      LeanTest.assertEqual e.map.inDim? (some 6) "Transpose input dim should be explicit."
+      LeanTest.assertEqual e.map.outDim? (some 6) "Transpose output dim should be explicit."
+      LeanTest.assertEqual e.map.entries.size 6 "Transpose map should materialize six sparse entries."
+      LeanTest.assertTrue (hasEntry e.map.entries 1 2)
+        s!"Transpose map missing expected entry src=1,dst=2: {reprStr e.map.entries}"
+      LeanTest.assertTrue (hasEntry e.map.entries 3 1)
+        s!"Transpose map missing expected entry src=3,dst=1: {reprStr e.map.entries}"
+
+    match findEdge? edges 1 4 with
+    | none => LeanTest.fail "Missing sliceRows edge 1 -> 4"
+    | some e =>
+      LeanTest.assertEqual e.map.inDim? (some 6) "sliceRows input dim should be explicit."
+      LeanTest.assertEqual e.map.outDim? (some 3) "sliceRows output dim should be explicit."
+      LeanTest.assertEqual e.map.entries.size 3 "sliceRows map should materialize three sparse entries."
+      LeanTest.assertTrue (hasEntry e.map.entries 3 0)
+        s!"sliceRows map missing expected entry src=3,dst=0: {reprStr e.map.entries}"
+      LeanTest.assertTrue (hasEntry e.map.entries 5 2)
+        s!"sliceRows map missing expected entry src=5,dst=2: {reprStr e.map.entries}"
+
+    match findEdge? edges 4 5 with
+    | none => LeanTest.fail "Missing concat-left edge 4 -> 5"
+    | some e =>
+      LeanTest.assertEqual e.map.inDim? (some 3) "concat-left input dim should be explicit."
+      LeanTest.assertEqual e.map.outDim? (some 6) "concat-left output dim should be explicit."
+      LeanTest.assertEqual e.map.entries.size 3 "concat-left map should materialize three sparse entries."
+      LeanTest.assertTrue (hasEntry e.map.entries 2 2)
+        s!"concat-left map missing expected entry src=2,dst=2: {reprStr e.map.entries}"
+
+    match findEdge? edges 6 5 with
+    | none => LeanTest.fail "Missing concat-right edge 6 -> 5"
+    | some e =>
+      LeanTest.assertEqual e.map.inDim? (some 3) "concat-right input dim should be explicit."
+      LeanTest.assertEqual e.map.outDim? (some 6) "concat-right output dim should be explicit."
+      LeanTest.assertEqual e.map.entries.size 3 "concat-right map should materialize three sparse entries."
+      LeanTest.assertTrue (hasEntry e.map.entries 0 3)
+        s!"concat-right map missing expected entry src=0,dst=3: {reprStr e.map.entries}"
+      LeanTest.assertTrue (hasEntry e.map.entries 2 5)
+        s!"concat-right map missing expected entry src=2,dst=5: {reprStr e.map.entries}"
+
+    match findEdge? edges 1 7 with
+    | none => LeanTest.fail "Missing cumsum edge 1 -> 7"
+    | some e =>
+      LeanTest.assertEqual e.map.inDim? (some 6) "cumsum input dim should be explicit."
+      LeanTest.assertEqual e.map.outDim? (some 6) "cumsum output dim should be explicit."
+      LeanTest.assertEqual e.map.entries.size 12 "cumsum Col map should materialize prefix sparse entries."
+      LeanTest.assertTrue (hasEntry e.map.entries 0 2)
+        s!"cumsum map missing expected entry src=0,dst=2: {reprStr e.map.entries}"
+      LeanTest.assertTrue (hasEntry e.map.entries 3 4)
+        s!"cumsum map missing expected entry src=3,dst=4: {reprStr e.map.entries}"
+      LeanTest.assertTrue (hasEntry e.map.entries 5 5)
+        s!"cumsum map missing expected entry src=5,dst=5: {reprStr e.map.entries}"
+
+@[test]
 def testBuildAndExtractFromKStmtsGraphaxAlphaGradSemanticsRules : IO Unit := do
   let v0 : VarId := { idx := 0 }
   let v1 : VarId := { idx := 1 }
@@ -874,5 +994,100 @@ def testExtractDynamicAliasRules : IO Unit := do
       "dynamic_update_index_in_dim alias should emit update edge."
     LeanTest.assertTrue ((findEdge? edges 2 5).isNone)
       "dynamic_update_index_in_dim alias should not emit index edge."
+
+@[test]
+def testExtractScanAliasRuleSubjaxprPartition : IO Unit := do
+  let jaxpr : LeanJaxpr := {
+    invars := #[{ id := 10 }, { id := 11 }]
+    eqns := #[
+      {
+        op := scanAliasOpName
+        invars := #[{ id := 10 }, { id := 11 }]
+        outvars := #[{ id := 12 }, { id := 13 }]
+        params := #[
+          OpParam.mkNat .scanCarryInputCount 1,
+          OpParam.mkNat .scanDataInputCount 1,
+          OpParam.mkNat .scanCarryOutputCount 1
+        ]
+        source := { decl := `test.scan_subjaxpr_partition, line? := some 100 }
+      }
+    ]
+    outvars := #[{ id := 12 }, { id := 13 }]
+  }
+
+  let res ← runCoreM (do
+    registerGraphaxAlphaGradReductionControlAliasRules
+    extractLocalJacEdges jaxpr
+  )
+  match res with
+  | .error errs =>
+    LeanTest.fail s!"scan alias subjaxpr partition should extract successfully, got: {errs.map ruleExecutionErrorToString}"
+  | .ok edges =>
+    LeanTest.assertEqual edges.size 4
+      "scan with one carry/data input and one carry/data output should produce four dependency edges."
+    LeanTest.assertTrue (edges.any (fun e => e.src == 10 && e.dst == 12))
+      "scan carry input should connect to carry output."
+    LeanTest.assertTrue (edges.any (fun e => e.src == 10 && e.dst == 13))
+      "scan carry input should connect to data output."
+    LeanTest.assertTrue (edges.any (fun e => e.src == 11 && e.dst == 12))
+      "scan data input should connect to carry output."
+    LeanTest.assertTrue (edges.any (fun e => e.src == 11 && e.dst == 13))
+      "scan data input should connect to data output."
+    LeanTest.assertTrue
+      (edges.any (fun e =>
+        e.src == 10 && e.dst == 12 &&
+        match e.map.repr with
+        | .semantic (.unary op .x .carry) => op == scanAliasOpName
+        | _ => false))
+      "scan carry->carry edge should be carry-tagged."
+    LeanTest.assertTrue
+      (edges.any (fun e =>
+        e.src == 11 && e.dst == 13 &&
+        match e.map.repr with
+        | .semantic (.unary op .x .projection) => op == scanAliasOpName
+        | _ => false))
+      "scan data->data edge should be projection-tagged."
+
+@[test]
+def testExtractCondAliasRuleSubjaxprPartition : IO Unit := do
+  let jaxpr : LeanJaxpr := {
+    invars := #[{ id := 20 }, { id := 21 }, { id := 22 }]
+    eqns := #[
+      {
+        op := condAliasOpName
+        invars := #[{ id := 20 }, { id := 21 }, { id := 22 }]
+        outvars := #[{ id := 23 }, { id := 24 }]
+        params := #[
+          OpParam.mkNat .condPredicateCount 1,
+          OpParam.mkNat .condDataInputCount 2
+        ]
+        source := { decl := `test.cond_subjaxpr_partition, line? := some 110 }
+      }
+    ]
+    outvars := #[{ id := 23 }, { id := 24 }]
+  }
+
+  let res ← runCoreM (do
+    registerGraphaxAlphaGradReductionControlAliasRules
+    extractLocalJacEdges jaxpr
+  )
+  match res with
+  | .error errs =>
+    LeanTest.fail s!"cond alias subjaxpr partition should extract successfully, got: {errs.map ruleExecutionErrorToString}"
+  | .ok edges =>
+    LeanTest.assertEqual edges.size 4
+      "cond with two data inputs and two outputs should produce four dependency edges."
+    LeanTest.assertTrue (!(edges.any (fun e => e.src == 20)))
+      "cond should not emit predicate-input local-Jac edges."
+    LeanTest.assertTrue (edges.any (fun e => e.src == 21 && e.dst == 23))
+      "cond should connect first data input to first output."
+    LeanTest.assertTrue (edges.any (fun e => e.src == 22 && e.dst == 24))
+      "cond should connect second data input to second output."
+    LeanTest.assertTrue
+      (edges.all (fun e =>
+        match e.map.repr with
+        | .semantic (.unary op .x .projection) => op == condAliasOpName
+        | _ => false))
+      "cond data edges should be projection-tagged."
 
 end Tests.ADJaxprLikeExtract

@@ -76,6 +76,71 @@ def testKStmtRoundtripArithmeticSubset : IO Unit := do
       "KStmt -> LeanJaxpr -> KStmt should preserve arithmetic subset statements"
 
 @[test]
+def testLowerToKStmtsDotGeneralAndMma : IO Unit := do
+  let jaxpr : LeanJaxpr := {
+    invars := #[{ id := 1 }, { id := 2 }, { id := 3 }]
+    eqns := #[
+      {
+        op := kstmtDotGeneralOpName
+        invars := #[{ id := 1 }, { id := 2 }]
+        outvars := #[{ id := 4 }]
+        params := #[
+          OpParam.mkNats .lhsContract #[1],
+          OpParam.mkNats .rhsContract #[0],
+          OpParam.mkNats .lhsBatch #[],
+          OpParam.mkNats .rhsBatch #[]
+        ]
+      },
+      {
+        op := kstmtMmaOpName .AB
+        invars := #[{ id := 1 }, { id := 2 }, { id := 3 }]
+        outvars := #[{ id := 5 }]
+      }
+    ]
+    outvars := #[{ id := 5 }]
+  }
+
+  match lowerToKStmts jaxpr with
+  | .error errs =>
+    LeanTest.fail s!"dot_general/mma lowering should succeed, got:\n{renderErrors errs}"
+  | .ok lowered =>
+    let v1 : Tyr.GPU.Codegen.VarId := { idx := 1 }
+    let v2 : Tyr.GPU.Codegen.VarId := { idx := 2 }
+    let v3 : Tyr.GPU.Codegen.VarId := { idx := 3 }
+    let v4 : Tyr.GPU.Codegen.VarId := { idx := 4 }
+    let v5 : Tyr.GPU.Codegen.VarId := { idx := 5 }
+    let expected : Array KStmt := #[
+      .mm .AB v4 v1 v2,
+      .mma .AB v5 v1 v2 v3
+    ]
+    LeanTest.assertTrue (lowered == expected)
+      s!"dot_general/mma lowering mismatch; expected={reprStr expected}, got={reprStr lowered}"
+
+@[test]
+def testLowerToKStmtsOuterLikeDotGeneralAlias : IO Unit := do
+  let jaxpr : LeanJaxpr := {
+    invars := #[{ id := 7 }, { id := 8 }]
+    eqns := #[
+      {
+        op := `Graphax.dot_general
+        invars := #[{ id := 7 }, { id := 8 }]
+        outvars := #[{ id := 9 }]
+      }
+    ]
+    outvars := #[{ id := 9 }]
+  }
+
+  match lowerToKStmts jaxpr with
+  | .error errs =>
+    LeanTest.fail s!"outer-like dot_general alias lowering should succeed, got:\n{renderErrors errs}"
+  | .ok lowered =>
+    let v7 : Tyr.GPU.Codegen.VarId := { idx := 7 }
+    let v8 : Tyr.GPU.Codegen.VarId := { idx := 8 }
+    let v9 : Tyr.GPU.Codegen.VarId := { idx := 9 }
+    LeanTest.assertTrue (lowered == #[.outer v9 v7 v8])
+      s!"outer-like dot_general alias should lower to KStmt.outer, got={reprStr lowered}"
+
+@[test]
 def testFnBodyRoundtripArithmeticSubset : IO Unit := do
   let lowered ←
     match lowerToFnBody arithmeticJaxpr `test.ad_elim_lowering.fnbody_roundtrip with
