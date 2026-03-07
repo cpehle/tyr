@@ -6,6 +6,35 @@ open torch.mctxdag
 private def approx (a b : Float) (tol : Float := 1e-6) : Bool :=
   Float.abs (a - b) < tol
 
+private def intToNatNonneg (x : Int) : Nat :=
+  if x < 0 then 0 else Int.toNat x
+
+private def deepestLeaf [BEq K] [Hashable K] (tree : DagTree S K E) : Nat × Nat := Id.run do
+  let mut stack : Array (Nat × Nat) := #[(ROOT_INDEX, 0)]
+  let mut bestNode := ROOT_INDEX
+  let mut bestDepth := 0
+  let mut bestVisits := tree.nodeVisits.getD ROOT_INDEX 0
+
+  while !stack.isEmpty do
+    let some (node, depth) := stack.back? | break
+    stack := stack.pop
+
+    let mut hasChild := false
+    for a in [:tree.numActions] do
+      let child := (tree.childrenIndex.getD node #[]).getD a UNVISITED
+      if child != UNVISITED then
+        hasChild := true
+        stack := stack.push (intToNatNonneg child, depth + 1)
+
+    if !hasChild then
+      let visits := tree.nodeVisits.getD node 0
+      if depth > bestDepth || (depth = bestDepth && visits > bestVisits) then
+        bestNode := node
+        bestDepth := depth
+        bestVisits := visits
+
+  return (bestNode, bestDepth)
+
 private def chooseLeastVisitedAction [BEq K] [Hashable K]
     (tree : DagTree S K E) (nodeIndex : Nat) : Nat :=
   let visits := tree.childrenVisits.getD nodeIndex #[]
@@ -127,3 +156,42 @@ def testMctxDagResetSearchTree : IO Unit := do
   LeanTest.assertTrue (reset.keyToNode.isEmpty) "Reset DAG tree should clear transposition table"
   LeanTest.assertTrue ((List.range reset.nodeVisits.size).all fun i => reset.nodeVisits.getD i 1 = 0)
     "Reset DAG tree should clear node visits"
+
+@[test]
+def testMctxDagGumbelPolicyRespectsInvalidMask : IO Unit := do
+  let root : RootFnOutput UInt64 := {
+    priorLogits := #[0.0, -1.0, 2.0, 3.0]
+    value := -5.0
+    embedding := 42
+  }
+  let rewards : Array Float := #[20.0, 3.0, -1.0, 10.0]
+  let recurrent : RecurrentFn Unit UInt64 := fun _ _ action emb =>
+    let nextEmb := emb * 131 + UInt64.ofNat (action + 1)
+    ({ reward := rewards.getD action 0.0, discount := 0.0, priorLogits := #[0.0, 0.0, 0.0, 0.0], value := 0.0 }, nextEmb)
+
+  let invalid : Array Bool := #[true, false, false, true]
+  let out := gumbelMuZeroPolicyDag
+    (params := ())
+    (rngKey := 17)
+    (root := root)
+    (recurrentFn := recurrent)
+    (keyFn := id)
+    (numSimulations := 17)
+    (invalidActions := some invalid)
+    (maxDepth := some 3)
+    (qtransform := fun t i => qtransformCompletedByMixValue t i (valueScale := 0.05) (maxvisitInit := 60.0) (rescaleValues := true))
+    (gumbelScale := 1.0)
+
+  LeanTest.assertTrue (out.action = 1 || out.action = 2)
+    s!"Expected valid action among considered arms, got {out.action}"
+
+  let w := out.actionWeights
+  LeanTest.assertTrue (w.getD 0 1.0 < 1e-8 && w.getD 3 1.0 < 1e-8)
+    "Invalid actions should have near-zero weight"
+
+  let summary := out.searchTree.summary
+  LeanTest.assertEqual (summary.visitCounts.getD 0 999) 0 "Invalid action 0 should not be visited"
+  LeanTest.assertEqual (summary.visitCounts.getD 3 999) 0 "Invalid action 3 should not be visited"
+
+  let (_leaf, depth) := deepestLeaf out.searchTree
+  LeanTest.assertTrue (depth ≤ 3) s!"Search depth should respect max_depth=3, got {depth}"
