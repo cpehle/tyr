@@ -864,6 +864,12 @@ private def splitListIdx [Inhabited BM] (path : VirtualBrownianTree (List BM)) (
   let childSeed := (PRNGKey.foldIn root idx).state
   mkChildPath path childSeed (path.shape.getD i default)
 
+private def splitOptionSome (path : VirtualBrownianTree (Option BM)) (shape : BM) :
+    VirtualBrownianTree BM :=
+  let root := PRNGKey.foldIn (baseKey path.seed) 0x56544f50
+  let childSeed := (PRNGKey.foldIn root 1).state
+  mkChildPath path childSeed shape
+
 instance : VirtualBrownianTreeOps Float where
   increment := incrementFloatCore
   incrementSpaceTime := incrementSpaceTimeFloatCore
@@ -1055,6 +1061,31 @@ instance instVirtualBrownianTreeOpsList {BM : Type}
     }
     let inc := VirtualBrownianTreeOps.incrementSpaceTimeTime (BM := Array BM) arrayPath t0 t1
     { dt := inc.dt, W := inc.W.toList, H := inc.H.toList, K := inc.K.toList }
+
+instance instVirtualBrownianTreeOpsOption {BM : Type}
+    [VirtualBrownianTreeOps BM] :
+    VirtualBrownianTreeOps (Option BM) where
+  increment path t0 t1 :=
+    match path.shape with
+    | none => { dt := t1 - t0, W := none }
+    | some shape =>
+        let childPath := splitOptionSome path shape
+        let inc := VirtualBrownianTreeOps.increment (BM := BM) childPath t0 t1
+        { dt := inc.dt, W := some inc.W }
+  incrementSpaceTime path t0 t1 :=
+    match path.shape with
+    | none => { dt := t1 - t0, W := none, H := none }
+    | some shape =>
+        let childPath := splitOptionSome path shape
+        let inc := VirtualBrownianTreeOps.incrementSpaceTime (BM := BM) childPath t0 t1
+        { dt := inc.dt, W := some inc.W, H := some inc.H }
+  incrementSpaceTimeTime path t0 t1 :=
+    match path.shape with
+    | none => { dt := t1 - t0, W := none, H := none, K := none }
+    | some shape =>
+        let childPath := splitOptionSome path shape
+        let inc := VirtualBrownianTreeOps.incrementSpaceTimeTime (BM := BM) childPath t0 t1
+        { dt := inc.dt, W := some inc.W, H := some inc.H, K := some inc.K }
 
 def increment [VirtualBrownianTreeOps BM] (path : VirtualBrownianTree BM) (t0 t1 : Time) :
     BrownianIncrement Time BM :=
