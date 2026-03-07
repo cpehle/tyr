@@ -143,8 +143,7 @@ def testManifoldUpdatableSequentialComposes : IO Unit := do
   let g1b ← randn #[16] false
   let g2w ← randn #[16, 16] false
   let g2b ← randn #[16] false
-  let grad : ManifoldUpdatable.Grad (Sequential (StiefelLinear 8 16) (GrassmannLinear 16 16)) :=
-    ({ weight := g1w, bias := some g1b }, { weight := g2w, bias := some g2b })
+  let grad := ((g1w, some g1b), (g2w, some g2b))
 
   let net' := ManifoldUpdatable.step net grad 0.02
 
@@ -166,8 +165,7 @@ def testManifoldUpdatablePairComposes : IO Unit := do
 
   let gw ← randn #[10, 6] false
   let gv ← randn #[6] false
-  let grad : ManifoldUpdatable.Grad (StiefelLinear 6 10 × HyperbolicVector 5) :=
-    ({ weight := gw, bias := none }, gv)
+  let grad := ((gw, none), gv)
 
   let params' := ManifoldUpdatable.step params grad 0.01
 
