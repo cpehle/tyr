@@ -444,10 +444,101 @@ private def finalSaved {S C : Type}
   LeanTest.assertTrue (approx yJvp expected 5.0e-7)
     s!"Milstein JVP qv=0 fallback (VF!=Y) should preserve Ito -dt correction: {expected} vs {yJvp}"
 
+/--
+Near-zero quadratic-variation parity for Stratonovich Milstein with `VF != Y`.
+This targets the same JVP fallback corner as diffrax Milstein JVP logic:
+`../diffrax/diffrax/_solver/milstein.py`.
+-/
+@[test] def testStratonovichMilsteinAutodiffJvpTinyQuadraticVariationVfNotY : IO Unit := do
+  let drift : ODETerm Float Unit := { vectorField := fun _t _y _ => 0.0 }
+  let path := AbstractPath.linearInterpolation 0.0 1.0 (0.0 : Float) (1.0e-8 : Float)
+  let diffusionBase : DiffusionTerm Float (Float × Float) Float Unit :=
+    DiffusionTerm.ofPath
+      (fun _t y _ => (y * y, 0.0))
+      path
+      (fun vf control => vf.1 * control)
+      (fun _t y _ => 2.0 * y * y * y)
+  let diffusionJvp :
+      AutodiffJvpJacobianDiffusion
+        (DiffusionTerm Float (Float × Float) Float Unit) Float Float Unit :=
+    withAutodiffJvpJacobianProd diffusionBase
+      (fun _t y _args control tangent => (2.0 * y * tangent) * control)
+
+  let termsBase : MultiTerm (ODETerm Float Unit) (DiffusionTerm Float (Float × Float) Float Unit) := {
+    term1 := drift
+    term2 := diffusionBase
+  }
+  let termsJvp :
+      MultiTerm (ODETerm Float Unit)
+        (AutodiffJvpJacobianDiffusion
+          (DiffusionTerm Float (Float × Float) Float Unit) Float Float Unit) := {
+    term1 := drift
+    term2 := diffusionJvp
+  }
+
+  let solverBase :=
+    StratonovichMilstein.solver
+      (Drift := ODETerm Float Unit)
+      (Diffusion := DiffusionTerm Float (Float × Float) Float Unit)
+      (Y := Float)
+      (VFd := Float)
+      (VFg := (Float × Float))
+      (Control := Float)
+      (Args := Unit)
+  let solverJvp :=
+    StratonovichMilstein.solver
+      (Drift := ODETerm Float Unit)
+      (Diffusion := AutodiffJvpJacobianDiffusion
+        (DiffusionTerm Float (Float × Float) Float Unit) Float Float Unit)
+      (Y := Float)
+      (VFd := Float)
+      (VFg := (Float × Float))
+      (Control := Float)
+      (Args := Unit)
+
+  let y0 := 1000.0
+  let solveBase :=
+    diffeqsolve
+      (Term := MultiTerm (ODETerm Float Unit) (DiffusionTerm Float (Float × Float) Float Unit))
+      (Y := Float)
+      (VF := (Float × (Float × Float)))
+      (Control := (Time × Float))
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      termsBase solverBase 0.0 1.0 (some 1.0) y0 () (saveat := { t1 := true })
+  let solveJvp :=
+    diffeqsolve
+      (Term := MultiTerm (ODETerm Float Unit)
+        (AutodiffJvpJacobianDiffusion
+          (DiffusionTerm Float (Float × Float) Float Unit) Float Float Unit))
+      (Y := Float)
+      (VF := (Float × (Float × Float)))
+      (Control := (Time × Float))
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      termsJvp solverJvp 0.0 1.0 (some 1.0) y0 () (saveat := { t1 := true })
+
+  let yBase ← finalSaved "Stratonovich Milstein tiny-qv base VF!=Y" solveBase
+  let yJvp ← finalSaved "Stratonovich Milstein tiny-qv JVP VF!=Y" solveJvp
+
+  let dControl : Float := path.increment 0.0 1.0
+  let qv := MilsteinControl.quadraticVariation dControl
+  let g0 := y0 * y0 * dControl
+  let gg0 := 2.0 * y0 * y0 * y0
+  let expected := y0 + g0 + (0.5 * qv) * gg0
+
+  LeanTest.assertTrue (approx yBase expected 1.0e-10)
+    s!"Stratonovich Milstein exact diffusion Jacobian should match analytic tiny-qv value: {expected} vs {yBase}"
+  LeanTest.assertTrue (approx yJvp yBase 1.0e-8)
+    s!"Stratonovich Milstein tiny-qv JVP fallback (VF!=Y) parity mismatch: expected {yBase}, got {yJvp}"
+  LeanTest.assertTrue (approx yJvp expected 1.0e-8)
+    s!"Stratonovich Milstein tiny-qv JVP fallback (VF!=Y) should match analytic value: {expected} vs {yJvp}"
+
 def run : IO Unit := do
   testMilsteinFiniteDiffFallbackScalarParity
   testMilsteinFiniteDiffFallbackVectorControlParity
   testMilsteinAutodiffJvpZeroQuadraticVariationFallback
   testMilsteinAutodiffJvpZeroQuadraticVariationFallbackVfNotY
+  testStratonovichMilsteinAutodiffJvpTinyQuadraticVariationVfNotY
 
 end Tests.DiffEqMilsteinAutodiffParity
