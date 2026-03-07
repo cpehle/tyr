@@ -92,11 +92,26 @@ private def rootSubSaveAt (saveat : SaveAt) : SubSaveAt := {
 private def allSubs (saveat : SaveAt) : Array SubSaveAt :=
   SaveAt.SubSaveAt.flatten (rootSubSaveAt saveat)
 
+private def payloadRoots (saveat : SaveAt) : Array SubSaveAt :=
+  if saveat.subs.size == 0 then
+    #[rootSubSaveAt saveat]
+  else
+    saveat.subs
+
+private def payloadTreeSubs (saveat : SaveAt) : Array SubSaveAt := Id.run do
+  let mut out : Array SubSaveAt := #[]
+  for root in payloadRoots saveat do
+    out := out ++ SaveAt.SubSaveAt.flatten root
+  return out
+
+private def payloadLeaves (saveat : SaveAt) : Array SubSaveAt :=
+  (payloadTreeSubs saveat).filter (fun sub => sub.subs.size == 0)
+
 private def hasPayloadOutput (sub : SubSaveAt) : Bool :=
   sub.t0 || sub.t1 || sub.ts.isSome || sub.steps.enabled
 
 def payloadSubs (saveat : SaveAt) : Array SubSaveAt :=
-  (allSubs saveat).filter hasPayloadOutput
+  (payloadLeaves saveat).filter hasPayloadOutput
 
 private def appendTs (acc : Array Time) (ts : Option (Array Time)) : Array Time :=
   match ts with
@@ -104,14 +119,14 @@ private def appendTs (acc : Array Time) (ts : Option (Array Time)) : Array Time 
   | none => acc
 
 def effectiveT0 (saveat : SaveAt) : Bool :=
-  (allSubs saveat).any (fun sub => sub.t0)
+  (payloadLeaves saveat).any (fun sub => sub.t0)
 
 def effectiveT1 (saveat : SaveAt) : Bool :=
-  (allSubs saveat).any (fun sub => sub.t1)
+  (payloadLeaves saveat).any (fun sub => sub.t1)
 
 def stepCadences (saveat : SaveAt) : Array Nat := Id.run do
   let mut cadences : Array Nat := #[]
-  for sub in allSubs saveat do
+  for sub in payloadLeaves saveat do
     let cadence : Nat := sub.steps
     if cadence != 0 then
       cadences := cadences.push cadence
@@ -132,7 +147,7 @@ def shouldSaveAcceptedStep (saveat : SaveAt) (acceptedSteps : Nat) : Bool :=
 def effectiveTs (saveat : SaveAt) : Option (Array Time) :=
   let ts := Id.run do
     let mut out : Array Time := #[]
-    for sub in allSubs saveat do
+    for sub in payloadLeaves saveat do
       out := appendTs out sub.ts
     return out
   if ts.size == 0 then none else some ts
