@@ -507,20 +507,65 @@ private def binaryBroadcastJacPair
       defaultPair
 
 private def reduceStructuralRule (op : ReduceOp) (axis : ReduceAxis) : LocalJacRule :=
-  unarySymbolicRule
-    (kstmtReduceOpName op axis)
-    (reduceJacTag op axis)
+  fun eqn _ctx => do
+    let opName := kstmtReduceOpName op axis
+    let (inv, outv) ← requireUnaryShape opName eqn
+    let tag := reduceJacTag op axis
+    let map :=
+      match op with
+      | .Sum =>
+        match shapeRowsCols? inv, varFlatDim? inv, varFlatDim? outv with
+        | some (rows, cols), some inDim, some outDim =>
+          if inDim = 0 || outDim = 0 then
+            unaryJacMapForVars inv outv tag 1.0
+          else
+            buildSparseMap tag inDim outDim (reduceSumEntries axis rows cols outDim)
+        | _, _, _ =>
+          unaryJacMapForVars inv outv tag 1.0
+      | _ =>
+        unaryJacMapForVars inv outv tag 1.0
+    .ok #[{ src := inv.id, dst := outv.id, map := map }]
 
 private def reduceAccumStructuralRule (op : ReduceOp) (axis : ReduceAxis) : LocalJacRule :=
-  binarySymbolicRule
-    (kstmtReduceAccumOpName op axis)
-    (reduceAccumSrcJacTag op axis, 1.0)
-    (reduceAccumAccumJacTag op axis, 1.0)
+  fun eqn _ctx => do
+    let opName := kstmtReduceAccumOpName op axis
+    let (srcv, accv, outv) ← requireBinaryShape opName eqn
+    let srcTag := reduceAccumSrcJacTag op axis
+    let accTag := reduceAccumAccumJacTag op axis
+    let srcMap :=
+      match op with
+      | .Sum =>
+        match shapeRowsCols? srcv, varFlatDim? srcv, varFlatDim? outv with
+        | some (rows, cols), some inDim, some outDim =>
+          if inDim = 0 || outDim = 0 then
+            binaryJacMapForVars srcv outv srcTag 1.0
+          else
+            buildSparseMap srcTag inDim outDim (reduceSumEntries axis rows cols outDim)
+        | _, _, _ =>
+          binaryJacMapForVars srcv outv srcTag 1.0
+      | _ =>
+        binaryJacMapForVars srcv outv srcTag 1.0
+    let accMap := binaryJacMapForVars accv outv accTag 1.0
+    .ok #[
+      { src := srcv.id, dst := outv.id, map := srcMap },
+      { src := accv.id, dst := outv.id, map := accMap }
+    ]
 
 private def broadcastStructuralRule (axis : BroadcastAxis) : LocalJacRule :=
-  unarySymbolicRule
-    (kstmtBroadcastOpName axis)
-    (broadcastJacTag axis)
+  fun eqn _ctx => do
+    let opName := kstmtBroadcastOpName axis
+    let (inv, outv) ← requireUnaryShape opName eqn
+    let tag := broadcastJacTag axis
+    let map :=
+      match shapeRowsCols? outv, varFlatDim? inv, varFlatDim? outv with
+      | some (outRows, outCols), some inDim, some outDim =>
+        if inDim = 0 || outDim = 0 then
+          unaryJacMapForVars inv outv tag 1.0
+        else
+          buildSparseMap tag inDim outDim (broadcastEntries axis inDim outRows outCols)
+      | _, _, _ =>
+        unaryJacMapForVars inv outv tag 1.0
+    .ok #[{ src := inv.id, dst := outv.id, map := map }]
 
 private def binaryBroadcastStructuralRule (op : BinaryOp) (axis : BroadcastAxis) : LocalJacRule :=
   let pair := binaryBroadcastJacPair op axis
@@ -530,7 +575,19 @@ private def binaryBroadcastStructuralRule (op : BinaryOp) (axis : BroadcastAxis)
     pair.2
 
 private def transposeStructuralRule : LocalJacRule :=
-  unarySymbolicRule kstmtTransposeOpName (.semantic (.transpose .x .permute))
+  fun eqn _ctx => do
+    let (inv, outv) ← requireUnaryShape kstmtTransposeOpName eqn
+    let tag : Tyr.AD.Sparse.SparseMapTag := .semantic (.transpose .x .permute)
+    let map :=
+      match shapeRowsCols? inv, varFlatDim? inv, varFlatDim? outv with
+      | some (rows, cols), some inDim, some outDim =>
+        if inDim = 0 || outDim = 0 || inDim != outDim || inDim != rows * cols then
+          unaryJacMapForVars inv outv tag 1.0
+        else
+          buildSparseMap tag inDim outDim (transposeEntries rows cols)
+      | _, _, _ =>
+        unaryJacMapForVars inv outv tag 1.0
+    .ok #[{ src := inv.id, dst := outv.id, map := map }]
 
 private def swapLayoutStructuralRule : LocalJacRule :=
   unarySymbolicRule kstmtSwapLayoutOpName (.semantic (.swapLayout .x .layoutPermute))
@@ -539,16 +596,60 @@ private def convertStructuralRule : LocalJacRule :=
   unarySymbolicRule kstmtConvertOpName (.semantic (.convert .x .cast))
 
 private def sliceRowsStructuralRule : LocalJacRule :=
-  unarySymbolicRule kstmtSliceRowsOpName (.semantic (.sliceRows .x .projection))
+  fun eqn _ctx => do
+    let (inv, outv) ← requireUnaryShape kstmtSliceRowsOpName eqn
+    let tag : Tyr.AD.Sparse.SparseMapTag := .semantic (.sliceRows .x .projection)
+    let map :=
+      match shapeRowsCols? inv, shapeRowsCols? outv, varFlatDim? inv, varFlatDim? outv with
+      | some (rows, cols), some (outRows, outCols), some inDim, some outDim =>
+        let startRow := (eqn.params.findNat? .startRow).getD 0
+        buildSparseMap tag inDim outDim (sliceRowsEntries rows cols startRow outRows outCols)
+      | _, _, _, _ =>
+        unaryJacMapForVars inv outv tag 1.0
+    .ok #[{ src := inv.id, dst := outv.id, map := map }]
 
 private def sliceColsStructuralRule : LocalJacRule :=
-  unarySymbolicRule kstmtSliceColsOpName (.semantic (.sliceCols .x .projection))
+  fun eqn _ctx => do
+    let (inv, outv) ← requireUnaryShape kstmtSliceColsOpName eqn
+    let tag : Tyr.AD.Sparse.SparseMapTag := .semantic (.sliceCols .x .projection)
+    let map :=
+      match shapeRowsCols? inv, shapeRowsCols? outv, varFlatDim? inv, varFlatDim? outv with
+      | some (rows, cols), some (outRows, outCols), some inDim, some outDim =>
+        let startCol := (eqn.params.findNat? .startCol).getD 0
+        buildSparseMap tag inDim outDim (sliceColsEntries rows cols startCol outRows outCols)
+      | _, _, _, _ =>
+        unaryJacMapForVars inv outv tag 1.0
+    .ok #[{ src := inv.id, dst := outv.id, map := map }]
 
 private def concatColsStructuralRule : LocalJacRule :=
-  binarySymbolicRule
-    kstmtConcatColsOpName
-    (.semantic (.concatCols .lhs .inject), 1.0)
-    (.semantic (.concatCols .rhs .inject), 1.0)
+  fun eqn _ctx => do
+    let (lhs, rhs, outv) ← requireBinaryShape kstmtConcatColsOpName eqn
+    let lhsTag : Tyr.AD.Sparse.SparseMapTag := .semantic (.concatCols .lhs .inject)
+    let rhsTag : Tyr.AD.Sparse.SparseMapTag := .semantic (.concatCols .rhs .inject)
+    let lhsMap :=
+      match shapeRowsCols? lhs, shapeRowsCols? outv, varFlatDim? lhs, varFlatDim? outv with
+      | some (rows, lhsCols), some (outRows, outCols), some inDim, some outDim =>
+        if rows != outRows then
+          binaryJacMapForVars lhs outv lhsTag 1.0
+        else
+          buildSparseMap lhsTag inDim outDim (concatColsEntriesLhs rows lhsCols outCols)
+      | _, _, _, _ =>
+        binaryJacMapForVars lhs outv lhsTag 1.0
+    let rhsMap :=
+      match shapeRowsCols? lhs, shapeRowsCols? rhs, shapeRowsCols? outv,
+          varFlatDim? rhs, varFlatDim? outv with
+      | some (_rows, lhsCols), some (rhsRows, rhsCols), some (outRows, outCols), some inDim, some outDim =>
+        if rhsRows != outRows then
+          binaryJacMapForVars rhs outv rhsTag 1.0
+        else
+          buildSparseMap rhsTag inDim outDim
+            (concatColsEntriesRhs rhsRows rhsCols outCols lhsCols)
+      | _, _, _, _, _ =>
+        binaryJacMapForVars rhs outv rhsTag 1.0
+    .ok #[
+      { src := lhs.id, dst := outv.id, map := lhsMap },
+      { src := rhs.id, dst := outv.id, map := rhsMap }
+    ]
 
 private def outerStructuralRule : LocalJacRule :=
   binarySymbolicRule
@@ -713,32 +814,76 @@ private def selectNAliasRule (opName : OpName) : LocalJacRule :=
           }
         .ok edges
 
+private def sliceWindow {α} (xs : Array α) (start count : Nat) : Array α :=
+  let lo := min start xs.size
+  let hi := min (lo + count) xs.size
+  xs.extract lo hi
+
 private def condAliasRule (opName : OpName) : LocalJacRule :=
   fun eqn _ctx => do
-    let (invars, outv) ← requireAtLeastOneInputOneOutput opName eqn
-    if invars.size < 2 then
-      .error (.malformedEqn s!"Control-flow rule `{opName}` expects predicate plus at least one data input, got {invars.size}.")
+    if eqn.outvars.isEmpty then
+      .error (.malformedEqn s!"Control-flow rule `{opName}` expects at least one output variable, got 0.")
     else
+      let predDefault := if eqn.invars.isEmpty then 0 else 1
+      let predCount :=
+        min ((eqn.params.findNat? .condPredicateCount).getD predDefault) eqn.invars.size
+      let dataInvars := sliceWindow eqn.invars predCount (eqn.invars.size - predCount)
       let mut edges : Array LocalJacEdge := #[]
-      for i in [1:invars.size] do
-        let inv := invars[i]!
-        edges := edges.push {
-          src := inv.id
-          dst := outv.id
-          map := binaryJacMapForVars inv outv (.semantic (.unary opName .x .projection)) 1.0
-        }
+      for outv in eqn.outvars do
+        for inv in dataInvars do
+          edges := edges.push {
+            src := inv.id
+            dst := outv.id
+            map := binaryJacMapForVars inv outv (.semantic (.unary opName .x .projection)) 1.0
+          }
       .ok edges
 
 private def scanAliasRule (opName : OpName) : LocalJacRule :=
   fun eqn _ctx => do
-    let (invars, outv) ← requireAtLeastOneInputOneOutput opName eqn
-    let edges := invars.map fun inv =>
-      {
-        src := inv.id
-        dst := outv.id
-        map := binaryJacMapForVars inv outv (.semantic (.unary opName .x .carry)) 1.0
-      }
-    .ok edges
+    if eqn.outvars.isEmpty then
+      .error (.malformedEqn s!"Control-flow rule `{opName}` expects at least one output variable, got 0.")
+    else
+      let carryDefault := if eqn.invars.isEmpty then 0 else 1
+      let carryCount :=
+        min ((eqn.params.findNat? .scanCarryInputCount).getD carryDefault) eqn.invars.size
+      let carryInvars := sliceWindow eqn.invars 0 carryCount
+      let dataInvars := sliceWindow eqn.invars carryCount (eqn.invars.size - carryCount)
+
+      let carryOutDefault := min carryCount eqn.outvars.size
+      let carryOutCount :=
+        min ((eqn.params.findNat? .scanCarryOutputCount).getD carryOutDefault) eqn.outvars.size
+      let carryOutvars := sliceWindow eqn.outvars 0 carryOutCount
+      let dataOutvars := sliceWindow eqn.outvars carryOutCount (eqn.outvars.size - carryOutCount)
+
+      let mut edges : Array LocalJacEdge := #[]
+      for outv in carryOutvars do
+        for inv in carryInvars do
+          edges := edges.push {
+            src := inv.id
+            dst := outv.id
+            map := binaryJacMapForVars inv outv (.semantic (.unary opName .x .carry)) 1.0
+          }
+        for inv in dataInvars do
+          edges := edges.push {
+            src := inv.id
+            dst := outv.id
+            map := binaryJacMapForVars inv outv (.semantic (.unary opName .x .projection)) 1.0
+          }
+
+      for outv in dataOutvars do
+        for inv in carryInvars do
+          edges := edges.push {
+            src := inv.id
+            dst := outv.id
+            map := binaryJacMapForVars inv outv (.semantic (.unary opName .x .carry)) 1.0
+          }
+        for inv in dataInvars do
+          edges := edges.push {
+            src := inv.id
+            dst := outv.id
+            map := binaryJacMapForVars inv outv (.semantic (.unary opName .x .projection)) 1.0
+          }
+      .ok edges
 
 private def dynamicProjectionAliasRule (opName : OpName) : LocalJacRule :=
   fun eqn _ctx => do
@@ -831,9 +976,40 @@ private def graphaxStructuralUnaryAliasSpecs :
 ]
 
 private def cumsumStructuralRule (axis : ReduceAxis) : LocalJacRule :=
-  unarySymbolicRule
-    (kstmtCumsumOpName axis)
-    (.semantic (.cumsum (reduceAxisTagName axis) .x .prefix))
+  fun eqn _ctx => do
+    let opName := kstmtCumsumOpName axis
+    let (inv, outv) ← requireUnaryShape opName eqn
+    let tag : Tyr.AD.Sparse.SparseMapTag := .semantic (.cumsum (reduceAxisTagName axis) .x .prefix)
+    let map :=
+      match axis with
+      | .Full =>
+        match varFlatDim? inv, varFlatDim? outv with
+        | some inDim, some outDim =>
+          if inDim = 0 || outDim = 0 then
+            unaryJacMapForVars inv outv tag 1.0
+          else
+            buildSparseMap tag inDim outDim (cumsumFullEntries inDim outDim)
+        | _, _ =>
+          unaryJacMapForVars inv outv tag 1.0
+      | .Row =>
+        match shapeRowsCols? inv, varFlatDim? inv, varFlatDim? outv with
+        | some (rows, cols), some inDim, some outDim =>
+          if inDim = 0 || outDim = 0 || inDim != outDim then
+            unaryJacMapForVars inv outv tag 1.0
+          else
+            buildSparseMap tag inDim outDim (cumsumRowEntries rows cols)
+        | _, _, _ =>
+          unaryJacMapForVars inv outv tag 1.0
+      | .Col =>
+        match shapeRowsCols? inv, varFlatDim? inv, varFlatDim? outv with
+        | some (rows, cols), some inDim, some outDim =>
+          if inDim = 0 || outDim = 0 || inDim != outDim then
+            unaryJacMapForVars inv outv tag 1.0
+          else
+            buildSparseMap tag inDim outDim (cumsumColEntries rows cols)
+        | _, _, _ =>
+          unaryJacMapForVars inv outv tag 1.0
+    .ok #[{ src := inv.id, dst := outv.id, map := map }]
 
 private def cumprodStructuralRule (axis : ReduceAxis) : LocalJacRule :=
   unarySymbolicRule
