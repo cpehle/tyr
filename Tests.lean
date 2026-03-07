@@ -35,6 +35,10 @@ import Tests.TestMctxDag
 import Tests.TestDiffEq
 import Tests.TestDiffEqEventTreeParity
 import Tests.TestDiffEqMilsteinAutodiffParity
+import Tests.TestDiffEqSDEOrderParity
+import Tests.TestDiffEqUnderdampedOrderParity
+import Tests.TestDiffEqWeakStats
+import Tests.TestDiffEqWeakStatsParity2
 import Tests.TestDiffEqAdjoint
 import Tests.TestDiffEqAdjointCore
 import Tests.TestGPUDSL

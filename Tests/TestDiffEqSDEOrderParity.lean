@@ -147,7 +147,3 @@ def run : IO Unit := do
   testSEAStrongSelfConvergenceAdditive
 
 end Tests.DiffEqSDEOrderParity
-
-unsafe def main : IO Unit := do
-  Tests.DiffEqSDEOrderParity.run
-  IO.println "TestDiffEqSDEOrderParity: ok"

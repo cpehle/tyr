@@ -665,7 +665,3 @@ def run : IO Unit := do
   testQUICSORTUnderdampedSelfConvergence
 
 end Tests.DiffEqUnderdampedOrderParity
-
-unsafe def main : IO Unit := do
-  Tests.DiffEqUnderdampedOrderParity.run
-  IO.println "TestDiffEqUnderdampedOrderParity: ok"
