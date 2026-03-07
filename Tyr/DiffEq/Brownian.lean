@@ -12,17 +12,20 @@ Minimal data types for Brownian motion controls and Levy areas.
 structure BrownianIncrement (DT BM : Type) where
   dt : DT
   W : BM
+  deriving Inhabited
 
 structure SpaceTimeLevyArea (DT BM : Type) where
   dt : DT
   W : BM
   H : BM
+  deriving Inhabited
 
 structure SpaceTimeTimeLevyArea (DT BM : Type) where
   dt : DT
   W : BM
   H : BM
   K : BM
+  deriving Inhabited
 
 /-! ## Levy Area Interfaces -/
 
@@ -234,7 +237,7 @@ def toPath (path : AbstractBrownianPath BM) : AbstractPath BM := {
   t1 := path.t1
   evaluate := fun t0 t1 left =>
     match t1 with
-    | none => path.evaluate t0 t0 left
+    | none => path.evaluate path.t0 t0 left
     | some t1 => path.evaluate t0 t1 left
 }
 
@@ -1093,16 +1096,29 @@ instance instVirtualBrownianTreeOpsOption {BM : Type}
         let inc := VirtualBrownianTreeOps.incrementSpaceTimeTime (BM := BM) childPath t0 t1
         { dt := inc.dt, W := some inc.W, H := some inc.H, K := some inc.K }
 
+@[inline] private def ensureValidRange (path : VirtualBrownianTree BM) (t0 t1 : Time) : Unit :=
+  Id.run do
+    if !(path.t0 < path.t1) then
+      panic! "VirtualBrownianTree requires t0 < t1"
+    let lo := min t0 t1
+    let hi := max t0 t1
+    if lo < path.t0 || hi > path.t1 then
+      panic! "VirtualBrownianTree increment query outside range"
+    pure ()
+
 def increment [VirtualBrownianTreeOps BM] (path : VirtualBrownianTree BM) (t0 t1 : Time) :
     BrownianIncrement Time BM :=
+  let _ := ensureValidRange path t0 t1
   VirtualBrownianTreeOps.increment path t0 t1
 
 def incrementSpaceTime [VirtualBrownianTreeOps BM] (path : VirtualBrownianTree BM) (t0 t1 : Time) :
     SpaceTimeLevyArea Time BM :=
+  let _ := ensureValidRange path t0 t1
   VirtualBrownianTreeOps.incrementSpaceTime path t0 t1
 
 def incrementSpaceTimeTime [VirtualBrownianTreeOps BM]
     (path : VirtualBrownianTree BM) (t0 t1 : Time) : SpaceTimeTimeLevyArea Time BM :=
+  let _ := ensureValidRange path t0 t1
   VirtualBrownianTreeOps.incrementSpaceTimeTime path t0 t1
 
 def value [VirtualBrownianTreeOps BM] (path : VirtualBrownianTree BM) (t : Time) : BM :=

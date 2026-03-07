@@ -87,8 +87,31 @@ private def approx (a b tol : Float) : Bool :=
   | _, _, _, _, _, _ =>
       LeanTest.fail "Option some should produce some STT increments"
 
+@[test] def testAbstractBrownianPathPointEvalAnchorsToPathStart : IO Unit := do
+  /-
+  Diffrax reference (`_path.py`): point evaluation of a control path should be anchored
+  to the path's start, not interpreted as a zero-length increment from query time.
+  -/
+  let base : AbstractBrownianPath Float := {
+    t0 := -2.0
+    t1 := 3.0
+    evaluate := fun t0 t1 _left => t0 + 10.0 * t1
+    increment := fun t0 t1 => { dt := t1 - t0, W := t1 - t0 }
+  }
+  let asPath := AbstractBrownianPath.toPath base
+  let point := asPath.evaluate 0.7 none true
+  let pointExpected := base.evaluate base.t0 0.7 true
+  LeanTest.assertTrue (approx point pointExpected 1.0e-12)
+    s!"toPath point evaluation should anchor at path.t0: expected {pointExpected}, got {point}"
+
+  let inc := asPath.evaluate 0.4 (some 0.9) true
+  let incExpected := base.evaluate 0.4 0.9 true
+  LeanTest.assertTrue (approx inc incExpected 1.0e-12)
+    s!"toPath increment evaluation should preserve increment semantics: expected {incExpected}, got {inc}"
+
 def run : IO Unit := do
   testBrownianOptionNoneSemantics
   testBrownianOptionSomeAdditivityAndConsistency
+  testAbstractBrownianPathPointEvalAnchorsToPathStart
 
 end Tests.DiffEqBrownianOptionParity
