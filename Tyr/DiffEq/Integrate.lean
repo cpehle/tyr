@@ -270,6 +270,7 @@ def diffeqsolve {Term Y VF Control Args Controller : Type}
     [DiffEqElem Y]
     [Inhabited Y]
     [StepSizeController Controller]
+    [StepSizeControllerValidation Controller]
     [Inhabited Controller]
     (terms : Term)
     (solver : AbstractSolver Term Y VF Control Args)
@@ -308,6 +309,8 @@ def diffeqsolve {Term Y VF Control Args Controller : Type}
     | some f => fun t y => f t y args
   let stepStats0 : List (String × Nat) :=
     [("num_steps", 0), ("num_accepted_steps", 0), ("num_rejected_steps", 0)]
+  let controllerInvalid :=
+    (inferInstance : StepSizeControllerValidation Controller).validate controller t0 t1 dt0
   let outOfRange :=
     match saveatTs with
     | none => false
@@ -319,7 +322,7 @@ def diffeqsolve {Term Y VF Control Args Controller : Type}
     match saveatTs with
     | none => false
     | some ts => !(isMonotoneInSolveDirection t0 t1 ts)
-  if outOfRange || badDirection then
+  if controllerInvalid.isSome || outOfRange || badDirection then
     exact maybeThrowOnFailure throwOnFailure {
       t0 := t0
       t1 := t1

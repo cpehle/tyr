@@ -66,6 +66,9 @@ class StepSizeController (C : Type) where
     C → StepSizeState State → Time → Time → Y → Y → Option Y → Float →
     StepSizeDecision State
 
+class StepSizeControllerValidation (C : Type) where
+  validate : C → Time → Time → Option Time → Option String
+
 structure ConstantStepSize where
   deriving Inhabited
 
@@ -77,6 +80,9 @@ instance : StepSizeController ConstantStepSize where
     | none => panic! "ConstantStepSize requires dt0; pass `dt0 := some ...`."
   adapt _ state _t0 _t1 _y0 _y1 _yError _errorOrder :=
     { accept := true, dt := state.dt, state := state.state, result := Result.successful }
+
+instance : StepSizeControllerValidation ConstantStepSize where
+  validate _ _ _ _ := none
 
 structure PIDState where
   prevInvError : Float := 1.0
@@ -174,6 +180,9 @@ instance : StepSizeController PIDController where
               prevPrevInvError := state.state.prevPrevInvError }
         { accept := keep, dt := dt, state := nextState, result := result }
 
+instance : StepSizeControllerValidation PIDController where
+  validate _ _ _ _ := none
+
 structure StepTo where
   ts : Array Time := #[]
   deriving Inhabited
@@ -182,17 +191,44 @@ structure StepToState where
   idx : Nat := 0
   deriving Inhabited
 
+private def isStrictMonotoneInDirection (forward : Bool) (ts : Array Time) : Bool := Id.run do
+  if ts.size <= 1 then
+    return true
+  let mut ok := true
+  for i in [:ts.size - 1] do
+    let lhs := ts[i]!
+    let rhs := ts[i + 1]!
+    let strictMono := if forward then rhs > lhs else rhs < lhs
+    ok := ok && strictMono
+  return ok
+
+instance (priority := 1) : StepSizeControllerValidation StepTo where
+  validate ctrl t0 t1 dt0 :=
+    match dt0 with
+    | some _ => some "StepTo requires dt0 := none."
+    | none =>
+        if ctrl.ts.size < 2 then
+          some "StepTo requires ts.size >= 2."
+        else
+          let first := ctrl.ts[0]!
+          let last := ctrl.ts[ctrl.ts.size - 1]!
+          if first != t0 || last != t1 then
+            some "StepTo requires t0 == ts[0] and t1 == ts[-1]."
+          else
+            let forward := t1 >= t0
+            if !(isStrictMonotoneInDirection forward ctrl.ts) then
+              some "StepTo(ts=...) must be strictly increasing/decreasing in solve direction."
+            else
+              none
+
 instance : StepSizeController StepTo where
   State := StepToState
-  init ctrl _terms t0 _t1 _y0 _args dt0 _func _errorOrder :=
-    match dt0 with
-    | some _ => panic! "StepTo requires dt0 := none."
+  init ctrl _terms t0 t1 _y0 _args dt0 _func _errorOrder :=
+    match (inferInstance : StepSizeControllerValidation StepTo).validate ctrl t0 t1 dt0 with
+    | some msg => panic! msg
     | none =>
-        if ctrl.ts.size >= 2 then
-          let t1 := ctrl.ts[1]!
-          { dt := t1 - t0, state := { idx := 1 } }
-        else
-          panic! "StepTo requires ts.size >= 2."
+        let tNext := ctrl.ts[1]!
+        { dt := tNext - t0, state := { idx := 1 } }
   adapt ctrl state _t0 t1 _y0 _y1 _yError _errorOrder :=
     if state.state.idx + 1 < ctrl.ts.size then
       let nextIdx := state.state.idx + 1
@@ -322,6 +358,11 @@ instance [Inhabited Base] [StepSizeController Base] : StepSizeController (ClipSt
       result := result
       madeJump := if baseDecision.accept then touchesTime t1 ctrl.jump_ts else false
     }
+
+instance [Inhabited Base] [StepSizeController Base] [StepSizeControllerValidation Base] :
+    StepSizeControllerValidation (ClipStepSizeController Base) where
+  validate ctrl t0 t1 dt0 :=
+    (inferInstance : StepSizeControllerValidation Base).validate ctrl.controller t0 t1 dt0
 
 end DiffEq
 end torch

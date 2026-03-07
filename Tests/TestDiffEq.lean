@@ -667,6 +667,67 @@ private def evaluateDenseFloat {S C : Type}
       else
         LeanTest.fail s!"Unexpected ts size for StepTo: {ts.size}"
 
+@[test] def testStepToReverseTime : IO Unit := do
+  let term : ODETerm Float Unit := { vectorField := fun _t y _ => -y }
+  let solver :=
+    Euler.solver (Term := ODETerm Float Unit) (Y := Float) (VF := Float) (Args := Unit)
+  let ctrl : StepTo := { ts := #[1.0, 0.6, 0.0] }
+  let sol :=
+    diffeqsolve
+      (Term := ODETerm Float Unit)
+      (Y := Float)
+      (VF := Float)
+      (Control := Time)
+      (Args := Unit)
+      (Controller := StepTo)
+      term solver 1.0 0.0 none (1.0 : Float) () (saveat := { steps := true })
+      (controller := ctrl)
+  match sol.ts with
+  | none => LeanTest.fail "Expected ts for reverse StepTo solve"
+  | some ts =>
+      if ts.size == 3 then
+        let ok :=
+          approx ts[0]! 1.0 1e-12 && approx ts[1]! 0.6 1e-12 && approx ts[2]! 0.0 1e-12
+        LeanTest.assertTrue ok s!"Reverse StepTo ts mismatch: {ts}"
+      else
+        LeanTest.fail s!"Unexpected ts size for reverse StepTo: {ts.size}"
+
+@[test] def testStepToRejectsEndpointMismatch : IO Unit := do
+  let term : ODETerm Float Unit := { vectorField := fun _t y _ => -y }
+  let solver :=
+    Euler.solver (Term := ODETerm Float Unit) (Y := Float) (VF := Float) (Args := Unit)
+  let ctrl : StepTo := { ts := #[0.1, 0.5, 1.0] }
+  let sol :=
+    diffeqsolve
+      (Term := ODETerm Float Unit)
+      (Y := Float)
+      (VF := Float)
+      (Control := Time)
+      (Args := Unit)
+      (Controller := StepTo)
+      term solver 0.0 1.0 none (1.0 : Float) () (saveat := { steps := true })
+      (controller := ctrl)
+  LeanTest.assertTrue (sol.result == Result.internalError)
+    "StepTo endpoint mismatch should return internalError"
+
+@[test] def testStepToRejectsNonMonotoneTs : IO Unit := do
+  let term : ODETerm Float Unit := { vectorField := fun _t y _ => -y }
+  let solver :=
+    Euler.solver (Term := ODETerm Float Unit) (Y := Float) (VF := Float) (Args := Unit)
+  let ctrl : StepTo := { ts := #[0.0, 0.5, 0.5, 1.0] }
+  let sol :=
+    diffeqsolve
+      (Term := ODETerm Float Unit)
+      (Y := Float)
+      (VF := Float)
+      (Control := Time)
+      (Args := Unit)
+      (Controller := StepTo)
+      term solver 0.0 1.0 none (1.0 : Float) () (saveat := { steps := true })
+      (controller := ctrl)
+  LeanTest.assertTrue (sol.result == Result.internalError)
+    "StepTo non-monotone ts should return internalError"
+
 @[test] def testReverseTimeODE : IO Unit := do
   let term : ODETerm Float Unit := { vectorField := fun _t y _ => -y }
   let solver :=
@@ -1996,6 +2057,9 @@ def run : IO Unit := do
   testTsit5ODE
   testDopri8ODE
   testStepTo
+  testStepToReverseTime
+  testStepToRejectsEndpointMismatch
+  testStepToRejectsNonMonotoneTs
   testReverseTimeODE
   testSaveAtT0
   testSaveAtT1

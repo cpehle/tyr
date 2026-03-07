@@ -277,7 +277,8 @@ def diffeqsolveAdjoint
     [DiffEqElem Y] [DiffEqElem Args]
     [AdjointBackend Y Args]
     [Inhabited Y] [Inhabited Args]
-    [StepSizeController Controller] [Inhabited Controller]
+    [StepSizeController Controller] [StepSizeControllerValidation Controller]
+    [Inhabited Controller]
     (term : ODETerm Y Args)
     (solver : AbstractSolver (ODETerm Y Args) Y Y Time Args)
     (adjSolver :
@@ -454,7 +455,8 @@ def diffeqsolveBacksolveAdjoint
     [DiffEqElem Y] [DiffEqElem Args]
     [AdjointBackend Y Args]
     [Inhabited Y] [Inhabited Args]
-    [StepSizeController Controller] [Inhabited Controller]
+    [StepSizeController Controller] [StepSizeControllerValidation Controller]
+    [Inhabited Controller]
     (term : ODETerm Y Args)
     (solver : AbstractSolver (ODETerm Y Args) Y Y Time Args)
     (adjoint : BacksolveAdjoint Y Args)
@@ -506,7 +508,8 @@ private def recursiveCheckpointBackprop
     [DiffEqElem Y] [DiffEqElem Args]
     [AdjointBackend Y Args]
     [Inhabited Y] [Inhabited Args]
-    [StepSizeController Controller] [Inhabited Controller]
+    [StepSizeController Controller] [StepSizeControllerValidation Controller]
+    [Inhabited Controller]
     (term : ODETerm Y Args)
     (solver : AbstractSolver (ODETerm Y Args) Y Y Time Args)
     (adjSolver :
@@ -633,7 +636,8 @@ private def diffeqsolveBacksolveAdjointWithReportCore
     [DiffEqElem Y] [DiffEqElem Args]
     [AdjointBackend Y Args]
     [Inhabited Y] [Inhabited Args]
-    [StepSizeController Controller] [Inhabited Controller]
+    [StepSizeController Controller] [StepSizeControllerValidation Controller]
+    [Inhabited Controller]
     (term : ODETerm Y Args)
     (solver : AbstractSolver (ODETerm Y Args) Y Y Time Args)
     (adjoint : BacksolveAdjoint Y Args)
@@ -728,7 +732,8 @@ def diffeqsolveRecursiveCheckpointAdjoint
     [DiffEqElem Y] [DiffEqElem Args]
     [AdjointBackend Y Args]
     [Inhabited Y] [Inhabited Args]
-    [StepSizeController Controller] [Inhabited Controller]
+    [StepSizeController Controller] [StepSizeControllerValidation Controller]
+    [Inhabited Controller]
     (mode : RecursiveCheckpointAdjoint := {})
     (term : ODETerm Y Args)
     (solver : AbstractSolver (ODETerm Y Args) Y Y Time Args)
@@ -834,7 +839,8 @@ def diffeqsolveImplicitAdjoint
     [DiffEqElem Y] [DiffEqElem Args]
     [AdjointBackend Y Args]
     [Inhabited Y] [Inhabited Args]
-    [StepSizeController Controller] [Inhabited Controller]
+    [StepSizeController Controller] [StepSizeControllerValidation Controller]
+    [Inhabited Controller]
     (mode : ImplicitAdjoint := {})
     (term : ODETerm Y Args)
     (solver : AbstractSolver (ODETerm Y Args) Y Y Time Args)
