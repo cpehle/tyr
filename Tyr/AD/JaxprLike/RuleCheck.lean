@@ -81,6 +81,11 @@ private def coverageMetadataParts (e : CoverageError) : Array String := Id.run d
     parts := parts.push s!"opParam={opParam}"
   | none => pure ()
 
+  match e.params.findName? .sourceOp with
+  | some sourceOp =>
+    parts := parts.push s!"sourceOp={sourceOp}"
+  | none => pure ()
+
   return parts
 
 def coverageErrorToString (e : CoverageError) : String :=

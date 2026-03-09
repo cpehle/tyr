@@ -41,6 +41,7 @@ instance : ToString FromFnBodyDiagnostic := ⟨FromFnBodyDiagnostic.toString⟩
 /-- Conversion context; source mapping is intentionally minimal at this stage. -/
 structure FromFnBodyCtx where
   source : SourceRef := {}
+  hints : FnBodyLoweringHints := {}
   deriving Inhabited
 
 /-- Stateful accumulator used while traversing a `FnBody`. -/
@@ -70,7 +71,11 @@ def bindVar (ctx : FromFnBodyCtx) (x : VarId) (ty : IRType) : FromFnBodyM JVar :
     addDiagnostic ctx s!"Duplicate binder x_{x.idx} encountered during `FnBody` lowering."
     pure existing
   | none =>
-    let v : JVar := { id := st.nextId, ty := ty }
+    let v : JVar := {
+      id := st.nextId
+      ty := ty
+      metaInfo := ctx.hints.varMetaByIrVar.getD x.idx {}
+    }
     set { st with varEnv := st.varEnv.insert x.idx v, nextId := st.nextId + 1 }
     pure v
 
@@ -151,7 +156,7 @@ def argsToJVars? (ctx : FromFnBodyCtx) (args : Array Arg) : FromFnBodyM (Option 
     pure none
 
 private def controlArgsToJVars?
-    (ctx : FromFnBodyCtx)
+    (_ctx : FromFnBodyCtx)
     (args : Array Arg) :
     FromFnBodyM (Option (Array JVar × Nat)) := do
   let mut invars : Array JVar := #[]
@@ -217,6 +222,24 @@ private def controlFlowParams
   else
     #[]
 
+private def hintedEqnParams
+    (ctx : FromFnBodyCtx)
+    (outIrVar : VarId) :
+    OpParams :=
+  ctx.hints.eqnParamsByOutIrVar.getD outIrVar.idx #[]
+
+private def extraParamsForEqn
+    (ctx : FromFnBodyCtx)
+    (rawOp canonicalOp : OpName)
+    (outIrVar : VarId)
+    (invars : Array JVar)
+    (staticCount : Nat) :
+    OpParams :=
+  let defaults :=
+    controlFlowParams canonicalOp invars staticCount ++
+      dotGeneralDefaultParams rawOp canonicalOp
+  OpParams.mergePreferRight defaults (hintedEqnParams ctx outIrVar)
+
 def exprKind : IR.Expr → String
   | .ctor _ _ => "Expr.ctor"
   | .reset _ _ => "Expr.reset"
@@ -271,8 +294,7 @@ def traverseFnBody (ctx : FromFnBodyCtx) (body : FnBody) : FromFnBodyM Unit := d
       match invars? with
       | some (invars, staticCount) =>
         let extraParams :=
-          controlFlowParams canonicalOp invars staticCount ++
-            dotGeneralDefaultParams op canonicalOp
+          extraParamsForEqn ctx op canonicalOp x invars staticCount
         modify fun st =>
           { st with
               eqns := st.eqns.push {
@@ -281,6 +303,7 @@ def traverseFnBody (ctx : FromFnBodyCtx) (body : FnBody) : FromFnBodyM Unit := d
                 outvars := #[outvar]
                 params := #[
                   OpParam.mkName .loweringKind (loweringKindForOp op),
+                  OpParam.mkName .sourceOp op,
                   OpParam.mkNat .fnbodyOutVarIdx outvar.id
                 ] ++ extraParams
                 source := ctx.source
@@ -345,12 +368,13 @@ def renderDiagnostics (diagnostics : Array FromFnBodyDiagnostic) : String :=
   String.intercalate "\n" (diagnostics.toList.map (fun d => toString d))
 
 /-- Convert a function body to `LeanJaxpr` using a conservative lowering strategy. -/
-def fromFnBody
+def fromFnBodyWithHints
     (declName : Name)
     (params : Array Param)
-    (body : FnBody) :
+    (body : FnBody)
+    (hints : FnBodyLoweringHints := {}) :
     Except String LeanJaxpr := Id.run do
-  let ctx : FromFnBodyCtx := { source := { decl := declName } }
+  let ctx : FromFnBodyCtx := { source := { decl := declName }, hints := hints }
   let (invars, stAfterParams) := (registerInvars ctx params).run {}
   let (_, st) := (traverseFnBody ctx body).run stAfterParams
 
@@ -368,6 +392,14 @@ def fromFnBody
     eqns := st.eqns
     outvars := st.outvars
   }
+
+/-- Convert a function body to `LeanJaxpr` using a conservative lowering strategy. -/
+def fromFnBody
+    (declName : Name)
+    (params : Array Param)
+    (body : FnBody) :
+    Except String LeanJaxpr :=
+  fromFnBodyWithHints declName params body {}
 
 /-- Helper to extract the traversable pieces from an IR declaration. -/
 def declFnBodyView? (decl : Decl) : Except String (Name × Array Param × FnBody) :=

@@ -12,6 +12,7 @@ namespace Tyr.AD.JaxprLike
 structure RuleExecutionError where
   eqnIndex0 : Nat
   op : OpName
+  sourceOp? : Option OpName := none
   source : SourceRef
   message : String
   deriving Repr, Inhabited
@@ -31,7 +32,15 @@ private def formatSourceRef (source : SourceRef) : String :=
 
 def ruleExecutionErrorToString (e : RuleExecutionError) : String :=
   let source := formatSourceRef e.source
-  s!"{e.message}: op `{e.op}` at eqn #{e.eqnIndex0}, source={source}"
+  let sourceOpPart :=
+    match e.sourceOp? with
+    | some sourceOp =>
+      if sourceOp == e.op then
+        ""
+      else
+        s!" (source `{sourceOp}`)"
+    | none => ""
+  s!"{e.message}: op `{e.op}`{sourceOpPart} at eqn #{e.eqnIndex0}, source={source}"
 
 /--
 Run registered local-Jacobian rules for every equation in `jaxpr`.
@@ -53,6 +62,7 @@ def extractLocalJacEdges
       errors := errors.push {
         eqnIndex0 := i
         op := eqn.op
+        sourceOp? := eqn.params.findName? .sourceOp
         source := eqn.source
         message := ruleErrorToMessage err
       }

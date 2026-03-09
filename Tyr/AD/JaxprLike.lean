@@ -4,6 +4,8 @@ import Tyr.AD.JaxprLike.VertexOrder
 import Tyr.AD.JaxprLike.Validate
 import Tyr.AD.JaxprLike.FromFnBody
 import Tyr.AD.JaxprLike.FromKStmt
+import Tyr.AD.JaxprLike.HintRegistry
+import Tyr.AD.JaxprLike.Elab
 import Tyr.AD.JaxprLike.LowerFnBody
 import Tyr.AD.JaxprLike.LowerKStmt
 import Tyr.AD.JaxprLike.Rules

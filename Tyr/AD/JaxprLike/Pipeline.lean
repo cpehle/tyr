@@ -1,8 +1,10 @@
 import Tyr.AD.JaxprLike.LowerFnBody
 import Tyr.AD.JaxprLike.LowerKStmt
 import Tyr.AD.JaxprLike.Validate
+import Tyr.AD.JaxprLike.Elab
 import Tyr.AD.JaxprLike.RuleCheck
 import Tyr.AD.JaxprLike.Extract
+import Tyr.AD.Frontend.Signature
 
 /-!
 # Tyr.AD.JaxprLike.Pipeline
@@ -63,15 +65,36 @@ private def runCoverage
       let msgs := errs.map coverageErrorToString
       return .error (.coverage msgs)
 
-/-- Convert + validate + optionally rule-check from a Lean IR declaration. -/
+private def declNameOf : Decl → Name
+  | .fdecl f _ _ _ _ => f
+  | .extern f _ _ _ => f
+
+/--
+Convert + validate + optionally rule-check from a Lean IR declaration.
+
+When a frontend has already registered a direct `LeanJaxpr` for the declaration,
+that high-level IR is preferred over `FnBody` recovery.
+-/
 def buildFromDecl
     (cfg : BuildConfig := {})
     (decl : Decl) :
     CoreM (Except BuildError LeanJaxpr) := do
+  let declName := declNameOf decl
+  let frontend? ← getRegisteredFrontendRegistration? declName
   let jaxpr ←
-    match LowerFnBody.runDecl { decl := decl } with
-    | .ok j => pure j
-    | .error err => return .error (.conversion (toString err))
+    match frontend? with
+    | some reg => pure (reg.jaxpr.withDefaultSourceDecl declName)
+    | none =>
+      match (← LowerFnBody.runDecl { decl := decl }) with
+      | .ok j => pure j
+      | .error err => return .error (.conversion (toString err))
+
+  match frontend?.bind (·.signature) with
+  | some sig =>
+      match sig.validateJaxprBoundaryMetadata jaxpr with
+      | .ok () => pure ()
+      | .error err => return .error (.conversion err)
+  | none => pure ()
 
   match runValidation jaxpr with
   | .error err => return .error err
@@ -85,10 +108,11 @@ def buildFromFnBody
     (cfg : BuildConfig := {})
     (declName : Name)
     (params : Array Param)
-    (body : FnBody) :
+    (body : FnBody)
+    (hints : FnBodyLoweringHints := {}) :
     CoreM (Except BuildError LeanJaxpr) := do
   let jaxpr ←
-    match LowerFnBody.run { declName := declName, params := params, body := body } with
+    match LowerFnBody.run { declName := declName, params := params, body := body, hints := hints } with
     | .ok j => pure j
     | .error err => return .error (.conversion (toString err))
 
@@ -148,9 +172,10 @@ def buildAndExtractFromFnBody
     (cfg : BuildConfig := {})
     (declName : Name)
     (params : Array Param)
-    (body : FnBody) :
+    (body : FnBody)
+    (hints : FnBodyLoweringHints := {}) :
     CoreM (Except BuildExtractError (LeanJaxpr × Array LocalJacEdge)) := do
-  extractAfterBuild (← buildFromFnBody cfg declName params body)
+  extractAfterBuild (← buildFromFnBody cfg declName params body hints)
 
 /--
 Convert + validate + optionally coverage-check + execute local-Jacobian rules

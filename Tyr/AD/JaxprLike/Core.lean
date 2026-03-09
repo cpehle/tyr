@@ -36,7 +36,11 @@ inductive OpParamKey where
   | rhsContract
   | lhsBatch
   | rhsBatch
+  | padLow
+  | padHigh
+  | padInterior
   | variant
+  | sourceOp
   | controlStaticArgCount
   | condPredicateCount
   | condDataInputCount
@@ -62,7 +66,11 @@ def OpParamKey.toString : OpParamKey → String
   | .rhsContract => "rhsContract"
   | .lhsBatch => "lhsBatch"
   | .rhsBatch => "rhsBatch"
+  | .padLow => "padLow"
+  | .padHigh => "padHigh"
+  | .padInterior => "padInterior"
   | .variant => "variant"
+  | .sourceOp => "sourceOp"
   | .controlStaticArgCount => "controlStaticArgCount"
   | .condPredicateCount => "condPredicateCount"
   | .condDataInputCount => "condDataInputCount"
@@ -120,6 +128,9 @@ def findValue? (params : OpParams) (key : OpParamKey) : Option OpParamValue := I
       return some p.value
   return none
 
+def containsKey (params : OpParams) (key : OpParamKey) : Bool :=
+  params.any (fun p => p.key == key)
+
 def findNat? (params : OpParams) (key : OpParamKey) : Option Nat := do
   let value ← findValue? params key
   match value with
@@ -141,6 +152,14 @@ def findNats? (params : OpParams) (key : OpParamKey) : Option (Array Nat) := do
   | .nat _ => none
   | .name _ => none
 
+/--
+Merge two parameter bags while preferring entries from `overrides` when a key is
+present in both collections. The left-to-right order of surviving entries is
+preserved.
+-/
+def mergePreferRight (base overrides : OpParams) : OpParams :=
+  base.filter (fun p => !(overrides.containsKey p.key)) ++ overrides
+
 end OpParams
 
 /-- AD participation marker carried on normalized variables. -/
@@ -158,6 +177,44 @@ structure VarMeta where
   sharding : Option String := none
   aliasGroup? : Option Nat := none
   deriving Repr, Inhabited
+
+/--
+Optional metadata hints for `FnBody -> LeanJaxpr` lowering.
+
+- `varMetaByIrVar`: extra `VarMeta` keyed by Lean IR binder/parameter `VarId.idx`
+- `eqnParamsByOutIrVar`: extra equation params keyed by the output binder
+  `VarId.idx` of the corresponding `FnBody.vdecl`
+-/
+structure FnBodyLoweringHints where
+  varMetaByIrVar : Std.HashMap Nat VarMeta := {}
+  eqnParamsByOutIrVar : Std.HashMap Nat OpParams := {}
+  deriving Repr, Inhabited
+
+namespace FnBodyLoweringHints
+
+private def mergeHashMapPreferRight
+    {α β : Type}
+    [BEq α] [Hashable α]
+    (base overrides : Std.HashMap α β) :
+    Std.HashMap α β := Id.run do
+  let mut out := base
+  for (k, v) in overrides.toList do
+    out := out.insert k v
+  return out
+
+/--
+Merge two hint packs while preferring metadata from `overrides` on key
+collisions. This lets traced frontends register baseline metadata and still
+allow more specific call-site overrides later.
+-/
+def mergePreferRight
+    (base overrides : FnBodyLoweringHints) :
+    FnBodyLoweringHints :=
+  { varMetaByIrVar := mergeHashMapPreferRight base.varMetaByIrVar overrides.varMetaByIrVar
+    eqnParamsByOutIrVar :=
+      mergeHashMapPreferRight base.eqnParamsByOutIrVar overrides.eqnParamsByOutIrVar }
+
+end FnBodyLoweringHints
 
 /-- Source location metadata for diagnostics and coverage errors. -/
 structure SourceRef where
@@ -182,6 +239,18 @@ structure JEqn where
   source : SourceRef := {}
   deriving Repr, Inhabited
 
+namespace JEqn
+
+/-- Normalized/canonical op name used for rule lookup and lowering. -/
+def normalizedOpName (eqn : JEqn) : OpName :=
+  eqn.op
+
+/-- Source/frontend op name when preserved by lowering, otherwise the normalized op. -/
+def sourceOpName (eqn : JEqn) : OpName :=
+  (eqn.params.findName? .sourceOp).getD eqn.op
+
+end JEqn
+
 /-- Jaxpr-like normalized IR for elimination-based AD. -/
 structure LeanJaxpr where
   constvars : Array JVar := #[]
@@ -189,6 +258,24 @@ structure LeanJaxpr where
   eqns : Array JEqn := #[]
   outvars : Array JVar := #[]
   deriving Repr, Inhabited
+
+namespace LeanJaxpr
+
+/--
+Populate anonymous equation source declarations with the owning declaration
+name. Frontends that emit `LeanJaxpr` directly can omit per-equation `decl`
+fields and still get stable diagnostics from `buildFromDecl`.
+-/
+def withDefaultSourceDecl
+    (jaxpr : LeanJaxpr)
+    (declName : Name) :
+    LeanJaxpr :=
+  { jaxpr with
+      eqns := jaxpr.eqns.map fun eqn =>
+        if eqn.source.decl == .anonymous then
+          { eqn with source := { eqn.source with decl := declName } }
+        else
+          eqn }
 
 /-- Explicit graph partitions used by Graphax-style elimination helpers. -/
 structure VertexPartitions where
@@ -219,18 +306,18 @@ def eliminableVertices1 (jaxpr : LeanJaxpr) : Array Nat :=
   (Array.range jaxpr.eqns.size).map eqnVertexId1
 
 /-- Input-like graph vertices (`constvars ++ invars`) in declaration order. -/
-def LeanJaxpr.inputVertices (jaxpr : LeanJaxpr) : Array JVarId :=
+def inputVertices (jaxpr : LeanJaxpr) : Array JVarId :=
   dedupPreserveOrder <| (jaxpr.constvars ++ jaxpr.invars).map (·.id)
 
 /-- Output boundary graph vertices in declaration order. -/
-def LeanJaxpr.outputVertices (jaxpr : LeanJaxpr) : Array JVarId :=
+def outputVertices (jaxpr : LeanJaxpr) : Array JVarId :=
   dedupPreserveOrder <| jaxpr.outvars.map (·.id)
 
 /--
 Eliminable graph vertices in equation-topological order.
 This tracks produced variables that are not final outputs.
 -/
-def LeanJaxpr.eliminableGraphVertices (jaxpr : LeanJaxpr) : Array JVarId := Id.run do
+def eliminableGraphVertices (jaxpr : LeanJaxpr) : Array JVarId := Id.run do
   let outputs : Std.HashSet JVarId :=
     jaxpr.outputVertices.foldl (init := {}) fun acc v => acc.insert v
   let mut out : Array JVarId := #[]
@@ -241,11 +328,13 @@ def LeanJaxpr.eliminableGraphVertices (jaxpr : LeanJaxpr) : Array JVarId := Id.r
   return out
 
 /-- Graph partitions derived from normalized `LeanJaxpr` boundaries. -/
-def LeanJaxpr.vertexPartitions (jaxpr : LeanJaxpr) : VertexPartitions :=
+def vertexPartitions (jaxpr : LeanJaxpr) : VertexPartitions :=
   {
     inputs := jaxpr.inputVertices
     outputs := jaxpr.outputVertices
     eliminable := jaxpr.eliminableGraphVertices
   }
+
+end LeanJaxpr
 
 end Tyr.AD.JaxprLike

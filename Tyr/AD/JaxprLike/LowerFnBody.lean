@@ -1,4 +1,5 @@
 import Tyr.AD.JaxprLike.FromFnBody
+import Tyr.AD.JaxprLike.HintRegistry
 
 /-!
 # Tyr.AD.JaxprLike.LowerFnBody
@@ -19,6 +20,7 @@ structure Input where
   declName : Name
   params : Array Param
   body : FnBody
+  hints : FnBodyLoweringHints := {}
   deriving Inhabited
 
 /-- Typed input for lowering a full Lean IR declaration. -/
@@ -38,15 +40,20 @@ instance : ToString Error := ⟨Error.toString⟩
 
 /-- Typed entrypoint that wraps `fromFnBody` without fallback behavior. -/
 def run (input : Input) : Except Error LeanJaxpr :=
-  match fromFnBody input.declName input.params input.body with
+  match fromFnBodyWithHints input.declName input.params input.body input.hints with
   | .ok jaxpr => .ok jaxpr
   | .error message => .error { message := message }
 
-/-- Typed entrypoint that wraps `fromDecl` without fallback behavior. -/
-def runDecl (input : DeclInput) : Except Error LeanJaxpr :=
-  match fromDecl input.decl with
-  | .ok jaxpr => .ok jaxpr
-  | .error message => .error { message := message }
+/-- Typed entrypoint that wraps `fromDecl` and applies registered decl hints. -/
+def runDecl (input : DeclInput) : Lean.CoreM (Except Error LeanJaxpr) := do
+  match declFnBodyView? input.decl with
+  | .error message =>
+    return .error { message := message }
+  | .ok (declName, params, body) =>
+    let hints ← getRegisteredFnBodyLoweringHints declName
+    match fromFnBodyWithHints declName params body hints with
+    | .ok jaxpr => return .ok jaxpr
+    | .error message => return .error { message := message }
 
 end LowerFnBody
 
