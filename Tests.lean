@@ -17,6 +17,7 @@ import Tests.TestADJaxprLikeExtract
 import Tests.TestADTensorStructSchema
 import Tests.TestADTensorStructFlatten
 import Tests.TestADFrontendSignature
+import Tests.TestADFrontendElab
 import Tests.TestADGraphaxAlphaGradParity
 import Tests.TestADGraphaxAlphaGradCoverageGate
 import Tests.TestADSparse

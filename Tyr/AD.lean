@@ -3,6 +3,7 @@ import Tyr.AD.TensorStructSchema
 import Tyr.AD.Frontend.Signature
 import Tyr.AD.Frontend.Companion
 import Tyr.AD.Frontend.API
+import Tyr.AD.Frontend.Elab
 import Tyr.AD.JaxprLike
 import Tyr.AD.Elim
 
@@ -17,6 +18,7 @@ Current contents:
 - Structured frontend signature metadata for binding and reconstructing `TensorStruct` leaves across flat AD vars.
 - Structured companion helpers that rebuild flat frontend gradients/pullbacks into Lean-facing values.
 - A first structured frontend API layer over flat backend callbacks (`call`, `linearize`, `vjp`, scalar `grad`).
+- Restricted definition-site frontend derivation helpers for ordinary Lean defs in the supported subset.
 - LeanJaxpr-like IR scaffolding for elimination-based AD.
 - Order-policy and AlphaGrad compatibility adapters for elimination planning.
 

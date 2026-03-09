@@ -82,6 +82,9 @@ Already available:
   - [Tyr/AD/JaxprLike/Elab.lean](/Users/pehle/dev/tyr/Tyr/AD/JaxprLike/Elab.lean#L1)
   - [Tests/TestADJaxprLikeElabFixture.lean](/Users/pehle/dev/tyr/Tests/TestADJaxprLikeElabFixture.lean#L113)
   - [Tests/TestADJaxprLike.lean](/Users/pehle/dev/tyr/Tests/TestADJaxprLike.lean#L712)
+- a first definition-site frontend derivation helper for ordinary Lean defs in a restricted supported subset:
+  - [Tyr/AD/Frontend/Elab.lean](/Users/pehle/dev/tyr/Tyr/AD/Frontend/Elab.lean#L1)
+  - [Tests/TestADFrontendElab.lean](/Users/pehle/dev/tyr/Tests/TestADFrontendElab.lean#L1)
 
 Still missing:
 
@@ -380,7 +383,7 @@ Acceptance:
 
 Remaining gap:
 
-- automatic frontend tracing/elaboration still needs to produce the direct `LeanJaxpr`; the current path validates and consumes it once registered.
+- automatic frontend tracing/elaboration still needs to go beyond the current restricted single-primitive subset and produce the direct `LeanJaxpr` for general structured definitions.
 
 Suggested files:
 
@@ -411,7 +414,9 @@ Status:
 - `attribute [ad_frontend frontendSpec] f` can now synthesize `f.frontend`, `f.linearize`, `f.vjp`, `f.valueAndGrad`, and `f.grad` when `frontendSpec` includes a runtime frontend constant:
   - [Tyr/AD/JaxprLike/Elab.lean](/Users/pehle/dev/tyr/Tyr/AD/JaxprLike/Elab.lean#L1)
   - [Tests/TestADJaxprLike.lean](/Users/pehle/dev/tyr/Tests/TestADJaxprLike.lean#L712)
+- `Tyr/AD/Frontend/Elab.lean` now derives direct frontend `LeanJaxpr` from ordinary Lean defs in the first supported subset: one registered primitive call over tensor-typed parameters, without manual fixture `LeanJaxpr` literals.
 - remaining gap: elaboration still does not derive those runtime frontend constants automatically from ordinary high-level definitions.
+- residual limitation: executing registration-heavy smoke checks under `lean --run` currently trips a Lean IR interpreter assertion, so the new executable coverage is restricted to derivation itself rather than full env-mutation tests.
 
 Acceptance:
 
