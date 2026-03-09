@@ -23,6 +23,11 @@ def Midpoint.solver {Term Y VF Args : Type}
   SolverState := Unit
   DenseInfo := LocalLinearDenseInfo Y
   termStructure := TermStructure.single
+  odeStepAdjoint? := some (.explicitRK {
+    a := #[#[], #[0.5]]
+    b := #[0.0, 1.0]
+    c := #[0.0, 0.5]
+  })
   order := fun _ => 2
   strongOrder := fun _ => 0.0
   init := fun _ _ _ _ _ => ()

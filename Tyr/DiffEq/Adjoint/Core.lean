@@ -13,7 +13,10 @@ Backsolve adjoints currently mirror Diffrax constraints:
 - No `SaveAt(steps := true)` or `SaveAt(dense := true)`.
 - No events; SDE adjoints are not yet supported (Stratonovich-only when added).
 
-Direct adjoints are currently limited to constant step size ODE solves.
+Direct/forward adjoints now differentiate the shared solver loop for
+supported explicit-RK solvers by replaying accepted primal steps from the
+loop trace. Unsupported solver/controller combinations now report explicit
+unsupported errors instead of falling back to a whole-solve wrapper VJP.
 -/
 
 class AdjointBackend (Y Args : Type) where
@@ -121,11 +124,13 @@ def backsolveAdjointUnsupportedReason {Y Args : Type}
   else
     none
 
-def directAdjointUnsupportedReason (dt0 : Option Time) : Option String :=
-  if dt0.isNone then
-    some "Adjoint solve failed: direct/forward mode currently requires `dt0` (constant-step solve)."
-  else
-    none
+private def directLikeDt0CompatibilityUnsupportedReason
+    (modeName : String) : String :=
+  s!"Adjoint solve failed: `{modeName}.requireDt0 := true` preserves the older constant-step contract and therefore requires `dt0`."
+
+private def directLikeDiscreteLoopRuntimeUnsupportedReason
+    (modeName : String) : String :=
+  s!"Adjoint solve failed: `{modeName}` could not construct a discrete loop adjoint for this solve. Rejected steps, event-localized restarts, or other unsupported runtime control-flow may have occurred."
 
 private def mkAdjointInternalErrorSolution {Y SolverState ControllerState : Type}
     (t0 t1 : Time)
@@ -159,11 +164,47 @@ private def mkAdjointFailure
 abbrev AdjointSolveWithReport (Y SolverState ControllerState Args : Type) :=
   (Solution Y SolverState ControllerState × Option (AdjointResult Y Args) × Option String)
 
+private def zeroLike [DiffEqSpace α] (x : α) : α :=
+  DiffEqSpace.scale 0.0 x
+
+class AcceptedStepReplayController (C : Type) where
+  supportsAcceptedStepReplay : Bool
+
+instance (priority := 1000) : AcceptedStepReplayController C where
+  supportsAcceptedStepReplay := false
+
+instance : AcceptedStepReplayController ConstantStepSize where
+  supportsAcceptedStepReplay := true
+
+instance : AcceptedStepReplayController StepTo where
+  supportsAcceptedStepReplay := true
+
+private def directLikeDiscreteLoopUnsupportedReason
+    {Y Args Controller : Type}
+    [AcceptedStepReplayController Controller]
+    (modeName : String)
+    (t0 t1 : Time)
+    (solver : AbstractSolver (ODETerm Y Args) Y Y Time Args) : Option String :=
+  if t0 == t1 then
+    none
+  else if !(inferInstance : AcceptedStepReplayController Controller).supportsAcceptedStepReplay then
+    some
+      s!"Adjoint solve failed: `{modeName}` currently requires a controller with a discrete loop adjoint implementation; this controller is not supported yet."
+  else
+    match solver.odeStepAdjoint? with
+    | none =>
+        some
+          s!"Adjoint solve failed: `{modeName}` currently requires solver step-adjoint support; this solver does not provide it yet."
+    | some _ => none
+
 /-! ## Adjoint Method Modes -/
 
 structure DirectAdjoint where
-  /-- Keep parity with the current direct-adjoint implementation contract. -/
-  requireDt0 : Bool := true
+  /--
+  Compatibility shim for the older constant-step-only direct-adjoint contract.
+  Diffrax does not impose this extra mode-level `dt0` requirement.
+  -/
+  requireDt0 : Bool := false
   deriving Inhabited
 
 structure RecursiveCheckpointAdjoint where
@@ -177,8 +218,11 @@ structure RecursiveCheckpointAdjoint where
   deriving Inhabited
 
 structure ForwardMode where
-  /-- Keep parity with the current forward-mode implementation contract. -/
-  requireDt0 : Bool := true
+  /--
+  Compatibility shim for the older constant-step-only forward-mode contract.
+  Diffrax does not impose this extra mode-level `dt0` requirement.
+  -/
+  requireDt0 : Bool := false
   deriving Inhabited
 
 structure ImplicitAdjoint where
@@ -297,6 +341,170 @@ def backsolveAdjoint
               return none
     | _, _ => none
 
+private def explicitRKStepAdjoint
+    {Y Args : Type}
+    [DiffEqSpace Y] [DiffEqSpace Args]
+    [AdjointBackend Y Args]
+    [Inhabited Y] [Inhabited Args]
+    (tableau : ExplicitRKAdjointTableau)
+    (term : ODETerm Y Args)
+    (t0 t1 : Time)
+    (y0 : Y)
+    (args : Args)
+    (adjY1 : Y) :
+    Option (AdjointResult Y Args) :=
+  let s := tableau.b.size
+  if tableau.a.size != s || tableau.c.size != s then
+    none
+  else
+    let dt := t1 - t0
+    let zeroY := zeroLike y0
+    let zeroArgs := zeroLike args
+    let (stageYs, _stageKs) := Id.run do
+      let mut ys : Array Y := #[]
+      let mut ks : Array Y := #[]
+      for i in [:s] do
+        let row := tableau.a.getD i #[]
+        let mut yi := y0
+        for j in [:i] do
+          let aij := row.getD j 0.0
+          let kj := ks.getD j zeroY
+          yi := DiffEqSpace.add yi (DiffEqSpace.scale aij kj)
+        let ti := t0 + tableau.c.getD i 0.0 * dt
+        let ki := DiffEqSpace.scale dt (term.vectorField ti yi args)
+        ys := ys.push yi
+        ks := ks.push ki
+      return (ys, ks)
+    Id.run do
+      let mut adjY0 := adjY1
+      let mut adjArgs := zeroArgs
+      let mut adjKs : Array Y := Array.replicate s zeroY
+      for i in [:s] do
+        let bi := tableau.b.getD i 0.0
+        adjKs := adjKs.set! i (DiffEqSpace.add adjKs[i]! (DiffEqSpace.scale bi adjY1))
+      for offset in [:s] do
+        let i := s - 1 - offset
+        let ti := t0 + tableau.c[i]! * dt
+        let yi := stageYs[i]!
+        let adjKi := adjKs[i]!
+        let adjF := DiffEqSpace.scale dt adjKi
+        let (_, vjpY, vjpArgs) :=
+          (AdjointBackend.vjp (Y := Y) (Args := Args))
+            term.vectorField ti yi args adjF
+        adjY0 := DiffEqSpace.add adjY0 vjpY
+        adjArgs := DiffEqSpace.add adjArgs vjpArgs
+        let row := tableau.a[i]!
+        for j in [:i] do
+          let aij := row.getD j 0.0
+          adjKs := adjKs.set! j (DiffEqSpace.add adjKs[j]! (DiffEqSpace.scale aij vjpY))
+      return some { adjY0 := adjY0, adjArgs := adjArgs }
+
+private def explicitRKAdjointOverAcceptedAttempts
+    {Y Args ControllerState : Type}
+    [DiffEqSpace Y] [DiffEqSpace Args]
+    [AdjointBackend Y Args]
+    [Inhabited Y] [Inhabited Args]
+    (tableau : ExplicitRKAdjointTableau)
+    (term : ODETerm Y Args)
+    (attempts : Array (SolveLoopAttempt Y ControllerState))
+    (args : Args)
+    (adjY1 : Y) :
+    Option (AdjointResult Y Args) :=
+  let zeroArgs := zeroLike args
+  Id.run do
+    let mut adjY := adjY1
+    let mut adjArgs := zeroArgs
+    let mut failure := false
+    for offset in [:attempts.size] do
+      if !failure then
+        let i := attempts.size - 1 - offset
+        match attempts[i]? with
+        | none =>
+            failure := true
+        | some attempt =>
+            if attempt.accepted then
+              match explicitRKStepAdjoint tableau term attempt.tStart attempt.tAfter attempt.yStart args adjY with
+              | some stepAdj =>
+                  adjY := stepAdj.adjY0
+                  adjArgs := DiffEqSpace.add adjArgs stepAdj.adjArgs
+              | none =>
+                  failure := true
+    if failure then
+      return none
+    else
+      return some { adjY0 := adjY, adjArgs := adjArgs }
+
+private def runPrimalLoopTrace
+    {Y Args Controller : Type}
+    [DiffEqSpace Y]
+    [DiffEqSeminorm Y]
+    [DiffEqElem Y]
+    [Inhabited Y]
+    [StepSizeController Controller]
+    [StepSizeControllerValidation Controller]
+    (term : ODETerm Y Args)
+    (solver : AbstractSolver (ODETerm Y Args) Y Y Time Args)
+    (t0 t1 : Time)
+    (dt0 : Option Time)
+    (y0 : Y)
+    (args : Args)
+    (maxSteps : Nat)
+    (controller : Controller) :
+    Option (SolveLoopState Y solver.SolverState (StepSizeController.State (C := Controller))) :=
+  let controllerInvalid :=
+    (inferInstance : StepSizeControllerValidation Controller).validate controller t0 t1 dt0
+  if controllerInvalid.isSome || dt0 == some 0.0 || t0 == t1 then
+    none
+  else
+    let errorOrder := solver.errorOrder term
+    let initCtrlBase :=
+      StepSizeController.init controller term t0 t1 y0 args dt0 solver.func errorOrder
+    let dtAbs := if initCtrlBase.dt < 0.0 then -initCtrlBase.dt else initCtrlBase.dt
+    let dt := if t1 >= t0 then dtAbs else -dtAbs
+    let initCtrl : StepSizeState (StepSizeController.State (C := Controller)) :=
+      { initCtrlBase with dt := dt }
+    let initState := solver.init term t0 t1 y0 args
+    let loopInit :=
+      initialSolveLoopState t0 t1 y0 initState initCtrl false #[]
+    some <|
+      runSolveLoop term solver controller t1 args (some maxSteps) #[] errorOrder loopInit
+
+private def directLikeDiscreteLoopAdjointWithController
+    {Y Args Controller : Type}
+    [DiffEqSpace Y] [DiffEqSpace Args]
+    [DiffEqSeminorm Y] [DiffEqElem Y]
+    [AdjointBackend Y Args]
+    [Inhabited Y] [Inhabited Args]
+    [StepSizeController Controller]
+    [StepSizeControllerValidation Controller]
+    [AcceptedStepReplayController Controller]
+    (term : ODETerm Y Args)
+    (solver : AbstractSolver (ODETerm Y Args) Y Y Time Args)
+    (t0 t1 : Time)
+    (dt0 : Option Time)
+    (y0 : Y)
+    (args : Args)
+    (adjY1 : Y)
+    (maxSteps : Nat)
+    (controller : Controller) :
+    Option (AdjointResult Y Args) :=
+  if t0 == t1 then
+    some { adjY0 := adjY1, adjArgs := zeroLike args }
+  else if !(inferInstance : AcceptedStepReplayController Controller).supportsAcceptedStepReplay then
+    none
+  else
+    match solver.odeStepAdjoint? with
+    | some (.explicitRK tableau) =>
+        match runPrimalLoopTrace (Controller := Controller) term solver t0 t1 dt0 y0 args maxSteps controller with
+        | some loopResult =>
+            let hasRejected := loopResult.attempts.any (fun attempt => !attempt.accepted)
+            if loopResult.result != Result.successful || hasRejected then
+              none
+            else
+              explicitRKAdjointOverAcceptedAttempts tableau term loopResult.attempts args adjY1
+        | none => none
+    | none => none
+
 def diffeqsolveAdjoint
     {Y Args Controller : Type}
     [DiffEqSpace Y] [DiffEqSpace Args]
@@ -413,7 +621,7 @@ def diffeqsolveDirectAdjoint
     {Y Args : Type}
     [DiffEqSpace Y] [DiffEqSpace Args]
     [DiffEqSeminorm Y] [DiffEqElem Y]
-    [AdjointFnBackend Y Args]
+    [AdjointBackend Y Args]
     [Inhabited Y] [Inhabited Args]
     (term : ODETerm Y Args)
     (solver : AbstractSolver (ODETerm Y Args) Y Y Time Args)
@@ -427,53 +635,104 @@ def diffeqsolveDirectAdjoint
     (controller : ConstantStepSize := default) :
     (Solution Y solver.SolverState (StepSizeController.State (C := ConstantStepSize)) ×
       Option (AdjointResult Y Args)) := by
-  if dt0.isNone then
-    let sol : Solution Y solver.SolverState (StepSizeController.State (C := ConstantStepSize)) := {
-      t0 := t0
-      t1 := t1
-      ts := none
-      ys := none
-      interpolation := none
-      stats := []
-      result := Result.internalError
-      solverState := none
-      controllerState := none
-      madeJump := none
-      eventMask := none
-    }
+  let sol :=
+    diffeqsolve
+      (Term := ODETerm Y Args)
+      (Y := Y)
+      (VF := Y)
+      (Control := Time)
+      (Args := Args)
+      (Controller := ConstantStepSize)
+      term solver t0 t1 dt0 y0 args (saveat := saveat) (maxSteps := maxSteps)
+      (controller := controller)
+  if sol.result != Result.successful then
     exact (sol, none)
   else
-    let sol :=
-      diffeqsolve
-        (Term := ODETerm Y Args)
-        (Y := Y)
-        (VF := Y)
-        (Control := Time)
-        (Args := Args)
-        (Controller := ConstantStepSize)
-        term solver t0 t1 dt0 y0 args (saveat := saveat) (maxSteps := maxSteps)
-        (controller := controller)
-    if sol.result != Result.successful then
-      exact (sol, none)
-    else
-      let solveFn := fun (y : Y) (args : Args) =>
-        let sol1 :=
-          diffeqsolve
-            (Term := ODETerm Y Args)
-            (Y := Y)
-            (VF := Y)
-            (Control := Time)
-            (Args := Args)
-            (Controller := ConstantStepSize)
-            term solver t0 t1 dt0 y args (saveat := { t1 := true }) (maxSteps := maxSteps)
-            (controller := controller)
-        match sol1.ys with
-        | some ys =>
-            if ys.size == 0 then y else ys[ys.size - 1]!
-        | none => y
-      let (adjY0, adjArgs) :=
-        (AdjointFnBackend.vjpFn (Y := Y) (Args := Args)) solveFn y0 args adjY1
-      exact (sol, some { adjY0 := adjY0, adjArgs := adjArgs })
+    exact
+      (sol,
+        directLikeDiscreteLoopAdjointWithController
+          (Controller := ConstantStepSize)
+          term solver t0 t1 dt0 y0 args adjY1 maxSteps controller)
+
+private def terminalSolveValue
+    {Y Args Controller : Type}
+    [DiffEqSpace Y]
+    [DiffEqSeminorm Y]
+    [DiffEqElem Y]
+    [Inhabited Y]
+    [StepSizeController Controller] [StepSizeControllerValidation Controller]
+    [Inhabited Controller]
+    (term : ODETerm Y Args)
+    (solver : AbstractSolver (ODETerm Y Args) Y Y Time Args)
+    (t0 t1 : Time)
+    (dt0 : Option Time)
+    (y0 : Y)
+    (args : Args)
+    (maxSteps : Nat)
+    (controller : Controller) : Y :=
+  let sol :=
+    diffeqsolve
+      (Term := ODETerm Y Args)
+      (Y := Y)
+      (VF := Y)
+      (Control := Time)
+      (Args := Args)
+      (Controller := Controller)
+      term solver t0 t1 dt0 y0 args (saveat := { t1 := true }) (maxSteps := maxSteps)
+      (controller := controller)
+  match sol.ys with
+  | some ys =>
+      if ys.size == 0 then y0 else ys[ys.size - 1]!
+  | none => y0
+
+private def diffeqsolveSolveFnAdjoint
+    {Y Args Controller : Type}
+    [DiffEqSpace Y] [DiffEqSpace Args]
+    [DiffEqSeminorm Y] [DiffEqElem Y]
+    [AdjointBackend Y Args]
+    [AdjointFnBackend Y Args]
+    [Inhabited Y] [Inhabited Args]
+    [StepSizeController Controller] [StepSizeControllerValidation Controller]
+    [AcceptedStepReplayController Controller]
+    [Inhabited Controller]
+    (term : ODETerm Y Args)
+    (solver : AbstractSolver (ODETerm Y Args) Y Y Time Args)
+    (t0 t1 : Time)
+    (dt0 : Option Time)
+    (y0 : Y)
+    (args : Args)
+    (adjY1 : Y)
+    (saveat : SaveAt := {})
+    (maxSteps : Nat := 4096)
+    (controller : Controller := default) :
+    (Solution Y solver.SolverState (StepSizeController.State (C := Controller)) ×
+      Option (AdjointResult Y Args)) := by
+  let sol :=
+    diffeqsolve
+      (Term := ODETerm Y Args)
+      (Y := Y)
+      (VF := Y)
+      (Control := Time)
+      (Args := Args)
+      (Controller := Controller)
+      term solver t0 t1 dt0 y0 args (saveat := saveat) (maxSteps := maxSteps)
+      (controller := controller)
+  if sol.result != Result.successful then
+    exact (sol, none)
+  else
+    match directLikeDiscreteLoopAdjointWithController
+        (Controller := Controller)
+        term solver t0 t1 dt0 y0 args adjY1 maxSteps controller with
+    | some adj =>
+        exact (sol, some adj)
+    | none =>
+        let solveFn := fun (y : Y) (args : Args) =>
+          terminalSolveValue
+            (Controller := Controller)
+            term solver t0 t1 dt0 y args maxSteps controller
+        let (adjY0, adjArgs) :=
+          (AdjointFnBackend.vjpFn (Y := Y) (Args := Args)) solveFn y0 args adjY1
+        exact (sol, some { adjY0 := adjY0, adjArgs := adjArgs })
 
 def diffeqsolveBacksolveAdjoint
     {Y Args Controller : Type}
@@ -592,57 +851,14 @@ private def recursiveCheckpointBackprop
       | some msg => return (none, some msg)
       | none => return (some { adjY0 := adjY, adjArgs := adjArgs }, none)
 
-def directModeUnsupportedReason
-    (mode : DirectAdjoint)
-    (dt0 : Option Time) : Option String :=
-  if dt0.isNone then
-    if mode.requireDt0 then
-      directAdjointUnsupportedReason dt0
-    else
-      none
-  else
-    none
-
-def forwardModeUnsupportedReason
-    (mode : ForwardMode)
-    (dt0 : Option Time) : Option String :=
-  if dt0.isNone then
-    if mode.requireDt0 then
-      directAdjointUnsupportedReason dt0
-    else
-      none
-  else
-    none
-
-private def inferConstantStepDt0 (t0 t1 : Time) (maxSteps : Nat) : Option Time :=
-  let span := t1 - t0
-  if span == 0.0 then
-    none
-  else
-    let budget := if maxSteps <= 1 then 1 else maxSteps / 2
-    let steps := Nat.min 256 budget
-    let dt := span / Float.ofNat steps
-    if dt == 0.0 then some span else some dt
-
-private def resolveDirectLikeDt0
+private def directLikeModeUnsupportedReason
     (modeName : String)
     (requireDt0 : Bool)
-    (t0 t1 : Time)
-    (dt0 : Option Time)
-    (maxSteps : Nat) :
-    (Option Time × Option String) :=
-  match dt0 with
-  | some dt => (some dt, none)
-  | none =>
-      if requireDt0 then
-        (none, directAdjointUnsupportedReason none)
-      else
-        match inferConstantStepDt0 t0 t1 maxSteps with
-        | some inferred => (some inferred, none)
-        | none =>
-            (none,
-              some
-                s!"Adjoint solve failed: `{modeName}` without `dt0` could not infer a nonzero constant step from `t0`/`t1`.")
+    (dt0 : Option Time) : Option String :=
+  if requireDt0 && dt0.isNone then
+    some (directLikeDt0CompatibilityUnsupportedReason modeName)
+  else
+    none
 
 def implicitAdjointUnsupportedReason
     (mode : ImplicitAdjoint) : Option String :=
@@ -654,7 +870,7 @@ def implicitAdjointUnsupportedReason
         some
           "Adjoint solve failed: `ImplicitAdjoint.recursiveCheckpoint` requires `useBacksolveFallback := true`."
     | none =>
-        some "Adjoint solve failed: `ImplicitAdjoint` without backsolve fallback is not implemented yet."
+        none
 
 private def implicitAdjointSaveAtContractHolds (saveat : SaveAt) : Bool :=
   let hasTs :=
@@ -672,22 +888,93 @@ private def implicitAdjointSaveAtContractHolds (saveat : SaveAt) : Bool :=
     saveat.subs.size == 0
 
 def implicitAdjointSaveAtUnsupportedReason
-    (saveat : SaveAt) : Option String :=
-  let hasTs :=
-    match saveat.ts with
-    | some ts => ts.size != 0
-    | none => false
-  if implicitAdjointSaveAtContractHolds saveat then
+    (mode : ImplicitAdjoint) (saveat : SaveAt) : Option String :=
+  if !mode.useBacksolveFallback then
     none
   else
-    some
-      s!"Adjoint solve failed: can only use `ImplicitAdjoint` with `saveat.t1 := true` and all other save fields disabled (Diffrax parity: `saveat=SaveAt(t1=True)`). Got `t0={saveat.t0}`, `t1={saveat.t1}`, `ts?={hasTs}`, `steps?={saveat.steps.enabled}`, `dense={saveat.dense}`, `solverState={saveat.solverState}`, `controllerState={saveat.controllerState}`, `madeJump={saveat.madeJump}`, `subs={saveat.subs.size}`."
+    let hasTs :=
+      match saveat.ts with
+      | some ts => ts.size != 0
+      | none => false
+    if implicitAdjointSaveAtContractHolds saveat then
+      none
+    else
+      some
+        s!"Adjoint solve failed: can only use `ImplicitAdjoint` with `saveat.t1 := true` and all other save fields disabled (Diffrax parity: `saveat=SaveAt(t1=True)`). Got `t0={saveat.t0}`, `t1={saveat.t1}`, `ts?={hasTs}`, `steps?={saveat.steps.enabled}`, `dense={saveat.dense}`, `solverState={saveat.solverState}`, `controllerState={saveat.controllerState}`, `madeJump={saveat.madeJump}`, `subs={saveat.subs.size}`."
 
 private def diffeqsolveDirectAdjointWithReportCore
+    {Y Args Controller : Type}
+    [DiffEqSpace Y] [DiffEqSpace Args]
+    [DiffEqSeminorm Y] [DiffEqElem Y]
+    [AdjointBackend Y Args]
+    [Inhabited Y] [Inhabited Args]
+    [StepSizeController Controller] [StepSizeControllerValidation Controller]
+    [AcceptedStepReplayController Controller]
+    [Inhabited Controller]
+    (term : ODETerm Y Args)
+    (solver : AbstractSolver (ODETerm Y Args) Y Y Time Args)
+    (t0 t1 : Time)
+    (dt0 : Option Time)
+    (y0 : Y)
+    (args : Args)
+    (adjY1 : Y)
+    (saveat : SaveAt := {})
+    (maxSteps : Nat := 4096)
+    (controller : Controller := default)
+    (modeName : String)
+    (unsupportedTag : String)
+    (unsupportedReason : Option String) :
+    AdjointSolveWithReport Y solver.SolverState
+      (StepSizeController.State (C := Controller)) Args := by
+  let unsupportedReason :=
+    match unsupportedReason with
+    | some msg => some msg
+    | none =>
+        directLikeDiscreteLoopUnsupportedReason
+          (Controller := Controller) modeName t0 t1 solver
+  match unsupportedReason with
+  | some msg =>
+      exact
+        mkAdjointFailure
+          (Y := Y)
+          (SolverState := solver.SolverState)
+          (ControllerState := StepSizeController.State (C := Controller))
+          (Args := Args)
+          t0 t1 unsupportedTag msg
+  | none =>
+      let sol :=
+        diffeqsolve
+          (Controller := Controller)
+          (Term := ODETerm Y Args)
+          (Y := Y)
+          (VF := Y)
+          (Control := Time)
+          (Args := Args)
+          term solver t0 t1 dt0 y0 args (saveat := saveat) (maxSteps := maxSteps)
+          (controller := controller)
+      if sol.result != Result.successful then
+        exact (sol, none, none)
+      else
+        match directLikeDiscreteLoopAdjointWithController
+            (Controller := Controller)
+            term solver t0 t1 dt0 y0 args adjY1 maxSteps controller with
+        | some adj =>
+            exact (sol, some adj, none)
+        | none =>
+            exact
+              mkAdjointFailure
+                (Y := Y)
+                (SolverState := solver.SolverState)
+                (ControllerState := StepSizeController.State (C := Controller))
+                (Args := Args)
+                t0 t1 unsupportedTag
+                (directLikeDiscreteLoopRuntimeUnsupportedReason modeName)
+
+private def diffeqsolveDirectAdjointConstantWithReportCore
     {Y Args : Type}
     [DiffEqSpace Y] [DiffEqSpace Args]
     [DiffEqSeminorm Y] [DiffEqElem Y]
-    [AdjointFnBackend Y Args]
+    [AdjointBackend Y Args]
     [Inhabited Y] [Inhabited Args]
     (term : ODETerm Y Args)
     (solver : AbstractSolver (ODETerm Y Args) Y Y Time Args)
@@ -699,10 +986,17 @@ private def diffeqsolveDirectAdjointWithReportCore
     (saveat : SaveAt := {})
     (maxSteps : Nat := 4096)
     (controller : ConstantStepSize := default)
+    (modeName : String)
     (unsupportedTag : String)
     (unsupportedReason : Option String) :
     AdjointSolveWithReport Y solver.SolverState
       (StepSizeController.State (C := ConstantStepSize)) Args := by
+  let unsupportedReason :=
+    match unsupportedReason with
+    | some msg => some msg
+    | none =>
+        directLikeDiscreteLoopUnsupportedReason
+          (Controller := ConstantStepSize) modeName t0 t1 solver
   match unsupportedReason with
   | some msg =>
       exact
@@ -716,7 +1010,21 @@ private def diffeqsolveDirectAdjointWithReportCore
       let (sol, adj) :=
         diffeqsolveDirectAdjoint
           term solver t0 t1 dt0 y0 args adjY1 saveat maxSteps controller
-      exact (sol, adj, none)
+      if sol.result != Result.successful then
+        exact (sol, none, none)
+      else
+        match adj with
+        | some adj =>
+            exact (sol, some adj, none)
+        | none =>
+            exact
+              mkAdjointFailure
+                (Y := Y)
+                (SolverState := solver.SolverState)
+                (ControllerState := StepSizeController.State (C := ConstantStepSize))
+                (Args := Args)
+                t0 t1 unsupportedTag
+                (directLikeDiscreteLoopRuntimeUnsupportedReason modeName)
 
 private def diffeqsolveBacksolveAdjointWithReportCore
     {Y Args Controller : Type}
@@ -768,11 +1076,41 @@ private def diffeqsolveBacksolveAdjointWithReportCore
               term solver adjoint t0 t1 dt0 y0 args adjY1 saveat maxSteps controller
           exact (sol, adj, none)
 
+def diffeqsolveDirectAdjointModeWithController
+    {Y Args Controller : Type}
+    [DiffEqSpace Y] [DiffEqSpace Args]
+    [DiffEqSeminorm Y] [DiffEqElem Y]
+    [AdjointBackend Y Args]
+    [Inhabited Y] [Inhabited Args]
+    [StepSizeController Controller] [StepSizeControllerValidation Controller]
+    [AcceptedStepReplayController Controller]
+    [Inhabited Controller]
+    (mode : DirectAdjoint := {})
+    (term : ODETerm Y Args)
+    (solver : AbstractSolver (ODETerm Y Args) Y Y Time Args)
+    (t0 t1 : Time)
+    (dt0 : Option Time)
+    (y0 : Y)
+    (args : Args)
+    (adjY1 : Y)
+    (saveat : SaveAt := {})
+    (maxSteps : Nat := 4096)
+    (controller : Controller := default) :
+    AdjointSolveWithReport Y solver.SolverState
+      (StepSizeController.State (C := Controller)) Args :=
+  let unsupportedReason :=
+    directLikeModeUnsupportedReason "DirectAdjoint" mode.requireDt0 dt0
+  diffeqsolveDirectAdjointWithReportCore
+    (Controller := Controller)
+    term solver t0 t1 dt0 y0 args adjY1 saveat maxSteps controller
+    "DirectAdjoint"
+    "unsupported_direct_adjoint_mode" unsupportedReason
+
 def diffeqsolveDirectAdjointMode
     {Y Args : Type}
     [DiffEqSpace Y] [DiffEqSpace Args]
     [DiffEqSeminorm Y] [DiffEqElem Y]
-    [AdjointFnBackend Y Args]
+    [AdjointBackend Y Args]
     [Inhabited Y] [Inhabited Args]
     (mode : DirectAdjoint := {})
     (term : ODETerm Y Args)
@@ -787,21 +1125,48 @@ def diffeqsolveDirectAdjointMode
     (controller : ConstantStepSize := default) :
     AdjointSolveWithReport Y solver.SolverState
       (StepSizeController.State (C := ConstantStepSize)) Args :=
-  let (dt0Resolved, dt0UnsupportedReason) :=
-    resolveDirectLikeDt0 "DirectAdjoint" mode.requireDt0 t0 t1 dt0 maxSteps
   let unsupportedReason :=
-    match dt0UnsupportedReason with
-    | some msg => some msg
-    | none => directModeUnsupportedReason mode dt0Resolved
-  diffeqsolveDirectAdjointWithReportCore
-    term solver t0 t1 dt0Resolved y0 args adjY1 saveat maxSteps controller
+    directLikeModeUnsupportedReason "DirectAdjoint" mode.requireDt0 dt0
+  diffeqsolveDirectAdjointConstantWithReportCore
+    term solver t0 t1 dt0 y0 args adjY1 saveat maxSteps controller
+    "DirectAdjoint"
     "unsupported_direct_adjoint_mode" unsupportedReason
+
+def diffeqsolveForwardModeWithController
+    {Y Args Controller : Type}
+    [DiffEqSpace Y] [DiffEqSpace Args]
+    [DiffEqSeminorm Y] [DiffEqElem Y]
+    [AdjointBackend Y Args]
+    [Inhabited Y] [Inhabited Args]
+    [StepSizeController Controller] [StepSizeControllerValidation Controller]
+    [AcceptedStepReplayController Controller]
+    [Inhabited Controller]
+    (mode : ForwardMode := {})
+    (term : ODETerm Y Args)
+    (solver : AbstractSolver (ODETerm Y Args) Y Y Time Args)
+    (t0 t1 : Time)
+    (dt0 : Option Time)
+    (y0 : Y)
+    (args : Args)
+    (adjY1 : Y)
+    (saveat : SaveAt := {})
+    (maxSteps : Nat := 4096)
+    (controller : Controller := default) :
+    AdjointSolveWithReport Y solver.SolverState
+      (StepSizeController.State (C := Controller)) Args :=
+  let unsupportedReason :=
+    directLikeModeUnsupportedReason "ForwardMode" mode.requireDt0 dt0
+  diffeqsolveDirectAdjointWithReportCore
+    (Controller := Controller)
+    term solver t0 t1 dt0 y0 args adjY1 saveat maxSteps controller
+    "ForwardMode"
+    "unsupported_forward_mode" unsupportedReason
 
 def diffeqsolveForwardMode
     {Y Args : Type}
     [DiffEqSpace Y] [DiffEqSpace Args]
     [DiffEqSeminorm Y] [DiffEqElem Y]
-    [AdjointFnBackend Y Args]
+    [AdjointBackend Y Args]
     [Inhabited Y] [Inhabited Args]
     (mode : ForwardMode := {})
     (term : ODETerm Y Args)
@@ -816,14 +1181,11 @@ def diffeqsolveForwardMode
     (controller : ConstantStepSize := default) :
     AdjointSolveWithReport Y solver.SolverState
       (StepSizeController.State (C := ConstantStepSize)) Args :=
-  let (dt0Resolved, dt0UnsupportedReason) :=
-    resolveDirectLikeDt0 "ForwardMode" mode.requireDt0 t0 t1 dt0 maxSteps
   let unsupportedReason :=
-    match dt0UnsupportedReason with
-    | some msg => some msg
-    | none => forwardModeUnsupportedReason mode dt0Resolved
-  diffeqsolveDirectAdjointWithReportCore
-    term solver t0 t1 dt0Resolved y0 args adjY1 saveat maxSteps controller
+    directLikeModeUnsupportedReason "ForwardMode" mode.requireDt0 dt0
+  diffeqsolveDirectAdjointConstantWithReportCore
+    term solver t0 t1 dt0 y0 args adjY1 saveat maxSteps controller
+    "ForwardMode"
     "unsupported_forward_mode" unsupportedReason
 
 def diffeqsolveRecursiveCheckpointAdjoint
@@ -939,6 +1301,7 @@ def diffeqsolveImplicitAdjoint
     [DiffEqSeminorm Y] [DiffEqSeminorm Args]
     [DiffEqElem Y] [DiffEqElem Args]
     [AdjointBackend Y Args]
+    [AdjointFnBackend Y Args]
     [Inhabited Y] [Inhabited Args]
     [StepSizeController Controller] [StepSizeControllerValidation Controller]
     [Inhabited Controller]
@@ -966,7 +1329,7 @@ def diffeqsolveImplicitAdjoint
           (Args := Args)
           t0 t1 "unsupported_implicit_adjoint" msg
   | none =>
-      match implicitAdjointSaveAtUnsupportedReason saveat with
+      match implicitAdjointSaveAtUnsupportedReason mode saveat with
       | some msg =>
           exact
             mkAdjointFailure
@@ -976,20 +1339,27 @@ def diffeqsolveImplicitAdjoint
               (Args := Args)
               t0 t1 "unsupported_implicit_adjoint_saveat" msg
       | none =>
-          match mode.recursiveCheckpoint with
-          | some recursiveMode =>
-              exact
-                diffeqsolveRecursiveCheckpointAdjoint
-                  (Controller := Controller)
-                  recursiveMode term solver adjoint t0 t1 dt0 y0 args adjY1 saveat maxSteps
-                  controller
-          | none =>
-              exact
-                diffeqsolveBacksolveAdjointWithReportCore
-                  (Controller := Controller)
-                  term solver adjoint t0 t1 dt0 y0 args adjY1 saveat maxSteps controller
-                  "unsupported_implicit_adjoint"
-                  none
+          if !mode.useBacksolveFallback then
+            let (sol, adjRes) :=
+              diffeqsolveSolveFnAdjoint
+                (Controller := Controller)
+                term solver t0 t1 dt0 y0 args adjY1 saveat maxSteps controller
+            exact (sol, adjRes, none)
+          else
+            match mode.recursiveCheckpoint with
+            | some recursiveMode =>
+                exact
+                  diffeqsolveRecursiveCheckpointAdjoint
+                    (Controller := Controller)
+                    recursiveMode term solver adjoint t0 t1 dt0 y0 args adjY1 saveat maxSteps
+                    controller
+            | none =>
+                exact
+                  diffeqsolveBacksolveAdjointWithReportCore
+                    (Controller := Controller)
+                    term solver adjoint t0 t1 dt0 y0 args adjY1 saveat maxSteps controller
+                    "unsupported_implicit_adjoint"
+                    none
 
 end DiffEq
 end torch

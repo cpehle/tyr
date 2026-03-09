@@ -202,6 +202,11 @@ def solver {s : Nat} {Term Y VF Args : Type}
   SolverState := Unit
   DenseInfo := DenseInfo Y
   termStructure := TermStructure.single
+  odeStepAdjoint? := some (.explicitRK {
+    a := rk.tableau.a.toArray
+    b := rk.tableau.b.toArray
+    c := rk.tableau.c.toArray
+  })
   order := fun _ => rk.tableau.order
   strongOrder := fun _ => 0.0
   init := fun _ _ _ _ _ => ()

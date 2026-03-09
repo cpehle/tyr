@@ -23,6 +23,11 @@ def Euler.solver {Term Y VF Control Args : Type}
   SolverState := Unit
   DenseInfo := LocalLinearDenseInfo Y
   termStructure := TermStructure.single
+  odeStepAdjoint? := some (.explicitRK {
+    a := #[#[]]
+    b := #[1.0]
+    c := #[0.0]
+  })
   order := fun _ => 1
   strongOrder := fun _ => 0.0
   init := fun _ _ _ _ _ => ()

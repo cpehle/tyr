@@ -23,6 +23,11 @@ def Heun.solver {Term Y VF Control Args : Type}
   SolverState := Unit
   DenseInfo := LocalLinearDenseInfo Y
   termStructure := TermStructure.single
+  odeStepAdjoint? := some (.explicitRK {
+    a := #[#[], #[1.0]]
+    b := #[0.5, 0.5]
+    c := #[0.0, 1.0]
+  })
   order := fun _ => 2
   strongOrder := fun _ => 0.0
   init := fun _ _ _ _ _ => ()

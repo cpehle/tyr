@@ -158,11 +158,22 @@ structure StepOutput (Y DenseInfo SolverState : Type) where
   solverState : SolverState
   result : Result
 
+structure ExplicitRKAdjointTableau where
+  a : Array (Array Time)
+  b : Array Time
+  c : Array Time
+  deriving Inhabited
+
+inductive ODEStepAdjoint where
+  | explicitRK (tableau : ExplicitRKAdjointTableau)
+  deriving Inhabited
+
 structure AbstractSolver (Term Y VF Control Args : Type) where
   SolverState : Type
   DenseInfo : Type
   termStructure : TermStructure := TermStructure.single
   termStructureMeta : Option TermStructureMeta := none
+  odeStepAdjoint? : Option ODEStepAdjoint := none
   order : Term → Nat := fun _ => 1
   strongOrder : Term → Float := fun _ => 0.0
   errorOrder : Term → Float := fun term =>

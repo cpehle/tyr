@@ -8,10 +8,25 @@ open LeanTest
 open torch
 open torch.DiffEq
 
+private def approx (a b tol : Float) : Bool :=
+  Float.abs (a - b) <= tol
+
 private def getStat (name : String) (stats : List (String × Nat)) : Nat :=
   match stats.find? (fun kv => kv.fst == name) with
   | some (_, v) => v
   | none => 0
+
+private def getY1 {S C : Type} (label : String) (sol : Solution Float S C) : IO Float := do
+  match sol.ys with
+  | some ys =>
+      if ys.size == 0 then
+        LeanTest.fail s!"Expected y1 for {label}"
+        return 0.0
+      else
+        return ys[ys.size - 1]!
+  | none =>
+      LeanTest.fail s!"Expected ys for {label}"
+      return 0.0
 
 section
 
@@ -34,29 +49,36 @@ section
       let gradA := ((vf y (a + eps)) - (vf y (a - eps))) / (2.0 * eps)
       (gradY * adjY, gradA * adjY)
 
-  @[test] def testForwardModeInfersDt0WhenAllowed : IO Unit := do
+  @[test] def testForwardModePIDControllerWithoutDt0IsUnsupported : IO Unit := do
     let term : ODETerm Float Float := { vectorField := fun _t y a => a * y }
     let solver :=
-      RK4.solver
+      Dopri5.solver
         (Term := ODETerm Float Float)
         (Y := Float)
         (VF := Float)
         (Args := Float)
-    let mode : ForwardMode := { requireDt0 := false }
-    let (sol, adjOpt, errOpt) :=
-      diffeqsolveForwardMode
-        (mode := mode)
+    let controller : PIDController := { rtol := 1.0e-6, atol := 1.0e-8 }
+    let (solAdj, adjOpt, errOpt) :=
+      diffeqsolveForwardModeWithController
+        (Controller := PIDController)
+        (mode := {})
         term solver 0.0 1.0 none 2.0 0.3 1.0
         (saveat := { t1 := true })
-    LeanTest.assertTrue (sol.result == Result.successful)
-      "ForwardMode should infer dt0 when requireDt0=false"
-    LeanTest.assertTrue errOpt.isNone
-      "ForwardMode inferred-dt0 path should not return unsupported error"
-    LeanTest.assertTrue (getStat "unsupported_forward_mode" sol.stats == 0)
-      "ForwardMode inferred-dt0 path should not tag unsupported_forward_mode"
-    match adjOpt with
-    | some _ => pure ()
-    | none => LeanTest.fail "Expected ForwardMode adjoint output when dt0 inference succeeds"
+        (controller := controller)
+    LeanTest.assertTrue (solAdj.result == Result.internalError)
+      "ForwardMode should report unsupported for PIDController until controller adjoints are implemented"
+    LeanTest.assertTrue adjOpt.isNone
+      "Unsupported ForwardMode PIDController path should not return adjoints"
+    LeanTest.assertTrue (getStat "adjoint_error" solAdj.stats == 1)
+      "Unsupported ForwardMode PIDController path should set adjoint_error"
+    LeanTest.assertTrue (getStat "unsupported_forward_mode" solAdj.stats == 1)
+      "Unsupported ForwardMode PIDController path should set unsupported_forward_mode"
+    match errOpt with
+    | some msg =>
+        LeanTest.assertTrue (msg.contains "ForwardMode")
+          s!"Expected ForwardMode unsupported message, got: {msg}"
+    | none =>
+        LeanTest.fail "Expected unsupported ForwardMode PIDController message"
 
   @[test] def testForwardModeRequireDt0RejectsMissingDt0 : IO Unit := do
     let term : ODETerm Float Float := { vectorField := fun _t y a => a * y }
@@ -83,12 +105,12 @@ section
     match errOpt with
     | some msg =>
         LeanTest.assertTrue
-          (msg.startsWith "Adjoint solve failed: direct/forward mode currently requires")
+          (msg.startsWith "Adjoint solve failed: `ForwardMode.requireDt0 := true`")
           s!"Expected ForwardMode requireDt0 message, got: {msg}"
     | none =>
         LeanTest.fail "Expected unsupported message for missing ForwardMode dt0"
 
-  @[test] def testDirectAdjointDegenerateIntervalMissingDt0IsUnsupported : IO Unit := do
+  @[test] def testDirectAdjointDegenerateIntervalMissingDt0Succeeds : IO Unit := do
     let term : ODETerm Float Float := { vectorField := fun _t y a => a * y }
     let solver :=
       RK4.solver
@@ -96,27 +118,356 @@ section
         (Y := Float)
         (VF := Float)
         (Args := Float)
-    let mode : DirectAdjoint := { requireDt0 := false }
     let (sol, adjOpt, errOpt) :=
       diffeqsolveDirectAdjointMode
-        (mode := mode)
+        (mode := {})
         term solver 1.0 1.0 none 2.0 0.3 1.0
         (saveat := { t1 := true })
-    LeanTest.assertTrue (sol.result == Result.internalError)
-      "DirectAdjoint should fail when dt0 inference is impossible on degenerate interval"
-    LeanTest.assertTrue adjOpt.isNone
-      "DirectAdjoint degenerate missing-dt0 failure should not return adjoint values"
-    LeanTest.assertTrue (getStat "adjoint_error" sol.stats == 1)
-      "DirectAdjoint degenerate missing-dt0 failure should set adjoint_error stat"
-    LeanTest.assertTrue (getStat "unsupported_direct_adjoint_mode" sol.stats == 1)
-      "DirectAdjoint degenerate missing-dt0 failure should set unsupported_direct_adjoint_mode stat"
-    match errOpt with
-    | some msg =>
-        LeanTest.assertTrue
-          (msg.startsWith "Adjoint solve failed: `DirectAdjoint` without `dt0` could not infer")
-          s!"Expected DirectAdjoint dt0 inference failure message, got: {msg}"
+    LeanTest.assertTrue (sol.result == Result.successful)
+      "DirectAdjoint should succeed on a degenerate interval without consulting controller dt0 requirements"
+    LeanTest.assertTrue errOpt.isNone
+      "DirectAdjoint degenerate interval should not report unsupported errors"
+    LeanTest.assertTrue (getStat "unsupported_direct_adjoint_mode" sol.stats == 0)
+      "DirectAdjoint degenerate interval should not set unsupported_direct_adjoint_mode"
+    let y1 ← getY1 "direct degenerate interval" sol
+    LeanTest.assertTrue (approx y1 2.0 1.0e-12)
+      s!"DirectAdjoint degenerate interval should preserve y0, got {y1}"
+    match adjOpt with
     | none =>
-        LeanTest.fail "Expected unsupported message for DirectAdjoint degenerate missing dt0"
+        LeanTest.fail "Expected adjoint values for DirectAdjoint on a degenerate interval"
+    | some adj =>
+        LeanTest.assertTrue (approx adj.adjY0 1.0 2.0e-3)
+          s!"DirectAdjoint degenerate interval adjY0 should be identity, got {adj.adjY0}"
+        LeanTest.assertTrue (approx adj.adjArgs 0.0 2.0e-3)
+          s!"DirectAdjoint degenerate interval adjArgs should vanish, got {adj.adjArgs}"
+
+  @[test] def testDirectAdjointConstantStepUsesDiscreteLoopVjp : IO Unit := do
+    let term : ODETerm Float Float := { vectorField := fun _t y a => a * y }
+    let solver :=
+      Euler.solver
+        (Term := ODETerm Float Float)
+        (Y := Float)
+        (VF := Float)
+        (Args := Float)
+    let t0 := 0.0
+    let t1 := 1.0
+    let dt0 := some 0.01
+    let y0 := 2.0
+    let a := 0.3
+    let adjY1 := 1.0
+    let (sol, adjOpt, errOpt) :=
+      diffeqsolveDirectAdjointMode
+        (mode := {})
+        term solver t0 t1 dt0 y0 a adjY1
+        (saveat := { t1 := true })
+    LeanTest.assertTrue errOpt.isNone
+      "DirectAdjoint discrete-loop path should not report unsupported errors"
+    LeanTest.assertTrue (sol.result == Result.successful)
+      "DirectAdjoint should succeed on the discrete loop path"
+    let eps : Float := 1.0e-6
+    let solYp :=
+      diffeqsolve
+        (Term := ODETerm Float Float)
+        (Y := Float)
+        (VF := Float)
+        (Control := Time)
+        (Args := Float)
+        (Controller := ConstantStepSize)
+        term solver t0 t1 dt0 (y0 + eps) a
+        (saveat := { t1 := true })
+    let solYm :=
+      diffeqsolve
+        (Term := ODETerm Float Float)
+        (Y := Float)
+        (VF := Float)
+        (Control := Time)
+        (Args := Float)
+        (Controller := ConstantStepSize)
+        term solver t0 t1 dt0 (y0 - eps) a
+        (saveat := { t1 := true })
+    let solAp :=
+      diffeqsolve
+        (Term := ODETerm Float Float)
+        (Y := Float)
+        (VF := Float)
+        (Control := Time)
+        (Args := Float)
+        (Controller := ConstantStepSize)
+        term solver t0 t1 dt0 y0 (a + eps)
+        (saveat := { t1 := true })
+    let solAm :=
+      diffeqsolve
+        (Term := ODETerm Float Float)
+        (Y := Float)
+        (VF := Float)
+        (Control := Time)
+        (Args := Float)
+        (Controller := ConstantStepSize)
+        term solver t0 t1 dt0 y0 (a - eps)
+        (saveat := { t1 := true })
+    let yYp ← getY1 "direct loop y0+eps" solYp
+    let yYm ← getY1 "direct loop y0-eps" solYm
+    let yAp ← getY1 "direct loop a+eps" solAp
+    let yAm ← getY1 "direct loop a-eps" solAm
+    let fdY0 := (yYp - yYm) / (2.0 * eps)
+    let fdA := (yAp - yAm) / (2.0 * eps)
+    match adjOpt with
+    | none =>
+        LeanTest.fail "Expected DirectAdjoint result on discrete-loop path"
+    | some adj =>
+        LeanTest.assertTrue (approx adj.adjY0 fdY0 2.0e-3)
+          s!"DirectAdjoint discrete-loop dy0 expected {fdY0}, got {adj.adjY0}"
+        LeanTest.assertTrue (approx adj.adjArgs fdA 2.0e-3)
+          s!"DirectAdjoint discrete-loop da expected {fdA}, got {adj.adjArgs}"
+
+  @[test] def testForwardModeConstantStepUsesDiscreteLoopVjp : IO Unit := do
+    let term : ODETerm Float Float := { vectorField := fun _t y a => a * y }
+    let solver :=
+      RK4.solver
+        (Term := ODETerm Float Float)
+        (Y := Float)
+        (VF := Float)
+        (Args := Float)
+    let t0 := 0.0
+    let t1 := 1.0
+    let dt0 := some 0.05
+    let y0 := 2.0
+    let a := 0.3
+    let adjY1 := 1.0
+    let (sol, adjOpt, errOpt) :=
+      diffeqsolveForwardMode
+        (mode := {})
+        term solver t0 t1 dt0 y0 a adjY1
+        (saveat := { t1 := true })
+    LeanTest.assertTrue errOpt.isNone
+      "ForwardMode discrete-loop path should not report unsupported errors"
+    LeanTest.assertTrue (sol.result == Result.successful)
+      "ForwardMode should succeed on the discrete loop path"
+    let eps : Float := 1.0e-6
+    let solYp :=
+        diffeqsolve
+          (Term := ODETerm Float Float)
+          (Y := Float)
+          (VF := Float)
+          (Control := Time)
+          (Args := Float)
+          (Controller := ConstantStepSize)
+          term solver t0 t1 dt0 (y0 + eps) a
+          (saveat := { t1 := true })
+      let solYm :=
+        diffeqsolve
+          (Term := ODETerm Float Float)
+          (Y := Float)
+          (VF := Float)
+          (Control := Time)
+          (Args := Float)
+          (Controller := ConstantStepSize)
+          term solver t0 t1 dt0 (y0 - eps) a
+          (saveat := { t1 := true })
+      let solAp :=
+        diffeqsolve
+          (Term := ODETerm Float Float)
+          (Y := Float)
+          (VF := Float)
+          (Control := Time)
+          (Args := Float)
+          (Controller := ConstantStepSize)
+          term solver t0 t1 dt0 y0 (a + eps)
+          (saveat := { t1 := true })
+      let solAm :=
+        diffeqsolve
+          (Term := ODETerm Float Float)
+          (Y := Float)
+          (VF := Float)
+          (Control := Time)
+          (Args := Float)
+          (Controller := ConstantStepSize)
+          term solver t0 t1 dt0 y0 (a - eps)
+          (saveat := { t1 := true })
+    let yYp ← getY1 "forward loop y0+eps" solYp
+    let yYm ← getY1 "forward loop y0-eps" solYm
+    let yAp ← getY1 "forward loop a+eps" solAp
+    let yAm ← getY1 "forward loop a-eps" solAm
+    let fdY0 := (yYp - yYm) / (2.0 * eps)
+    let fdA := (yAp - yAm) / (2.0 * eps)
+    match adjOpt with
+    | none =>
+        LeanTest.fail "Expected ForwardMode result on discrete-loop path"
+    | some adj =>
+        LeanTest.assertTrue (approx adj.adjY0 fdY0 5.0e-3)
+          s!"ForwardMode discrete-loop dy0 expected {fdY0}, got {adj.adjY0}"
+        LeanTest.assertTrue (approx adj.adjArgs fdA 5.0e-3)
+          s!"ForwardMode discrete-loop da expected {fdA}, got {adj.adjArgs}"
+
+  @[test] def testDirectAdjointStepToUsesDiscreteLoopVjp : IO Unit := do
+    let term : ODETerm Float Float := { vectorField := fun _t y a => a * y }
+    let solver :=
+      RK4.solver
+        (Term := ODETerm Float Float)
+        (Y := Float)
+        (VF := Float)
+        (Args := Float)
+    let controller : StepTo := { ts := #[0.0, 0.1, 0.23, 0.6, 1.0] }
+    let t0 := 0.0
+    let t1 := 1.0
+    let y0 := 2.0
+    let a := 0.3
+    let adjY1 := 1.0
+    let (sol, adjOpt, errOpt) :=
+      diffeqsolveDirectAdjointModeWithController
+        (Controller := StepTo)
+        (mode := {})
+        term solver t0 t1 none y0 a adjY1
+        (saveat := { t1 := true })
+        (controller := controller)
+    LeanTest.assertTrue errOpt.isNone
+      "DirectAdjoint StepTo path should not report unsupported errors"
+    LeanTest.assertTrue (sol.result == Result.successful)
+      "DirectAdjoint StepTo path should succeed"
+    let eps : Float := 1.0e-6
+    let solYp :=
+        diffeqsolve
+          (Term := ODETerm Float Float)
+          (Y := Float)
+          (VF := Float)
+          (Control := Time)
+          (Args := Float)
+          (Controller := StepTo)
+          term solver t0 t1 none (y0 + eps) a
+          (saveat := { t1 := true })
+          (controller := controller)
+      let solYm :=
+        diffeqsolve
+          (Term := ODETerm Float Float)
+          (Y := Float)
+          (VF := Float)
+          (Control := Time)
+          (Args := Float)
+          (Controller := StepTo)
+          term solver t0 t1 none (y0 - eps) a
+          (saveat := { t1 := true })
+          (controller := controller)
+      let solAp :=
+        diffeqsolve
+          (Term := ODETerm Float Float)
+          (Y := Float)
+          (VF := Float)
+          (Control := Time)
+          (Args := Float)
+          (Controller := StepTo)
+          term solver t0 t1 none y0 (a + eps)
+          (saveat := { t1 := true })
+          (controller := controller)
+      let solAm :=
+        diffeqsolve
+          (Term := ODETerm Float Float)
+          (Y := Float)
+          (VF := Float)
+          (Control := Time)
+          (Args := Float)
+          (Controller := StepTo)
+          term solver t0 t1 none y0 (a - eps)
+          (saveat := { t1 := true })
+          (controller := controller)
+    let yYp ← getY1 "direct StepTo y0+eps" solYp
+    let yYm ← getY1 "direct StepTo y0-eps" solYm
+    let yAp ← getY1 "direct StepTo a+eps" solAp
+    let yAm ← getY1 "direct StepTo a-eps" solAm
+    let fdY0 := (yYp - yYm) / (2.0 * eps)
+    let fdA := (yAp - yAm) / (2.0 * eps)
+    match adjOpt with
+    | none =>
+        LeanTest.fail "Expected DirectAdjoint result on StepTo discrete-loop path"
+    | some adj =>
+        LeanTest.assertTrue (approx adj.adjY0 fdY0 5.0e-3)
+          s!"DirectAdjoint StepTo dy0 expected {fdY0}, got {adj.adjY0}"
+        LeanTest.assertTrue (approx adj.adjArgs fdA 5.0e-3)
+          s!"DirectAdjoint StepTo da expected {fdA}, got {adj.adjArgs}"
+
+  @[test] def testForwardModeStepToUsesDiscreteLoopVjp : IO Unit := do
+    let term : ODETerm Float Float := { vectorField := fun _t y a => a * y }
+    let solver :=
+      Euler.solver
+        (Term := ODETerm Float Float)
+        (Y := Float)
+        (VF := Float)
+        (Args := Float)
+    let controller : StepTo := { ts := #[0.0, 0.08, 0.21, 0.59, 1.0] }
+    let t0 := 0.0
+    let t1 := 1.0
+    let y0 := 2.0
+    let a := 0.3
+    let adjY1 := 1.0
+    let (sol, adjOpt, errOpt) :=
+      diffeqsolveForwardModeWithController
+        (Controller := StepTo)
+        (mode := {})
+        term solver t0 t1 none y0 a adjY1
+        (saveat := { t1 := true })
+        (controller := controller)
+    LeanTest.assertTrue errOpt.isNone
+      "ForwardMode StepTo path should not report unsupported errors"
+    LeanTest.assertTrue (sol.result == Result.successful)
+      "ForwardMode StepTo path should succeed"
+    let eps : Float := 1.0e-6
+    let solYp :=
+        diffeqsolve
+          (Term := ODETerm Float Float)
+          (Y := Float)
+          (VF := Float)
+          (Control := Time)
+          (Args := Float)
+          (Controller := StepTo)
+          term solver t0 t1 none (y0 + eps) a
+          (saveat := { t1 := true })
+          (controller := controller)
+      let solYm :=
+        diffeqsolve
+          (Term := ODETerm Float Float)
+          (Y := Float)
+          (VF := Float)
+          (Control := Time)
+          (Args := Float)
+          (Controller := StepTo)
+          term solver t0 t1 none (y0 - eps) a
+          (saveat := { t1 := true })
+          (controller := controller)
+      let solAp :=
+        diffeqsolve
+          (Term := ODETerm Float Float)
+          (Y := Float)
+          (VF := Float)
+          (Control := Time)
+          (Args := Float)
+          (Controller := StepTo)
+          term solver t0 t1 none y0 (a + eps)
+          (saveat := { t1 := true })
+          (controller := controller)
+      let solAm :=
+        diffeqsolve
+          (Term := ODETerm Float Float)
+          (Y := Float)
+          (VF := Float)
+          (Control := Time)
+          (Args := Float)
+          (Controller := StepTo)
+          term solver t0 t1 none y0 (a - eps)
+          (saveat := { t1 := true })
+          (controller := controller)
+    let yYp ← getY1 "forward StepTo y0+eps" solYp
+    let yYm ← getY1 "forward StepTo y0-eps" solYm
+    let yAp ← getY1 "forward StepTo a+eps" solAp
+    let yAm ← getY1 "forward StepTo a-eps" solAm
+    let fdY0 := (yYp - yYm) / (2.0 * eps)
+    let fdA := (yAp - yAm) / (2.0 * eps)
+    match adjOpt with
+    | none =>
+        LeanTest.fail "Expected ForwardMode result on StepTo discrete-loop path"
+    | some adj =>
+        LeanTest.assertTrue (approx adj.adjY0 fdY0 5.0e-3)
+          s!"ForwardMode StepTo dy0 expected {fdY0}, got {adj.adjY0}"
+        LeanTest.assertTrue (approx adj.adjArgs fdA 5.0e-3)
+          s!"ForwardMode StepTo da expected {fdA}, got {adj.adjArgs}"
 
   @[test] def testImplicitAdjointRejectsNonT1SaveAt : IO Unit := do
     let term : ODETerm Float Float := { vectorField := fun _t y a => a * y }
@@ -214,6 +565,67 @@ section
     | some _ => pure ()
     | none => LeanTest.fail "Expected adjoint result for implicit saveat config with empty ts"
 
+  @[test] def testImplicitAdjointWithoutFallbackAllowsGeneralSaveAt : IO Unit := do
+    let term : ODETerm Float Float := { vectorField := fun _t y a => a * y }
+    let solver :=
+      RK4.solver
+        (Term := ODETerm Float Float)
+        (Y := Float)
+        (VF := Float)
+        (Args := Float)
+    let adjSolver :=
+      RK4.solver
+        (Term := ODETerm (AdjointState Float Float) Float)
+        (Y := AdjointState Float Float)
+        (VF := AdjointState Float Float)
+        (Args := Float)
+    let adjoint : BacksolveAdjoint Float Float := { adjSolver := adjSolver }
+    let mode : ImplicitAdjoint := { useBacksolveFallback := false }
+    let saveat : SaveAt := { t0 := true, t1 := true, ts := some #[0.25, 0.5, 0.75] }
+    let (solAdj, adjOpt, errOpt) :=
+      diffeqsolveImplicitAdjoint
+        (mode := mode)
+        (Controller := ConstantStepSize)
+        term solver  adjoint 0.0 1.0 (some 0.01) 2.0 0.3 1.0
+        (saveat := saveat)
+    let solBase :=
+      diffeqsolve
+        (Term := ODETerm Float Float)
+        (Y := Float)
+        (VF := Float)
+        (Control := Time)
+        (Args := Float)
+        (Controller := ConstantStepSize)
+        term solver 0.0 1.0 (some 0.01) 2.0 0.3
+        (saveat := saveat)
+    LeanTest.assertTrue (solAdj.result == Result.successful)
+      "ImplicitAdjoint without fallback should allow general saveat payloads"
+    LeanTest.assertTrue errOpt.isNone
+      "ImplicitAdjoint no-fallback general saveat path should not report unsupported errors"
+    LeanTest.assertTrue (getStat "unsupported_implicit_adjoint_saveat" solAdj.stats == 0)
+      "ImplicitAdjoint no-fallback general saveat path should not tag unsupported_implicit_adjoint_saveat"
+    match solAdj.ts, solBase.ts, solAdj.ys, solBase.ys with
+    | some tsAdj, some tsBase, some ysAdj, some ysBase =>
+        LeanTest.assertTrue (tsAdj == tsBase)
+          s!"ImplicitAdjoint no-fallback ts mismatch: {tsAdj} vs {tsBase}"
+        LeanTest.assertTrue (ysAdj.size == ysBase.size)
+          s!"ImplicitAdjoint no-fallback ys size mismatch: {ysAdj.size} vs {ysBase.size}"
+        for i in [:ysAdj.size] do
+          LeanTest.assertTrue (Float.abs (ysAdj[i]! - ysBase[i]!) <= 1.0e-12)
+            s!"ImplicitAdjoint no-fallback saved y mismatch at {i}: {ysAdj[i]!} vs {ysBase[i]!}"
+    | _, _, _, _ =>
+        LeanTest.fail "Expected matching ts/ys payloads for general implicit saveat"
+    match adjOpt with
+    | none =>
+        LeanTest.fail "Expected adjoint result for ImplicitAdjoint without fallback and general saveat"
+    | some adj =>
+        let expectedY0 := Float.exp 0.3
+        let expectedA := 2.0 * Float.exp 0.3
+        LeanTest.assertTrue (Float.abs (adj.adjY0 - expectedY0) <= 5.0e-2)
+          s!"ImplicitAdjoint general-saveat adjY0 expected ~{expectedY0}, got {adj.adjY0}"
+        LeanTest.assertTrue (Float.abs (adj.adjArgs - expectedA) <= 8.0e-2)
+          s!"ImplicitAdjoint general-saveat adjArgs expected ~{expectedA}, got {adj.adjArgs}"
+
   @[test] def testBacksolveAdjointRejectsSubSaveAt : IO Unit := do
     let term : ODETerm Float Float := { vectorField := fun _t y a => a * y }
     let solver :=
@@ -239,7 +651,7 @@ section
     LeanTest.assertTrue adjOpt.isNone
       "Backsolve adjoint SaveAt.subs contract failure should not return adjoint values"
 
-  @[test] def testImplicitAdjointWithoutFallbackUnsupported : IO Unit := do
+  @[test] def testImplicitAdjointWithoutFallbackUsesSolveFnAdjoint : IO Unit := do
     let term : ODETerm Float Float := { vectorField := fun _t y a => a * y }
     let solver :=
       RK4.solver
@@ -264,19 +676,22 @@ section
         (Controller := ConstantStepSize)
         term solver adjoint 0.0 1.0 (some 0.01) 2.0 0.3 1.0
         (saveat := { t1 := true })
-    LeanTest.assertTrue (sol.result == Result.internalError)
-      "ImplicitAdjoint should report unsupported when backsolve fallback is disabled"
-    LeanTest.assertTrue adjOpt.isNone
-      "ImplicitAdjoint unsupported mode should not return adjoint values"
-    LeanTest.assertTrue (getStat "unsupported_implicit_adjoint" sol.stats == 1)
-      "ImplicitAdjoint unsupported mode should set unsupported_implicit_adjoint stat"
-    match errOpt with
-    | some msg =>
-        LeanTest.assertTrue
-          (msg.startsWith "Adjoint solve failed: `ImplicitAdjoint` without backsolve fallback")
-          s!"Expected ImplicitAdjoint unsupported fallback message, got: {msg}"
+    LeanTest.assertTrue (sol.result == Result.successful)
+      "ImplicitAdjoint without fallback should use solve-function adjoints"
+    LeanTest.assertTrue errOpt.isNone
+      "ImplicitAdjoint without fallback should not report unsupported errors"
+    LeanTest.assertTrue (getStat "unsupported_implicit_adjoint" sol.stats == 0)
+      "ImplicitAdjoint no-fallback solve-function path should not set unsupported_implicit_adjoint"
+    match adjOpt with
     | none =>
-        LeanTest.fail "Expected unsupported message for ImplicitAdjoint without fallback"
+        LeanTest.fail "Expected adjoint values for ImplicitAdjoint without fallback"
+    | some adj =>
+        let expectedY0 := Float.exp 0.3
+        let expectedA := 2.0 * Float.exp 0.3
+        LeanTest.assertTrue (Float.abs (adj.adjY0 - expectedY0) <= 5.0e-2)
+          s!"ImplicitAdjoint no-fallback adjY0 expected ~{expectedY0}, got {adj.adjY0}"
+        LeanTest.assertTrue (Float.abs (adj.adjArgs - expectedA) <= 8.0e-2)
+          s!"ImplicitAdjoint no-fallback adjArgs expected ~{expectedA}, got {adj.adjArgs}"
 
   @[test] def testImplicitAdjointRecursiveRequiresFallback : IO Unit := do
     let term : ODETerm Float Float := { vectorField := fun _t y a => a * y }
@@ -356,14 +771,17 @@ section
 end
 
 def run : IO Unit := do
-  testForwardModeInfersDt0WhenAllowed
+  testForwardModePIDControllerWithoutDt0IsUnsupported
   testForwardModeRequireDt0RejectsMissingDt0
-  testDirectAdjointDegenerateIntervalMissingDt0IsUnsupported
+  testDirectAdjointDegenerateIntervalMissingDt0Succeeds
+  testDirectAdjointConstantStepUsesDiscreteLoopVjp
+  testForwardModeConstantStepUsesDiscreteLoopVjp
   testImplicitAdjointRejectsNonT1SaveAt
   testImplicitAdjointDefaultSaveAtStillWorks
   testImplicitAdjointAllowsEmptyTsSaveAt
+  testImplicitAdjointWithoutFallbackAllowsGeneralSaveAt
   testBacksolveAdjointRejectsSubSaveAt
-  testImplicitAdjointWithoutFallbackUnsupported
+  testImplicitAdjointWithoutFallbackUsesSolveFnAdjoint
   testImplicitAdjointRecursiveRequiresFallback
   testRecursiveCheckpointAdjointRejectsBacksolveIncompatibleSaveAt
 
