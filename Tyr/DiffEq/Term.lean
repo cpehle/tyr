@@ -379,6 +379,23 @@ structure UnderdampedLangevinDiffusionTerm (X Args : Type) where
   u : Time → X → X → Args → Scalar := fun _ _ _ _ => 1.0
   argsValid : Time → X → X → Args → Bool := fun _ _ _ _ => true
 
+class UnderdampedLevyControl (Control X : Type) where
+  projW : Control → X
+  projH? : Option (Control → X) := none
+  projK? : Option (Control → X) := none
+
+instance : UnderdampedLevyControl X X where
+  projW control := control
+
+instance : UnderdampedLevyControl (SpaceTimeLevyArea Time X) X where
+  projW control := control.W
+  projH? := some fun control => control.H
+
+instance : UnderdampedLevyControl (SpaceTimeTimeLevyArea Time X) X where
+  projW control := control.W
+  projH? := some fun control => control.H
+  projK? := some fun control => control.K
+
 namespace UnderdampedLangevinDiffusionTerm
 
 private def validateScale (name : String) (value : Scalar) : Option String :=
@@ -455,19 +472,25 @@ def withControlsHK (term : UnderdampedLangevinDiffusionTerm X Args)
   { term with controlH? := some controlH, controlK? := some controlK }
 
 instance [DiffEqSpace X] :
-    TermLike (UnderdampedLangevinDiffusionTerm X Args) (X × X) Scalar X Args where
+    TermLike (UnderdampedLangevinDiffusionTerm X Args) (X × X) Scalar
+      (SpaceTimeTimeLevyArea Time X) Args where
   vf term t y args :=
     let _ := ensureValid term t y args
     noiseScale term t y args
-  contr term t0 t1 := term.control t0 t1
+  contr term t0 t1 := {
+    dt := t1 - t0
+    W := term.control t0 t1
+    H := controlH term t0 t1
+    K := controlK term t0 t1
+  }
   prod _ vf control :=
-    let zero := DiffEqSpace.scale 0.0 control
-    (zero, DiffEqSpace.scale vf control)
+    let zero := DiffEqSpace.scale 0.0 control.W
+    (zero, DiffEqSpace.scale vf control.W)
   vf_prod term t y args control :=
     let _ := ensureValid term t y args
     let sigma := noiseScale term t y args
-    let zero := DiffEqSpace.scale 0.0 control
-    (zero, DiffEqSpace.scale sigma control)
+    let zero := DiffEqSpace.scale 0.0 control.W
+    (zero, DiffEqSpace.scale sigma control.W)
   is_vf_expensive _ _ _ _ _ := false
 
 instance : TermShape (UnderdampedLangevinDiffusionTerm X Args) where
@@ -476,8 +499,29 @@ instance : TermShape (UnderdampedLangevinDiffusionTerm X Args) where
   tree? _ := some TermTree.single
 
 def toAbstract [DiffEqSpace X] (term : UnderdampedLangevinDiffusionTerm X Args) :
-    AbstractTerm (X × X) Scalar X Args :=
+    AbstractTerm (X × X) Scalar (SpaceTimeTimeLevyArea Time X) Args :=
   AbstractTerm.ofTermLike term
+
+private def ofProjectedPathWithSide {Control : Type}
+    [UnderdampedLevyControl Control X] (path : AbstractPath Control)
+    (gamma : Time → X → X → Args → Scalar := fun _ _ _ _ => 1.0)
+    (u : Time → X → X → Args → Scalar := fun _ _ _ _ => 1.0)
+    (argsValid : Time → X → X → Args → Bool := fun _ _ _ _ => true)
+    (left : Bool := true) :
+    UnderdampedLangevinDiffusionTerm X Args :=
+  let proj : UnderdampedLevyControl Control X := inferInstance
+  {
+    control := fun t0 t1 => proj.projW (path.evaluate t0 (some t1) left)
+    controlH? :=
+      proj.projH?.map fun projectH =>
+        fun t0 t1 => projectH (path.evaluate t0 (some t1) left)
+    controlK? :=
+      proj.projK?.map fun projectK =>
+        fun t0 t1 => projectK (path.evaluate t0 (some t1) left)
+    gamma := gamma
+    u := u
+    argsValid := argsValid
+  }
 
 def ofPathWithSide (path : AbstractPath X)
     (gamma : Time → X → X → Args → Scalar := fun _ _ _ _ => 1.0)
@@ -485,14 +529,7 @@ def ofPathWithSide (path : AbstractPath X)
     (argsValid : Time → X → X → Args → Bool := fun _ _ _ _ => true)
     (left : Bool := true) :
     UnderdampedLangevinDiffusionTerm X Args :=
-  {
-    control := fun t0 t1 => path.evaluate t0 (some t1) left
-    controlH? := none
-    controlK? := none
-    gamma := gamma
-    u := u
-    argsValid := argsValid
-  }
+  ofProjectedPathWithSide path gamma u argsValid left
 
 def ofPath (path : AbstractPath X)
     (gamma : Time → X → X → Args → Scalar := fun _ _ _ _ => 1.0)
@@ -507,14 +544,7 @@ def ofSpaceTimePathWithSide (path : AbstractPath (SpaceTimeLevyArea Time X))
     (argsValid : Time → X → X → Args → Bool := fun _ _ _ _ => true)
     (left : Bool := true) :
     UnderdampedLangevinDiffusionTerm X Args :=
-  {
-    control := fun t0 t1 => (path.evaluate t0 (some t1) left).W
-    controlH? := some (fun t0 t1 => (path.evaluate t0 (some t1) left).H)
-    controlK? := none
-    gamma := gamma
-    u := u
-    argsValid := argsValid
-  }
+  ofProjectedPathWithSide path gamma u argsValid left
 
 def ofSpaceTimePath (path : AbstractPath (SpaceTimeLevyArea Time X))
     (gamma : Time → X → X → Args → Scalar := fun _ _ _ _ => 1.0)
@@ -529,14 +559,7 @@ def ofSpaceTimeTimePathWithSide (path : AbstractPath (SpaceTimeTimeLevyArea Time
     (argsValid : Time → X → X → Args → Bool := fun _ _ _ _ => true)
     (left : Bool := true) :
     UnderdampedLangevinDiffusionTerm X Args :=
-  {
-    control := fun t0 t1 => (path.evaluate t0 (some t1) left).W
-    controlH? := some (fun t0 t1 => (path.evaluate t0 (some t1) left).H)
-    controlK? := some (fun t0 t1 => (path.evaluate t0 (some t1) left).K)
-    gamma := gamma
-    u := u
-    argsValid := argsValid
-  }
+  ofProjectedPathWithSide path gamma u argsValid left
 
 def ofSpaceTimeTimePath (path : AbstractPath (SpaceTimeTimeLevyArea Time X))
     (gamma : Time → X → X → Args → Scalar := fun _ _ _ _ => 1.0)
@@ -544,6 +567,23 @@ def ofSpaceTimeTimePath (path : AbstractPath (SpaceTimeTimeLevyArea Time X))
     (argsValid : Time → X → X → Args → Bool := fun _ _ _ _ => true) :
     UnderdampedLangevinDiffusionTerm X Args :=
   ofSpaceTimeTimePathWithSide path gamma u argsValid true
+
+def ofBrownianPathWithSide {Control : Type} [UnderdampedLevyControl Control X]
+    (path : AbstractBrownianPath Control)
+    (gamma : Time → X → X → Args → Scalar := fun _ _ _ _ => 1.0)
+    (u : Time → X → X → Args → Scalar := fun _ _ _ _ => 1.0)
+    (argsValid : Time → X → X → Args → Bool := fun _ _ _ _ => true)
+    (left : Bool := true) :
+    UnderdampedLangevinDiffusionTerm X Args :=
+  ofProjectedPathWithSide path.toPath gamma u argsValid left
+
+def ofBrownianPath {Control : Type} [UnderdampedLevyControl Control X]
+    (path : AbstractBrownianPath Control)
+    (gamma : Time → X → X → Args → Scalar := fun _ _ _ _ => 1.0)
+    (u : Time → X → X → Args → Scalar := fun _ _ _ _ => 1.0)
+    (argsValid : Time → X → X → Args → Bool := fun _ _ _ _ => true) :
+    UnderdampedLangevinDiffusionTerm X Args :=
+  ofBrownianPathWithSide path gamma u argsValid true
 
 end UnderdampedLangevinDiffusionTerm
 

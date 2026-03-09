@@ -1,6 +1,7 @@
 import LeanTest
 import Lean.Util.Path
 import Tests.TestDiffEqAdjoint
+import Tests.TestDiffEqAdjointParity
 
 /-- Parse command line arguments into a RunConfig. -/
 private def parseArgs (args : List String) : IO LeanTest.RunConfig := do
@@ -37,6 +38,10 @@ unsafe def main (args : List String) : IO UInt32 := do
   Lean.initSearchPath (← Lean.findSysroot)
   Lean.enableInitializersExecution
   let env ← Lean.importModules
-    #[{ module := `LeanTest }, { module := `Tests.TestDiffEqAdjoint }]
+    #[
+      { module := `LeanTest },
+      { module := `Tests.TestDiffEqAdjoint },
+      { module := `Tests.TestDiffEqAdjointParity }
+    ]
     {}
   LeanTest.runTestsAndExit env {} config

@@ -44,6 +44,7 @@ import Tests.TestDiffEqUnderdampedOrderParity
 import Tests.TestDiffEqWeakStats
 import Tests.TestDiffEqWeakStatsParity2
 import Tests.TestDiffEqAdjoint
+import Tests.TestDiffEqAdjointParity
 import Tests.TestDiffEqAdjointCore
 import Tests.TestGPUDSL
 import Tests.TestGPUKernels

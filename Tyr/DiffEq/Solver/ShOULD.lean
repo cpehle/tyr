@@ -76,7 +76,7 @@ def ShOULD.solver (cfg : ShOULD := {}) {X Args : Type}
       (MultiTerm (UnderdampedLangevinDriftTerm X Args) (UnderdampedLangevinDiffusionTerm X Args))
       (X × X)
       ((X × X) × Scalar)
-      (Time × X)
+      (Time × SpaceTimeTimeLevyArea Time X)
       Args := {
   SolverState := Unit
   DenseInfo := LocalLinearDenseInfo (X × X)
@@ -111,14 +111,16 @@ def ShOULD.solver (cfg : ShOULD := {}) {X Args : Type}
             let driftInst := (inferInstance :
               TermLike (UnderdampedLangevinDriftTerm X Args) (X × X) (X × X) Time Args)
             let diffInst := (inferInstance :
-              TermLike (UnderdampedLangevinDiffusionTerm X Args) (X × X) Scalar X Args)
+              TermLike (UnderdampedLangevinDiffusionTerm X Args) (X × X) Scalar
+                (SpaceTimeTimeLevyArea Time X) Args)
 
             let x0 := y0.1
             let v0 := y0.2
             let h := driftInst.contr drift t0 t1
-            let dW := diffInst.contr diffusion t0 t1
-            let dH : X := UnderdampedLangevinDiffusionTerm.controlH diffusion t0 t1
-            let dK : X := UnderdampedLangevinDiffusionTerm.controlK diffusion t0 t1
+            let control := diffInst.contr diffusion t0 t1
+            let dW : X := control.W
+            let dH : X := control.H
+            let dK : X := control.K
             let gamma := drift.gamma t0 x0 v0 args
             let u := drift.u t0 x0 v0 args
             let rho := Float.sqrt (2.0 * gamma * u)
@@ -161,7 +163,8 @@ def ShOULD.solver (cfg : ShOULD := {}) {X Args : Type}
     let driftInst := (inferInstance :
       TermLike (UnderdampedLangevinDriftTerm X Args) (X × X) (X × X) Time Args)
     let diffInst := (inferInstance :
-      TermLike (UnderdampedLangevinDiffusionTerm X Args) (X × X) Scalar X Args)
+      TermLike (UnderdampedLangevinDiffusionTerm X Args) (X × X) Scalar
+        (SpaceTimeTimeLevyArea Time X) Args)
     (driftInst.vf terms.term1 t y args, diffInst.vf terms.term2 t y args)
   interpolation := fun info => info.toInterpolation
 }

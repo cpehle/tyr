@@ -82,7 +82,7 @@ private def solveUnderdampedSingleStep
         (UnderdampedLangevinDiffusionTerm Float Unit))
       (Float × Float)
       ((Float × Float) × Scalar)
-      (Time × Float)
+      (Time × SpaceTimeTimeLevyArea Time Float)
       Unit) : IO (Float × Float) := do
   let terms := mkUnderdampedSingleStepTerms
   let sol :=
@@ -91,7 +91,7 @@ private def solveUnderdampedSingleStep
         (UnderdampedLangevinDiffusionTerm Float Unit))
       (Y := (Float × Float))
       (VF := ((Float × Float) × Scalar))
-      (Control := (Time × Float))
+      (Control := (Time × SpaceTimeTimeLevyArea Time Float))
       (Args := Unit)
       (Controller := ConstantStepSize)
       terms solver 0.0 1.0 (some 1.0) ((1.0, 0.5) : Float × Float) ()
@@ -107,7 +107,7 @@ private def assertThresholdSwitchChangesEndpoint
         (UnderdampedLangevinDiffusionTerm Float Unit))
       (Float × Float)
       ((Float × Float) × Scalar)
-      (Time × Float)
+      (Time × SpaceTimeTimeLevyArea Time Float)
       Unit)
     (minDelta : Float := 1.0e-4) : IO Unit := do
   let yDirect ← solveUnderdampedSingleStep s!"{label} direct" solverDirect
@@ -149,7 +149,7 @@ private def solveUnderdampedVectorShape
         (UnderdampedLangevinDiffusionTerm (Vector 2 Float) Unit))
       (Vector 2 Float × Vector 2 Float)
       (((Vector 2 Float) × (Vector 2 Float)) × Scalar)
-      (Time × Vector 2 Float)
+      (Time × SpaceTimeTimeLevyArea Time (Vector 2 Float))
       Unit) :
     Solution (Vector 2 Float × Vector 2 Float) solver.SolverState
       (StepSizeController.State (C := ConstantStepSize)) := by
@@ -163,7 +163,7 @@ private def solveUnderdampedVectorShape
         (UnderdampedLangevinDiffusionTerm (Vector 2 Float) Unit))
       (Y := (Vector 2 Float × Vector 2 Float))
       (VF := (((Vector 2 Float) × (Vector 2 Float)) × Scalar))
-      (Control := (Time × Vector 2 Float))
+      (Control := (Time × SpaceTimeTimeLevyArea Time (Vector 2 Float)))
       (Args := Unit)
       (Controller := ConstantStepSize)
       terms solver 0.3 1.0 (some 0.1) (x0, v0) ()
@@ -203,7 +203,7 @@ private def solveUnderdampedEndpoint
         (UnderdampedLangevinDiffusionTerm Float Unit))
       (Float × Float)
       ((Float × Float) × Scalar)
-      (Time × Float)
+      (Time × SpaceTimeTimeLevyArea Time Float)
       Unit)
     (dt : Float) : IO (Float × Float) := do
   let terms := mkUnderdampedTerms 20260306
@@ -213,7 +213,7 @@ private def solveUnderdampedEndpoint
         (UnderdampedLangevinDiffusionTerm Float Unit))
       (Y := (Float × Float))
       (VF := ((Float × Float) × Scalar))
-      (Control := (Time × Float))
+      (Control := (Time × SpaceTimeTimeLevyArea Time Float))
       (Args := Unit)
       (Controller := ConstantStepSize)
       terms solver 0.0 1.0 (some dt) ((0.2, -0.3) : Float × Float) ()
@@ -254,7 +254,7 @@ private def solveUnderdampedLevyControlEndpoint
         (UnderdampedLangevinDiffusionTerm Float Unit))
       (Float × Float)
       ((Float × Float) × Scalar)
-      (Time × Float)
+      (Time × SpaceTimeTimeLevyArea Time Float)
       Unit)
     (withH : Bool)
     (dt : Float) : IO (Float × Float) := do
@@ -275,7 +275,7 @@ private def solveUnderdampedLevyControlEndpoint
         (UnderdampedLangevinDiffusionTerm Float Unit))
       (Y := (Float × Float))
       (VF := ((Float × Float) × Scalar))
-      (Control := (Time × Float))
+      (Control := (Time × SpaceTimeTimeLevyArea Time Float))
       (Args := Unit)
       (Controller := ConstantStepSize)
       terms solver 0.0 1.0 (some dt) ((0.15, -0.2) : Float × Float) ()
@@ -291,7 +291,7 @@ private def assertSelfConvergence
         (UnderdampedLangevinDiffusionTerm Float Unit))
       (Float × Float)
       ((Float × Float) × Scalar)
-      (Time × Float)
+      (Time × SpaceTimeTimeLevyArea Time Float)
       Unit)
     (minRatio : Float := 1.2)
     (fineTol : Float := 0.12) : IO Unit := do
@@ -376,7 +376,7 @@ Matches diffrax `ALIGN` formula that uses `chh * H`.
         (UnderdampedLangevinDiffusionTerm Float Unit))
       (Y := (Float × Float))
       (VF := ((Float × Float) × Scalar))
-      (Control := (Time × Float))
+      (Control := (Time × SpaceTimeTimeLevyArea Time Float))
       (Args := Unit)
       (Controller := ConstantStepSize)
       terms solver t0 t1 (some dt) y0 ()
@@ -447,7 +447,7 @@ Matches diffrax `ShOULD` formula that uses `chh * H + ckk * K`.
         (UnderdampedLangevinDiffusionTerm Float Unit))
       (Y := (Float × Float))
       (VF := ((Float × Float) × Scalar))
-      (Control := (Time × Float))
+      (Control := (Time × SpaceTimeTimeLevyArea Time Float))
       (Args := Unit)
       (Controller := ConstantStepSize)
       terms solver t0 t1 (some dt) y0 ()
@@ -523,7 +523,7 @@ Matches diffrax `QUICSORT` staged update with `W/H/K` controls.
         (UnderdampedLangevinDiffusionTerm Float Unit))
       (Y := (Float × Float))
       (VF := ((Float × Float) × Scalar))
-      (Control := (Time × Float))
+      (Control := (Time × SpaceTimeTimeLevyArea Time Float))
       (Args := Unit)
       (Controller := ConstantStepSize)
       terms solver t0 t1 (some dt) y0 ()
@@ -565,7 +565,7 @@ private def assertLevyControlParityAndStability
         (UnderdampedLangevinDiffusionTerm Float Unit))
       (Float × Float)
       ((Float × Float) × Scalar)
-      (Time × Float)
+      (Time × SpaceTimeTimeLevyArea Time Float)
       Unit)
     (minDelta : Float := 1.0e-4)
     (maxRefineDrift : Float := 0.35) : IO Unit := do
@@ -594,6 +594,115 @@ private def assertLevyControlParityAndStability
     (ALIGN.solver { taylorThreshold := 0.1 })
     1.0e-4
     0.35
+
+@[test] def testUnderdampedBrownianPathConstructorProjectsLevyControls : IO Unit := do
+  let bm : VirtualBrownianTree Float := {
+    t0 := 0.0
+    t1 := 1.0
+    tol := 5.0e-4
+    maxDepth := 24
+    seed := 20260308
+    shape := 0.0
+  }
+  let gammaConst := 0.7
+  let uConst := 0.6
+  let gamma := fun _t _x _v _ => gammaConst
+  let u := fun _t _x _v _ => uConst
+  let tProbe0 := 0.2
+  let tProbe1 := 0.85
+  let diffusionInst :
+      TermLike (UnderdampedLangevinDiffusionTerm Float Unit)
+        (Float × Float) Float (SpaceTimeTimeLevyArea Time Float) Unit :=
+    inferInstance
+
+  let pathW := VirtualBrownianTree.toAbstract bm
+  let diffusionW : UnderdampedLangevinDiffusionTerm Float Unit :=
+    UnderdampedLangevinDiffusionTerm.ofBrownianPath pathW (gamma := gamma) (u := u)
+  let controlW := diffusionInst.contr diffusionW tProbe0 tProbe1
+  LeanTest.assertTrue (Float.abs (controlW.W - pathW.evaluate tProbe0 tProbe1 true) <= 1.0e-12)
+    s!"W-only Brownian constructor should preserve W increments, got {controlW.W}"
+  LeanTest.assertTrue (Float.abs controlW.H <= 1.0e-12 && Float.abs controlW.K <= 1.0e-12)
+    s!"W-only Brownian constructor should zero H/K, got H={controlW.H}, K={controlW.K}"
+
+  let pathST := VirtualBrownianTree.toAbstractSpaceTime bm
+  let diffusionST : UnderdampedLangevinDiffusionTerm Float Unit :=
+    UnderdampedLangevinDiffusionTerm.ofBrownianPath pathST (gamma := gamma) (u := u)
+  let diffusionSTLegacy : UnderdampedLangevinDiffusionTerm Float Unit :=
+    UnderdampedLangevinDiffusionTerm.ofSpaceTimePath pathST.toPath (gamma := gamma) (u := u)
+  let controlST := diffusionInst.contr diffusionST tProbe0 tProbe1
+  let controlSTLegacy := diffusionInst.contr diffusionSTLegacy tProbe0 tProbe1
+  LeanTest.assertTrue
+    (Float.abs (controlST.W - controlSTLegacy.W) <= 1.0e-12)
+    s!"Space-time Brownian constructor should preserve W projection, got {controlST.W}"
+  LeanTest.assertTrue
+    (Float.abs (controlST.H - controlSTLegacy.H) <= 1.0e-12)
+    s!"Space-time Brownian constructor should preserve H projection, got {controlST.H}"
+  LeanTest.assertTrue (Float.abs controlST.H > 1.0e-12 && Float.abs controlST.K <= 1.0e-12)
+    s!"Space-time Brownian constructor should expose nonzero H and zero K, got H={controlST.H}, K={controlST.K}"
+
+  let pathSTT := VirtualBrownianTree.toAbstractSpaceTimeTime bm
+  let diffusionSTT : UnderdampedLangevinDiffusionTerm Float Unit :=
+    UnderdampedLangevinDiffusionTerm.ofBrownianPath pathSTT (gamma := gamma) (u := u)
+  let diffusionSTTLegacy : UnderdampedLangevinDiffusionTerm Float Unit :=
+    UnderdampedLangevinDiffusionTerm.ofSpaceTimeTimePath pathSTT.toPath (gamma := gamma) (u := u)
+  let controlSTT := diffusionInst.contr diffusionSTT tProbe0 tProbe1
+  let controlSTTLegacy := diffusionInst.contr diffusionSTTLegacy tProbe0 tProbe1
+  LeanTest.assertTrue
+    (Float.abs (controlSTT.W - controlSTTLegacy.W) <= 1.0e-12)
+    s!"Space-time-time Brownian constructor should preserve W projection, got {controlSTT.W}"
+  LeanTest.assertTrue
+    (Float.abs (controlSTT.H - controlSTTLegacy.H) <= 1.0e-12)
+    s!"Space-time-time Brownian constructor should preserve H projection, got {controlSTT.H}"
+  LeanTest.assertTrue
+    (Float.abs (controlSTT.K - controlSTTLegacy.K) <= 1.0e-12)
+    s!"Space-time-time Brownian constructor should preserve K projection, got {controlSTT.K}"
+  LeanTest.assertTrue (Float.abs controlSTT.H > 1.0e-12 && Float.abs controlSTT.K > 1.0e-12)
+    s!"Space-time-time Brownian constructor should expose nonzero H/K, got H={controlSTT.H}, K={controlSTT.K}"
+
+  let drift : UnderdampedLangevinDriftTerm Float Unit := {
+    gradPotential := fun _t x _ => 0.75 * x
+    gamma := fun _t _x _v _ => gammaConst
+    u := fun _t _x _v _ => uConst
+  }
+  let termsGeneric :
+      MultiTerm (UnderdampedLangevinDriftTerm Float Unit) (UnderdampedLangevinDiffusionTerm Float Unit) := {
+    term1 := drift
+    term2 := diffusionSTT
+  }
+  let termsLegacy :
+      MultiTerm (UnderdampedLangevinDriftTerm Float Unit) (UnderdampedLangevinDiffusionTerm Float Unit) := {
+    term1 := drift
+    term2 := diffusionSTTLegacy
+  }
+  let solver := QUICSORT.solver { taylorThreshold := 0.1 }
+  let solGeneric :=
+    diffeqsolve
+      (Term := MultiTerm (UnderdampedLangevinDriftTerm Float Unit)
+        (UnderdampedLangevinDiffusionTerm Float Unit))
+      (Y := (Float × Float))
+      (VF := ((Float × Float) × Scalar))
+      (Control := (Time × SpaceTimeTimeLevyArea Time Float))
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      termsGeneric solver 0.0 1.0 (some 0.05) ((0.15, -0.2) : Float × Float) ()
+      (saveat := { t1 := true })
+  let solLegacy :=
+    diffeqsolve
+      (Term := MultiTerm (UnderdampedLangevinDriftTerm Float Unit)
+        (UnderdampedLangevinDiffusionTerm Float Unit))
+      (Y := (Float × Float))
+      (VF := ((Float × Float) × Scalar))
+      (Control := (Time × SpaceTimeTimeLevyArea Time Float))
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      termsLegacy solver 0.0 1.0 (some 0.05) ((0.15, -0.2) : Float × Float) ()
+      (saveat := { t1 := true })
+  LeanTest.assertTrue (solGeneric.result == Result.successful && solLegacy.result == Result.successful)
+    "Brownian-path underdamped constructor parity solves should succeed"
+  let yGeneric ← finalSavedPair "generic Brownian-path underdamped solve" solGeneric
+  let yLegacy ← finalSavedPair "legacy space-time-time underdamped solve" solLegacy
+  LeanTest.assertTrue (pairL2 yGeneric yLegacy <= 1.0e-10)
+    s!"Generic Brownian-path underdamped constructor should match legacy space-time-time endpoint, got {yGeneric} vs {yLegacy}"
 
 /--
 Structured-state underdamped shape/branch parity inspired by:
@@ -659,6 +768,7 @@ def run : IO Unit := do
   testShOULDUnderdampedLevyCoeffWeightingParity
   testQUICSORTUnderdampedLevyCoeffWeightingParity
   testALIGNUnderdampedLevyControlParityAndStability
+  testUnderdampedBrownianPathConstructorProjectsLevyControls
   testUnderdampedVectorStateShapeParity
   testALIGNUnderdampedSelfConvergence
   testShOULDUnderdampedSelfConvergence

@@ -36,14 +36,6 @@ private def evaluateDenseFloat {S C : Type}
       LeanTest.fail s!"{label}: expected dense interpolation"
       pure 0.0
 
-private def skipInCI? (name reason : String) : IO Bool := do
-  match (← IO.getEnv "CI") with
-  | some _ =>
-      IO.println s!"[skip] {name}: {reason}"
-      pure true
-  | none =>
-      pure false
-
 /-- Basic ODE test inspired by Diffrax test_integrate.py::test_basic. -/
 @[test] def testHeunODE : IO Unit := do
   let term : ODETerm Float Unit := { vectorField := fun _t y _ => -y }
@@ -2284,13 +2276,17 @@ private def skipInCI? (name reason : String) : IO Bool := do
       (u := fun _t _x _v _ => 2.0)
   let diffusionInst :
       TermLike (UnderdampedLangevinDiffusionTerm Float Unit)
-        (Float × Float) Float Float Unit :=
+        (Float × Float) Float (SpaceTimeTimeLevyArea Time Float) Unit :=
     inferInstance
   let sigma := diffusionInst.vf diffusion 0.25 y ()
   LeanTest.assertTrue (approx sigma (Float.sqrt 2.0) 1e-12)
     s!"Underdamped diffusion sigma mismatch: {sigma}"
-  let dW := diffusionInst.contr diffusion 0.0 1.0
-  let diffusionStep := diffusionInst.vf_prod diffusion 0.25 y () dW
+  let control := diffusionInst.contr diffusion 0.0 1.0
+  LeanTest.assertTrue (approx control.W 1.0 1e-12)
+    s!"Underdamped diffusion W control mismatch: {control.W}"
+  LeanTest.assertTrue (approx control.H 0.0 1e-12 && approx control.K 0.0 1e-12)
+    s!"Underdamped diffusion W-only path should zero H/K, got H={control.H}, K={control.K}"
+  let diffusionStep := diffusionInst.vf_prod diffusion 0.25 y () control
   LeanTest.assertTrue (approx diffusionStep.1 0.0 1e-12)
     s!"Underdamped diffusion should not perturb position: {diffusionStep.1}"
   LeanTest.assertTrue (approx diffusionStep.2 sigma 1e-12)
@@ -2326,7 +2322,7 @@ private def skipInCI? (name reason : String) : IO Bool := do
         (UnderdampedLangevinDiffusionTerm Float Unit))
       (Y := (Float × Float))
       (VF := ((Float × Float) × Float))
-      (Control := (Time × Float))
+      (Control := (Time × SpaceTimeTimeLevyArea Time Float))
       (Args := Unit)
       (Controller := ConstantStepSize)
       terms solver 0.0 1.0 (some 1.0) ((1.0, 0.5) : Float × Float) ()
@@ -2387,7 +2383,7 @@ private def skipInCI? (name reason : String) : IO Bool := do
         (UnderdampedLangevinDiffusionTerm Float Unit))
       (Y := (Float × Float))
       (VF := ((Float × Float) × Float))
-      (Control := (Time × Float))
+      (Control := (Time × SpaceTimeTimeLevyArea Time Float))
       (Args := Unit)
       (Controller := ConstantStepSize)
       terms solver 0.0 1.0 (some 1.0) ((1.0, 0.5) : Float × Float) ()
@@ -2473,7 +2469,7 @@ private def solveUnderdampedReverseWith
         (UnderdampedLangevinDiffusionTerm Float Unit))
       (Float × Float)
       ((Float × Float) × Scalar)
-      (Time × Float)
+      (Time × SpaceTimeTimeLevyArea Time Float)
       Unit)
     : Solution (Float × Float) solver.SolverState Unit :=
   let t0 := 0.7
@@ -2485,7 +2481,7 @@ private def solveUnderdampedReverseWith
       (UnderdampedLangevinDiffusionTerm Float Unit))
     (Y := (Float × Float))
     (VF := ((Float × Float) × Scalar))
-    (Control := (Time × Float))
+    (Control := (Time × SpaceTimeTimeLevyArea Time Float))
     (Args := Unit)
     (Controller := ConstantStepSize)
     terms solver t0 t1 (some (-0.01)) ((0.0, 0.0) : Float × Float) ()
@@ -2517,7 +2513,7 @@ private def assertUnderdampedReverseParity
         (UnderdampedLangevinDiffusionTerm Float Unit))
       (Float × Float)
       ((Float × Float) × Scalar)
-      (Time × Float)
+      (Time × SpaceTimeTimeLevyArea Time Float)
       Unit)
     (tol : Float := 0.1) : IO Unit := do
   let sol := solveUnderdampedReverseWith solver
@@ -2528,7 +2524,7 @@ private def assertUnderdampedReverseParity
           (UnderdampedLangevinDiffusionTerm Float Unit))
         (Y := (Float × Float))
         (VF := ((Float × Float) × Scalar))
-        (Control := (Time × Float))
+        (Control := (Time × SpaceTimeTimeLevyArea Time Float))
         (Args := Unit))
   LeanTest.assertTrue (sol.result == Result.successful)
     s!"{label}: expected successful reverse solve, got {repr sol.result}"
@@ -2557,7 +2553,7 @@ private def solveUnderdampedBoolArgsWith
         (UnderdampedLangevinDiffusionTerm Float Bool))
       (Float × Float)
       ((Float × Float) × Scalar)
-      (Time × Float)
+      (Time × SpaceTimeTimeLevyArea Time Float)
       Bool)
     (diffusionArgsValid : Bool → Bool)
     (args : Bool) :
@@ -2584,7 +2580,7 @@ private def solveUnderdampedBoolArgsWith
       (UnderdampedLangevinDiffusionTerm Float Bool))
     (Y := (Float × Float))
     (VF := ((Float × Float) × Scalar))
-    (Control := (Time × Float))
+    (Control := (Time × SpaceTimeTimeLevyArea Time Float))
     (Args := Bool)
     (Controller := ConstantStepSize)
     terms solver 0.0 1.0 (some 0.1) ((1.0, 0.0) : Float × Float) args
@@ -2597,7 +2593,7 @@ private def assertUnderdampedArgsContract
         (UnderdampedLangevinDiffusionTerm Float Bool))
       (Float × Float)
       ((Float × Float) × Scalar)
-      (Time × Float)
+      (Time × SpaceTimeTimeLevyArea Time Float)
       Bool) : IO Unit := do
   let bad := solveUnderdampedBoolArgsWith solver (fun a => !a) true
   LeanTest.assertTrue (bad.result == Result.internalError)
@@ -3252,6 +3248,23 @@ private def deterministicEndpointError
   LeanTest.assertTrue (ratio1 > 3.0 && ratio2 > 3.0)
     s!"Midpoint error ratios should show ~second-order trend: {ratio1}, {ratio2}"
 
+@[test] def testRalstonGlobalOrderTrendDeterministic : IO Unit := do
+  let solver :=
+    Ralston.solver
+      (Term := ODETerm Float Unit)
+      (Y := Float)
+      (VF := Float)
+      (Args := Unit)
+  let errCoarse ← deterministicEndpointError "Ralston coarse" solver 0.2
+  let errMedium ← deterministicEndpointError "Ralston medium" solver 0.1
+  let errFine ← deterministicEndpointError "Ralston fine" solver 0.05
+  LeanTest.assertTrue (errCoarse > errMedium && errMedium > errFine)
+    s!"Ralston errors should decrease with dt: {errCoarse}, {errMedium}, {errFine}"
+  let ratio1 := if errMedium <= 1.0e-16 then 0.0 else errCoarse / errMedium
+  let ratio2 := if errFine <= 1.0e-16 then 0.0 else errMedium / errFine
+  LeanTest.assertTrue (ratio1 > 3.0 && ratio2 > 3.0)
+    s!"Ralston error ratios should show ~second-order trend: {ratio1}, {ratio2}"
+
 @[test] def testBosh3GlobalOrderTrendDeterministic : IO Unit := do
   let solver :=
     Bosh3.solver
@@ -3295,6 +3308,40 @@ private def deterministicEndpointError
   let ratio2 := if errFine <= 1.0e-16 then 0.0 else errMedium / errFine
   LeanTest.assertTrue (ratio1 > 8.0 && ratio2 > 8.0)
     s!"RK4 error ratios should show high-order trend: {ratio1}, {ratio2}"
+
+@[test] def testDopri5GlobalOrderTrendDeterministic : IO Unit := do
+  let solver :=
+    Dopri5.solver
+      (Term := ODETerm Float Unit)
+      (Y := Float)
+      (VF := Float)
+      (Args := Unit)
+  let errCoarse ← deterministicEndpointError "Dopri5 coarse" solver 0.25
+  let errMedium ← deterministicEndpointError "Dopri5 medium" solver 0.125
+  let errFine ← deterministicEndpointError "Dopri5 fine" solver 0.0625
+  LeanTest.assertTrue (errCoarse > errMedium && errMedium > errFine)
+    s!"Dopri5 errors should decrease with dt: {errCoarse}, {errMedium}, {errFine}"
+  let ratio1 := if errMedium <= 1.0e-16 then 0.0 else errCoarse / errMedium
+  let ratio2 := if errFine <= 1.0e-16 then 0.0 else errMedium / errFine
+  LeanTest.assertTrue (ratio1 > 12.0 && ratio2 > 12.0)
+    s!"Dopri5 error ratios should show high-order trend: {ratio1}, {ratio2}"
+
+@[test] def testTsit5GlobalOrderTrendDeterministic : IO Unit := do
+  let solver :=
+    Tsit5.solver
+      (Term := ODETerm Float Unit)
+      (Y := Float)
+      (VF := Float)
+      (Args := Unit)
+  let errCoarse ← deterministicEndpointError "Tsit5 coarse" solver 0.25
+  let errMedium ← deterministicEndpointError "Tsit5 medium" solver 0.125
+  let errFine ← deterministicEndpointError "Tsit5 fine" solver 0.0625
+  LeanTest.assertTrue (errCoarse > errMedium && errMedium > errFine)
+    s!"Tsit5 errors should decrease with dt: {errCoarse}, {errMedium}, {errFine}"
+  let ratio1 := if errMedium <= 1.0e-16 then 0.0 else errCoarse / errMedium
+  let ratio2 := if errFine <= 1.0e-16 then 0.0 else errMedium / errFine
+  LeanTest.assertTrue (ratio1 > 12.0 && ratio2 > 12.0)
+    s!"Tsit5 error ratios should show high-order trend: {ratio1}, {ratio2}"
 
 @[test] def testDenseInterpolationErrorTrend : IO Unit := do
   let term : ODETerm Float Unit := { vectorField := fun _t y _ => -y }
@@ -3435,10 +3482,6 @@ private def deterministicEndpointError
     s!"KenCarp3 default dense mode should match explicit .kencarp3Poly2: {yDefault} vs {yPoly}"
 
 @[test] def testDopri5DenseInterpolationErrorTrend : IO Unit := do
-  if (← skipInCI?
-      "testDopri5DenseInterpolationErrorTrend"
-      "Dopri5 dense interpolation regression intermittently segfaults on CI runners (tracked separately)") then
-    return ()
   let term : ODETerm Float Unit := { vectorField := fun _t y _ => -y }
   let solver :=
     Dopri5.solver (Term := ODETerm Float Unit) (Y := Float) (VF := Float) (Args := Unit)
@@ -3472,10 +3515,6 @@ private def deterministicEndpointError
     s!"Dopri5 dense error ratios should show high-order trend: {ratio1}, {ratio2}"
 
 @[test] def testDopri5DenseImprovesOverHermiteFallback : IO Unit := do
-  if (← skipInCI?
-      "testDopri5DenseImprovesOverHermiteFallback"
-      "Dopri5 dense interpolation regression intermittently segfaults on CI runners (tracked separately)") then
-    return ()
   let term : ODETerm Float Unit := { vectorField := fun _t y _ => -y }
   let solverPoly :=
     Dopri5.solver (Term := ODETerm Float Unit) (Y := Float) (VF := Float) (Args := Unit)
@@ -3823,8 +3862,11 @@ def run : IO Unit := do
   testEulerGlobalOrderTrend
   testHeunGlobalOrderTrendDeterministic
   testMidpointGlobalOrderTrendDeterministic
+  testRalstonGlobalOrderTrendDeterministic
   testBosh3GlobalOrderTrendDeterministic
   testRK4GlobalOrderTrend
+  testDopri5GlobalOrderTrendDeterministic
+  testTsit5GlobalOrderTrendDeterministic
   testDenseInterpolationErrorTrend
   testKvaerno3DenseInterpolationTrend
   testKencarp3DenseInterpolationAccuracy

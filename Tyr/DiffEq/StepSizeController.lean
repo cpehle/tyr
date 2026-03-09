@@ -82,7 +82,10 @@ instance : StepSizeController ConstantStepSize where
     { accept := true, dt := state.dt, state := state.state, result := Result.successful }
 
 instance : StepSizeControllerValidation ConstantStepSize where
-  validate _ _ _ _ := none
+  validate _ _ _ dt0 :=
+    match dt0 with
+    | some _ => none
+    | none => some "ConstantStepSize requires dt0; pass `dt0 := some ...`."
 
 structure PIDState where
   prevInvError : Float := 1.0

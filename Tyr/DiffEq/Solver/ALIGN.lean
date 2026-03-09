@@ -58,7 +58,7 @@ def ALIGN.solver (cfg : ALIGN := {}) {X Args : Type}
       (MultiTerm (UnderdampedLangevinDriftTerm X Args) (UnderdampedLangevinDiffusionTerm X Args))
       (X × X)
       ((X × X) × Scalar)
-      (Time × X)
+      (Time × SpaceTimeTimeLevyArea Time X)
       Args := {
   SolverState := Unit
   DenseInfo := LocalLinearDenseInfo (X × X)
@@ -93,18 +93,14 @@ def ALIGN.solver (cfg : ALIGN := {}) {X Args : Type}
             let driftInst := (inferInstance :
               TermLike (UnderdampedLangevinDriftTerm X Args) (X × X) (X × X) Time Args)
             let diffInst := (inferInstance :
-              TermLike (UnderdampedLangevinDiffusionTerm X Args) (X × X) Scalar X Args)
+              TermLike (UnderdampedLangevinDiffusionTerm X Args) (X × X) Scalar
+                (SpaceTimeTimeLevyArea Time X) Args)
             let x0 := y0.1
             let v0 := y0.2
             let h := driftInst.contr drift t0 t1
-            let dW := diffInst.contr diffusion t0 t1
-            let zeroControl : X := 0.0 * dW
-            let dHOpt := diffusion.controlH?.map (fun controlH => controlH t0 t1)
-            let dH : X :=
-              match dHOpt with
-              | some hCtrl => hCtrl
-              | none => zeroControl
-            let hasHControl := dHOpt.isSome
+            let control := diffInst.contr diffusion t0 t1
+            let dW := control.W
+            let dH := control.H
             let gamma := drift.gamma t0 x0 v0 args
             let u := drift.u t0 x0 v0 args
             let rho := Float.sqrt (2.0 * gamma * u)
@@ -112,22 +108,14 @@ def ALIGN.solver (cfg : ALIGN := {}) {X Args : Type}
             let f0 := drift.gradPotential t0 x0 args
 
             let xDrift := coeffs.a1 * v0 - coeffs.b1 * ((u * h) * f0)
-            let xDiff :=
-              if hasHControl then
-                rho * (coeffs.b1 * dW + coeffs.chh * dH)
-              else
-                rho * (coeffs.b1 * dW)
+            let xDiff := rho * (coeffs.b1 * dW + coeffs.chh * dH)
             let x1 := x0 + (xDrift + xDiff)
 
             let f1 := drift.gradPotential t1 x1 args
             let vDrift :=
               coeffs.beta * v0 -
                 u * (((coeffs.a1 - coeffs.b1) * f0) + coeffs.b1 * f1)
-            let vDiff :=
-              if hasHControl then
-                rho * (coeffs.aa * dW - (gamma * coeffs.chh) * dH)
-              else
-                rho * (coeffs.aa * dW)
+            let vDiff := rho * (coeffs.aa * dW - (gamma * coeffs.chh) * dH)
             let v1 := vDrift + vDiff
 
             let y1 : X × X := (x1, v1)
@@ -144,7 +132,8 @@ def ALIGN.solver (cfg : ALIGN := {}) {X Args : Type}
     let driftInst := (inferInstance :
       TermLike (UnderdampedLangevinDriftTerm X Args) (X × X) (X × X) Time Args)
     let diffInst := (inferInstance :
-      TermLike (UnderdampedLangevinDiffusionTerm X Args) (X × X) Scalar X Args)
+      TermLike (UnderdampedLangevinDiffusionTerm X Args) (X × X) Scalar
+        (SpaceTimeTimeLevyArea Time X) Args)
     (driftInst.vf terms.term1 t y args, diffInst.vf terms.term2 t y args)
   interpolation := fun info => info.toInterpolation
 }
