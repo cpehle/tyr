@@ -244,6 +244,11 @@ private def applyTrainOverridesFromEnv (fallback : TrainConfig) : IO TrainConfig
     logInterval := logInterval
   }
 
+private def envStringOr (name : String) (fallback : String) : IO String := do
+  match ← IO.getEnv name with
+  | some raw => pure raw
+  | none => pure fallback
+
 private def resolvePullbackMetricFromEnv (fallback : PullbackMetricConfig) : IO PullbackMetricConfig := do
   let mode :=
     match (← IO.getEnv "TYR_RIEMANNIAN_PULLBACK").map String.toLower with
@@ -274,13 +279,15 @@ private def mainConfig (device : Device) : IO (Config × TrainConfig × Pullback
     let trainCfg ← applyTrainOverridesFromEnv trainCfg
     let pullbackMetric ←
       resolvePullbackMetricFromEnv { mode := .sampledFisher, fisherProbeCount := 4 }
-    pure (modelCfg, trainCfg, pullbackMetric, some "checkpoints/riemannian_gpt_smoke")
+    let checkpointDir ← envStringOr "TYR_RIEMANNIAN_CHECKPOINT_DIR" "checkpoints/riemannian_gpt_smoke"
+    pure (modelCfg, trainCfg, pullbackMetric, some checkpointDir)
   else
     let modelCfg := Config.nanogpt_cpu_shakespeare
     let trainCfg ← applyTrainOverridesFromEnv (defaultTrainConfig device modelCfg.block_size)
     let pullbackMetric ←
       resolvePullbackMetricFromEnv { mode := .sampledFisher, fisherProbeCount := 32 }
-    pure (modelCfg, trainCfg, pullbackMetric, some "checkpoints/riemannian_gpt")
+    let checkpointDir ← envStringOr "TYR_RIEMANNIAN_CHECKPOINT_DIR" "checkpoints/riemannian_gpt"
+    pure (modelCfg, trainCfg, pullbackMetric, some checkpointDir)
 
 private def outputFactorRank (cfg : Config) (trainCfg : TrainConfig) (pullbackMetric : PullbackMetricConfig) : UInt64 :=
   match pullbackMetric.mode with
