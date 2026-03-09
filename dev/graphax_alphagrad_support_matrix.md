@@ -69,6 +69,7 @@ Tyr status:
 - Action-space compatibility supports:
   - full-vertex action/logit sizing (`vertex = action + 1`),
   - explicit restricted action-space tables (`ActionId0 -> VertexId1`) for intermediate-only paths.
+- Partition-aware AlphaGrad task graphs now preserve the fixed full-width action surface while masking declared output/non-eliminable slots invalid and terminating after the declared eliminable rollout length.
 - Root/recurrent mask diagnostics enforce `true = invalid` semantics.
 
 ## 3) Constraint Masking and Fallback Semantics
@@ -93,22 +94,26 @@ Implemented now:
   - unary/binary semantic pack aligned with Graphax/AlphaGrad overlap.
 - structural/reduction semantic pack using structured (typed) sparse-map tags.
 - Coverage/extraction tests now cover arithmetic, structural, Graphax alias, communication alias, dot-general, `select`/`pad`, and dynamic update aliases (including `_p` forms) in `FnBody -> LeanJaxpr -> extract` source paths.
+- Graphax supported-subset parity coverage now also checks that overlapping exact structural aliases and executable KStmt ops agree on sparse payload dimensions/entries for `broadcast_in_dim`, `transpose`, `slice_in_dim`, and `concatenate`.
 - A declared-coverage gate now validates matrix claims directly:
   - `registerKStmtAllSupportedSemanticsRules` must cover `allKStmtSupportedOpNames`,
   - `registerGraphaxAlphaGradParityRules` must cover the declared Graphax/AlphaGrad parity op families,
   - higher-order control aliases (`allHigherOrderControlAliasOpNames`, including `scan`/`cond`) must be covered by explicit deterministic control-flow rules (strict no-fallback behavior).
 - AlphaGrad task materialization for all non-`RoeFlux_1d` tasks (`Perceptron`, `Encoder`, `RobotArm_6DOF`, `BlackScholes_Jacobian`, `HumanHeartDipole`, `PropaneCombustion`) now uses strict all-semantics registration and rejects non-semantic extracted edges.
+- AlphaGrad environment parity now includes selectable reward modes for Tyr-native heuristic rewards, exact base-env `-nops`, and a terminal-only `-total_nops` proxy; the AlphaGrad port example tasks now default to the `-nops` mode and log the configured reward mode explicitly.
+- AlphaGrad KStmt-materialized tasks now also carry partitioned elimination graphs, so the port examples and policy-training paths keep the full action-slot width while masking output slots invalid and using eliminable-count rollout lengths.
 
 Still missing for closer parity:
-- Full numeric structural Jacobian payloads for every structural primitive. Current status: exact sparse-entry payloads are now emitted for key linear structural/reduction ops (`broadcast`, `binaryBroadcast`, `reduce_sum`, `transpose`, `sliceRows`, `sliceCols`, `concatCols`, `cumsum`) when shape metadata is available, and source-path structural aliases now do the same for shape-aware `reshape`, `squeeze`, `broadcast_in_dim`, `slice`/`slice_in_dim`, `transpose`, and `concatenate` cases; `pad` plus nonlinear/value-dependent structural ops still use semantic tags.
+- Full numeric structural Jacobian payloads for every structural primitive. Current status: exact sparse-entry payloads are now emitted for key linear structural/reduction ops (`broadcast`, `binaryBroadcast`, `reduce_sum`, `transpose`, `sliceRows`, `sliceCols`, `concatCols`, `cumsum`) when shape metadata is available, and source-path structural aliases now do the same for shape-aware `reshape`, `squeeze`, `broadcast_in_dim`, `slice`/`slice_in_dim`, `transpose`, `concatenate`, and `pad` when explicit metadata is present. `FnBody` lowering now supports `FnBodyLoweringHints` for both binder `VarMeta` and per-equation `OpParams`, `buildFromDecl` can pick up those hints from a decl-keyed registry, and `buildFromDecl` can also prefer elaboration-registered direct `LeanJaxpr` frontend IR over `FnBody` recovery. Lowered equations preserve a first-class `sourceOp` so canonicalized `dot_general` / `scan` / `cond` still report Graphax/JAX frontend identity. Remaining reduction/value-dependent structural ops still use semantic tags, and upstream traced/elaborated frontends still need to populate the richer shape/extent metadata automatically.
+- Full AlphaGrad traced-task and fixed-slot parity across all paths. Current status: KStmt-materialized tasks now preserve fixed slot width plus output masking via partitioned graphs, and exact base `-nops` plus a reproducible terminal-only `-total_nops` proxy are implemented, but traced JAX/Graphax task materialization and direct `jacve`/timing-backed terminal reward integration are still missing.
 - Full subjaxpr/body interpretation for higher-order/control primitives. Current status: `scan`/`cond` rules are now metadata-aware (predicate/carry/data partitioning and multi-output routing), but still conservative dependency semantics rather than branch/body jaxpr execution.
-- Dot-general backend representability beyond canonical 2D `mm`/`outer` forms. Current status: `LowerKStmt` now also accepts dot-general specs with any number of leading unit batch axes (canonicalized to `KStmt.mm`), but still rejects non-leading/non-unit batch patterns and richer contraction layouts.
+- Dot-general backend representability beyond canonical 2D `mm`/`outer` forms. Current status: `LowerKStmt` now also accepts canonical `mm` / `outer`-like dot-general specs with unit batch axes in arbitrary positions, including transpose variants that still normalize to a single `KStmt.mm`, but still rejects richer contraction layouts and non-unit batch patterns.
 - Separate execution checklists now live in:
   - `dev/graphax_parity_checklist.md`
   - `dev/alphagrad_parity_checklist.md`
 
 ## 5) Immediate Next Priorities
 
-1. Complete structural exact-payload coverage for remaining structural ops and alias paths (especially `pad`, reduction aliases, and higher-rank/value-dependent transforms where representable).
-2. Upgrade `scan`/`cond` from metadata-aware dependency routing to full subjaxpr/body-aware local-Jac semantics.
-3. Extend dot-general lowering beyond `mm`/outer-like subsets for additional contract/batch patterns that can map to executable backends.
+1. Complete structural exact-payload coverage for remaining structural ops and alias paths, especially automatic traced/elaborated frontend population of direct `LeanJaxpr` or `FnBodyLoweringHints`.
+2. Match AlphaGrad's exact fixed-slot action/output masking semantics and traced task materialization path everywhere, not only on partition-aware KStmt tasks.
+3. Upgrade `scan`/`cond` from metadata-aware dependency routing to full subjaxpr/body-aware local-Jac semantics, and extend dot-general lowering beyond `mm`/outer-like subsets where executable.

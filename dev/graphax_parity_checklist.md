@@ -15,14 +15,19 @@ Non-goals:
 Already in place:
 - LeanJaxpr extraction and sparse elimination graph construction.
 - Graphax/JAX alias coverage for the main arithmetic, reduction, structural, no-grad, communication, and dynamic-update families.
-- Exact sparse payloads for key shape-aware structural aliases: `reshape`, `squeeze`, `broadcast_in_dim`, `slice`, `slice_in_dim`, `transpose`, and `concatenate`.
+- Exact sparse payloads for key shape-aware structural aliases: `reshape`, `squeeze`, `broadcast_in_dim`, `slice`, `slice_in_dim`, `transpose`, `concatenate`, and `pad` when explicit pad extents are present, including the `FnBody` path via `FnBodyLoweringHints`.
+- `FnBody` lowering now records a first-class `sourceOp` on lowered equations, so canonicalized `dot_general` / `scan` / `cond` still retain their Graphax/JAX frontend primitive identity in semantic tags and diagnostics.
+- Declaration-driven lowering can now consume registered per-decl `FnBodyLoweringHints`, so higher-level Tyr frontends can attach source metadata once and reuse the standard `buildFromDecl` / `buildAndExtractFromDecl` path.
+- `buildFromDecl` can now also prefer elaboration-registered direct frontend AD bundles (for example `attribute [ad_frontend frontendSpec] f`) over `FnBody` recovery, so higher-level Tyr frontends are no longer forced to round-trip through lowered Lean IR when they can emit high-level AD IR directly.
 - Strict no-fallback rule-pack gating for the declared Graphax parity op surface.
 - LeanJaxpr-derived elimination graphs now carry explicit `inputs`, `outputs`, and `eliminable` partitions.
 - The higher-level order-policy surface now resolves Graphax-style `forward` / `reverse`, filtered explicit custom orders, and AlphaGrad action orders against that eliminable set, and the Jaxpr/KStmt execution path can run policies directly.
+- `dot_general` lowering now accepts canonical `mm` / `outer`-like cases even when unit batch axes appear in arbitrary positions, not only as leading dimensions, including transpose variants that still normalize to a single `KStmt.mm`.
+- Supported-subset parity regressions now compare Graphax/JAX structural alias payloads directly against the executable KStmt path for overlapping exact cases (`broadcast_in_dim`, `transpose`, `slice_in_dim`, `concatenate`).
 
 Still blocking full parity:
-- Structural local-Jac behavior is not yet exact for every transform/reduction path Graphax models explicitly, with `pad` and the remaining reduction/value-dependent cases still on the conservative semantic path.
-- Executable lowering for `dot_general` still covers only `mm` / `outer`-like subsets.
+- Structural local-Jac behavior is not yet exact for every transform/reduction path Graphax models explicitly. Remaining gaps are mostly automatic traced/elaborated-frontend population of richer source metadata, whether via direct `LeanJaxpr` emission or the existing per-decl hint path (especially traced shape/extent params for `pad` and similar ops), plus the reduction/value-dependent cases that still stay on the conservative semantic path.
+- Executable lowering for `dot_general` still covers only the representable `mm` / `outer`-like subset; richer contraction layouts still stop at semantic extraction.
 
 ## P0: Core Graphax Semantics
 
@@ -75,7 +80,8 @@ Goal:
 - Replace semantic tags with exact sparse entries wherever the transform is linear and shape metadata makes the mapping unambiguous.
 
 Work:
-- Add exact payload builders for remaining structural aliases such as `reshape`, `squeeze`, `pad`, and any remaining reduction/source-path variants that are representable.
+- Add exact payload builders for the remaining structural aliases and source-path variants that are still representable.
+- Wire real traced/elaborated frontends to populate either direct `LeanJaxpr` registrations or `FnBodyLoweringHints` automatically so traced `jax.lax.pad` / `Graphax.pad` equations hit the exact sparse payload path without manual metadata injection.
 - Audit higher-rank transform cases to separate "exactly representable" from "must remain semantic".
 - Keep ambiguous/value-dependent cases on the conservative semantic path.
 
@@ -94,7 +100,7 @@ Goal:
 - Cover more of Graphax's contraction surface in executable Tyr lowering, not only the current `mm` / `outer` subset.
 
 Work:
-- Support additional contraction layouts and batch placements that can still map onto executable `KStmt` forms.
+- Support additional contraction layouts beyond the newly accepted arbitrary-position unit-batch `mm` / `outer` cases and transpose variants.
 - Distinguish "extractable local-Jac semantics" from "lowerable back to executable KStmt" in diagnostics.
 - Add tests for accepted and intentionally rejected layouts.
 
@@ -113,6 +119,9 @@ Likely touch points:
 5. Add Graphax differential parity tests on the supported subset.
 Goal:
 - Turn "looks aligned" into executable evidence.
+
+Status:
+- Started for the overlapping exact structural subset: CI now checks that Graphax/JAX alias extraction and the executable KStmt path agree on sparse payload dimensions and entries for `broadcast_in_dim`, `transpose`, `slice_in_dim`, and `concatenate`. Remaining work is to extend that fixture set across more primitive/order families and, where practical, against external Graphax-produced references.
 
 Work:
 - Build a fixture set of Graphax-supported primitive graphs and explicit orders.
