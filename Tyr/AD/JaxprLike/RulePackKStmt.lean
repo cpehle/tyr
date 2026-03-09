@@ -1,3 +1,4 @@
+import Std.Data.HashSet
 import Tyr.AD.JaxprLike.RuleRegistry
 import Tyr.AD.JaxprLike.KStmtNames
 
@@ -353,6 +354,110 @@ private def identityAliasEntries? (inv outv : JVar) : Option (Array Tyr.AD.Spars
     none
   else
     some (diagEntries inDim 1.0)
+
+private def rowMajorStrides (shape : Array Nat) : Array Nat := Id.run do
+  let mut strides := Array.replicate shape.size 1
+  let mut stride := 1
+  for i in (List.range shape.size).reverse do
+    strides := strides.set! i stride
+    stride := stride * shape.getD i 1
+  return strides
+
+private def flattenCoord (strides coord : Array Nat) : Nat := Id.run do
+  let mut flat := 0
+  for i in [:coord.size] do
+    flat := flat + coord[i]! * strides.getD i 1
+  return flat
+
+private def unflattenIndex (shape strides : Array Nat) (flat : Nat) : Array Nat := Id.run do
+  let mut rem := flat
+  let mut coord := Array.replicate shape.size 0
+  for i in [:shape.size] do
+    let stride := strides.getD i 1
+    let extent := shape.getD i 1
+    let value :=
+      if extent = 0 || stride = 0 then
+        0
+      else
+        rem / stride
+    coord := coord.set! i value
+    if extent != 0 && stride != 0 then
+      rem := rem % stride
+  return coord
+
+private def padConfig? (eqn : JEqn) : Option (Array Nat × Array Nat × Array Nat) := do
+  let low ← eqn.params.findNats? .padLow
+  let high ← eqn.params.findNats? .padHigh
+  let interior ← eqn.params.findNats? .padInterior
+  if low.size = high.size && high.size = interior.size then
+    some (low, high, interior)
+  else
+    none
+
+private def expectedPaddedExtent (input low high interior : Nat) : Nat :=
+  if input = 0 then
+    low + high
+  else
+    low + input + high + interior * (input - 1)
+
+private def padBaseEntries
+    (inShape outShape low interior : Array Nat) :
+    Array Tyr.AD.Sparse.SparseEntry := Id.run do
+  let inDim := shapeFlatDim? (some inShape) |>.getD 0
+  let inStrides := rowMajorStrides inShape
+  let outStrides := rowMajorStrides outShape
+  let mut entries : Array Tyr.AD.Sparse.SparseEntry := #[]
+  for src in [:inDim] do
+    let inCoord := unflattenIndex inShape inStrides src
+    let mut outCoord := Array.replicate inCoord.size 0
+    for i in [:inCoord.size] do
+      outCoord := outCoord.set! i (low.getD i 0 + inCoord[i]! * (interior.getD i 0 + 1))
+    entries := entries.push {
+      src := src
+      dst := flattenCoord outStrides outCoord
+      weight := 1.0
+    }
+  return entries
+
+private def padBaseEntries? (eqn : JEqn) (base outv : JVar) :
+    Option (Array Tyr.AD.Sparse.SparseEntry) := do
+  let inShape ← base.metaInfo.shape
+  let outShape ← outv.metaInfo.shape
+  let (low, high, interior) ← padConfig? eqn
+  let inDim ← varFlatDim? base
+  let outDim ← varFlatDim? outv
+  if
+      inDim = 0 || outDim = 0 ||
+      inShape.size != outShape.size ||
+      low.size != inShape.size ||
+      high.size != inShape.size ||
+      interior.size != inShape.size then
+    none
+  else
+    let shapeMatches :=
+      (List.range inShape.size).all fun i =>
+        outShape.getD i 0 = expectedPaddedExtent (inShape.getD i 0) (low.getD i 0) (high.getD i 0) (interior.getD i 0)
+    if shapeMatches then
+      some (padBaseEntries inShape outShape low interior)
+    else
+      none
+
+private def padValueEntries?
+    (padv outv : JVar)
+    (baseEntries : Array Tyr.AD.Sparse.SparseEntry) :
+    Option (Array Tyr.AD.Sparse.SparseEntry) := do
+  let padDim ← varFlatDim? padv
+  let outDim ← varFlatDim? outv
+  if padDim != 1 || outDim = 0 then
+    none
+  else
+    let occupied : Std.HashSet Nat :=
+      baseEntries.foldl (init := {}) fun acc entry => acc.insert entry.dst
+    let mut entries : Array Tyr.AD.Sparse.SparseEntry := #[]
+    for dst in [:outDim] do
+      if !occupied.contains dst then
+        entries := entries.push { src := 0, dst := dst, weight := 1.0 }
+    some entries
 
 private def broadcastAliasEntries? (inv outv : JVar) : Option (Array Tyr.AD.Sparse.SparseEntry) := do
   let inShape ← inv.metaInfo.shape
@@ -930,7 +1035,13 @@ private def dotGeneralRule (opName : OpName) : LocalJacRule :=
     let rhsContract := (eqn.params.findNats? .rhsContract).getD #[]
     let lhsBatch := (eqn.params.findNats? .lhsBatch).getD #[]
     let rhsBatch := (eqn.params.findNats? .rhsBatch).getD #[]
-    let variant := (eqn.params.findName? .variant).getD (atomName "generic")
+    let variant :=
+      match eqn.params.findName? .variant with
+      | some variant => variant
+      | none =>
+        match eqn.params.findName? .sourceOp with
+        | some sourceOp => sourceOp
+        | none => atomName "generic"
     .ok #[
       { src := a.id, dst := outv.id, map := binaryJacMapForVars a outv (.semantic (.dotGeneral {
           variant := variant
@@ -1044,30 +1155,31 @@ private def structuralUnaryAliasRule
     LocalJacRule :=
   fun eqn _ctx => do
     let (inv, outv) ← requireUnaryShape opName eqn
-    let tag : Tyr.AD.Sparse.SparseMapTag := .semantic (.unary opName .x mode)
+    let semanticOp := eqn.sourceOpName
+    let tag : Tyr.AD.Sparse.SparseMapTag := .semantic (.unary semanticOp .x mode)
     let entries? :=
-      if opName == transposeAliasOpName || opName == `jax.lax.transpose_p || opName == `Graphax.transpose then
+      if semanticOp == transposeAliasOpName || semanticOp == `jax.lax.transpose_p || semanticOp == `Graphax.transpose then
         transposeAliasEntries? inv outv
       else if
-          opName == reshapeAliasOpName ||
-          opName == `jax.lax.reshape_p ||
-          opName == `Graphax.reshape ||
-          opName == squeezeAliasOpName ||
-          opName == `jax.lax.squeeze_p ||
-          opName == `Graphax.squeeze then
+          semanticOp == reshapeAliasOpName ||
+          semanticOp == `jax.lax.reshape_p ||
+          semanticOp == `Graphax.reshape ||
+          semanticOp == squeezeAliasOpName ||
+          semanticOp == `jax.lax.squeeze_p ||
+          semanticOp == `Graphax.squeeze then
         identityAliasEntries? inv outv
       else if
-          opName == broadcastInDimAliasOpName ||
-          opName == `jax.lax.broadcast_in_dim_p ||
-          opName == `Graphax.broadcast_in_dim then
+          semanticOp == broadcastInDimAliasOpName ||
+          semanticOp == `jax.lax.broadcast_in_dim_p ||
+          semanticOp == `Graphax.broadcast_in_dim then
         broadcastAliasEntries? inv outv
       else if
-          opName == sliceAliasOpName ||
-          opName == `jax.lax.slice_p ||
-          opName == sliceInDimAliasOpName ||
-          opName == `jax.lax.slice_in_dim_p ||
-          opName == `Graphax.slice ||
-          opName == `Graphax.slice_in_dim then
+          semanticOp == sliceAliasOpName ||
+          semanticOp == `jax.lax.slice_p ||
+          semanticOp == sliceInDimAliasOpName ||
+          semanticOp == `jax.lax.slice_in_dim_p ||
+          semanticOp == `Graphax.slice ||
+          semanticOp == `Graphax.slice_in_dim then
         sliceAliasEntries? eqn inv outv
       else
         none
@@ -1081,10 +1193,11 @@ private def concatLikeStructuralRule (opName : OpName) : LocalJacRule :=
   fun eqn _ctx => do
     let (invars, outv) ← requireAtLeastOneInputOneOutput opName eqn
     let exactEntries? := concatAliasEntries? invars outv
+    let semanticOp := eqn.sourceOpName
     let mut edges : Array LocalJacEdge := #[]
     for h : idx in [:invars.size] do
       let inv := invars[idx]
-      let tag : Tyr.AD.Sparse.SparseMapTag := .semantic (.unary opName .x .inject)
+      let tag : Tyr.AD.Sparse.SparseMapTag := .semantic (.unary semanticOp .x .inject)
       let entries? := exactEntries?.bind (·[idx]?)
       edges := edges.push {
         src := inv.id
@@ -1101,6 +1214,7 @@ private def selectNAliasRule (opName : OpName) : LocalJacRule :=
     if eqn.invars.size < 2 then
       .error (.malformedEqn s!"Control rule `{opName}` expects at least two input variables, got {eqn.invars.size}.")
     else
+      let semanticOp := eqn.sourceOpName
       let outv ←
         match eqn.outvars[0]? with
         | some v => .ok v
@@ -1114,7 +1228,7 @@ private def selectNAliasRule (opName : OpName) : LocalJacRule :=
           edges := edges.push {
             src := inv.id
             dst := outv.id
-            map := binaryJacMapForVars inv outv (.semantic (.unary opName .x .mask)) 1.0
+            map := binaryJacMapForVars inv outv (.semantic (.unary semanticOp .x .mask)) 1.0
           }
         .ok edges
 
@@ -1128,6 +1242,7 @@ private def condAliasRule (opName : OpName) : LocalJacRule :=
     if eqn.outvars.isEmpty then
       .error (.malformedEqn s!"Control-flow rule `{opName}` expects at least one output variable, got 0.")
     else
+      let semanticOp := eqn.sourceOpName
       let predDefault := if eqn.invars.isEmpty then 0 else 1
       let predCount :=
         min ((eqn.params.findNat? .condPredicateCount).getD predDefault) eqn.invars.size
@@ -1141,7 +1256,7 @@ private def condAliasRule (opName : OpName) : LocalJacRule :=
           edges := edges.push {
             src := inv.id
             dst := outv.id
-            map := binaryJacMapForVars inv outv (.semantic (.unary opName .x .projection)) 1.0
+            map := binaryJacMapForVars inv outv (.semantic (.unary semanticOp .x .projection)) 1.0
           }
       .ok edges
 
@@ -1150,6 +1265,7 @@ private def scanAliasRule (opName : OpName) : LocalJacRule :=
     if eqn.outvars.isEmpty then
       .error (.malformedEqn s!"Control-flow rule `{opName}` expects at least one output variable, got 0.")
     else
+      let semanticOp := eqn.sourceOpName
       let carryDefault := if eqn.invars.isEmpty then 0 else 1
       let carryCount :=
         min ((eqn.params.findNat? .scanCarryInputCount).getD carryDefault) eqn.invars.size
@@ -1171,13 +1287,13 @@ private def scanAliasRule (opName : OpName) : LocalJacRule :=
           edges := edges.push {
             src := inv.id
             dst := outv.id
-            map := binaryJacMapForVars inv outv (.semantic (.unary opName .x .carry)) 1.0
+            map := binaryJacMapForVars inv outv (.semantic (.unary semanticOp .x .carry)) 1.0
           }
         for inv in dataInvars do
           edges := edges.push {
             src := inv.id
             dst := outv.id
-            map := binaryJacMapForVars inv outv (.semantic (.unary opName .x .projection)) 1.0
+            map := binaryJacMapForVars inv outv (.semantic (.unary semanticOp .x .projection)) 1.0
           }
 
       for outv in dataOutvars do
@@ -1185,18 +1301,19 @@ private def scanAliasRule (opName : OpName) : LocalJacRule :=
           edges := edges.push {
             src := inv.id
             dst := outv.id
-            map := binaryJacMapForVars inv outv (.semantic (.unary opName .x .carry)) 1.0
+            map := binaryJacMapForVars inv outv (.semantic (.unary semanticOp .x .carry)) 1.0
           }
         for inv in dataInvars do
           edges := edges.push {
             src := inv.id
             dst := outv.id
-            map := binaryJacMapForVars inv outv (.semantic (.unary opName .x .projection)) 1.0
+            map := binaryJacMapForVars inv outv (.semantic (.unary semanticOp .x .projection)) 1.0
           }
       .ok edges
 
 private def dynamicProjectionAliasRule (opName : OpName) : LocalJacRule :=
   fun eqn _ctx => do
+    let semanticOp := eqn.sourceOpName
     let outv ←
       match eqn.outvars[0]? with
       | some v => .ok v
@@ -1211,11 +1328,12 @@ private def dynamicProjectionAliasRule (opName : OpName) : LocalJacRule :=
       .ok #[{
         src := inv.id
         dst := outv.id
-        map := binaryJacMapForVars inv outv (.semantic (.unary opName .x .projection)) 1.0
+        map := binaryJacMapForVars inv outv (.semantic (.unary semanticOp .x .projection)) 1.0
       }]
 
 private def dynamicUpdateAliasRule (opName : OpName) : LocalJacRule :=
   fun eqn _ctx => do
+    let semanticOp := eqn.sourceOpName
     let outv ←
       match eqn.outvars[0]? with
       | some v => .ok v
@@ -1235,12 +1353,12 @@ private def dynamicUpdateAliasRule (opName : OpName) : LocalJacRule :=
         {
           src := base.id
           dst := outv.id
-          map := binaryJacMapForVars base outv (.semantic (.binary opName .lhs .projection)) 1.0
+          map := binaryJacMapForVars base outv (.semantic (.binary semanticOp .lhs .projection)) 1.0
         },
         {
           src := update.id
           dst := outv.id
-          map := binaryJacMapForVars update outv (.semantic (.binary opName .rhs .inject)) 1.0
+          map := binaryJacMapForVars update outv (.semantic (.binary semanticOp .rhs .inject)) 1.0
         }
       ]
 
@@ -1327,10 +1445,25 @@ private def cumprodStructuralRule (axis : ReduceAxis) : LocalJacRule :=
     (.semantic (.cumprod (reduceAxisTagName axis) .x .prefixProduct))
 
 private def padAliasRule (opName : OpName) : LocalJacRule :=
-  binarySymbolicRule
-    opName
-    (.semantic (.binary opName .lhs .projection), 1.0)
-    (.semantic (.binary opName .rhs .inject), 1.0)
+  fun eqn _ctx => do
+    let (base, padv, outv) ← requireBinaryShape opName eqn
+    let semanticOp := eqn.sourceOpName
+    let baseTag : Tyr.AD.Sparse.SparseMapTag := .semantic (.binary semanticOp .lhs .projection)
+    let padTag : Tyr.AD.Sparse.SparseMapTag := .semantic (.binary semanticOp .rhs .inject)
+    let baseEntries? := padBaseEntries? eqn base outv
+    let padEntries? := baseEntries?.bind (padValueEntries? padv outv)
+    .ok #[
+      {
+        src := base.id
+        dst := outv.id
+        map := exactBinaryMapOrFallback base outv baseTag baseEntries?
+      },
+      {
+        src := padv.id
+        dst := outv.id
+        map := exactBinaryMapOrFallback padv outv padTag padEntries?
+      }
+    ]
 
 /-- Register placeholder local-Jac rules for every KStmt unary and binary op. -/
 def registerKStmtUnaryBinaryPlaceholderRules : Lean.CoreM Unit := do

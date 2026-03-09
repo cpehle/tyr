@@ -1016,7 +1016,7 @@ def testExtractStructuralAliasRulesUseShapeAwareSparsePayloads : IO Unit := do
     match findEdge? edges 5 6 with
     | none => LeanTest.fail "Missing slice_in_dim edge 5 -> 6"
     | some e =>
-      LeanTest.assertTrue (e.map.repr == .semantic (.unary sliceInDimAliasOpName .x .projection))
+      LeanTest.assertEqual (toString e.map.repr) "djax.lax.slice_in_dim_p/dx[projection]"
         s!"Unexpected slice_in_dim repr: {e.map.repr}"
       LeanTest.assertEqual e.map.inDim? (some 8) "slice input dim should be explicit."
       LeanTest.assertEqual e.map.outDim? (some 4) "slice output dim should be explicit."
@@ -1157,6 +1157,133 @@ def testBuildAndExtractFromFnBodyPadSelectDynamicUpdateIndexAliasPath : IO Unit 
       "dynamic_update_index_in_dim should emit edge from update operand."
     LeanTest.assertTrue ((findEdge? edges 3 6).isNone)
       "dynamic_update_index_in_dim should not emit edge from index operand."
+
+@[test]
+def testBuildAndExtractFromFnBodyPadAliasUsesHintedExactPayloads : IO Unit := do
+  let x : Lean.IR.VarId := { idx := 0 }
+  let y : Lean.IR.VarId := { idx := 1 }
+  let p0 : Lean.IR.Param := { x := x, borrow := false, ty := Lean.IR.IRType.object }
+  let p1 : Lean.IR.Param := { x := y, borrow := false, ty := Lean.IR.IRType.object }
+  let a : Lean.IR.VarId := { idx := 2 }
+  let body : Lean.IR.FnBody :=
+    .vdecl a Lean.IR.IRType.object (Lean.IR.Expr.fap `jax.lax.pad_p #[Lean.IR.Arg.var x, Lean.IR.Arg.var y]) (
+      .ret (.var a)
+    )
+  let varHints : Std.HashMap Nat VarMeta :=
+    (({} : Std.HashMap Nat VarMeta)
+      |>.insert x.idx { shape := some #[2] }
+      |>.insert y.idx { shape := some #[1] }
+      |>.insert a.idx { shape := some #[6] })
+  let eqnHints : Std.HashMap Nat OpParams :=
+    (({} : Std.HashMap Nat OpParams)
+      |>.insert a.idx #[
+        OpParam.mkNats .padLow #[1],
+        OpParam.mkNats .padHigh #[2],
+        OpParam.mkNats .padInterior #[1]
+      ])
+  let hints : FnBodyLoweringHints := {
+    varMetaByIrVar := varHints
+    eqnParamsByOutIrVar := eqnHints
+  }
+
+  let res ← runCoreM (do
+    registerGraphaxAlphaGradParityRules
+    buildAndExtractFromFnBody {} `test.fnbody_pad_exact_with_hints #[p0, p1] body hints
+  )
+  match res with
+  | .error err =>
+    LeanTest.fail s!"FnBody pad alias with hints should build+extract successfully, got: {buildExtractErrorToString err}"
+  | .ok (_jaxpr, edges) =>
+    LeanTest.assertEqual edges.size 2
+      "Single hinted pad source path should produce base and padding-value local-Jac edges."
+    match findEdge? edges 1 3 with
+    | none => LeanTest.fail "Missing hinted pad base edge 1 -> 3"
+    | some e =>
+      LeanTest.assertEqual e.map.inDim? (some 2) "Hinted pad base input dim should be explicit."
+      LeanTest.assertEqual e.map.outDim? (some 6) "Hinted pad base output dim should be explicit."
+      LeanTest.assertTrue (hasEntry e.map.entries 0 1)
+        s!"Hinted pad base missing src=0,dst=1: {reprStr e.map.entries}"
+      LeanTest.assertTrue (hasEntry e.map.entries 1 3)
+        s!"Hinted pad base missing src=1,dst=3: {reprStr e.map.entries}"
+    match findEdge? edges 2 3 with
+    | none => LeanTest.fail "Missing hinted pad value edge 2 -> 3"
+    | some e =>
+      LeanTest.assertEqual e.map.inDim? (some 1) "Hinted pad value input dim should be explicit."
+      LeanTest.assertEqual e.map.outDim? (some 6) "Hinted pad value output dim should be explicit."
+      LeanTest.assertTrue (hasEntry e.map.entries 0 0)
+        s!"Hinted pad value missing src=0,dst=0: {reprStr e.map.entries}"
+      LeanTest.assertTrue (hasEntry e.map.entries 0 2)
+        s!"Hinted pad value missing src=0,dst=2: {reprStr e.map.entries}"
+      LeanTest.assertTrue (hasEntry e.map.entries 0 4)
+        s!"Hinted pad value missing src=0,dst=4: {reprStr e.map.entries}"
+      LeanTest.assertTrue (hasEntry e.map.entries 0 5)
+        s!"Hinted pad value missing src=0,dst=5: {reprStr e.map.entries}"
+
+@[test]
+def testExtractPadAliasRuleUsesExplicitPadConfigPayloads : IO Unit := do
+  let base : JVar := { id := 0, metaInfo := { shape := some #[2] } }
+  let padValue : JVar := { id := 1, metaInfo := { shape := some #[1] } }
+  let out : JVar := { id := 2, metaInfo := { shape := some #[6] } }
+  let jaxpr : LeanJaxpr := {
+    invars := #[base, padValue]
+    eqns := #[
+      {
+        op := padAliasOpName
+        invars := #[base, padValue]
+        outvars := #[out]
+        params := #[
+          OpParam.mkNats .padLow #[1],
+          OpParam.mkNats .padHigh #[2],
+          OpParam.mkNats .padInterior #[1]
+        ]
+        source := { decl := `test.pad_alias_exact, line? := some 96 }
+      }
+    ]
+    outvars := #[out]
+  }
+
+  let res ← runCoreM (do
+    registerGraphaxAlphaGradParityRules
+    extractLocalJacEdges jaxpr
+  )
+  match res with
+  | .error errs =>
+    LeanTest.fail s!"Pad alias rule should extract successfully, got: {errs.map ruleExecutionErrorToString}"
+  | .ok edges =>
+    LeanTest.assertEqual edges.size 2
+      "pad should emit exact local-Jac edges for the base operand and padding value when pad config is explicit."
+
+    match findEdge? edges 0 2 with
+    | none => LeanTest.fail "Missing pad base edge 0 -> 2"
+    | some e =>
+      LeanTest.assertTrue (e.map.repr == .semantic (.binary padAliasOpName .lhs .projection))
+        s!"Unexpected pad base repr: {e.map.repr}"
+      LeanTest.assertEqual e.map.inDim? (some 2) "pad base input dim should be explicit."
+      LeanTest.assertEqual e.map.outDim? (some 6) "pad base output dim should be explicit."
+      LeanTest.assertEqual e.map.entries.size 2 "pad base should materialize two sparse entries."
+      LeanTest.assertTrue (hasEntry e.map.entries 0 1)
+        s!"pad base missing src=0,dst=1: {reprStr e.map.entries}"
+      LeanTest.assertTrue (hasEntry e.map.entries 1 3)
+        s!"pad base missing src=1,dst=3: {reprStr e.map.entries}"
+
+    match findEdge? edges 1 2 with
+    | none => LeanTest.fail "Missing pad value edge 1 -> 2"
+    | some e =>
+      LeanTest.assertTrue (e.map.repr == .semantic (.binary padAliasOpName .rhs .inject))
+        s!"Unexpected pad value repr: {e.map.repr}"
+      LeanTest.assertEqual e.map.inDim? (some 1) "pad value input dim should be explicit."
+      LeanTest.assertEqual e.map.outDim? (some 6) "pad value output dim should be explicit."
+      LeanTest.assertEqual e.map.entries.size 4 "pad value should materialize four sparse entries."
+      LeanTest.assertTrue (hasEntry e.map.entries 0 0)
+        s!"pad value missing src=0,dst=0: {reprStr e.map.entries}"
+      LeanTest.assertTrue (hasEntry e.map.entries 0 2)
+        s!"pad value missing src=0,dst=2: {reprStr e.map.entries}"
+      LeanTest.assertTrue (hasEntry e.map.entries 0 4)
+        s!"pad value missing src=0,dst=4: {reprStr e.map.entries}"
+      LeanTest.assertTrue (hasEntry e.map.entries 0 5)
+        s!"pad value missing src=0,dst=5: {reprStr e.map.entries}"
+      LeanTest.assertTrue (!(hasEntry e.map.entries 0 1))
+        s!"pad value should not target carried operand slot dst=1: {reprStr e.map.entries}"
 
 @[test]
 def testExtractDynamicAliasRules : IO Unit := do

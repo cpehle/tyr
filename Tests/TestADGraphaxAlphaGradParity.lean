@@ -8,7 +8,30 @@ namespace Tests.ADGraphaxAlphaGradParity
 open Lean
 open LeanTest
 open Tyr.AD.JaxprLike
+open Tyr.AD.Sparse
 open Tyr.GPU.Codegen
+
+private def approx (a b : Float) (tol : Float := 1e-9) : Bool :=
+  Float.abs (a - b) < tol
+
+private def findEdge? (edges : Array LocalJacEdge) (src dst : Nat) : Option LocalJacEdge :=
+  edges.find? (fun e => e.src = src && e.dst = dst)
+
+private def sameEntries (lhs rhs : Array SparseEntry) : Bool :=
+  lhs.size = rhs.size &&
+    lhs.all (fun e =>
+      rhs.any (fun f => f.src = e.src && f.dst = e.dst && approx f.weight e.weight))
+
+private def assertSameSparsePayload
+    (label : String)
+    (lhs rhs : Tyr.AD.Sparse.SparseLinearMap) :
+    IO Unit := do
+  LeanTest.assertEqual lhs.inDim? rhs.inDim?
+    s!"{label} should agree on input dimension."
+  LeanTest.assertEqual lhs.outDim? rhs.outDim?
+    s!"{label} should agree on output dimension."
+  LeanTest.assertTrue (sameEntries lhs.entries rhs.entries)
+    s!"{label} should agree on sparse entries, lhs={reprStr lhs.entries}, rhs={reprStr rhs.entries}"
 
 def runCoreMResult (x : CoreM α) : IO (Except String α) := do
   let env ← mkEmptyEnvironment
@@ -489,7 +512,7 @@ def testGraphaxParityScanAndCondExtractionFromFnBody : IO Unit := do
   ]
   let scanBody : Lean.IR.FnBody :=
     .vdecl scanOut Lean.IR.IRType.object
-      (Lean.IR.Expr.fap scanAliasOpName #[Lean.IR.Arg.var scanCarry, Lean.IR.Arg.var scanData]) (
+      (Lean.IR.Expr.fap `Graphax.scan #[Lean.IR.Arg.var scanCarry, Lean.IR.Arg.var scanData]) (
       .ret (.var scanOut)
     )
 
@@ -515,18 +538,18 @@ def testGraphaxParityScanAndCondExtractionFromFnBody : IO Unit := do
     | some e =>
       LeanTest.assertTrue
         (match e.map.repr with
-        | Tyr.AD.Sparse.SparseMapTag.semantic (.unary op .x .carry) => op == scanAliasOpName
+        | Tyr.AD.Sparse.SparseMapTag.semantic (.unary op .x .carry) => op == `Graphax.scan
         | _ => false)
-        "scan carry input should emit carry-tagged semantic map."
+        "scan carry input should emit a carry-tagged semantic map for the frontend primitive."
     match dataEdge? with
     | none =>
       LeanTest.fail "Missing data edge for scan."
     | some e =>
       LeanTest.assertTrue
         (match e.map.repr with
-        | Tyr.AD.Sparse.SparseMapTag.semantic (.unary op .x .projection) => op == scanAliasOpName
+        | Tyr.AD.Sparse.SparseMapTag.semantic (.unary op .x .projection) => op == `Graphax.scan
         | _ => false)
-        "scan data input should emit projection-tagged semantic map."
+        "scan data input should emit a projection-tagged semantic map for the frontend primitive."
 
   let condPred : Lean.IR.VarId := { idx := 10 }
   let condTrue : Lean.IR.VarId := { idx := 11 }
@@ -539,7 +562,7 @@ def testGraphaxParityScanAndCondExtractionFromFnBody : IO Unit := do
   ]
   let condBody : Lean.IR.FnBody :=
     .vdecl condOut Lean.IR.IRType.object
-      (Lean.IR.Expr.fap condAliasOpName #[Lean.IR.Arg.var condPred, Lean.IR.Arg.var condTrue, Lean.IR.Arg.var condFalse]) (
+      (Lean.IR.Expr.fap `Graphax.cond #[Lean.IR.Arg.var condPred, Lean.IR.Arg.var condTrue, Lean.IR.Arg.var condFalse]) (
       .ret (.var condOut)
     )
 
@@ -562,8 +585,118 @@ def testGraphaxParityScanAndCondExtractionFromFnBody : IO Unit := do
     LeanTest.assertTrue
       (edges.all (fun e =>
         match e.map.repr with
-        | Tyr.AD.Sparse.SparseMapTag.semantic (.unary op .x .projection) => op == condAliasOpName
+        | Tyr.AD.Sparse.SparseMapTag.semantic (.unary op .x .projection) => op == `Graphax.cond
         | _ => false))
-      "cond alias rule should emit projection-tagged semantic maps for data inputs."
+      "cond alias rule should emit projection-tagged semantic maps for the frontend primitive."
+
+@[test]
+def testGraphaxStructuralAliasPayloadParityWithKStmtSubset : IO Unit := do
+  let x : JVar := { id := 0, metaInfo := { shape := some #[3] } }
+  let bcast : JVar := { id := 1, metaInfo := { shape := some #[2, 3] } }
+  let transposed : JVar := { id := 2, metaInfo := { shape := some #[3, 2] } }
+  let sliced : JVar := { id := 3, metaInfo := { shape := some #[3, 1] } }
+  let y : JVar := { id := 4, metaInfo := { shape := some #[3, 1] } }
+  let out : JVar := { id := 5, metaInfo := { shape := some #[3, 2] } }
+  let jaxpr : LeanJaxpr := {
+    invars := #[x, y]
+    eqns := #[
+      {
+        op := broadcastInDimAliasOpName
+        invars := #[x]
+        outvars := #[bcast]
+        source := { decl := `test.graphax_structural_payload_parity, line? := some 70 }
+      },
+      {
+        op := transposeAliasOpName
+        invars := #[bcast]
+        outvars := #[transposed]
+        source := { decl := `test.graphax_structural_payload_parity, line? := some 71 }
+      },
+      {
+        op := `jax.lax.slice_in_dim_p
+        invars := #[transposed]
+        outvars := #[sliced]
+        params := #[
+          OpParam.mkNat .startCol 1,
+          OpParam.mkNat .numCols 1
+        ]
+        source := { decl := `test.graphax_structural_payload_parity, line? := some 72 }
+      },
+      {
+        op := concatenateAliasOpName
+        invars := #[sliced, y]
+        outvars := #[out]
+        source := { decl := `test.graphax_structural_payload_parity, line? := some 73 }
+      }
+    ]
+    outvars := #[out]
+  }
+
+  let jaxEdges ← runCoreM (do
+    registerGraphaxAlphaGradParityRules
+    extractLocalJacEdges jaxpr
+  )
+  let kstmtEdgesRes ← runCoreM (do
+    registerKStmtAllSupportedSemanticsRules
+    let v0 : VarId := { idx := 0 }
+    let v1 : VarId := { idx := 1 }
+    let v2 : VarId := { idx := 2 }
+    let v3 : VarId := { idx := 3 }
+    let v4 : VarId := { idx := 4 }
+    let v5 : VarId := { idx := 5 }
+    buildAndExtractFromKStmts {} #[
+      KStmt.declRV v0 .Float32 3,
+      KStmt.declRT v1 .Float32 2 3 .Row,
+      KStmt.broadcast .Row v1 v0,
+      KStmt.declRT v2 .Float32 3 2 .Row,
+      KStmt.transpose v2 v1,
+      KStmt.declRT v3 .Float32 3 1 .Row,
+      KStmt.sliceCols v3 v2 1 1,
+      KStmt.declRT v4 .Float32 3 1 .Row,
+      KStmt.declRT v5 .Float32 3 2 .Row,
+      KStmt.concatCols v5 v3 v4
+    ]
+  )
+
+  match jaxEdges, kstmtEdgesRes with
+  | .error errs, _ =>
+    LeanTest.fail s!"Graphax structural alias parity fixture should extract successfully, got: {errs.map ruleExecutionErrorToString}"
+  | _, .error err =>
+    LeanTest.fail s!"KStmt structural parity fixture should lower/extract successfully, got: {buildExtractErrorToString err}"
+  | .ok jEdges, .ok (_jaxpr, kEdges) =>
+    LeanTest.assertEqual jEdges.size 5
+      "Graphax structural parity fixture should emit one edge per supported exact transform/input."
+    LeanTest.assertEqual kEdges.size 5
+      "KStmt structural parity fixture should emit one edge per supported exact transform/input."
+
+    match findEdge? jEdges 0 1, findEdge? kEdges 0 1 with
+    | some jEdge, some kEdge =>
+      assertSameSparsePayload "broadcast payload parity" jEdge.map kEdge.map
+    | _, _ =>
+      LeanTest.fail "Missing broadcast parity edge."
+
+    match findEdge? jEdges 1 2, findEdge? kEdges 1 2 with
+    | some jEdge, some kEdge =>
+      assertSameSparsePayload "transpose payload parity" jEdge.map kEdge.map
+    | _, _ =>
+      LeanTest.fail "Missing transpose parity edge."
+
+    match findEdge? jEdges 2 3, findEdge? kEdges 2 3 with
+    | some jEdge, some kEdge =>
+      assertSameSparsePayload "slice payload parity" jEdge.map kEdge.map
+    | _, _ =>
+      LeanTest.fail "Missing slice parity edge."
+
+    match findEdge? jEdges 3 5, findEdge? kEdges 3 5 with
+    | some jEdge, some kEdge =>
+      assertSameSparsePayload "concat-left payload parity" jEdge.map kEdge.map
+    | _, _ =>
+      LeanTest.fail "Missing concat-left parity edge."
+
+    match findEdge? jEdges 4 5, findEdge? kEdges 4 5 with
+    | some jEdge, some kEdge =>
+      assertSameSparsePayload "concat-right payload parity" jEdge.map kEdge.map
+    | _, _ =>
+      LeanTest.fail "Missing concat-right parity edge."
 
 end Tests.ADGraphaxAlphaGradParity

@@ -116,30 +116,126 @@ private def isLeadingBatchAxes (axes : Array Nat) : Bool :=
 private def allUnitBatchAxes (v : JVar) (axes : Array Nat) : Bool :=
   axes.all (fun axis => shapeDim? v axis == some 1)
 
+private def axesWithout (rank : Nat) (removed : Array Nat) : Array Nat :=
+  (Array.range rank).filter fun axis => !removed.contains axis
+
+private def axisIndex? (axes : Array Nat) (target : Nat) : Option Nat := Id.run do
+  for i in [:axes.size] do
+    if axes[i]! == target then
+      return some i
+  return none
+
+private def reindexAxesAfterRemoving?
+    (rank : Nat)
+    (axes removed : Array Nat) : Option (Array Nat) := do
+  let kept := axesWithout rank removed
+  let mut out : Array Nat := #[]
+  for axis in axes do
+    if axis >= rank || removed.contains axis then
+      none
+    let idx ← axisIndex? kept axis
+    out := out.push idx
+  return out
+
+private def expectedBatchPrefixShape (rank : Nat) : Array Nat :=
+  Array.replicate rank 1
+
+private def shapeAtAxes (shape axes : Array Nat) : Array Nat :=
+  axes.map fun axis => shape.getD axis 1
+
+private def compressShapeAfterRemovingAxes
+    (shape removed : Array Nat) : Array Nat :=
+  shapeAtAxes shape (axesWithout shape.size removed)
+
+private def compressDotGeneralSingletonAxes?
+    (lhsContract rhsContract lhsBatch rhsBatch : Array Nat)
+    (lhs rhs out : JVar) :
+    Option (Array Nat × Array Nat × Array Nat × Array Nat) := do
+  if lhsBatch.size != rhsBatch.size then
+    none
+  else if
+      !(allUnitBatchAxes lhs lhsBatch &&
+        allUnitBatchAxes rhs rhsBatch) then
+    none
+  else
+    match lhs.metaInfo.shape, rhs.metaInfo.shape, out.metaInfo.shape with
+    | some lhsShape, some rhsShape, some outShape =>
+      let batchRank := lhsBatch.size
+      let lhsNonBatchAxes := axesWithout lhsShape.size lhsBatch
+      let rhsNonBatchAxes := axesWithout rhsShape.size rhsBatch
+      let lhsNonBatchShape := shapeAtAxes lhsShape lhsNonBatchAxes
+      let rhsNonBatchShape := shapeAtAxes rhsShape rhsNonBatchAxes
+      let lhsContract' := reindexAxesAfterRemoving? lhsShape.size lhsContract lhsBatch
+      let rhsContract' := reindexAxesAfterRemoving? rhsShape.size rhsContract rhsBatch
+      match lhsContract', rhsContract' with
+      | some lhsContract'', some rhsContract'' =>
+        if lhsContract''.size != rhsContract''.size then
+          none
+        else
+          let lhsFreeOrig := (Array.range lhsNonBatchShape.size).filter fun axis => !lhsContract''.contains axis
+          let rhsFreeOrig := (Array.range rhsNonBatchShape.size).filter fun axis => !rhsContract''.contains axis
+          let lhsFreeExtentsOrig := shapeAtAxes lhsNonBatchShape lhsFreeOrig
+          let rhsFreeExtentsOrig := shapeAtAxes rhsNonBatchShape rhsFreeOrig
+          let expectedOut :=
+            expectedBatchPrefixShape batchRank ++ lhsFreeExtentsOrig ++ rhsFreeExtentsOrig
+          if outShape != expectedOut then
+            none
+          else
+            let mut lhsRemoved : Array Nat := #[]
+            let mut rhsRemoved : Array Nat := #[]
+            let mut lhsContractsKept : Array Nat := #[]
+            let mut rhsContractsKept : Array Nat := #[]
+            for i in [:lhsContract''.size] do
+              let lhsAxis := lhsContract''[i]!
+              let rhsAxis := rhsContract''[i]!
+              let lhsExtent := lhsNonBatchShape.getD lhsAxis 1
+              let rhsExtent := rhsNonBatchShape.getD rhsAxis 1
+              if lhsExtent = 1 && rhsExtent = 1 then
+                lhsRemoved := lhsRemoved.push lhsAxis
+                rhsRemoved := rhsRemoved.push rhsAxis
+              else
+                lhsContractsKept := lhsContractsKept.push lhsAxis
+                rhsContractsKept := rhsContractsKept.push rhsAxis
+            for axis in lhsFreeOrig do
+              if lhsNonBatchShape.getD axis 1 = 1 then
+                lhsRemoved := lhsRemoved.push axis
+            for axis in rhsFreeOrig do
+              if rhsNonBatchShape.getD axis 1 = 1 then
+                rhsRemoved := rhsRemoved.push axis
+            let lhsContractCompressed := reindexAxesAfterRemoving? lhsNonBatchShape.size lhsContractsKept lhsRemoved
+            let rhsContractCompressed := reindexAxesAfterRemoving? rhsNonBatchShape.size rhsContractsKept rhsRemoved
+            match lhsContractCompressed, rhsContractCompressed with
+            | some lhsCompressedContracts, some rhsCompressedContracts =>
+              some
+                ( compressShapeAfterRemovingAxes lhsNonBatchShape lhsRemoved
+                , compressShapeAfterRemovingAxes rhsNonBatchShape rhsRemoved
+                , lhsCompressedContracts
+                , rhsCompressedContracts )
+            | _, _ => none
+      | _, _ => none
+    | _, _, _ => none
+
 private def decodeMMTransposeFromUnitBatchAxes?
     (lhsContract rhsContract lhsBatch rhsBatch : Array Nat)
     (lhs rhs out : JVar) :
     Option MMATranspose :=
-  let batchRank := lhsBatch.size
-  if batchRank == 0 then
-    none
-  else if lhsBatch != rhsBatch || !isLeadingBatchAxes lhsBatch then
-    none
-  else if
-      !(allUnitBatchAxes lhs lhsBatch &&
-        allUnitBatchAxes rhs rhsBatch &&
-        allUnitBatchAxes out lhsBatch) then
-    none
-  else if lhsContract == #[batchRank + 1] && rhsContract == #[batchRank] then
-    some .AB
-  else if lhsContract == #[batchRank + 1] && rhsContract == #[batchRank + 1] then
-    some .ABt
-  else if lhsContract == #[batchRank] && rhsContract == #[batchRank] then
-    some .AtB
-  else if lhsContract == #[batchRank] && rhsContract == #[batchRank + 1] then
-    some .AtBt
-  else
-    none
+  match compressDotGeneralSingletonAxes? lhsContract rhsContract lhsBatch rhsBatch lhs rhs out with
+  | some (lhsShape, rhsShape, lhsContract', rhsContract') =>
+      if lhsShape.size = 2 && rhsShape.size = 2 then
+        decodeMMTransposeFromContractAxes? lhsContract' rhsContract' #[] #[]
+      else
+        none
+  | none => none
+
+private def decodeOuterFromUnitBatchAxes
+    (lhsContract rhsContract lhsBatch rhsBatch : Array Nat)
+    (lhs rhs out : JVar) :
+    Bool :=
+  match compressDotGeneralSingletonAxes? lhsContract rhsContract lhsBatch rhsBatch lhs rhs out with
+  | some (lhsShape, rhsShape, lhsContract', rhsContract') =>
+      lhsContract'.isEmpty && rhsContract'.isEmpty &&
+        lhsShape.size = 1 && rhsShape.size = 1
+  | none => false
 
 /-- True iff `opName` can be lowered into a concrete `KStmt` constructor. -/
 def isKStmtLowerableOpName (opName : OpName) : Bool :=
@@ -237,8 +333,20 @@ private def lowerEqnToKStmt (idx0 : Nat) (eqn : JEqn) : Except String KStmt := d
     let lhsVar := eqn.invars[0]!
     let rhsVar := eqn.invars[1]!
     let outVar := eqn.outvars[0]!
-    let trans? :=
+    let directTrans? :=
       match decodeMMTransposeFromContractAxes? lhsContract rhsContract lhsBatch rhsBatch with
+      | some trans =>
+        match lhsVar.metaInfo.shape, rhsVar.metaInfo.shape, outVar.metaInfo.shape with
+        | some lhsShape, some rhsShape, some outShape =>
+          if lhsBatch.isEmpty && rhsBatch.isEmpty &&
+              lhsShape.size = 2 && rhsShape.size = 2 && outShape.size = 2 then
+            some trans
+          else
+            none
+        | _, _, _ => some trans
+      | none => none
+    let trans? :=
+      match directTrans? with
       | some trans => some trans
       | none =>
         decodeMMTransposeFromUnitBatchAxes?
@@ -247,7 +355,9 @@ private def lowerEqnToKStmt (idx0 : Nat) (eqn : JEqn) : Except String KStmt := d
     | some trans =>
       return .mm trans dst invars[0]! invars[1]!
     | none =>
-      if lhsContract.isEmpty && rhsContract.isEmpty && lhsBatch.isEmpty && rhsBatch.isEmpty then
+      if
+          (lhsContract.isEmpty && rhsContract.isEmpty && lhsBatch.isEmpty && rhsBatch.isEmpty) ||
+          decodeOuterFromUnitBatchAxes lhsContract rhsContract lhsBatch rhsBatch lhsVar rhsVar outVar then
         return .outer dst invars[0]! invars[1]!
       else
         throw <|

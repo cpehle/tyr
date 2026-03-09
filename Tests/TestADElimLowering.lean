@@ -207,7 +207,232 @@ def testLowerToKStmtsMultiLeadingUnitBatchDotGeneralToMM : IO Unit := do
       s!"multi-leading-unit-batch dot_general should lower to mm.AB, got={reprStr lowered}"
 
 @[test]
-def testLowerToKStmtsNonLeadingUnitBatchDotGeneralRejects : IO Unit := do
+def testLowerToKStmtsNonLeadingUnitBatchDotGeneralToMM : IO Unit := do
+  let lhs : JVar := { id := 1, metaInfo := { shape := some #[2, 1, 3] } }
+  let rhs : JVar := { id := 2, metaInfo := { shape := some #[1, 3, 4] } }
+  let out : JVar := { id := 3, metaInfo := { shape := some #[1, 2, 4] } }
+  let jaxpr : LeanJaxpr := {
+    invars := #[lhs, rhs]
+    eqns := #[
+      {
+        op := kstmtDotGeneralOpName
+        invars := #[lhs, rhs]
+        outvars := #[out]
+        params := #[
+          OpParam.mkNats .lhsContract #[2],
+          OpParam.mkNats .rhsContract #[1],
+          OpParam.mkNats .lhsBatch #[1],
+          OpParam.mkNats .rhsBatch #[0]
+        ]
+      }
+    ]
+    outvars := #[out]
+  }
+
+  match lowerToKStmts jaxpr with
+  | .error errs =>
+    LeanTest.fail s!"non-leading unit-batch dot_general lowering should succeed, got:\n{renderErrors errs}"
+  | .ok lowered =>
+    let v1 : Tyr.GPU.Codegen.VarId := { idx := 1 }
+    let v2 : Tyr.GPU.Codegen.VarId := { idx := 2 }
+    let v3 : Tyr.GPU.Codegen.VarId := { idx := 3 }
+    LeanTest.assertTrue (lowered == #[.mm .AB v3 v1 v2])
+      s!"non-leading unit-batch dot_general should lower to mm.AB, got={reprStr lowered}"
+
+@[test]
+def testLowerToKStmtsUnitBatchDotGeneralTransposeVariants : IO Unit := do
+  let lhsABt : JVar := { id := 1, metaInfo := { shape := some #[2, 1, 3] } }
+  let rhsABt : JVar := { id := 2, metaInfo := { shape := some #[4, 3, 1] } }
+  let outABt : JVar := { id := 3, metaInfo := { shape := some #[1, 2, 4] } }
+  let lhsAtB : JVar := { id := 4, metaInfo := { shape := some #[3, 2, 1] } }
+  let rhsAtB : JVar := { id := 5, metaInfo := { shape := some #[1, 3, 4] } }
+  let outAtB : JVar := { id := 6, metaInfo := { shape := some #[1, 2, 4] } }
+  let lhsAtBt : JVar := { id := 7, metaInfo := { shape := some #[3, 2, 1] } }
+  let rhsAtBt : JVar := { id := 8, metaInfo := { shape := some #[4, 1, 3] } }
+  let outAtBt : JVar := { id := 9, metaInfo := { shape := some #[1, 2, 4] } }
+  let jaxpr : LeanJaxpr := {
+    invars := #[lhsABt, rhsABt, lhsAtB, rhsAtB, lhsAtBt, rhsAtBt]
+    eqns := #[
+      {
+        op := kstmtDotGeneralOpName
+        invars := #[lhsABt, rhsABt]
+        outvars := #[outABt]
+        params := #[
+          OpParam.mkNats .lhsContract #[2],
+          OpParam.mkNats .rhsContract #[1],
+          OpParam.mkNats .lhsBatch #[1],
+          OpParam.mkNats .rhsBatch #[2]
+        ]
+      },
+      {
+        op := kstmtDotGeneralOpName
+        invars := #[lhsAtB, rhsAtB]
+        outvars := #[outAtB]
+        params := #[
+          OpParam.mkNats .lhsContract #[0],
+          OpParam.mkNats .rhsContract #[1],
+          OpParam.mkNats .lhsBatch #[2],
+          OpParam.mkNats .rhsBatch #[0]
+        ]
+      },
+      {
+        op := kstmtDotGeneralOpName
+        invars := #[lhsAtBt, rhsAtBt]
+        outvars := #[outAtBt]
+        params := #[
+          OpParam.mkNats .lhsContract #[0],
+          OpParam.mkNats .rhsContract #[2],
+          OpParam.mkNats .lhsBatch #[2],
+          OpParam.mkNats .rhsBatch #[1]
+        ]
+      }
+    ]
+    outvars := #[outABt, outAtB, outAtBt]
+  }
+
+  match lowerToKStmts jaxpr with
+  | .error errs =>
+    LeanTest.fail s!"unit-batch transpose dot_general lowering should succeed, got:\n{renderErrors errs}"
+  | .ok lowered =>
+    let v1 : Tyr.GPU.Codegen.VarId := { idx := 1 }
+    let v2 : Tyr.GPU.Codegen.VarId := { idx := 2 }
+    let v3 : Tyr.GPU.Codegen.VarId := { idx := 3 }
+    let v4 : Tyr.GPU.Codegen.VarId := { idx := 4 }
+    let v5 : Tyr.GPU.Codegen.VarId := { idx := 5 }
+    let v6 : Tyr.GPU.Codegen.VarId := { idx := 6 }
+    let v7 : Tyr.GPU.Codegen.VarId := { idx := 7 }
+    let v8 : Tyr.GPU.Codegen.VarId := { idx := 8 }
+    let v9 : Tyr.GPU.Codegen.VarId := { idx := 9 }
+    LeanTest.assertTrue
+      (lowered == #[
+        .mm .ABt v3 v1 v2,
+        .mm .AtB v6 v4 v5,
+        .mm .AtBt v9 v7 v8
+      ])
+      s!"unit-batch transpose dot_general variants should lower to the expected mm transposes, got={reprStr lowered}"
+
+@[test]
+def testLowerToKStmtsDotGeneralDropsUnitFreeAndContractAxesToMM : IO Unit := do
+  let lhsFreeUnit : JVar := { id := 1, metaInfo := { shape := some #[1, 2, 3] } }
+  let rhsFreeUnit : JVar := { id := 2, metaInfo := { shape := some #[3, 4] } }
+  let outFreeUnit : JVar := { id := 3, metaInfo := { shape := some #[1, 2, 4] } }
+  let lhsContractUnit : JVar := { id := 4, metaInfo := { shape := some #[2, 1, 3] } }
+  let rhsContractUnit : JVar := { id := 5, metaInfo := { shape := some #[1, 3, 4] } }
+  let outContractUnit : JVar := { id := 6, metaInfo := { shape := some #[2, 4] } }
+  let jaxpr : LeanJaxpr := {
+    invars := #[lhsFreeUnit, rhsFreeUnit, lhsContractUnit, rhsContractUnit]
+    eqns := #[
+      {
+        op := kstmtDotGeneralOpName
+        invars := #[lhsFreeUnit, rhsFreeUnit]
+        outvars := #[outFreeUnit]
+        params := #[
+          OpParam.mkNats .lhsContract #[2],
+          OpParam.mkNats .rhsContract #[0],
+          OpParam.mkNats .lhsBatch #[],
+          OpParam.mkNats .rhsBatch #[]
+        ]
+      },
+      {
+        op := kstmtDotGeneralOpName
+        invars := #[lhsContractUnit, rhsContractUnit]
+        outvars := #[outContractUnit]
+        params := #[
+          OpParam.mkNats .lhsContract #[1, 2],
+          OpParam.mkNats .rhsContract #[0, 1],
+          OpParam.mkNats .lhsBatch #[],
+          OpParam.mkNats .rhsBatch #[]
+        ]
+      }
+    ]
+    outvars := #[outFreeUnit, outContractUnit]
+  }
+
+  match lowerToKStmts jaxpr with
+  | .error errs =>
+    LeanTest.fail s!"degenerate singleton dot_general lowering to mm should succeed, got:\n{renderErrors errs}"
+  | .ok lowered =>
+    let v1 : Tyr.GPU.Codegen.VarId := { idx := 1 }
+    let v2 : Tyr.GPU.Codegen.VarId := { idx := 2 }
+    let v3 : Tyr.GPU.Codegen.VarId := { idx := 3 }
+    let v4 : Tyr.GPU.Codegen.VarId := { idx := 4 }
+    let v5 : Tyr.GPU.Codegen.VarId := { idx := 5 }
+    let v6 : Tyr.GPU.Codegen.VarId := { idx := 6 }
+    LeanTest.assertTrue
+      (lowered == #[
+        .mm .AB v3 v1 v2,
+        .mm .AB v6 v4 v5
+      ])
+      s!"singleton free/contract axes should collapse to mm.AB, got={reprStr lowered}"
+
+@[test]
+def testLowerToKStmtsDotGeneralDropsUnitContractAxesToOuter : IO Unit := do
+  let lhs : JVar := { id := 1, metaInfo := { shape := some #[5, 1, 1] } }
+  let rhs : JVar := { id := 2, metaInfo := { shape := some #[1, 1, 7] } }
+  let out : JVar := { id := 3, metaInfo := { shape := some #[5, 7] } }
+  let jaxpr : LeanJaxpr := {
+    invars := #[lhs, rhs]
+    eqns := #[
+      {
+        op := kstmtDotGeneralOpName
+        invars := #[lhs, rhs]
+        outvars := #[out]
+        params := #[
+          OpParam.mkNats .lhsContract #[1, 2],
+          OpParam.mkNats .rhsContract #[0, 1],
+          OpParam.mkNats .lhsBatch #[],
+          OpParam.mkNats .rhsBatch #[]
+        ]
+      }
+    ]
+    outvars := #[out]
+  }
+
+  match lowerToKStmts jaxpr with
+  | .error errs =>
+    LeanTest.fail s!"degenerate singleton contract dot_general lowering to outer should succeed, got:\n{renderErrors errs}"
+  | .ok lowered =>
+    let v1 : Tyr.GPU.Codegen.VarId := { idx := 1 }
+    let v2 : Tyr.GPU.Codegen.VarId := { idx := 2 }
+    let v3 : Tyr.GPU.Codegen.VarId := { idx := 3 }
+    LeanTest.assertTrue (lowered == #[.outer v3 v1 v2])
+      s!"singleton contract axes should collapse to outer, got={reprStr lowered}"
+
+@[test]
+def testLowerToKStmtsUnitBatchDotGeneralToOuter : IO Unit := do
+  let lhs : JVar := { id := 1, metaInfo := { shape := some #[5, 1] } }
+  let rhs : JVar := { id := 2, metaInfo := { shape := some #[1, 7] } }
+  let out : JVar := { id := 3, metaInfo := { shape := some #[1, 5, 7] } }
+  let jaxpr : LeanJaxpr := {
+    invars := #[lhs, rhs]
+    eqns := #[
+      {
+        op := `Graphax.dot_general
+        invars := #[lhs, rhs]
+        outvars := #[out]
+        params := #[
+          OpParam.mkNats .lhsContract #[],
+          OpParam.mkNats .rhsContract #[],
+          OpParam.mkNats .lhsBatch #[1],
+          OpParam.mkNats .rhsBatch #[0]
+        ]
+      }
+    ]
+    outvars := #[out]
+  }
+
+  match lowerToKStmts jaxpr with
+  | .error errs =>
+    LeanTest.fail s!"unit-batch outer-like dot_general lowering should succeed, got:\n{renderErrors errs}"
+  | .ok lowered =>
+    let v1 : Tyr.GPU.Codegen.VarId := { idx := 1 }
+    let v2 : Tyr.GPU.Codegen.VarId := { idx := 2 }
+    let v3 : Tyr.GPU.Codegen.VarId := { idx := 3 }
+    LeanTest.assertTrue (lowered == #[.outer v3 v1 v2])
+      s!"unit-batch outer-like dot_general should lower to outer, got={reprStr lowered}"
+
+@[test]
+def testLowerToKStmtsUnitBatchDotGeneralRejectsNonCanonicalOutputShape : IO Unit := do
   let lhs : JVar := { id := 1, metaInfo := { shape := some #[2, 1, 3] } }
   let rhs : JVar := { id := 2, metaInfo := { shape := some #[2, 1, 4] } }
   let out : JVar := { id := 3, metaInfo := { shape := some #[2, 1, 3] } }
@@ -231,7 +456,7 @@ def testLowerToKStmtsNonLeadingUnitBatchDotGeneralRejects : IO Unit := do
 
   match lowerToKStmts jaxpr with
   | .ok lowered =>
-    LeanTest.fail s!"non-leading unit-batch dot_general should be rejected for KStmt lowering, got={reprStr lowered}"
+    LeanTest.fail s!"non-canonical unit-batch dot_general should be rejected for KStmt lowering, got={reprStr lowered}"
   | .error errs =>
     LeanTest.assertTrue (!errs.isEmpty) "Expected non-empty lowering errors."
     LeanTest.assertTrue ((errs[0]!).contains "not representable as KStmt mm/outer")
