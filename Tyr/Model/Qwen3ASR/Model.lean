@@ -693,15 +693,14 @@ def forward {batch seq frames : UInt64}
     : IO (T #[batch, seq, ThinkerLmVocabSize cfg]) := do
   return (← m.forwardWithAux inputIds inputFeatures featureAttentionMask attentionMask).logits
 
-private partial def greedyLoopUncached {batch frames : UInt64}
+private partial def greedyLoopUncached {batch : UInt64}
     (m : Qwen3ASRThinkerForConditionalGeneration cfg)
-    (inputFeatures : Option (T #[batch, cfg.audioConfig.numMelBins, frames]))
-    (featureAttentionMask : Option (T #[batch, frames]))
+    {promptSeq : UInt64}
+    (promptEmbeds : T #[batch, promptSeq, cfg.textConfig.hiddenSize])
     (eosTokenIds : Array UInt64)
     (eosVector : Option (T #[batch]))
     (remaining : Nat)
     (finished : Option (T #[batch]))
-    (cachePosition : UInt64)
     {curSeq : UInt64}
     (curIds : T #[batch, curSeq])
     : IO (Sigma (fun outSeq => T #[batch, outSeq])) := do
@@ -709,14 +708,20 @@ private partial def greedyLoopUncached {batch frames : UInt64}
     return ⟨curSeq, curIds⟩
   if curSeq == 0 then
     throw <| IO.userError "generateGreedy requires non-empty prompt sequence"
+  if curSeq < promptSeq then
+    throw <| IO.userError
+      s!"generateGreedyUncached prompt boundary mismatch: promptSeq={promptSeq}, curSeq={curSeq}"
 
-  let stepInputs :=
-    m.prepareInputsForGeneration
-      curIds
-      inputFeatures
-      featureAttentionMask
-      cachePosition
-  let logits ← m.forward stepInputs.inputIds stepInputs.inputFeatures stepInputs.featureAttentionMask none
+  let inputsEmbeds : T #[batch, curSeq, cfg.textConfig.hiddenSize] :=
+    if h : curSeq = promptSeq then
+      by simpa [h] using promptEmbeds
+    else
+      let suffixSeq := curSeq - promptSeq
+      let suffixIds : T #[batch, suffixSeq] := data.slice curIds 1 promptSeq suffixSeq
+      let suffixEmbeds : T #[batch, suffixSeq, cfg.textConfig.hiddenSize] := m.embedText suffixIds
+      let inputsEmbedsDyn : T #[] := nn.cat_dyn #[nn.eraseShape promptEmbeds, nn.eraseShape suffixEmbeds] 1
+      reshape inputsEmbedsDyn #[batch, curSeq, cfg.textConfig.hiddenSize]
+  let logits := m.forwardEmbeds inputsEmbeds none
   let lastPos := curSeq - 1
   let last3 : T #[batch, 1, ThinkerLmVocabSize cfg] :=
     reshape (data.slice logits 1 lastPos 1) #[batch, 1, ThinkerLmVocabSize cfg]
@@ -735,7 +740,7 @@ private partial def greedyLoopUncached {batch frames : UInt64}
   match eosVector with
   | none =>
     greedyLoopUncached
-      m inputFeatures featureAttentionMask eosTokenIds none (remaining - 1) none (cachePosition + 1) appended
+      m promptEmbeds eosTokenIds none (remaining - 1) none appended
   | some _ =>
     let reachedEos : T #[batch] := tokenInSetMask nextTok eosTokenIds
     let finished' : T #[batch] :=
@@ -748,13 +753,11 @@ private partial def greedyLoopUncached {batch frames : UInt64}
     else
       greedyLoopUncached
         m
-        inputFeatures
-        featureAttentionMask
+        promptEmbeds
         eosTokenIds
         eosVector
         (remaining - 1)
         (some finished')
-        (cachePosition + 1)
         appended
 
 /-- Compatibility path mirroring the previous full re-forward greedy loop.
@@ -771,16 +774,15 @@ def generateGreedyUncached {batch seq frames : UInt64}
     throw <| IO.userError "generateGreedy requires non-empty prompt sequence"
   if maxNewTokens == 0 then
     return ⟨seq, inputIds⟩
+  let promptEmbeds ← buildInputsEmbeds m inputIds inputFeatures featureAttentionMask
   let eosVector := eosVectorOnDevice (batch := batch) eosTokenIds inputIds.device
   greedyLoopUncached
     m
-    inputFeatures
-    featureAttentionMask
+    promptEmbeds
     eosTokenIds
     eosVector
     maxNewTokens.toNat
     none
-    0
     inputIds
 
 /-- Greedy generation utility (Lean-only, no vLLM dependency).
