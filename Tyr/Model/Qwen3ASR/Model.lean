@@ -701,6 +701,7 @@ private partial def greedyLoopUncached {batch frames : UInt64}
     (eosVector : Option (T #[batch]))
     (remaining : Nat)
     (finished : Option (T #[batch]))
+    (cachePosition : UInt64)
     {curSeq : UInt64}
     (curIds : T #[batch, curSeq])
     : IO (Sigma (fun outSeq => T #[batch, outSeq])) := do
@@ -709,7 +710,13 @@ private partial def greedyLoopUncached {batch frames : UInt64}
   if curSeq == 0 then
     throw <| IO.userError "generateGreedy requires non-empty prompt sequence"
 
-  let logits ← m.forward curIds inputFeatures featureAttentionMask none
+  let stepInputs :=
+    m.prepareInputsForGeneration
+      curIds
+      inputFeatures
+      featureAttentionMask
+      cachePosition
+  let logits ← m.forward stepInputs.inputIds stepInputs.inputFeatures stepInputs.featureAttentionMask none
   let lastPos := curSeq - 1
   let last3 : T #[batch, 1, ThinkerLmVocabSize cfg] :=
     reshape (data.slice logits 1 lastPos 1) #[batch, 1, ThinkerLmVocabSize cfg]
@@ -727,7 +734,8 @@ private partial def greedyLoopUncached {batch frames : UInt64}
 
   match eosVector with
   | none =>
-    greedyLoopUncached m inputFeatures featureAttentionMask eosTokenIds none (remaining - 1) none appended
+    greedyLoopUncached
+      m inputFeatures featureAttentionMask eosTokenIds none (remaining - 1) none (cachePosition + 1) appended
   | some _ =>
     let reachedEos : T #[batch] := tokenInSetMask nextTok eosTokenIds
     let finished' : T #[batch] :=
@@ -738,7 +746,16 @@ private partial def greedyLoopUncached {batch frames : UInt64}
     if !hasActiveRows then
       return ⟨curSeq + 1, appended⟩
     else
-      greedyLoopUncached m inputFeatures featureAttentionMask eosTokenIds eosVector (remaining - 1) (some finished') appended
+      greedyLoopUncached
+        m
+        inputFeatures
+        featureAttentionMask
+        eosTokenIds
+        eosVector
+        (remaining - 1)
+        (some finished')
+        (cachePosition + 1)
+        appended
 
 /-- Compatibility path mirroring the previous full re-forward greedy loop.
     Useful for parity checks against the cached generation path. -/
@@ -755,7 +772,16 @@ def generateGreedyUncached {batch seq frames : UInt64}
   if maxNewTokens == 0 then
     return ⟨seq, inputIds⟩
   let eosVector := eosVectorOnDevice (batch := batch) eosTokenIds inputIds.device
-  greedyLoopUncached m inputFeatures featureAttentionMask eosTokenIds eosVector maxNewTokens.toNat none inputIds
+  greedyLoopUncached
+    m
+    inputFeatures
+    featureAttentionMask
+    eosTokenIds
+    eosVector
+    maxNewTokens.toNat
+    none
+    0
+    inputIds
 
 /-- Greedy generation utility (Lean-only, no vLLM dependency).
     Returns generated full sequence `[prompt || new_tokens]` with dynamic output length. -/

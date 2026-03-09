@@ -107,6 +107,13 @@ private def tinyPreprocessorCfg (melBins frames : UInt64) : PreprocessorConfig :
   dither := 0.0
 }
 
+private def withZeroLmHead
+    (model : Qwen3ASRForConditionalGeneration cfg) :
+    Qwen3ASRForConditionalGeneration cfg :=
+  let zeroLmHead : T #[ThinkerLmVocabSize cfg.thinkerConfig, cfg.thinkerConfig.textConfig.hiddenSize] :=
+    torch.zeros #[ThinkerLmVocabSize cfg.thinkerConfig, cfg.thinkerConfig.textConfig.hiddenSize]
+  { model with thinker := { model.thinker with lmHead := zeroLmHead } }
+
 private def mkDeterministicWavSamples (n : Nat) : Array Float := Id.run do
   let mut out : Array Float := Array.mkEmpty n
   for i in [:n] do
@@ -871,6 +878,7 @@ def testQwen3ASRGreedyGenerateFromWav : IO Unit := do
 def testQwen3ASRGreedyCachedMatchesUncached : IO Unit := do
   let cfg := tinyCfg
   let model ← Qwen3ASRForConditionalGeneration.init cfg
+  let model := withZeroLmHead model
   let batch : UInt64 := 1
   let frames : UInt64 := 32
   let audioSeq : UInt64 := AudioEncoderConfig.framesAfterConv3 cfg.thinkerConfig.audioConfig frames
@@ -899,6 +907,45 @@ def testQwen3ASRGreedyCachedMatchesUncached : IO Unit := do
   let toksCached ← data.tensorToUInt64Array flatCached
   let toksUncached ← data.tensorToUInt64Array flatUncached
   LeanTest.assertEqual toksCached toksUncached "cached and uncached generation should produce identical token ids"
+
+@[test]
+def testQwen3ASRGreedyCachedMatchesUncachedWhenAudioTokenIsGenerated : IO Unit := do
+  let cfg : Qwen3ASRConfig :=
+    { tinyCfg with thinkerConfig := { tinyCfg.thinkerConfig with audioTokenId := 0 } }
+  let model0 ← Qwen3ASRForConditionalGeneration.init cfg
+  let model : Qwen3ASRForConditionalGeneration cfg := withZeroLmHead model0
+  let batch : UInt64 := 1
+  let frames : UInt64 := 32
+  let audioSeq : UInt64 := AudioEncoderConfig.framesAfterConv3 cfg.thinkerConfig.audioConfig frames
+  let promptSeq : UInt64 := audioSeq + 2
+  let aTok : Int64 := Int64.ofNat cfg.thinkerConfig.audioTokenId.toNat
+  let mut idsVals : Array Int64 := #[]
+  for _ in [:audioSeq.toNat] do
+    idsVals := idsVals.push aTok
+  idsVals := idsVals.push 7
+  idsVals := idsVals.push 11
+  let inputIds : T #[batch, promptSeq] := reshape (data.fromInt64Array idsVals) #[batch, promptSeq]
+  let mel ← randn #[batch, cfg.thinkerConfig.audioConfig.numMelBins, frames]
+  let fmask : T #[batch, frames] := full_int #[batch, frames] 1
+
+  let outCached ← model.generateGreedy inputIds (some mel) (some fmask) 4 #[]
+  let outUncached ← model.generateGreedyUncached inputIds (some mel) (some fmask) 4 #[]
+
+  let seqCached := outCached.1
+  let idsCached := outCached.2
+  let seqUncached := outUncached.1
+  let idsUncached := outUncached.2
+
+  LeanTest.assertEqual seqCached seqUncached
+    "cached and uncached generation should stay aligned even when the generated token equals the audio placeholder id"
+  let flatCached : T #[seqCached] := reshape idsCached #[seqCached]
+  let flatUncached : T #[seqUncached] := reshape idsUncached #[seqUncached]
+  let toksCached ← data.tensorToUInt64Array flatCached
+  let toksUncached ← data.tensorToUInt64Array flatUncached
+  LeanTest.assertEqual toksCached toksUncached
+    "cached and uncached generation should produce identical token ids even when the audio placeholder id is generated"
+  LeanTest.assertTrue (toksCached.drop promptSeq.toNat |>.all (· == 0))
+    s!"zero lmHead should force generated continuation tokens to the audio token id, got {reprStr toksCached}"
 
 @[test]
 def testQwen3ASRMaskedPositionsMatchTrimmedLeftPad : IO Unit := do
