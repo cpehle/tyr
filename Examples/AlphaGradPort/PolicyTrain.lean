@@ -91,7 +91,7 @@ private def stateFeatures
     Array Float :=
   let nNat := s.numVertices
   let n := Float.ofNat nNat
-  let remainingNat := s.numVertices - s.eliminatedCount
+  let remainingNat := s.numEliminableActions - s.eliminatedEliminableCount
   let remaining := Float.ofNat remainingNat
   let feasible := Float.ofNat (feasibleActionCount cfg s)
   let edgeCount := Float.ofNat (graphEdgeCount s.graph)
@@ -297,11 +297,11 @@ private def rolloutPPOEpisode
   if actionDim.toNat != task.numVertices then
     throw s!"Network actionDim={actionDim} does not match task vertices={task.numVertices}."
 
-  let s0 ← initAlphaGradStateFromEdges? task.edges task.numVertices
+  let s0 ← initAlphaGradState? task.graph task.numVertices
   let mut s := s0
   let mut key := seed
   let mut steps : Array PPORolloutStep := #[]
-  let maxSteps := task.envCfg.maxEpisodeSteps.getD task.numVertices
+  let maxSteps := task.envCfg.maxEpisodeSteps.getD task.numEliminableVertices
   let mut iters := 0
 
   while iters < maxSteps && !(isTerminal task.envCfg s) do
@@ -341,9 +341,9 @@ private def evalGreedyReward?
     Except String Float := do
   if actionDim.toNat != task.numVertices then
     throw s!"Network actionDim={actionDim} does not match task vertices={task.numVertices}."
-  let s0 ← initAlphaGradStateFromEdges? task.edges task.numVertices
+  let s0 ← initAlphaGradState? task.graph task.numVertices
   let mut s := s0
-  let maxSteps := task.envCfg.maxEpisodeSteps.getD task.numVertices
+  let maxSteps := task.envCfg.maxEpisodeSteps.getD task.numEliminableVertices
   let mut iters := 0
   while iters < maxSteps && !(isTerminal task.envCfg s) do
     let (logits, _value) := evalStatePolicyValue net task.envCfg s
@@ -479,7 +479,7 @@ def trainPPO
     | .error msg =>
       return .error s!"PPO initial greedy eval failed: {msg}"
 
-  IO.println s!"[AlphaGradPPO] task={task.name} epochs={cfg.epochs} episodes/epoch={cfg.episodesPerEpoch} vertices={task.numVertices} edges={task.edges.size}"
+  IO.println s!"[AlphaGradPPO] task={task.name} epochs={cfg.epochs} episodes/epoch={cfg.episodesPerEpoch} vertices={task.numVertices} eliminable={task.numEliminableVertices} edges={task.edges.size}"
   IO.println s!"[AlphaGradPPO] initial_greedy_reward={initialGreedyReward}"
 
   let mut net := net0
@@ -608,7 +608,7 @@ private def rolloutAlphaZeroEpisode
     Except String (Array AZSample × Float × UInt64) := do
   if actionDim.toNat != task.numVertices then
     throw s!"Network actionDim={actionDim} does not match task vertices={task.numVertices}."
-  let s0 ← initAlphaGradStateFromEdges? task.edges task.numVertices
+  let s0 ← initAlphaGradState? task.graph task.numVertices
   let searchParams : AZSearchParams actionDim := {
     envCfg := task.envCfg
     net := net
@@ -620,7 +620,7 @@ private def rolloutAlphaZeroEpisode
   let mut policyTargets : Array (Array Float) := #[]
   let mut rewards : Array Float := #[]
   let mut tree? : Option (Tree AlphaGradState Unit) := none
-  let maxSteps := task.envCfg.maxEpisodeSteps.getD task.numVertices
+  let maxSteps := task.envCfg.maxEpisodeSteps.getD task.numEliminableVertices
   let mut steps : Nat := 0
 
   while steps < maxSteps && !(isTerminal task.envCfg s) do
@@ -747,7 +747,7 @@ def trainAlphaZero
   let opt := Optim.adamw (lr := cfg.learningRate) (weight_decay := cfg.weightDecay)
   let optState0 := opt.init net0
 
-  IO.println s!"[AlphaGradAZ] task={task.name} epochs={cfg.epochs} episodes/epoch={cfg.episodesPerEpoch} sims={cfg.numSimulations} vertices={task.numVertices} edges={task.edges.size}"
+  IO.println s!"[AlphaGradAZ] task={task.name} epochs={cfg.epochs} episodes/epoch={cfg.episodesPerEpoch} sims={cfg.numSimulations} vertices={task.numVertices} eliminable={task.numEliminableVertices} edges={task.edges.size}"
 
   let mut net := net0
   let mut optState := optState0

@@ -25,7 +25,7 @@ def testPerceptronSearchParityAcrossPolicies : IO Unit := do
 
   let mctsCfg : AlphaGradMctsConfig := {
     numSimulations := 6
-    maxDepth := some task.numVertices
+    maxDepth := some task.numEliminableVertices
     maxNumConsideredActions := 6
     gumbelScale := 0.0
     dagDirichletFraction := 0.0
@@ -37,10 +37,10 @@ def testPerceptronSearchParityAcrossPolicies : IO Unit := do
     | .error msg =>
       LeanTest.fail s!"{label} failed: {msg}"
     | .ok out =>
-      LeanTest.assertEqual out.actions0.size task.numVertices
-        s!"{label} should emit one action per vertex."
-      LeanTest.assertEqual out.order1.size task.numVertices
-        s!"{label} should emit one vertex per action."
+      LeanTest.assertEqual out.actions0.size task.numEliminableVertices
+        s!"{label} should emit one action per eliminable vertex."
+      LeanTest.assertEqual out.order1.size task.numEliminableVertices
+        s!"{label} should emit one vertex per eliminable action."
       LeanTest.assertTrue (hasNoDuplicates out.actions0)
         s!"{label} action trace must be duplicate-free."
       LeanTest.assertTrue (hasNoDuplicates out.order1)
@@ -49,11 +49,11 @@ def testPerceptronSearchParityAcrossPolicies : IO Unit := do
         s!"{label} should complete without constraint violations."
 
   let gumbel :=
-    searchEpisodeFromEdges? task.envCfg mctsCfg 2026030601 task.edges task.numVertices
+    searchEpisodeFromGraph? task.envCfg mctsCfg 2026030601 task.graph task.numVertices
   let dagAlphaZero :=
-    searchEpisodeDagWithPolicyFromEdges? .alphaZero task.envCfg mctsCfg 2026030602 task.edges task.numVertices
+    searchEpisodeDagWithPolicyFromGraph? .alphaZero task.envCfg mctsCfg 2026030602 task.graph task.numVertices
   let dagGumbel :=
-    searchEpisodeDagWithPolicyFromEdges? .gumbelMuZero task.envCfg mctsCfg 2026030603 task.edges task.numVertices
+    searchEpisodeDagWithPolicyFromGraph? .gumbelMuZero task.envCfg mctsCfg 2026030603 task.graph task.numVertices
 
   checkEpisode "gumbel" gumbel
   checkEpisode "dag-alphaZero" dagAlphaZero
@@ -74,6 +74,8 @@ def testKStmtLoweredTasksUseSemanticMaterialization : IO Unit := do
 
     LeanTest.assertTrue (task.numVertices > 0)
       s!"{task.name} should expose at least one vertex after KStmt lowering."
+    LeanTest.assertTrue (task.numEliminableVertices > 0)
+      s!"{task.name} should expose at least one eliminable vertex after KStmt lowering."
     LeanTest.assertTrue (!task.edges.isEmpty)
       s!"{task.name} should expose non-empty local-Jac edges after KStmt lowering."
     assertSemanticEdges task.name task.edges
@@ -87,6 +89,8 @@ def testAllAlphaGradTasksMaterialize : IO Unit := do
       | .ok task => pure task
     LeanTest.assertTrue (task.numVertices > 0)
       s!"{task.name} should report a positive vertex count."
+    LeanTest.assertTrue (task.numEliminableVertices > 0)
+      s!"{task.name} should report a positive eliminable vertex count."
 
 @[test]
 def testPolicySweepPPOPerceptronTinyRun : IO Unit := do

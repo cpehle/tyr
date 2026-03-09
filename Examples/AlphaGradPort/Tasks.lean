@@ -22,8 +22,12 @@ open Tyr.GPU.Codegen
 structure TaskSpec where
   name : String
   description : String
+  /-- Fixed AlphaGrad-compatible action-slot width. -/
   numVertices : Nat
+  /-- Number of eliminable rollout steps under the task graph partitions. -/
+  numEliminableVertices : Nat
   edges : Array LocalJacEdge
+  graph : ElimGraph := {}
   envCfg : AlphaGradMctxConfig := {}
   mctsCfg : AlphaGradMctsConfig := {}
   deriving Repr, Inhabited
@@ -68,6 +72,13 @@ def taskSequence : Array TaskName := #[
   .humanHeartDipole,
   .propaneCombustion
 ]
+
+private def alphaGradParityEnvCfg : AlphaGradMctxConfig :=
+  {
+    rewardMode := .alphaGradNops
+    terminalBonus := 0.0
+    discount := 1.0
+  }
 
 private def scalarMap (repr : String) : Tyr.AD.Sparse.SparseLinearMap :=
   {
@@ -474,7 +485,7 @@ private def materializeFromKStmts
     return .error s!"{name}: CoreM failure while lowering KStmt graph: {msg}"
   | .ok (.error err) =>
     return .error s!"{name}: {buildExtractErrorToString err}"
-  | .ok (.ok (_jaxpr, edges)) =>
+  | .ok (.ok (jaxpr, edges)) =>
     let hasNonSemantic := edges.any (fun e =>
       match e.map.repr with
       | Tyr.AD.Sparse.SparseMapTag.semantic _ => false
@@ -486,14 +497,24 @@ private def materializeFromKStmts
       | .error msg =>
         return .error s!"{name}: {msg}"
       | .ok numVertices =>
-        return .ok {
-          name := name
-          description := description
-          numVertices := numVertices
-          edges := edges
-          envCfg := envCfg
-          mctsCfg := mctsCfg
-        }
+        match ofLocalJacEdgesWithPartitions
+            edges
+            jaxpr.vertexPartitions.inputs
+            jaxpr.vertexPartitions.outputs
+            jaxpr.vertexPartitions.eliminable with
+        | .error msg =>
+          return .error s!"{name}: failed to build partitioned elimination graph: {msg}"
+        | .ok graph =>
+          return .ok {
+            name := name
+            description := description
+            numVertices := numVertices
+            numEliminableVertices := graph.eliminable.size
+            edges := edges
+            graph := graph
+            envCfg := envCfg
+            mctsCfg := mctsCfg
+          }
 
 private def taskSpecStatic : TaskName → TaskSpec
   | .roeFlux1d =>
@@ -501,8 +522,10 @@ private def taskSpecStatic : TaskName → TaskSpec
       name := "RoeFlux_1d"
       description := "Graphax RoeFlux_1d-inspired elimination graph; first end-to-end AlphaGrad port target."
       numVertices := 35
+      numEliminableVertices := 35
       edges := roeFlux1dEdges
-      envCfg := { terminalBonus := 0.0, discount := 1.0 }
+      graph := ofLocalJacEdges roeFlux1dEdges
+      envCfg := alphaGradParityEnvCfg
       mctsCfg := { numSimulations := 50, maxNumConsideredActions := 5, gumbelScale := 1.0 }
     }
   | .perceptron =>
@@ -528,42 +551,42 @@ def materializeTask : TaskName → IO (Except String TaskSpec)
       "Perceptron"
       "Perceptron graph lowered from Tyr KStmt IR (tanh + layer-norm + cross-entropy-style path)."
       perceptronKStmts
-      { terminalBonus := 0.0, discount := 1.0 }
+      alphaGradParityEnvCfg
       { numSimulations := 36, maxNumConsideredActions := 7, gumbelScale := 1.0 }
   | .encoder =>
     materializeFromKStmts
       "Encoder"
       "Encoder graph lowered from Tyr KStmt IR (two attention-like blocks + normalization + loss proxy)."
       encoderKStmts
-      { terminalBonus := 0.0, discount := 1.0 }
+      alphaGradParityEnvCfg
       { numSimulations := 40, maxNumConsideredActions := 10, gumbelScale := 1.0 }
   | .robotArm6DOF =>
     materializeFromKStmts
       "RobotArm_6DOF"
       "RobotArm_6DOF graph lowered from Tyr KStmt IR (6-DOF trig/pose dependency path)."
       robotArmKStmts
-      { terminalBonus := 0.0, discount := 1.0 }
+      alphaGradParityEnvCfg
       { numSimulations := 48, maxNumConsideredActions := 8, gumbelScale := 1.0 }
   | .blackScholesJacobian =>
     materializeFromKStmts
       "BlackScholes_Jacobian"
       "BlackScholes_Jacobian graph lowered from Tyr KStmt IR (pricing + Jacobian/Hessian proxy path)."
       blackScholesJacobianKStmts
-      { terminalBonus := 0.0, discount := 1.0 }
+      alphaGradParityEnvCfg
       { numSimulations := 40, maxNumConsideredActions := 6, gumbelScale := 1.0 }
   | .humanHeartDipole =>
     materializeFromKStmts
       "HumanHeartDipole"
       "HumanHeartDipole graph lowered from Tyr KStmt IR (geometric residual + normalized dipole proxy path)."
       humanHeartDipoleKStmts
-      { terminalBonus := 0.0, discount := 1.0 }
+      alphaGradParityEnvCfg
       { numSimulations := 48, maxNumConsideredActions := 8, gumbelScale := 1.0 }
   | .propaneCombustion =>
     materializeFromKStmts
       "PropaneCombustion"
       "PropaneCombustion graph lowered from Tyr KStmt IR (reaction-composition + balance aggregation path)."
       propaneCombustionKStmts
-      { terminalBonus := 0.0, discount := 1.0 }
+      alphaGradParityEnvCfg
       { numSimulations := 56, maxNumConsideredActions := 9, gumbelScale := 1.0 }
   | task =>
     pure (.ok (taskSpecStatic task))

@@ -31,10 +31,31 @@ inductive AlphaGradActionSpace where
   | explicitVertices (vertices1 : Array VertexId1)
   deriving Repr, Inhabited
 
+/--
+Reward semantics used by AlphaGrad-style elimination search:
+- `tyrHeuristic`: current Tyr-native weighted objective with soft constraints.
+- `alphaGradNops`: exact AlphaGrad base-env step reward `-nops`.
+- `alphaGradTerminalNopsProxy`: reproducible terminal-only proxy that returns
+  `-total_nops` on successful termination and `0` on intermediate valid steps.
+-/
+inductive AlphaGradRewardMode where
+  | tyrHeuristic
+  | alphaGradNops
+  | alphaGradTerminalNopsProxy
+  deriving Repr, Inhabited, BEq
+
+instance : ToString AlphaGradRewardMode where
+  toString
+    | .tyrHeuristic => "tyr-heuristic"
+    | .alphaGradNops => "alphagrad-nops"
+    | .alphaGradTerminalNopsProxy => "alphagrad-terminal-nops-proxy"
+
 /-- Environment and objective knobs for AlphaGrad-style elimination search. -/
 structure AlphaGradMctxConfig where
   constraints : ConstraintSpec := {}
   costWeights : CostWeights := {}
+  /-- Reward semantics for environment transitions and value heuristics. -/
+  rewardMode : AlphaGradRewardMode := .tyrHeuristic
   /-- Action-space convention for AlphaGrad compatibility paths. -/
   actionSpace : AlphaGradActionSpace := .fullVertices
   /-- Search discount used by recurrent dynamics. -/
@@ -81,6 +102,8 @@ structure AlphaGradState where
   actionTrace : Array ActionId0 := #[]
   /-- Vertex-space replay trace (`VertexId1 = actionVertices[action]`). -/
   vertexTrace : Array VertexId1 := #[]
+  /-- AlphaGrad-style cumulative multiplication count (`nops`) across steps. -/
+  cumulativeNops : Nat := 0
   cumulativeReward : Float := 0.0
   violation? : Option String := none
   deriving Repr, Inhabited
@@ -200,6 +223,7 @@ def initAlphaGradState?
     eliminatedActions := eliminated
     actionTrace := actionPrefix
     vertexTrace := vertices
+    cumulativeNops := 0
     cumulativeReward := 0.0
     violation? := none
   }
@@ -213,6 +237,17 @@ def initAlphaGradStateFromEdges?
     Except String AlphaGradState :=
   initAlphaGradState? (ofLocalJacEdges edges) numVertices actionPrefix actionVertices?
 
+/-- Convenience initializer from partitioned local Jacobian edges. -/
+def initAlphaGradStateFromPartitionedEdges?
+    (edges : Array Tyr.AD.JaxprLike.LocalJacEdge)
+    (numVertices : Nat)
+    (inputs outputs eliminable : Array VertexId1)
+    (actionPrefix : Array ActionId0 := #[])
+    (actionVertices? : Option (Array VertexId1) := none) :
+    Except String AlphaGradState := do
+  let graph ← ofLocalJacEdgesWithPartitions edges inputs outputs eliminable
+  initAlphaGradState? graph numVertices actionPrefix actionVertices?
+
 /-- Number of actions already applied. -/
 def AlphaGradState.stepCount (s : AlphaGradState) : Nat :=
   s.actionTrace.size
@@ -224,6 +259,9 @@ def AlphaGradState.numActions (s : AlphaGradState) : Nat :=
 /-- Number of eliminated vertices. -/
 def AlphaGradState.eliminatedCount (s : AlphaGradState) : Nat :=
   s.eliminatedActions.foldl (init := 0) fun acc b => if b then acc + 1 else acc
+
+private def AlphaGradState.hasImplicitEliminableSet (s : AlphaGradState) : Bool :=
+  s.graph.inputs.isEmpty && s.graph.outputs.isEmpty && s.graph.eliminable.isEmpty
 
 /-- Domain-checked state-local map from action to vertex. -/
 def AlphaGradState.actionToVertex?
@@ -249,10 +287,40 @@ def AlphaGradState.isVertexEliminated (s : AlphaGradState) (vertex : VertexId1) 
   | .ok action => s.isActionEliminated action
   | .error _ => false
 
+/-- True iff vertex is part of the active eliminable set for this state. -/
+def AlphaGradState.isVertexEliminable (s : AlphaGradState) (vertex : VertexId1) : Bool :=
+  if s.hasImplicitEliminableSet then
+    true
+  else
+    isEliminableVertex s.graph vertex
+
+/-- True iff action maps to an eliminable vertex in the active graph. -/
+def AlphaGradState.isActionEliminable (s : AlphaGradState) (action : ActionId0) : Bool :=
+  match s.actionToVertex? action with
+  | .ok vertex => s.isVertexEliminable vertex
+  | .error _ => false
+
+/-- Output mask in action-space order (`true` means output/non-eliminable boundary slot). -/
+def AlphaGradState.outputActionMask (s : AlphaGradState) : Array Bool :=
+  (Array.range s.numActions).map fun action =>
+    match s.actionToVertex? action with
+    | .ok vertex => isBoundaryVertex s.graph vertex && !s.isVertexEliminable vertex
+    | .error _ => false
+
+/-- Number of eliminable action slots in the configured action space. -/
+def AlphaGradState.numEliminableActions (s : AlphaGradState) : Nat :=
+  (Array.range s.numActions).foldl (init := 0) fun acc action =>
+    if s.isActionEliminable action then acc + 1 else acc
+
+/-- Number of eliminated eliminable action slots. -/
+def AlphaGradState.eliminatedEliminableCount (s : AlphaGradState) : Nat :=
+  (Array.range s.numActions).foldl (init := 0) fun acc action =>
+    if s.isActionEliminated action && s.isActionEliminable action then acc + 1 else acc
+
 /-- Terminal if violation is present, all vertices are eliminated, or step cap reached. -/
 def isTerminal (cfg : AlphaGradMctxConfig) (s : AlphaGradState) : Bool :=
   s.violation?.isSome ||
-    s.eliminatedCount >= s.numActions ||
+    s.eliminatedEliminableCount >= s.numEliminableActions ||
     match cfg.maxEpisodeSteps with
     | none => false
     | some maxSteps => s.stepCount >= maxSteps
@@ -271,10 +339,12 @@ def actionConstraintFeasible
     (s : AlphaGradState)
     (action : ActionId0) :
     Bool :=
-  actionFeasibleInSpace s.actionVertices
-    (fun v => s.isVertexEliminated v)
-    (fun v => vertexConstraintFeasible cfg s v)
-    action
+  match s.actionToVertex? action with
+  | .error _ => false
+  | .ok vertex =>
+    s.isVertexEliminable vertex &&
+      !(s.isVertexEliminated vertex) &&
+      vertexConstraintFeasible cfg s vertex
 
 /-- Invalid-action mask in action space (`true` means invalid). -/
 def invalidActionMask
@@ -363,20 +433,26 @@ def unresolvedSoftPenalty
     let w := edge.2.2
     if !(isEliminated u) && !(isEliminated v) then acc + w else acc
 
-private def stepCostPenalty
+private def heuristicStepPenalty
     (cfg : AlphaGradMctxConfig)
-    (g : ElimGraph)
+    (s : AlphaGradState)
     (vertex : VertexId1) :
     Float :=
-  weightedScore cfg.costWeights (estimateHeuristicStepCostFromGraph cfg.constraints g vertex)
+  let cost := estimateHeuristicStepCostFromGraph cfg.constraints s.graph vertex
+  match cfg.rewardMode with
+  | .tyrHeuristic =>
+    let softPenalty := softPrecedencePenalty cfg.constraints (fun v => s.isVertexEliminated v) vertex
+    weightedScore cfg.costWeights cost + softPenalty
+  | .alphaGradNops
+  | .alphaGradTerminalNopsProxy =>
+    Float.ofNat cost.flops
 
 private def policyPenaltyForVertex
     (cfg : AlphaGradMctxConfig)
     (s : AlphaGradState)
     (vertex : VertexId1) :
     Float :=
-  let softPenalty := softPrecedencePenalty cfg.constraints (fun v => s.isVertexEliminated v) vertex
-  stepCostPenalty cfg s.graph vertex + softPenalty
+  heuristicStepPenalty cfg s vertex
 
 private def feasibleStepCostPenalties
     (cfg : AlphaGradMctxConfig)
@@ -385,7 +461,7 @@ private def feasibleStepCostPenalties
   (Array.range s.numActions).foldl (init := #[]) fun acc action =>
     if actionConstraintFeasible cfg s action then
       match s.actionToVertex? action with
-      | .ok vertex => acc.push (stepCostPenalty cfg s.graph vertex)
+      | .ok vertex => acc.push (heuristicStepPenalty cfg s vertex)
       | .error _ => acc
     else
       acc
@@ -422,13 +498,20 @@ def heuristicValue
   match s.violation? with
   | some _ => cfg.invalidActionPenalty
   | none =>
-    let remaining := s.numActions - s.eliminatedCount
-    let unresolvedSoft := unresolvedSoftPenalty cfg.constraints (fun v => s.isVertexEliminated v)
+    let remaining := s.numEliminableActions - s.eliminatedEliminableCount
     let frontierCost := meanPenalty (feasibleStepCostPenalties cfg s)
     if remaining = 0 then
-      cfg.terminalBonus
+      match cfg.rewardMode with
+      | .alphaGradTerminalNopsProxy => 0.0
+      | _ => cfg.terminalBonus
     else
-      0.0 - (Float.ofNat remaining + unresolvedSoft + frontierCost)
+      match cfg.rewardMode with
+      | .tyrHeuristic =>
+        let unresolvedSoft := unresolvedSoftPenalty cfg.constraints (fun v => s.isVertexEliminated v)
+        0.0 - (Float.ofNat remaining + unresolvedSoft + frontierCost)
+      | .alphaGradNops
+      | .alphaGradTerminalNopsProxy =>
+        0.0 - (Float.ofNat remaining * frontierCost)
 
 private def baseStepCost
     (cfg : AlphaGradMctxConfig)
@@ -441,6 +524,29 @@ private def baseStepCost
     localBytes := stats.insertedEdges + stats.updatedEdges
     comm := estimateCommForEliminationStep cfg.constraints gBefore vertex
   }
+
+private def stepRewardForCost
+    (cfg : AlphaGradMctxConfig)
+    (softPenalty : Float)
+    (cost : StepCost) :
+    Float :=
+  match cfg.rewardMode with
+  | .tyrHeuristic =>
+    rewardFromPenalty (objectivePenalty cfg.costWeights cost softPenalty)
+  | .alphaGradNops =>
+    0.0 - Float.ofNat cost.flops
+  | .alphaGradTerminalNopsProxy =>
+    0.0
+
+private def terminalSuccessReward
+    (cfg : AlphaGradMctxConfig)
+    (s : AlphaGradState) :
+    Float :=
+  let modeReward :=
+    match cfg.rewardMode with
+    | .alphaGradTerminalNopsProxy => 0.0 - Float.ofNat s.cumulativeNops
+    | _ => 0.0
+  modeReward + cfg.terminalBonus
 
 /-- Apply one action with strict feasibility checks. -/
 def applyAction
@@ -468,13 +574,14 @@ def applyAction
             s.eliminatedActions
         let cost := baseStepCost cfg s.graph vertex stats
         let softPenalty := softPrecedencePenalty cfg.constraints (fun v => s.isVertexEliminated v) vertex
-        let reward := rewardFromPenalty (objectivePenalty cfg.costWeights cost softPenalty)
+        let reward := stepRewardForCost cfg softPenalty cost
         let s' := {
           s with
           graph := graph'
           eliminatedActions := eliminated
           actionTrace := s.actionTrace.push action
           vertexTrace := s.vertexTrace.push vertex
+          cumulativeNops := s.cumulativeNops + cost.flops
           cumulativeReward := s.cumulativeReward + reward
         }
         (s', reward)
@@ -488,7 +595,7 @@ private def stampInfeasibleState
     (s, reward)
   else
     let msg :=
-      s!"No feasible actions remain after step {s.stepCount} with {s.numActions - s.eliminatedCount} actions left."
+      s!"No feasible actions remain after step {s.stepCount} with {s.numEliminableActions - s.eliminatedEliminableCount} eliminable actions left."
     let penalty := cfg.infeasibleStatePenalty
     ({ s with violation? := some msg, cumulativeReward := s.cumulativeReward + penalty }, reward + penalty)
 
@@ -500,10 +607,11 @@ def transition
     AlphaGradTransition :=
   let (s1, r1) := applyAction cfg s action
   let (s2, r2) := stampInfeasibleState cfg s1 r1
-  let successTerminal := s2.violation?.isNone && s2.eliminatedCount = s2.numActions
+  let successTerminal := s2.violation?.isNone && s2.eliminatedEliminableCount = s2.numEliminableActions
   let (s3, r3) :=
     if successTerminal then
-      ({ s2 with cumulativeReward := s2.cumulativeReward + cfg.terminalBonus }, r2 + cfg.terminalBonus)
+      let terminalReward := terminalSuccessReward cfg s2
+      ({ s2 with cumulativeReward := s2.cumulativeReward + terminalReward }, r2 + terminalReward)
     else
       (s2, r2)
   { nextState := s3, reward := r3, done := isTerminal cfg s3 }
@@ -576,7 +684,7 @@ def rootFromState?
   let invalid := invalidActionMask cfg s
   validateInvalidMaskSemantics? cfg s invalid "rootFromState?"
   if !(isTerminal cfg s) && invalid.all (fun b => b) then
-    throw s!"No feasible actions available at step {s.stepCount} with {s.numActions - s.eliminatedCount} actions left."
+    throw s!"No feasible actions available at step {s.stepCount} with {s.numEliminableActions - s.eliminatedEliminableCount} eliminable actions left."
   let priors := heuristicPriorLogits cfg s
   validateLogitsRespectMask? s invalid priors "rootFromState?"
   let root : RootFnOutput AlphaGradState := {
@@ -597,7 +705,7 @@ def searchStep?
     throw "Cannot run searchStep? on terminal AlphaGrad state."
 
   let (root, invalid) ← rootFromState? envCfg s
-  let depth := mctsCfg.maxDepth.getD (s.numActions + 1)
+  let depth := mctsCfg.maxDepth.getD (s.numEliminableActions + 1)
 
   let out := gumbelMuZeroPolicy
     (params := envCfg)
@@ -659,7 +767,7 @@ def searchStepDagWithPolicy?
     throw "Cannot run searchStepDagWithPolicy? on terminal AlphaGrad state."
 
   let (root, invalid) ← rootFromState? envCfg s
-  let depth := mctsCfg.maxDepth.getD (s.numActions + 1)
+  let depth := mctsCfg.maxDepth.getD (s.numEliminableActions + 1)
   match policy with
   | .alphaZero =>
     let out := torch.mctxdag.alphazeroPolicyDag
@@ -747,7 +855,7 @@ def searchEpisode?
     (s0 : AlphaGradState) :
     Except String AlphaGradEpisodeResult :=
   Id.run do
-    let maxSteps := envCfg.maxEpisodeSteps.getD s0.numActions
+    let maxSteps := envCfg.maxEpisodeSteps.getD s0.numEliminableActions
     let mut s := s0
     let mut rewards : Array Float := #[]
     let mut step : Nat := 0
@@ -785,7 +893,7 @@ def searchEpisodeDagWithPolicy?
     (s0 : AlphaGradState) :
     Except String AlphaGradEpisodeResult :=
   Id.run do
-    let maxSteps := envCfg.maxEpisodeSteps.getD s0.numActions
+    let maxSteps := envCfg.maxEpisodeSteps.getD s0.numEliminableActions
     let mut s := s0
     let mut rewards : Array Float := #[]
     let mut step : Nat := 0
@@ -861,6 +969,19 @@ def searchEpisodeFromEdges?
   let s0 ← initAlphaGradStateFromEdges? edges numVertices actionPrefix (some actionVertices)
   searchEpisode? envCfg mctsCfg rngKey s0
 
+/-- Convenience entrypoint from a pre-partitioned elimination graph. -/
+def searchEpisodeFromGraph?
+    (envCfg : AlphaGradMctxConfig)
+    (mctsCfg : AlphaGradMctsConfig)
+    (rngKey : UInt64)
+    (graph : ElimGraph)
+    (numVertices : Nat)
+    (actionPrefix : Array ActionId0 := #[]) :
+    Except String AlphaGradEpisodeResult := do
+  let actionVertices ← resolveActionVertices? envCfg numVertices
+  let s0 ← initAlphaGradState? graph numVertices actionPrefix (some actionVertices)
+  searchEpisode? envCfg mctsCfg rngKey s0
+
 /-- Policy-selectable DAG-backed convenience entrypoint from local Jacobian edges. -/
 def searchEpisodeDagWithPolicyFromEdges?
     (policy : AlphaGradDagMctsPolicy)
@@ -875,6 +996,20 @@ def searchEpisodeDagWithPolicyFromEdges?
   let s0 ← initAlphaGradStateFromEdges? edges numVertices actionPrefix (some actionVertices)
   searchEpisodeDagWithPolicy? policy envCfg mctsCfg rngKey s0
 
+/-- Policy-selectable DAG-backed convenience entrypoint from a partitioned graph. -/
+def searchEpisodeDagWithPolicyFromGraph?
+    (policy : AlphaGradDagMctsPolicy)
+    (envCfg : AlphaGradMctxConfig)
+    (mctsCfg : AlphaGradMctsConfig)
+    (rngKey : UInt64)
+    (graph : ElimGraph)
+    (numVertices : Nat)
+    (actionPrefix : Array ActionId0 := #[]) :
+    Except String AlphaGradEpisodeResult := do
+  let actionVertices ← resolveActionVertices? envCfg numVertices
+  let s0 ← initAlphaGradState? graph numVertices actionPrefix (some actionVertices)
+  searchEpisodeDagWithPolicy? policy envCfg mctsCfg rngKey s0
+
 /-- DAG-backed convenience entrypoint from local Jacobian edges. -/
 def searchEpisodeDagFromEdges?
     (envCfg : AlphaGradMctxConfig)
@@ -886,6 +1021,17 @@ def searchEpisodeDagFromEdges?
     Except String AlphaGradEpisodeResult := do
   searchEpisodeDagWithPolicyFromEdges? .alphaZero envCfg mctsCfg rngKey edges numVertices actionPrefix
 
+/-- DAG-backed convenience entrypoint from a partitioned graph. -/
+def searchEpisodeDagFromGraph?
+    (envCfg : AlphaGradMctxConfig)
+    (mctsCfg : AlphaGradMctsConfig)
+    (rngKey : UInt64)
+    (graph : ElimGraph)
+    (numVertices : Nat)
+    (actionPrefix : Array ActionId0 := #[]) :
+    Except String AlphaGradEpisodeResult := do
+  searchEpisodeDagWithPolicyFromGraph? .alphaZero envCfg mctsCfg rngKey graph numVertices actionPrefix
+
 /-- DAG + Gumbel convenience entrypoint from local Jacobian edges. -/
 def searchEpisodeDagGumbelFromEdges?
     (envCfg : AlphaGradMctxConfig)
@@ -896,5 +1042,16 @@ def searchEpisodeDagGumbelFromEdges?
     (actionPrefix : Array ActionId0 := #[]) :
     Except String AlphaGradEpisodeResult := do
   searchEpisodeDagWithPolicyFromEdges? .gumbelMuZero envCfg mctsCfg rngKey edges numVertices actionPrefix
+
+/-- DAG + Gumbel convenience entrypoint from a partitioned graph. -/
+def searchEpisodeDagGumbelFromGraph?
+    (envCfg : AlphaGradMctxConfig)
+    (mctsCfg : AlphaGradMctsConfig)
+    (rngKey : UInt64)
+    (graph : ElimGraph)
+    (numVertices : Nat)
+    (actionPrefix : Array ActionId0 := #[]) :
+    Except String AlphaGradEpisodeResult := do
+  searchEpisodeDagWithPolicyFromGraph? .gumbelMuZero envCfg mctsCfg rngKey graph numVertices actionPrefix
 
 end Tyr.AD.Elim

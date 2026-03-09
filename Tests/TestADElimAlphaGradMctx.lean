@@ -310,6 +310,127 @@ def testSoftPrecedenceShapesPriorValueAndReward : IO Unit := do
       s!"Soft precedence reward delta should match weight 5.0, got delta={(rGood - rBad)}"
 
 @[test]
+def testAlphaGradNopsRewardMatchesComposedPairs : IO Unit := do
+  let edges : Array LocalJacEdge := #[(mkEdge 1 2 "m12"), (mkEdge 2 3 "m23")]
+  let cfg : AlphaGradMctxConfig := {
+    rewardMode := .alphaGradNops
+  }
+
+  match initAlphaGradStateFromEdges? edges 3 with
+  | .error msg =>
+    LeanTest.fail s!"State init should succeed, got: {msg}"
+  | .ok s0 =>
+    let (s1, r1) := applyAction cfg s0 1
+    LeanTest.assertTrue (s1.violation?.isNone)
+      "Valid AlphaGrad nops step should not stamp a violation."
+    LeanTest.assertEqual s1.cumulativeNops 1
+      "Eliminating the middle vertex of a length-2 chain should contribute one composed pair."
+    LeanTest.assertTrue (approx r1 (- Float.ofNat s1.cumulativeNops) 1e-6)
+      s!"AlphaGrad nops reward should equal -cumulative step nops for a single step, got reward={r1}, nops={s1.cumulativeNops}"
+
+@[test]
+def testAlphaGradNopsRewardIgnoresSoftAndCommPenalties : IO Unit := do
+  let edges : Array LocalJacEdge := #[(mkEdge 1 2 "m12"), (mkEdge 2 3 "m23")]
+  let baseCfg : AlphaGradMctxConfig := {
+    rewardMode := .alphaGradNops
+    costWeights := {
+      alphaFlops := 1.0
+      betaLocalBytes := 1.0
+      gammaCommBytes := 1.0
+      deltaCollectives := 1.0
+      epsilonP2PMsgs := 1.0
+    }
+  }
+  let hintedCfg : AlphaGradMctxConfig := {
+    rewardMode := .alphaGradNops
+    constraints := {
+      softPrecedence := #[(1, 2, 5.0)]
+      groups := #[#[1], #[2], #[3]]
+      commHints := #[{ pattern := .allReduce, bytes := 128, collectiveCount := 2 }]
+    }
+    costWeights := baseCfg.costWeights
+  }
+
+  match initAlphaGradStateFromEdges? edges 3 with
+  | .error msg =>
+    LeanTest.fail s!"State init should succeed, got: {msg}"
+  | .ok s0 =>
+    let (_sBase, rBase) := applyAction baseCfg s0 1
+    let (_sHinted, rHinted) := applyAction hintedCfg s0 1
+    LeanTest.assertTrue (approx rHinted rBase 1e-6)
+      s!"AlphaGrad nops reward should ignore soft/comm penalties, got base={rBase}, hinted={rHinted}"
+
+@[test]
+def testAlphaGradTerminalNopsProxyDefersRewardUntilSuccess : IO Unit := do
+  let edges : Array LocalJacEdge := #[(mkEdge 1 2 "m12"), (mkEdge 2 3 "m23")]
+  let cfg : AlphaGradMctxConfig := {
+    rewardMode := .alphaGradTerminalNopsProxy
+  }
+
+  match initAlphaGradStateFromEdges? edges 3 with
+  | .error msg =>
+    LeanTest.fail s!"State init should succeed, got: {msg}"
+  | .ok s0 =>
+    let t1 := transition cfg s0 1
+    LeanTest.assertTrue (approx t1.reward 0.0 1e-6)
+      s!"Terminal nops proxy should defer reward on non-terminal steps, got {t1.reward}"
+    LeanTest.assertTrue (!t1.done)
+      "First terminal-proxy step on a 3-vertex chain should not terminate."
+    LeanTest.assertEqual t1.nextState.cumulativeNops 1
+      "Deferred terminal proxy should still track cumulative nops."
+
+    let t2 := transition cfg t1.nextState 0
+    LeanTest.assertTrue (approx t2.reward 0.0 1e-6)
+      s!"Terminal nops proxy should keep intermediate rewards at zero, got {t2.reward}"
+    LeanTest.assertTrue (!t2.done)
+      "Second terminal-proxy step should still leave one action."
+
+    let t3 := transition cfg t2.nextState 2
+    LeanTest.assertTrue t3.done
+      "Third step should terminate the episode."
+    LeanTest.assertTrue (approx t3.reward (-1.0) 1e-6)
+      s!"Terminal nops proxy should emit -total_nops on success, got {t3.reward}"
+    LeanTest.assertEqual t3.nextState.cumulativeNops 1
+      "Final cumulative nops should still reflect the one composed pair from the chain."
+    LeanTest.assertTrue (approx t3.nextState.cumulativeReward (-1.0) 1e-6)
+      s!"Terminal proxy cumulative reward should equal -total_nops on success, got {t3.nextState.cumulativeReward}"
+
+@[test]
+def testRewardModeChangesSameReplayTraceEvaluation : IO Unit := do
+  let edges : Array LocalJacEdge := #[(mkEdge 1 2 "m12"), (mkEdge 2 3 "m23")]
+  let heuristicCfg : AlphaGradMctxConfig := {
+    constraints := { softPrecedence := #[(1, 2, 5.0)] }
+    costWeights := {
+      alphaFlops := 0.0
+      betaLocalBytes := 0.0
+      gammaCommBytes := 0.0
+      deltaCollectives := 0.0
+      epsilonP2PMsgs := 0.0
+    }
+  }
+  let nopsCfg : AlphaGradMctxConfig := {
+    rewardMode := .alphaGradNops
+    constraints := heuristicCfg.constraints
+    costWeights := heuristicCfg.costWeights
+  }
+  let actions : Array ActionId0 := #[1, 0, 2]
+
+  match initAlphaGradStateFromEdges? edges 3 with
+  | .error msg =>
+    LeanTest.fail s!"State init should succeed, got: {msg}"
+  | .ok s0 =>
+    match replayActions? heuristicCfg s0 actions, replayActions? nopsCfg s0 actions with
+    | .ok sHeuristic, .ok sNops =>
+      LeanTest.assertTrue (!approx sHeuristic.cumulativeReward sNops.cumulativeReward 1e-6)
+        s!"Same trace should evaluate differently under heuristic vs AlphaGrad nops rewards, got heuristic={sHeuristic.cumulativeReward}, nops={sNops.cumulativeReward}"
+      LeanTest.assertTrue (approx sNops.cumulativeReward (-1.0) 1e-6)
+        s!"AlphaGrad nops replay should total -1 on the chain trace, got {sNops.cumulativeReward}"
+    | .error msg, _ =>
+      LeanTest.fail s!"Heuristic replay should succeed, got: {msg}"
+    | _, .error msg =>
+      LeanTest.fail s!"AlphaGrad nops replay should succeed, got: {msg}"
+
+@[test]
 def testDagTranspositionReuseOnReconvergentElimination : IO Unit := do
   -- No edge structure needed; with 2 vertices both orders end in the same eliminated set.
   let edges : Array LocalJacEdge := #[]
@@ -435,6 +556,37 @@ def testDagStateKeyIgnoresMapReprForEquivalentSparseMaps : IO Unit := do
   }
   LeanTest.assertTrue (dagStateKey sA == dagStateKey sB)
     "DAG state key should ignore sparse-map repr and canonicalize by shape+entries."
+
+@[test]
+def testPartitionedGraphMasksOutputsAndTerminatesOnEliminableCount : IO Unit := do
+  let edges : Array LocalJacEdge := #[(mkEdge 1 2 "m12")]
+  let graphRes := ofLocalJacEdgesWithPartitions edges #[] #[2] #[1]
+  match graphRes with
+  | .error msg =>
+    LeanTest.fail s!"Partitioned graph construction should succeed, got: {msg}"
+  | .ok graph =>
+    match initAlphaGradState? graph 2 with
+    | .error msg =>
+      LeanTest.fail s!"State init should succeed on partitioned graph, got: {msg}"
+    | .ok s0 =>
+      LeanTest.assertEqual s0.numActions 2
+        "Fixed action slots should still cover the full vertex domain."
+      LeanTest.assertEqual s0.numEliminableActions 1
+        "Only the declared eliminable vertex should count toward rollout length."
+      LeanTest.assertEqual s0.outputActionMask #[false, true]
+        "Output slot should be marked in the output-action mask."
+      LeanTest.assertEqual (invalidActionMask {} s0) #[false, true]
+        "Output vertex should be invalid from the root mask in fixed-slot compatibility mode."
+
+      let t := transition {} s0 0
+      LeanTest.assertTrue t.done
+        "Eliminating the single eliminable vertex should terminate even when output slots remain masked."
+      LeanTest.assertEqual t.nextState.actionTrace #[0]
+        "Action trace should record only the eliminable action."
+      LeanTest.assertEqual t.nextState.vertexTrace #[1]
+        "Vertex trace should record the eliminable vertex."
+      LeanTest.assertTrue (t.nextState.violation?.isNone)
+        "Partitioned fixed-slot transition should not stamp a violation."
 
 @[test]
 def testExplicitActionSpaceSubsetCompatibility : IO Unit := do

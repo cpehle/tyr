@@ -41,15 +41,23 @@ structure RunSummary where
   reverseReward : Float
   deriving Repr
 
-private def forwardOrder1 (n : Nat) : Array VertexId1 :=
-  (Array.range n).map (· + 1)
+private def forwardOrder1 (task : TaskSpec) : Array VertexId1 :=
+  let order := forwardEliminationOrder task.graph
+  if order.isEmpty then
+    (Array.range task.numEliminableVertices).map (· + 1)
+  else
+    order
 
-private def reverseOrder1 (n : Nat) : Array VertexId1 :=
-  (Array.range n).reverse.map (· + 1)
+private def reverseOrder1 (task : TaskSpec) : Array VertexId1 :=
+  let order := reverseEliminationOrder task.graph
+  if order.isEmpty then
+    (Array.range task.numEliminableVertices).reverse.map (· + 1)
+  else
+    order
 
 private def evalOrderReward? (task : TaskSpec) (order1 : Array VertexId1) : Except String Float := do
   let actions0 ← verticesToActions? task.numVertices order1
-  let s0 ← initAlphaGradStateFromEdges? task.edges task.numVertices
+  let s0 ← initAlphaGradState? task.graph task.numVertices
   let sf ← replayActions? task.envCfg s0 actions0
   pure sf.cumulativeReward
 
@@ -60,29 +68,29 @@ private def runEpisode?
     Except String AlphaGradEpisodeResult :=
   match backend with
   | .gumbel =>
-    searchEpisodeFromEdges? task.envCfg task.mctsCfg seed task.edges task.numVertices
+    searchEpisodeFromGraph? task.envCfg task.mctsCfg seed task.graph task.numVertices
   | .dag =>
-    searchEpisodeDagFromEdges? task.envCfg task.mctsCfg seed task.edges task.numVertices
+    searchEpisodeDagFromGraph? task.envCfg task.mctsCfg seed task.graph task.numVertices
   | .dagGumbel =>
-    searchEpisodeDagGumbelFromEdges? task.envCfg task.mctsCfg seed task.edges task.numVertices
+    searchEpisodeDagGumbelFromGraph? task.envCfg task.mctsCfg seed task.graph task.numVertices
 
 private def avgReward (sum : Float) (episodes : Nat) : Float :=
   if episodes = 0 then 0.0 else sum / Float.ofNat episodes
 
 def runTask (task : TaskSpec) (cfg : RunConfig := {}) : IO (Except String RunSummary) := do
   let forwardReward : Float ←
-    match evalOrderReward? task (forwardOrder1 task.numVertices) with
+    match evalOrderReward? task (forwardOrder1 task) with
     | .ok r => pure r
     | .error msg =>
       return .error s!"Failed to evaluate forward baseline for {task.name}: {msg}"
 
   let reverseReward : Float ←
-    match evalOrderReward? task (reverseOrder1 task.numVertices) with
+    match evalOrderReward? task (reverseOrder1 task) with
     | .ok r => pure r
     | .error msg =>
       return .error s!"Failed to evaluate reverse baseline for {task.name}: {msg}"
 
-  IO.println s!"[AlphaGradPort] task={task.name} backend={cfg.backend} episodes={cfg.episodes} vertices={task.numVertices} edges={task.edges.size}"
+  IO.println s!"[AlphaGradPort] task={task.name} backend={cfg.backend} episodes={cfg.episodes} vertices={task.numVertices} eliminable={task.numEliminableVertices} edges={task.edges.size} reward_mode={task.envCfg.rewardMode}"
   IO.println s!"[AlphaGradPort] baseline forward={forwardReward}, reverse={reverseReward}"
 
   if cfg.episodes = 0 then
