@@ -33,6 +33,7 @@ Typically: weights in E4M3, activations in E5M2 or E4M3.
 def gemmFp8E4M3Fwd (A_ptr : GPtr GpuFloat.FP8E4M3) (B_ptr : GPtr GpuFloat.FP8E4M3)
     (C_ptr : GPtr GpuFloat.BFloat16) (M : KVal UInt64) (N : KVal UInt64)
     (K_dim : KVal UInt64) : KernelM Unit := do
+  let _ := (M, N, K_dim)
   comment "=== FP8 GEMM (E4M3) ==="
   comment "A (E4M3) @ B (E4M3) → C (FP32)"
 
@@ -82,6 +83,7 @@ def gemmFp8E4M3Fwd (A_ptr : GPtr GpuFloat.FP8E4M3) (B_ptr : GPtr GpuFloat.FP8E4M
 def gemmFp8E5M2Fwd (A_ptr : GPtr GpuFloat.FP8E5M2) (B_ptr : GPtr GpuFloat.FP8E5M2)
     (C_ptr : GPtr GpuFloat.BFloat16) (M : KVal UInt64) (N : KVal UInt64)
     (K_dim : KVal UInt64) : KernelM Unit := do
+  let _ := (M, N, K_dim)
   comment "=== FP8 GEMM (E5M2) ==="
   comment "A (E5M2) @ B (E5M2) → C (FP32)"
 
@@ -127,6 +129,7 @@ def gemmMxFp8Fwd (A_ptr : GPtr GpuFloat.FP8E4M3) (B_ptr : GPtr GpuFloat.FP8E4M3)
     (scale_A_ptr : GPtr GpuFloat.Float32) (scale_B_ptr : GPtr GpuFloat.Float32)
     (C_ptr : GPtr GpuFloat.BFloat16) (M : KVal UInt64) (N : KVal UInt64)
     (K_dim : KVal UInt64) : KernelM Unit := do
+  let _ := (scale_A_ptr, scale_B_ptr, M, N, K_dim)
   comment "=== Microscaling FP8 GEMM ==="
   comment "FP8 values with per-block scale factors"
 
@@ -194,6 +197,7 @@ Common patterns: BF16 activations with FP8 weights for inference.
 def gemmMixedFwd (A_ptr : GPtr GpuFloat.BFloat16) (B_ptr : GPtr GpuFloat.FP8E4M3)
     (C_ptr : GPtr GpuFloat.BFloat16) (M : KVal UInt64) (N : KVal UInt64)
     (K_dim : KVal UInt64) : KernelM Unit := do
+  let _ := (M, N, K_dim)
   comment "=== Mixed Precision GEMM ==="
   comment "A (BF16) @ B (FP8) → C (FP32)"
 
@@ -252,6 +256,7 @@ def gemmFp8ScaledBiasFwd (A_ptr : GPtr GpuFloat.FP8E4M3) (B_ptr : GPtr GpuFloat.
     (scale_ptr : GPtr GpuFloat.Float32) (bias_ptr : GPtr GpuFloat.Float32)
     (C_ptr : GPtr GpuFloat.BFloat16) (M : KVal UInt64) (N : KVal UInt64)
     (K_dim : KVal UInt64) : KernelM Unit := do
+  let _ := (bias_ptr, M, N, K_dim)
   comment "=== FP8 GEMM with Scale and Bias ==="
   comment "C = scale * (A @ B) + bias"
 

@@ -67,13 +67,13 @@ def liftPortable (m : ArchKernelM .Ampere α) : ArchKernelM arch α := ⟨m.run�
 
 /-- Lift from a lower architecture to a higher one.
     Requires proof that minArch ≤ targetArch. -/
-def liftArch (m : ArchKernelM minArch α) (h : minArch ≤ targetArch := by decide)
+def liftArch (m : ArchKernelM minArch α) (_h : minArch ≤ targetArch := by decide)
     : ArchKernelM targetArch α := ⟨m.run⟩
 
 /-- Use an arch-specific operation when targeting a compatible architecture.
     The proof h ensures we're targeting an architecture that supports the operation. -/
 def requireArch (op : ArchKernelM minArch α)
-    (h : minArch ≤ targetArch := by decide) : ArchKernelM targetArch α := ⟨op.run⟩
+    (_h : minArch ≤ targetArch := by decide) : ArchKernelM targetArch α := ⟨op.run⟩
 
 /-- Combine two computations, taking the max of their architecture requirements -/
 def combine {arch1 arch2 : ArchLevel}

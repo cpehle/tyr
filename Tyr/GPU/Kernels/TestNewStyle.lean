@@ -73,6 +73,7 @@ def layerNormNew (x : GPtr GpuFloat.BFloat16) (weight : GPtr GpuFloat.BFloat16)
                  (bias : GPtr GpuFloat.BFloat16) (out : GPtr GpuFloat.BFloat16)
                  (batchSize : KVal UInt64) (hiddenDim : KVal UInt64)
                  : KernelM Unit := do
+  let _ := (weight, bias, batchSize, hiddenDim)
   comment "=== LayerNorm Forward (New Style) ==="
   let coord ← blockCoord2D
 

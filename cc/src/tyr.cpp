@@ -2421,7 +2421,6 @@ lean_object* lean_torch_save_ppm(
     auto tensor = borrowTensor(tensor_obj);
 
     // Get dimensions
-    int64_t batch = tensor.size(0);
     int64_t channels = tensor.size(1);
     int64_t height = tensor.size(2);
     int64_t width = tensor.size(3);
@@ -3775,8 +3774,6 @@ lean_object* lean_torch_sdpa_gqa_window(
   // Create sliding window causal mask
   // mask[i,j] = True if position j is NOT attended to by position i
   // For sliding window: j is attended if (j <= i) AND (i - j < window_size)
-  auto options = torch::TensorOptions().dtype(torch::kBool).device(q.device());
-
   // Create row indices [seq_len, 1] and col indices [1, seq_len]
   auto row_idx = torch::arange(seq_len, torch::TensorOptions().dtype(torch::kLong).device(q.device())).unsqueeze(1);
   auto col_idx = torch::arange(seq_len, torch::TensorOptions().dtype(torch::kLong).device(q.device())).unsqueeze(0);

@@ -15,6 +15,7 @@ open Tyr.GPU.Codegen
 @[gpu_kernel .SM90]
 def geluFwd (x_ptr : GPtr GpuFloat.BFloat16) (bias_ptr : GPtr GpuFloat.BFloat16)
     (out_ptr : GPtr GpuFloat.BFloat16) (size : KVal UInt64) : KernelM Unit := do
+  let _ := size
   comment "=== GELU with Bias ==="
   let numTiles : Nat := 16
 
@@ -53,6 +54,7 @@ def geluFwd (x_ptr : GPtr GpuFloat.BFloat16) (bias_ptr : GPtr GpuFloat.BFloat16)
 @[gpu_kernel .SM90]
 def swiGluFwd (x_ptr : GPtr GpuFloat.BFloat16) (gate_ptr : GPtr GpuFloat.BFloat16)
     (out_ptr : GPtr GpuFloat.BFloat16) (size : KVal UInt64) : KernelM Unit := do
+  let _ := size
   comment "=== SwiGLU ==="
   let numTiles : Nat := 16
 
@@ -88,6 +90,7 @@ def swiGluFwd (x_ptr : GPtr GpuFloat.BFloat16) (gate_ptr : GPtr GpuFloat.BFloat1
 @[gpu_kernel .SM90]
 def geGluFwd (x_ptr : GPtr GpuFloat.BFloat16) (gate_ptr : GPtr GpuFloat.BFloat16)
     (out_ptr : GPtr GpuFloat.BFloat16) (size : KVal UInt64) : KernelM Unit := do
+  let _ := size
   comment "=== GeGLU ==="
   let numTiles : Nat := 16
 

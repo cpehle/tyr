@@ -26,6 +26,7 @@ Demonstrates:
 def flashAttnFwdNew (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat16)
     (V_ptr : GPtr GpuFloat.BFloat16) (O_ptr : GPtr GpuFloat.BFloat16)
     (seq_len : KVal UInt64) (head_dim : KVal UInt64) : KernelM Unit := do
+  let _ := (seq_len, head_dim)
   comment "=== FlashAttention Forward ==="
   let tileSize : Nat := 64
   let numKvBlocks : Nat := 4
@@ -97,6 +98,7 @@ def flashAttnFwdNew (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFlo
 def simpleGemmNew (A_ptr : GPtr GpuFloat.BFloat16) (B_ptr : GPtr GpuFloat.BFloat16)
     (C_ptr : GPtr GpuFloat.Float32) (M : KVal UInt64) (N : KVal UInt64) (K : KVal UInt64)
     : KernelM Unit := do
+  let _ := (M, N, K)
   comment "=== Simple GEMM ==="
 
   let numKBlocks : Nat := 8

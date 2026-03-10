@@ -36,6 +36,7 @@ def hedgehogFwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat16
     (state_ptr : GPtr GpuFloat.Float32) (z_state_ptr : GPtr GpuFloat.Float32)
     (_batch_size : KVal UInt64) (_num_heads : KVal UInt64)
     (seq_len : KVal UInt64) (head_dim : KVal UInt64) : KernelM Unit := do
+  let _ := (seq_len, head_dim)
   comment "=== Hedgehog Hybrid Attention Forward ==="
 
   let numChunks : Nat := 16
@@ -204,6 +205,7 @@ def hedgehogLearnedFwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.B
     (O_ptr : GPtr GpuFloat.BFloat16) (state_ptr : GPtr GpuFloat.Float32)
     (_batch_size : KVal UInt64) (_num_heads : KVal UInt64)
     (_seq_len : KVal UInt64) (_head_dim : KVal UInt64) : KernelM Unit := do
+  let _ := state_ptr
   comment "=== Hedgehog with Learned Mixing ==="
 
   let numChunks : Nat := 16

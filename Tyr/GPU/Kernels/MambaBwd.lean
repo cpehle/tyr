@@ -47,6 +47,7 @@ def mamba2Bwd (q_ptr : GPtr GpuFloat.BFloat16) (k_ptr : GPtr GpuFloat.BFloat16)
     (dV_ptr : GPtr GpuFloat.Float32) (dA_ptr : GPtr GpuFloat.Float32)
     (batch_size : KVal UInt64) (num_heads : KVal UInt64) (seq_len : KVal UInt64)
     : KernelM Unit := do
+  let _ := (q_ptr, k_ptr, v_ptr, a_ptr, dO_ptr, batch_size, num_heads, seq_len)
 
   let coord ← blockCoord2D
   
@@ -60,7 +61,7 @@ def mamba2Bwd (q_ptr : GPtr GpuFloat.BFloat16) (k_ptr : GPtr GpuFloat.BFloat16)
   let k : RT GpuFloat.BFloat16 seqTile headDim ← allocRT .BFloat16 seqTile headDim
   let v : RT GpuFloat.BFloat16 seqTile headDim .Col ← allocRT .BFloat16 seqTile headDim .Col
   let dO : RT GpuFloat.BFloat16 seqTile headDim ← allocRT .BFloat16 seqTile headDim
-  let a : RT GpuFloat.Float32 seqTile seqTile ← allocRT .Float32 seqTile seqTile -- Stores 'A' broadcasted or processed?
+  let _a : RT GpuFloat.Float32 seqTile seqTile ← allocRT .Float32 seqTile seqTile -- Stores 'A' broadcasted or processed?
   -- Actually A is vector of length seqTile (per chunk) usually. 
   -- But mamba2FwdNew uses `localDecay` 16x16.
   -- We'll load A into a vector-like structure or diagonal of a tile?
@@ -78,18 +79,18 @@ def mamba2Bwd (q_ptr : GPtr GpuFloat.BFloat16) (k_ptr : GPtr GpuFloat.BFloat16)
   let att : RT GpuFloat.Float32 seqTile seqTile ← allocRT .Float32 seqTile seqTile
   let mask : RT GpuFloat.Float32 seqTile seqTile ← allocRT .Float32 seqTile seqTile
   let dAtt : RT GpuFloat.Float32 seqTile seqTile ← allocRT .Float32 seqTile seqTile
-  let dMask : RT GpuFloat.Float32 seqTile seqTile ← allocRT .Float32 seqTile seqTile
+  let _dMask : RT GpuFloat.Float32 seqTile seqTile ← allocRT .Float32 seqTile seqTile
   let term : RT GpuFloat.Float32 seqTile seqTile ← allocRT .Float32 seqTile seqTile
   
   -- Helper tiles for type conversion
   let qF : RT GpuFloat.Float32 seqTile headDim ← allocRT .Float32 seqTile headDim
   let kF : RT GpuFloat.Float32 seqTile headDim ← allocRT .Float32 seqTile headDim
-  let vF : RT GpuFloat.Float32 seqTile headDim .Col ← allocRT .Float32 seqTile headDim .Col
+  let _vF : RT GpuFloat.Float32 seqTile headDim .Col ← allocRT .Float32 seqTile headDim .Col
   let dOF : RT GpuFloat.Float32 seqTile headDim ← allocRT .Float32 seqTile headDim
   
-  let qBf : RT GpuFloat.BFloat16 seqTile headDim ← allocRT .BFloat16 seqTile headDim
-  let kBf : RT GpuFloat.BFloat16 seqTile headDim ← allocRT .BFloat16 seqTile headDim
-  let vBf : RT GpuFloat.BFloat16 seqTile headDim .Col ← allocRT .BFloat16 seqTile headDim .Col
+  let _qBf : RT GpuFloat.BFloat16 seqTile headDim ← allocRT .BFloat16 seqTile headDim
+  let _kBf : RT GpuFloat.BFloat16 seqTile headDim ← allocRT .BFloat16 seqTile headDim
+  let _vBf : RT GpuFloat.BFloat16 seqTile headDim .Col ← allocRT .BFloat16 seqTile headDim .Col
 
   -- Shared memory
   let qShared : ST GpuFloat.BFloat16 seqTile headDim ← allocST .BFloat16 seqTile headDim
@@ -134,7 +135,7 @@ def mamba2Bwd (q_ptr : GPtr GpuFloat.BFloat16) (k_ptr : GPtr GpuFloat.BFloat16)
     convert dOF dO
     
     -- Transpose Att for MMA
-    let attT : RT GpuFloat.Float32 seqTile seqTile .Col ← allocRT .Float32 seqTile seqTile .Col
+    let _attT : RT GpuFloat.Float32 seqTile seqTile .Col ← allocRT .Float32 seqTile seqTile .Col
     -- We don't have explicit tile transpose in registers often, but we have `mmaT` (A*B^T).
     -- We need A^T * B. `mmaAtB`?
     -- `mmaAtB dst A B C` -> A^T @ B + C.
@@ -259,7 +260,7 @@ def mamba2Bwd (q_ptr : GPtr GpuFloat.BFloat16) (k_ptr : GPtr GpuFloat.BFloat16)
     -- We should store the vector `dA` into diagonal or first row?
     -- `dAShared` is tile.
     
-    let dA_vec : RV GpuFloat.Float32 seqTile ← allocRV .Float32 seqTile
+    let _dA_vec : RV GpuFloat.Float32 seqTile ← allocRV .Float32 seqTile
     -- cumsumRow? No, vector scan.
     -- `cumsum` in IR is tile-based `cumsumRow`/`Col`.
     -- We don't have vector cumsum in `Ops`.

@@ -65,7 +65,7 @@ def moeGatingFwd : KernelM Unit := do
   load wGate wGateShared
 
   comment "Process token batches"
-  for batchIdx in krange 0 8 do
+  for _batchIdx in krange 0 8 do
     comment "Load tokens"
     load x xShared
 
@@ -105,7 +105,7 @@ def moeDispatchFwd : KernelM Unit := do
   let dispatched : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
 
   -- Token indices for gathering results later
-  let tokenIndices : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
+  let _tokenIndices : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
 
   -- Shared memory
   let tokensShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
@@ -158,7 +158,7 @@ def moeCombineFwd : KernelM Unit := do
   loadVec routingWeights routingWeightsShared
 
   comment "Process expert outputs"
-  for expertIdx in krange 0 8 do  -- Loop over experts (assuming top-k = 2 or so)
+  for _expertIdx in krange 0 8 do  -- Loop over experts (assuming top-k = 2 or so)
     comment "Load expert output"
     load expertOut expertOutShared
 
@@ -284,7 +284,7 @@ def moeFfnFwd : KernelM Unit := do
   load wDown wDownShared
 
   comment "Process token batches"
-  for batchIdx in krange 0 4 do
+  for _batchIdx in krange 0 4 do
     comment "Load tokens"
     load x xShared
 

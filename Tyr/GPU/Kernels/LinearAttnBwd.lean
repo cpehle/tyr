@@ -36,7 +36,7 @@ def linearAttnBwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat
     (state_ptr : GPtr GpuFloat.Float32) -- Forward state S
     (seq_len : KVal UInt64)
     : KernelM Unit := do
-  
+  let _ := (Q_ptr, K_ptr, V_ptr, dO_ptr, dQ_ptr, dK_ptr, dV_ptr, state_ptr, seq_len)
   let tileSize : Nat := 64
   comment "=== Linear Attention Backward ==="
 
@@ -63,7 +63,7 @@ def linearAttnBwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat
   load s sShared
   
   comment "Phase 1: Compute dQ and accumulate dS"
-  for chunkIdx in krange 0 16 do
+  for _chunkIdx in krange 0 16 do
     let qShared : ST GpuFloat.BFloat16 tileSize tileSize ← allocST .BFloat16 tileSize tileSize
     let dOShared : ST GpuFloat.BFloat16 tileSize tileSize ← allocST .BFloat16 tileSize tileSize
     
@@ -117,7 +117,7 @@ def linearAttnBwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat
   let dSShared : ST GpuFloat.Float32 tileSize tileSize ← allocST .Float32 tileSize tileSize
   store dSShared dS
 
-  for chunkIdx in krange 0 16 do
+  for _chunkIdx in krange 0 16 do
     let kShared : ST GpuFloat.BFloat16 tileSize tileSize ← allocST .BFloat16 tileSize tileSize
     let vShared : ST GpuFloat.BFloat16 tileSize tileSize .Col ← allocST .BFloat16 tileSize tileSize .Col
     
@@ -164,11 +164,11 @@ def causalLinearAttnBwd : KernelM Unit := do
   comment "=== Causal Linear Attention Backward ==="
   comment "Iterate backwards, maintaining dS state"
   
-  let dS : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
+  let _dS : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
   
   -- Iterating backwards
   -- Note: Using krange for iteration
-  for chunkIdx in krange 0 16 do
+  for _chunkIdx in krange 0 16 do
     comment "Load batch i (in reverse order)"
     
     comment "Update dS += phi(Q)^T @ dO"

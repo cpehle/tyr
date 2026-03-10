@@ -39,6 +39,7 @@ def mamba2Fwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat16)
     (V_ptr : GPtr GpuFloat.BFloat16) (A_ptr : GPtr GpuFloat.Float32)
     (O_ptr : GPtr GpuFloat.BFloat16) (state_ptr : GPtr GpuFloat.Float32)
     (seq_len : KVal UInt64) (head_dim : KVal UInt64) : KernelM Unit := do
+  let _ := (A_ptr, state_ptr, seq_len, head_dim)
   comment "=== Mamba2 Forward Pass ==="
 
   let numChunks : Nat := 8
@@ -57,11 +58,11 @@ def mamba2Fwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat16)
   let decay : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
 
   -- Decay vector (log-space cumulative sum)
-  let aVec : RV GpuFloat.Float32 64 ← allocRV .Float32 64
+  let _aVec : RV GpuFloat.Float32 64 ← allocRV .Float32 64
   let cumsum : RV GpuFloat.Float32 64 ← allocRV .Float32 64
 
   -- State tiles (KV accumulator)
-  let kv : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
+  let _kv : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
 
   -- Shared memory
   let qShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64

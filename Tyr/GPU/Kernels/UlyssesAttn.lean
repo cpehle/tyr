@@ -69,9 +69,9 @@ def ulyssesAttnFwd : KernelM Unit := do
   let qInShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
   let kInShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
   let vInShared : ST GpuFloat.BFloat16 64 64 .Col ← allocST .BFloat16 64 64 .Col
-  let qSeqShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
-  let kSeqShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
-  let vSeqShared : ST GpuFloat.BFloat16 64 64 .Col ← allocST .BFloat16 64 64 .Col
+  let _qSeqShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
+  let _kSeqShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
+  let _vSeqShared : ST GpuFloat.BFloat16 64 64 .Col ← allocST .BFloat16 64 64 .Col
   let outShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
 
   comment "Load head-parallel inputs"
@@ -174,7 +174,7 @@ def ulyssesAttnFusedFwd : KernelM Unit := do
   load v vShared
 
   comment "Fused all-to-all + attention loop"
-  for gpuIdx in krange 0 8 do  -- world_size iterations
+  for _gpuIdx in krange 0 8 do  -- world_size iterations
     comment "Prefetch next chunk (overlapped all-to-all)"
     load qNext qNextShared
     load kNext kNextShared

@@ -67,7 +67,7 @@ def fusedLayerNormFwd : KernelM Unit := do
   loadVec bias biasShared
 
   comment "Process tokens"
-  for tokenIdx in krange 0 64 do  -- batch * seq_len tokens
+  for _tokenIdx in krange 0 64 do  -- batch * seq_len tokens
     comment "Load input and residual"
     loadVec x xShared
     loadVec residual residualShared
@@ -168,7 +168,7 @@ def fusedLayerNormTiledFwd : KernelM Unit := do
   load bias biasShared
 
   comment "Process tiles"
-  for tileIdx in krange 0 16 do
+  for _tileIdx in krange 0 16 do
     comment "Load input tile"
     load x xShared
     load residual residualShared

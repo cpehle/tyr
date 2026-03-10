@@ -73,6 +73,7 @@ def flashAttn3Fwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat
     (L_ptr : GPtr GpuFloat.Float32)
     (seqLenQ : KVal UInt64) (seqLenK : KVal UInt64) (headDim : KVal UInt64)
     : KernelM Unit := do
+  let _ := (Q_ptr, K_ptr, V_ptr, seqLenQ, seqLenK, headDim)
   let blockM : Nat := 64
   let blockN : Nat := 64
   let hdim : Nat := 64
@@ -92,11 +93,11 @@ def flashAttn3Fwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat
 
   -- K tiles (double-buffered: stage 0 and stage 1)
   let sK0 : ST GpuFloat.BFloat16 blockN hdim ← allocST .BFloat16 blockN hdim
-  let sK1 : ST GpuFloat.BFloat16 blockN hdim ← allocST .BFloat16 blockN hdim
+  let _sK1 : ST GpuFloat.BFloat16 blockN hdim ← allocST .BFloat16 blockN hdim
 
   -- V tiles (double-buffered, column-major for efficient MMA)
   let sV0 : ST GpuFloat.BFloat16 blockN hdim .Col ← allocST .BFloat16 blockN hdim .Col
-  let sV1 : ST GpuFloat.BFloat16 blockN hdim .Col ← allocST .BFloat16 blockN hdim .Col
+  let _sV1 : ST GpuFloat.BFloat16 blockN hdim .Col ← allocST .BFloat16 blockN hdim .Col
 
   -- P tile (softmax output, for O += P @ V)
   let sP : ST GpuFloat.BFloat16 blockM blockN ← allocST .BFloat16 blockM blockN
@@ -297,6 +298,7 @@ def flashAttn3BwdPrep (dO_ptr : GPtr GpuFloat.BFloat16) (O_ptr : GPtr GpuFloat.B
     (D_ptr : GPtr GpuFloat.Float32)
     (seqLen : KVal UInt64) (headDim : KVal UInt64)
     : KernelM Unit := do
+  let _ := (seqLen, headDim)
   let blockM : Nat := 64
   let hdim : Nat := 64
   let coord ← blockCoord2D
@@ -363,6 +365,7 @@ def flashAttn3Bwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat
     (dV_ptr : GPtr GpuFloat.Float32)
     (seqLenQ : KVal UInt64) (seqLenK : KVal UInt64) (headDim : KVal UInt64)
     : KernelM Unit := do
+  let _ := (K_ptr, V_ptr, seqLenQ, seqLenK, headDim)
   let blockM : Nat := 64
   let blockN : Nat := 64
   let hdim : Nat := 64
@@ -382,8 +385,8 @@ def flashAttn3Bwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat
   let sDO : ST GpuFloat.BFloat16 blockM hdim ← allocST .BFloat16 blockM hdim
 
   comment "Shared memory for intermediates"
-  let sP : ST GpuFloat.BFloat16 blockM blockN ← allocST .BFloat16 blockM blockN
-  let sDS : ST GpuFloat.BFloat16 blockM blockN ← allocST .BFloat16 blockM blockN
+  let _sP : ST GpuFloat.BFloat16 blockM blockN ← allocST .BFloat16 blockM blockN
+  let _sDS : ST GpuFloat.BFloat16 blockM blockN ← allocST .BFloat16 blockM blockN
 
   comment "Shared memory for gradient outputs"
   let sDQ : ST GpuFloat.Float32 blockM hdim ← allocST .Float32 blockM hdim
@@ -535,6 +538,7 @@ def flashAttn3FwdGQA (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFl
     (seqLenQ : KVal UInt64) (seqLenK : KVal UInt64) (headDim : KVal UInt64)
     (numHeadsQ : KVal UInt64) (numHeadsKV : KVal UInt64)
     : KernelM Unit := do
+  let _ := (Q_ptr, K_ptr, V_ptr, O_ptr, L_ptr, seqLenQ, seqLenK, headDim, numHeadsQ, numHeadsKV)
   let blockM : Nat := 64
   let blockN : Nat := 64
   let hdim : Nat := 64
@@ -669,6 +673,7 @@ def flashAttn3FwdPersistent (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFl
     (seqLenQ : KVal UInt64) (seqLenK : KVal UInt64) (headDim : KVal UInt64)
     (numHeads : KVal UInt64) (numBatch : KVal UInt64)
     : KernelM Unit := do
+  let _ := (Q_ptr, K_ptr, V_ptr, O_ptr, L_ptr, tileCounter_ptr, seqLenQ, seqLenK, headDim, numHeads, numBatch)
   let blockM : Nat := 64
   let blockN : Nat := 64
   let hdim : Nat := 64

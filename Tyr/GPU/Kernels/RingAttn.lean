@@ -40,6 +40,7 @@ def ringAttnPartial (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFlo
     (_batch_size : KVal UInt64) (_num_heads : KVal UInt64)
     (_seq_len : KVal UInt64) (_head_dim : KVal UInt64)
     (rank : KVal UInt64) (kv_block_idx : KVal UInt64) : KernelM Unit := do
+  let _ := (rank, kv_block_idx)
   comment "=== Ring Attention - Partial Computation ==="
   comment "Compute attention with one KV block, output partial O and log-sum-exp"
 
@@ -134,6 +135,7 @@ def ringAttnFull (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat1
     (_batch_size : KVal UInt64) (_num_heads : KVal UInt64)
     (seq_len : KVal UInt64) (_head_dim : KVal UInt64)
     (rank : KVal UInt64) (world_size : KVal UInt64) : KernelM Unit := do
+  let _ := (seq_len, rank, world_size)
   comment "=== Ring Attention - Full Ring Processing ==="
   comment "Process all KV blocks around the ring, accumulate with LSE"
 
@@ -187,7 +189,7 @@ def ringAttnFull (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat1
   load v vShared
 
   comment "Ring loop over all GPUs"
-  for gpuIdx in krange 0 numGpus do
+  for _gpuIdx in krange 0 numGpus do
     comment "Prefetch next KV block (async from next GPU)"
     -- In actual implementation: async ring communication
     load kNext kNextShared

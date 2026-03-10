@@ -25,6 +25,7 @@ This is more efficient than vector-based for larger hidden dimensions.
 def layerNormTiledNew (x_ptr : GPtr GpuFloat.BFloat16) (weight_ptr : GPtr GpuFloat.BFloat16)
     (bias_ptr : GPtr GpuFloat.BFloat16) (out_ptr : GPtr GpuFloat.BFloat16)
     (batch_size : KVal UInt64) (hidden_dim : KVal UInt64) : KernelM Unit := do
+  let _ := (batch_size, hidden_dim)
   let tileSize : Nat := 64
   let numTiles : Nat := 16
   comment "=== LayerNorm Forward (Tiled) ==="
@@ -106,6 +107,7 @@ def layerNormTiledNew (x_ptr : GPtr GpuFloat.BFloat16) (weight_ptr : GPtr GpuFlo
 @[gpu_kernel .SM90]
 def rmsNormTiledNew (x_ptr : GPtr GpuFloat.BFloat16) (weight_ptr : GPtr GpuFloat.BFloat16)
     (out_ptr : GPtr GpuFloat.BFloat16) (hidden_dim : KVal UInt64) : KernelM Unit := do
+  let _ := hidden_dim
   let tileSize : Nat := 64
   let numTiles : Nat := 16
   comment "=== RMSNorm Forward (Tiled) ==="

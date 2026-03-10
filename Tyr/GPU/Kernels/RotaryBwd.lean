@@ -30,7 +30,7 @@ def rotaryBwd (dO_ptr : GPtr GpuFloat.BFloat16) (sin_ptr : GPtr GpuFloat.Float32
     (cos_ptr : GPtr GpuFloat.Float32) (dX_ptr : GPtr GpuFloat.BFloat16)
     (seq_len : KVal UInt64) (head_dim : KVal UInt64)
     : KernelM Unit := do
-  
+  let _ := (dO_ptr, sin_ptr, cos_ptr, dX_ptr, seq_len, head_dim)
   comment "=== Rotary Position Embedding Backward ==="
 
   -- Input tile: 64 x 64 (batch of positions x head_dim)
@@ -58,20 +58,20 @@ def rotaryBwd (dO_ptr : GPtr GpuFloat.BFloat16) (sin_ptr : GPtr GpuFloat.Float32
   let negDy1 : RT GpuFloat.Float32 64 32 ← allocRT .Float32 64 32
 
   -- Output dX
-  let dX : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
+  let _dX : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
 
   -- Shared memory
   let dOShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
   let sinShared : ST GpuFloat.Float32 64 32 ← allocST .Float32 64 32
   let cosShared : ST GpuFloat.Float32 64 32 ← allocST .Float32 64 32
-  let dXShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
+  let _dXShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
 
   comment "Load precomputed sin/cos"
   load sinT sinShared
   load cosT cosShared
 
   comment "Process sequence positions"
-  for posIdx in krange 0 16 do
+  for _posIdx in krange 0 16 do
     comment "Load gradient input dO"
     load dO dOShared
     convert dOF dO

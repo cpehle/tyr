@@ -96,7 +96,7 @@ def fftConvFwd : KernelM Unit := do
   let fInvCol ← complexAsCol fInv
 
   comment "Process batches"
-  for batchIdx in krange 0 16 do
+  for _batchIdx in krange 0 16 do
     comment "Load input (real only)"
     load x xShared
     let xCol ← asCol x
@@ -205,7 +205,7 @@ def fftConvPersistentFwd : KernelM Unit := do
   let fInvCol ← complexAsCol fInv
 
   comment "Process batches with persistent cache"
-  for batchIdx in krange 0 16 do
+  for _batchIdx in krange 0 16 do
     comment "Load per-head filter"
     loadComplex kf kfShared
 

@@ -44,7 +44,7 @@ def ringAttnBwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat16
     (dV_ptr : GPtr GpuFloat.Float32)
     (rank : KVal UInt32) (world_size : KVal UInt32)
     : KernelM Unit := do
-  
+  let _ := (Q_ptr, K_ptr, V_ptr, O_ptr, dO_ptr, L_ptr, D_ptr, rank, world_size)
   let tileSize : Nat := 64
   comment "=== Ring Attention Backward ==="
   let coord ← blockCoord2D
@@ -99,7 +99,7 @@ def ringAttnBwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat16
   load v vShared
   
   comment "Ring Loop"
-  for stepIdx in krange 0 8 do -- Hardcoded 8 for now, ideally 'world_size'
+  for _stepIdx in krange 0 8 do -- Hardcoded 8 for now, ideally 'world_size'
     
     comment "--- Computation ---"
     

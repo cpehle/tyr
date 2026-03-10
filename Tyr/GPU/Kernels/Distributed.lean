@@ -142,7 +142,7 @@ def agGemmFwd : KernelM Unit := do
   load b bShared
 
   comment "Loop over all GPUs' A slices"
-  for gpuIdx in krange 0 8 do  -- 8 GPUs
+  for _gpuIdx in krange 0 8 do  -- 8 GPUs
     comment "AllGather: load A slice from GPU i"
     load aLocal aShared
 
@@ -175,7 +175,7 @@ def gemmArFwd : KernelM Unit := do
   let outShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
 
   comment "Compute local GEMM"
-  for blkIdx in krange 0 4 do
+  for _blkIdx in krange 0 4 do
     load a aShared
     load b bShared
     mma c a b c
@@ -209,7 +209,7 @@ def gemmRsFwd : KernelM Unit := do
   let outShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
 
   comment "Compute local GEMM"
-  for blkIdx in krange 0 4 do
+  for _blkIdx in krange 0 4 do
     load a aShared
     load b bShared
     mma c a b c

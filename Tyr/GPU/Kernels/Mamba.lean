@@ -23,6 +23,7 @@ def mamba2FwdNew (q_ptr : GPtr GpuFloat.BFloat16) (k_ptr : GPtr GpuFloat.BFloat1
     (v_ptr : GPtr GpuFloat.BFloat16) (a_ptr : GPtr GpuFloat.Float32)
     (o_ptr : GPtr GpuFloat.BFloat16) (batch_size : KVal UInt64)
     (num_heads : KVal UInt64) (seq_len : KVal UInt64) : KernelM Unit := do
+  let _ := (a_ptr, batch_size, num_heads, seq_len)
   let headDim : Nat := 64
   let numChunks : Nat := 16
   comment "=== Mamba2 Forward ==="
@@ -43,11 +44,11 @@ def mamba2FwdNew (q_ptr : GPtr GpuFloat.BFloat16) (k_ptr : GPtr GpuFloat.BFloat1
   let outBf : RT GpuFloat.BFloat16 16 headDim ← allocRT .BFloat16 16 headDim
 
   comment "Decay factor vectors"
-  let aVec : RV GpuFloat.Float32 16 ← allocRV .Float32 16
-  let aCumsum : RV GpuFloat.Float32 16 ← allocRV .Float32 16
+  let _aVec : RV GpuFloat.Float32 16 ← allocRV .Float32 16
+  let _aCumsum : RV GpuFloat.Float32 16 ← allocRV .Float32 16
 
   comment "KV state for cross-position accumulation"
-  let kvState : RT GpuFloat.Float32 headDim headDim ← zeroRT .Float32 headDim headDim
+  let _kvState : RT GpuFloat.Float32 headDim headDim ← zeroRT .Float32 headDim headDim
 
   comment "Shared memory"
   let qShared : ST GpuFloat.BFloat16 16 headDim ← allocST .BFloat16 16 headDim
@@ -101,30 +102,31 @@ def mamba2FwdNew (q_ptr : GPtr GpuFloat.BFloat16) (k_ptr : GPtr GpuFloat.BFloat1
 @[gpu_kernel .SM90]
 def mambaSimpleNew (x_ptr : GPtr GpuFloat.BFloat16) (A_ptr : GPtr GpuFloat.Float32)
     (out_ptr : GPtr GpuFloat.BFloat16) (seq_len : KVal UInt64) : KernelM Unit := do
+  let _ := (x_ptr, A_ptr, out_ptr, seq_len)
   let headDim : Nat := 64
   let numSteps : Nat := 128
   comment "=== Mamba SSM: y = Cx + Du, x' = Ax + Bu ==="
 
-  let coord ← blockCoord2D
+  let _coord ← blockCoord2D
 
   comment "State vector h"
-  let h : RV GpuFloat.Float32 headDim ← allocRV .Float32 headDim
+  let _h : RV GpuFloat.Float32 headDim ← allocRV .Float32 headDim
 
   comment "Input/output"
-  let u : RV GpuFloat.Float32 1 ← allocRV .Float32 1
-  let y : RV GpuFloat.Float32 1 ← allocRV .Float32 1
+  let _u : RV GpuFloat.Float32 1 ← allocRV .Float32 1
+  let _y : RV GpuFloat.Float32 1 ← allocRV .Float32 1
 
   comment "SSM parameters"
-  let aBar : RV GpuFloat.Float32 headDim ← allocRV .Float32 headDim
-  let bBar : RV GpuFloat.Float32 headDim ← allocRV .Float32 headDim
-  let cVec : RV GpuFloat.Float32 headDim ← allocRV .Float32 headDim
+  let _aBar : RV GpuFloat.Float32 headDim ← allocRV .Float32 headDim
+  let _bBar : RV GpuFloat.Float32 headDim ← allocRV .Float32 headDim
+  let _cVec : RV GpuFloat.Float32 headDim ← allocRV .Float32 headDim
 
   comment "Shared memory for I/O"
-  let xShared : SV GpuFloat.BFloat16 headDim ← allocSV .BFloat16 headDim
-  let outShared : SV GpuFloat.BFloat16 1 ← allocSV .BFloat16 1
+  let _xShared : SV GpuFloat.BFloat16 headDim ← allocSV .BFloat16 headDim
+  let _outShared : SV GpuFloat.BFloat16 1 ← allocSV .BFloat16 1
 
   comment "Sequential recurrence"
-  for stepIdx in krange 0 numSteps do
+  for _stepIdx in krange 0 numSteps do
     comment "State update: h = A*h + B*u"
     -- Simplified: would need vector-vector ops
 

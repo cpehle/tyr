@@ -61,8 +61,8 @@ def nvfp4GemmFwd : KernelM Unit := do
   let bScale : RT GpuFloat.Float16 4 256 ← allocRT .Float16 4 256
 
   -- Global scales (single float per matrix)
-  let aGlobalScale : RV GpuFloat.Float32 1 ← allocRV .Float32 1
-  let bGlobalScale : RV GpuFloat.Float32 1 ← allocRV .Float32 1
+  let _aGlobalScale : RV GpuFloat.Float32 1 ← allocRV .Float32 1
+  let _bGlobalScale : RV GpuFloat.Float32 1 ← allocRV .Float32 1
 
   -- Output accumulator (FP32 for precision)
   let c : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
@@ -82,7 +82,7 @@ def nvfp4GemmFwd : KernelM Unit := do
   load bScale bScaleShared
 
   comment "GEMM loop (K dimension)"
-  for kBlkIdx in krange 0 4 do  -- Kb/64 iterations
+  for _kBlkIdx in krange 0 4 do  -- Kb/64 iterations
     comment "Load FP4 tiles (async TMA)"
     load a aShared
     load b bShared
@@ -130,7 +130,7 @@ def quantizeToFp4 : KernelM Unit := do
   let scaleShared : SV GpuFloat.Float32 1 ← allocSV .Float32 1
 
   comment "Process blocks"
-  for blkIdx in krange 0 16 do
+  for _blkIdx in krange 0 16 do
     comment "Load input block"
     load x xShared
 
@@ -186,7 +186,7 @@ def mixedFp4Fp8GemmFwd : KernelM Unit := do
   load wScale wScaleShared
 
   comment "GEMM loop"
-  for kBlkIdx in krange 0 8 do
+  for _kBlkIdx in krange 0 8 do
     load a aShared
     load w wShared
 

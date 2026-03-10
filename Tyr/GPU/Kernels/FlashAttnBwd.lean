@@ -26,6 +26,7 @@ def flashAttnFwdWithLse (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.
     (V_ptr : GPtr GpuFloat.BFloat16) (O_ptr : GPtr GpuFloat.BFloat16)
     (L_ptr : GPtr GpuFloat.Float32) (seq_len : KVal UInt64) (head_dim : KVal UInt64)
     : KernelM Unit := do
+  let _ := (seq_len, head_dim)
   let tileSize : Nat := 64
   let numKvBlocks : Nat := 4
   comment "=== FlashAttention Forward (with LSE for backward) ==="
@@ -112,6 +113,7 @@ to compute dS = P * (dP - D_vec).
 def flashAttnBwdPrep (dO_ptr : GPtr GpuFloat.BFloat16) (O_ptr : GPtr GpuFloat.BFloat16)
     (D_ptr : GPtr GpuFloat.Float32) (seq_len : KVal UInt64) (head_dim : KVal UInt64)
     : KernelM Unit := do
+  let _ := (seq_len, head_dim)
   let tileSize : Nat := 64
   let coord ← blockCoord2D
   comment "=== FlashAttention Backward Prep ==="
@@ -176,6 +178,7 @@ def flashAttnBwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat1
     (dQ_ptr : GPtr GpuFloat.Float32) (dK_ptr : GPtr GpuFloat.Float32)
     (dV_ptr : GPtr GpuFloat.Float32) (seq_len : KVal UInt64) (head_dim : KVal UInt64)
     : KernelM Unit := do
+  let _ := (seq_len, head_dim)
   let tileSize : Nat := 64
   let numKvBlocks : Nat := 4
   comment "=== FlashAttention Backward ==="

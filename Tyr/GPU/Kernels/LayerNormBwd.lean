@@ -30,6 +30,7 @@ def layerNormBwdTiled (dO_ptr : GPtr GpuFloat.BFloat16) (x_ptr : GPtr GpuFloat.B
     (dx_ptr : GPtr GpuFloat.BFloat16) (dweight_ptr : GPtr GpuFloat.Float32)
     (dbias_ptr : GPtr GpuFloat.Float32)
     (batch_size : KVal UInt64) (hidden_dim : KVal UInt64) : KernelM Unit := do
+  let _ := (dO_ptr, x_ptr, weight_ptr, mean_ptr, inv_std_ptr, dx_ptr, batch_size, hidden_dim)
   let tileSize : Nat := 64
   let hiddenDimFloat : Float := 64.0 -- Approximation for H
   let coord ← blockCoord2D
@@ -72,8 +73,8 @@ def layerNormBwdTiled (dO_ptr : GPtr GpuFloat.BFloat16) (x_ptr : GPtr GpuFloat.B
   let dxShared : ST GpuFloat.BFloat16 tileSize tileSize ← allocST .BFloat16 tileSize tileSize
   
   -- Global gradient accumulators (to store at end)
-  let dGammaShared : ST GpuFloat.Float32 tileSize tileSize ← allocST .Float32 tileSize tileSize
-  let dBetaShared : ST GpuFloat.Float32 tileSize tileSize ← allocST .Float32 tileSize tileSize
+  let _dGammaShared : ST GpuFloat.Float32 tileSize tileSize ← allocST .Float32 tileSize tileSize
+  let _dBetaShared : ST GpuFloat.Float32 tileSize tileSize ← allocST .Float32 tileSize tileSize
 
   comment "Load weight (gamma) - broadcasted to rows implicitly if loaded as tile?"
   -- Assuming input format of weight is (1, H) or (H).
@@ -84,7 +85,7 @@ def layerNormBwdTiled (dO_ptr : GPtr GpuFloat.BFloat16) (x_ptr : GPtr GpuFloat.B
   convert weightf weight
 
   comment "Loop over batch tiles"
-  for batchIdx in krange 0 16 do
+  for _batchIdx in krange 0 16 do
     comment "Load batch inputs"
     load dO dOShared
     load x xShared

@@ -32,7 +32,7 @@ def ulyssesAttnBwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloa
     (dV_ptr : GPtr GpuFloat.Float32)
     (seq_len : KVal UInt64) (head_dim : KVal UInt64)
     : KernelM Unit := do
-  
+  let _ := (Q_ptr, K_ptr, V_ptr, O_ptr, dO_ptr, L_ptr, D_ptr, seq_len, head_dim)
   let tileSize : Nat := 64
   let numKvBlocks : Nat := 4
   
@@ -92,7 +92,7 @@ def ulyssesAttnBwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloa
   let dSBf16 : RT GpuFloat.BFloat16 tileSize tileSize ← allocRT .BFloat16 tileSize tileSize
   let rowMaxVec : RV GpuFloat.Float32 tileSize ← allocRV .Float32 tileSize
 
-  for blkIdx in krange 0 numKvBlocks do
+  for _blkIdx in krange 0 numKvBlocks do
     load k kShared
     load v vShared
     

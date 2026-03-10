@@ -38,6 +38,7 @@ The state S = φ(K)^T @ V can be accumulated across chunks.
 def linearAttnFwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat16)
     (V_ptr : GPtr GpuFloat.BFloat16) (O_ptr : GPtr GpuFloat.BFloat16)
     (state_ptr : GPtr GpuFloat.Float32) (seq_len : KVal UInt64) : KernelM Unit := do
+  let _ := seq_len
   comment "=== Linear Attention Forward ==="
 
   let numChunks : Nat := 16
@@ -137,6 +138,7 @@ the running state and compute outputs incrementally.
 def causalLinearAttnFwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat16)
     (V_ptr : GPtr GpuFloat.BFloat16) (O_ptr : GPtr GpuFloat.BFloat16)
     (state_ptr : GPtr GpuFloat.Float32) : KernelM Unit := do
+  let _ := state_ptr
   comment "=== Causal Linear Attention Forward ==="
 
   let numChunks : Nat := 16
@@ -149,7 +151,7 @@ def causalLinearAttnFwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.
 
   let phiQ : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
   let phiK : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
-  let vF : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
+  let _vF : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
 
   -- Running state and output
   let state : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
