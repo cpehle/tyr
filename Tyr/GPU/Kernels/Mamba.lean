@@ -135,12 +135,6 @@ def mambaSketchRecurrence (x_ptr : GPtr GpuFloat.BFloat16) (A_ptr : GPtr GpuFloa
 
     sync
 
-@[deprecated mambaSketchFwd (since := "2026-03-10")]
-abbrev mamba2FwdNew := mambaSketchFwd
-
-@[deprecated mambaSketchRecurrence (since := "2026-03-10")]
-abbrev mambaSimpleNew := mambaSketchRecurrence
-
 -- Verify auto-generated kernel and launch definitions
 
 -- Generate C++ code

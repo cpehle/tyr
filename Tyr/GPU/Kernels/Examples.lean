@@ -1,5 +1,3 @@
-import Tyr.GPU.Codegen.Constraints
-import Tyr.GPU.Codegen.Arch
 import Tyr.GPU.Kernels.Prelude
 
 /-!
@@ -197,30 +195,6 @@ def layerNorm
   convert out centered
   store outS out
   storeGlobal outPtr outS coord
-
-/-! ## Compatibility Aliases -/
-
-/-- Deprecated compatibility shim for older architecture-polymorphic examples. -/
-@[deprecated simpleGemm (since := "2026-03-05")]
-def simpleGemmPoly (arch : ArchLevel) [HasMMA arch] : ArchKernelM arch Unit := do
-  archComment "Deprecated: use full-input example kernels in this module."
-  let a ← Arch.ArchKernelM.liftPortable (allocRT .BFloat16 64 64)
-  let b ← Arch.ArchKernelM.liftPortable (allocRT .BFloat16 64 64 .Col)
-  let c ← Arch.ArchKernelM.liftPortable (zeroRT .Float32 64 64)
-  smartMMA c a b c
-  archSync
-
-/-- Deprecated alias kept for older docs and external references. -/
-@[deprecated simpleGemm (since := "2026-03-05")]
-abbrev simpleGemmConstrained := simpleGemm
-
-/-- Deprecated alias kept for older docs and external references. -/
-@[deprecated simpleGemm (since := "2026-03-05")]
-abbrev simpleGemmNew := simpleGemm
-
-/-- Deprecated alias kept for older docs and external references. -/
-@[deprecated flashAttnFwd (since := "2026-03-05")]
-abbrev flashAttnFwdNew := flashAttnFwd
 
 -- Verify generated companion declarations on canonical examples.
 

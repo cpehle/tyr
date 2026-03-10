@@ -187,10 +187,4 @@ def causalLinearAttnBwdSketch : KernelM Unit := do
 
 -- Generate
 
-@[deprecated linearAttnBwdSketch (since := "2026-03-10")]
-abbrev linearAttnBwd := linearAttnBwdSketch
-
-@[deprecated causalLinearAttnBwdSketch (since := "2026-03-10")]
-abbrev causalLinearAttnBwd := causalLinearAttnBwdSketch
-
 end Tyr.GPU.Kernels.LinearAttn
