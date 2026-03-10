@@ -94,73 +94,90 @@ def mamba2Fwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat16)
   sync
   load kv stateShared
 
+  let inputConsumed ← allocSemaphore
+  let inputReady ← allocSemaphore
+  initSemaphore inputConsumed 1
+  initSemaphore inputReady 0
+
   comment "Main loop over sequence chunks"
-  for chunkIdx in krange 0 numChunks do
-    -- Load Q, K, V for this chunk
-    loadGlobal qShared Q_ptr (coord.withRow chunkIdx.id)
-    loadGlobal kShared K_ptr (coord.withRow chunkIdx.id)
-    loadGlobal vShared V_ptr (coord.withRow chunkIdx.id)
-    loadVecGlobalRow aShared A_ptr (coord.withRow chunkIdx.id)
-    sync
-    load q qShared
-    load k kShared
-    load v vShared
-    loadVec aVec aShared
+  comment "The vendored ThunderKittens kernel is an lcsf producer/consumer pipeline."
+  comment "This Lean surface now models that split explicitly, even though it still uses one shared stage per chunk."
 
-    comment "Step 1: Compute decay cumsum (Hillis-Steele scan)"
-    broadcastRow prefixRows aVec
-    cumsumRow prefixRows prefixRows
-    sliceRows prefixHead prefixRows 0 1
-    colSum cumsum prefixHead
+  ifWarpGroup 0 do
+    comment "Producer warp group: stream Q/K/V/A chunks into shared memory"
+    for chunkIdx in krange 0 numChunks do
+      let chunkCoord := coord.withRow chunkIdx.id
+      waitSemaphore inputConsumed
+      loadGlobal qShared Q_ptr chunkCoord
+      loadGlobal kShared K_ptr chunkCoord
+      loadGlobal vShared V_ptr chunkCoord
+      loadVecGlobalRow aShared A_ptr chunkCoord
+      sync
+      arriveSemaphore inputReady 1
 
-    comment "Step 2: Compute decay matrix"
-    broadcastRow prefixRows cumsum
-    broadcastCol prefixCols cumsum
-    sub decay prefixCols prefixRows
-    exp decay decay
+  ifWarpGroup 1 do
+    comment "Consumer warp group: compute local decay, recurrent contribution, and state update"
+    for chunkIdx in krange 0 numChunks do
+      let chunkCoord := coord.withRow chunkIdx.id
+      waitSemaphore inputReady
+      load q qShared
+      load k kShared
+      load v vShared
+      loadVec aVec aShared
 
-    comment "Step 3: Apply causal mask"
-    makeCausal decay decay (some 0.0)
+      comment "Step 1: Compute decay cumsum (Hillis-Steele scan)"
+      broadcastRow prefixRows aVec
+      cumsumRow prefixRows prefixRows
+      sliceRows prefixHead prefixRows 0 1
+      colSum cumsum prefixHead
 
-    comment "Step 4: Compute attention with decay"
-    -- att = Q @ K^T
-    mmaT att q k att
-    -- Scale by decay
-    mul att att decay
+      comment "Step 2: Compute decay matrix"
+      broadcastRow prefixRows cumsum
+      broadcastCol prefixCols cumsum
+      sub decay prefixCols prefixRows
+      exp decay decay
 
-    comment "Step 5: Compute local output and recurrent state contribution"
-    let attBf : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-    convert attBf att
-    zero o
-    mma o attBf v o
+      comment "Step 3: Apply causal mask"
+      makeCausal decay decay (some 0.0)
 
-    convert qF q
-    expVec totalDecay cumsum
-    mulCol qScaled qF totalDecay
-    convert qScaledBf qScaled
-    convert stateBfRow kv
-    swapLayout stateBf stateBfRow
-    mma o qScaledBf stateBf o
+      comment "Step 4: Compute attention with decay"
+      zero att
+      mmaT att q k att
+      mul att att decay
 
-    comment "Step 6: Update state (KV accumulator)"
-    sliceCols prefixLastCol prefixRows 63 1
-    rowSum totalDecay prefixLastCol
-    mulCol kv kv totalDecay
+      comment "Step 5: Compute local output and recurrent state contribution"
+      let attBf : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
+      convert attBf att
+      zero o
+      mma o attBf v o
 
-    subVec kDecay totalDecay cumsum
-    expVec kDecay kDecay
-    convert kF k
-    mulCol kScaled kF kDecay
-    convert kScaledBf kScaled
-    swapLayout kCol kScaledBf
-    mmaAtB kv kCol v kv
+      convert qF q
+      expVec totalDecay cumsum
+      mulCol qScaled qF totalDecay
+      convert qScaledBf qScaled
+      convert stateBfRow kv
+      swapLayout stateBf stateBfRow
+      mma o qScaledBf stateBf o
 
-    comment "Store output"
-    convert outBf o
-    store outShared outBf
-    storeGlobal O_ptr outShared (coord.withRow chunkIdx.id)
+      comment "Step 6: Update state (KV accumulator)"
+      sliceCols prefixLastCol prefixRows 63 1
+      rowSum totalDecay prefixLastCol
+      mulCol kv kv totalDecay
 
-    sync
+      subVec kDecay totalDecay cumsum
+      expVec kDecay kDecay
+      convert kF k
+      mulCol kScaled kF kDecay
+      convert kScaledBf kScaled
+      swapLayout kCol kScaledBf
+      mmaAtB kv kCol v kv
+
+      comment "Store output"
+      convert outBf o
+      store outShared outBf
+      storeGlobal O_ptr outShared chunkCoord
+      sync
+      arriveSemaphore inputConsumed 1
 
   comment "Store updated KV state"
   store stateShared kv

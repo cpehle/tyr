@@ -62,7 +62,7 @@ The working exhaustive source-to-Lean matrix lives in
 | `Tyr/GPU/Kernels/LayerNorm.lean` | `thirdparty/ThunderKittens/kernels/layernorm/layernorm.cu` | Generic tiling sketches, separate from the canonical fused residual port. |
 | `Tyr/GPU/Kernels/LayerNormBwd.lean` | `thirdparty/ThunderKittens/kernels/layernorm/layernorm.cu` | Conceptual backward kernel with broadcast/gradient assumptions still mocked. |
 | `Tyr/GPU/Kernels/FusedLayerNorm.lean` (`FusedLayerNorm.*`) | `thirdparty/ThunderKittens/kernels/layernorm/layernorm.cu` | Kept as sketches for IR experimentation; not the canonical port. |
-| `Tyr/GPU/Kernels/Mamba2.lean` | `thirdparty/ThunderKittens/kernels/mamba2/mamba2.cu` | The decay vector and recurrent KV state are now wired, but the full lcsf producer/consumer structure and exact warpgroup decay handling are still missing. |
+| `Tyr/GPU/Kernels/Mamba2.lean` | `thirdparty/ThunderKittens/kernels/mamba2/mamba2.cu` | The decay vector, recurrent KV state, and a staged producer/consumer split are now explicit, but the full lcsf double-buffering and exact warpgroup packing are still missing. |
 | `Tyr/GPU/Kernels/Mamba.lean` | `thirdparty/ThunderKittens/kernels/mamba2/mamba2.cu` | Educational sketch, not a faithful source-backed port. |
 | `Tyr/GPU/Kernels/MambaBwd.lean` | `thirdparty/ThunderKittens/kernels/mamba2/mamba2.cu` | Backward logic is conceptual and still uses placeholder mask/cumsum handling. |
 | `Tyr/GPU/Kernels/MhaH100LCF.lean` | `thirdparty/ThunderKittens/kernels/attention/mha_h100_lcf/mha_h100_lcf.cu` | Dedicated LCF surfaces exist, but they still compress the vendored multi-worker CTA packing into one logical query worker per kernel instance. |

@@ -81,7 +81,7 @@ counterpart. The remaining work is fidelity, not coverage.
 | `hedgehog/hedgehog.cu` | `Tyr/GPU/Kernels/Hedgehog.lean` (`tkHedgehogFwd`) | `partial` | Canonical chunk/state surface; full 3-ring schedule compressed. |
 | `layernorm/layernorm.cu` | `Tyr/GPU/Kernels/FusedLayerNorm.lean` (`tkFusedLayerNormResidual1024`) | `canonical` | Canonical fused residual + layernorm port. |
 | `linear_attention/linear_attention.cu` | `Tyr/GPU/Kernels/LinearAttn.lean`, `Tyr/GPU/Kernels/LinearAttnBwd.lean` | `partial` | Forward is source-shaped; backward remains only a sketch. |
-| `mamba2/mamba2.cu` | `Tyr/GPU/Kernels/Mamba2.lean` | `partial` | Decay/state wired; lcsf producer/consumer structure incomplete. |
+| `mamba2/mamba2.cu` | `Tyr/GPU/Kernels/Mamba2.lean` | `partial` | Decay/state and a staged producer/consumer split are wired; exact lcsf double-buffering and warpgroup packing remain incomplete. |
 | `parallel/ag_gemm/ag_gemm_b200.cu` | `Tyr/GPU/Kernels/Distributed.lean` (`agGemmB200CompatFwd`) | `compatibility` | Dedicated Blackwell AG+GEMM counterpart exists; exact cluster-specialized scheduling remains compressed. |
 | `parallel/ag_gemm/ag_gemm_h100.cu` | `Tyr/GPU/Kernels/Distributed.lean` (`agGemmFwd`) | `partial` | Source family represented, but peer arithmetic is simplified. |
 | `parallel/ag_gemm_fp8/ag_gemm_fp8_b200.cu` | `Tyr/GPU/Kernels/Distributed.lean` (`agGemmFp8B200CompatFwd`) | `compatibility` | Dedicated Blackwell FP8 AG+GEMM counterpart exists; peer arithmetic and cluster exchange remain compatibility-level. |
@@ -123,7 +123,7 @@ counterpart. The remaining work is fidelity, not coverage.
 | `Tyr/GPU/Kernels/Based.lean` | `kernels/based/linear_attn.cu` | Still uses portable slice/broadcast helpers instead of the exact warp-shuffle `mul_slice_row` / `mul_slice_col` implementation. |
 | `Tyr/GPU/Kernels/LinearAttn.lean` | `kernels/linear_attention/linear_attention.cu` | Uses explicit decay-vector inputs rather than constructing decays from slope in-kernel. |
 | `Tyr/GPU/Kernels/LinearAttnBwd.lean` (`linearAttnBwdSketch`) | `kernels/linear_attention/linear_attention.cu` | Explicitly demoted to a backward sketch; still needs alignment with the decayed forward state decomposition. |
-| `Tyr/GPU/Kernels/Mamba2.lean` | `kernels/mamba2/mamba2.cu` | Decay/state are wired, but lcsf producer/consumer and exact warpgroup structure are incomplete. |
+| `Tyr/GPU/Kernels/Mamba2.lean` | `kernels/mamba2/mamba2.cu` | Decay/state plus a staged producer/consumer split are now explicit, but the exact lcsf double-buffering and warpgroup packing are still incomplete. |
 | `Tyr/GPU/Kernels/MhaH100LCF.lean` | `kernels/attention/mha_h100_lcf/mha_h100_lcf.cu` | Multi-worker LCF CTA packing is still compressed to one logical query worker per kernel instance. |
 | `Tyr/GPU/Kernels/RingAttn.lean` | `kernels/parallel/ring_attn/ring_attn_h100.cu` | Forward is now split into partial/comm/reduction kernels, but the exact peer scheduling and ping-pong launch structure are still simplified. |
 | `Tyr/GPU/Kernels/RingAttnBwd.lean` | `kernels/parallel/ring_attn/ring_attn_h100.cu` | Explicitly speculative phased scaffold; needs correct global causal indexing and exact ring accumulation semantics. |
