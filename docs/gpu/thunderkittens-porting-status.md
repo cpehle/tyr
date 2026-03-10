@@ -25,7 +25,7 @@ prototypes.
 | `Tyr/GPU/Kernels/FusedLayerNorm.lean` (`FusedLayerNorm.*`) | `thirdparty/ThunderKittens/kernels/layernorm/layernorm.cu` | Kept as sketches for IR experimentation; not the canonical port. |
 | `Tyr/GPU/Kernels/FFTConv.lean` | `thirdparty/ThunderKittens/kernels/fftconv/fftconv_pc.cu` | High-level semantic structure exists, but not the real producer/consumer or scratch choreography. |
 | `Tyr/GPU/Kernels/Hedgehog.lean` | `thirdparty/ThunderKittens/kernels/hedgehog/hedgehog.cu` | Hybrid attention structure is present, but state handling and scheduling are simplified. |
-| `Tyr/GPU/Kernels/Mamba2.lean` | `thirdparty/ThunderKittens/kernels/mamba2/mamba2.cu` | Decay/state updates are still simplified placeholders. |
+| `Tyr/GPU/Kernels/Mamba2.lean` | `thirdparty/ThunderKittens/kernels/mamba2/mamba2.cu` | The decay vector and recurrent KV state are now wired, but the full lcsf producer/consumer structure and exact warpgroup decay handling are still missing. |
 | `Tyr/GPU/Kernels/Mamba.lean` | `thirdparty/ThunderKittens/kernels/mamba2/mamba2.cu` | Educational sketch, not a faithful source-backed port. |
 | `Tyr/GPU/Kernels/MambaBwd.lean` | `thirdparty/ThunderKittens/kernels/mamba2/mamba2.cu` | Backward logic is conceptual and still uses placeholder mask/cumsum handling. |
 | `Tyr/GPU/Kernels/MOE.lean` | `thirdparty/ThunderKittens/kernels/parallel/moe_dispatch_gemm/moe_dispatch_gemm_h100.cu` | Top-k routing, dispatch, and combine are still mocked. |
@@ -41,5 +41,5 @@ prototypes.
 
 1. `Based.lean` against `thirdparty/ThunderKittens/kernels/based/linear_attn.cu`.
 2. `LinearAttn.lean` against `thirdparty/ThunderKittens/kernels/linear_attention/linear_attention.cu`.
-3. `Mamba2.lean` against `thirdparty/ThunderKittens/kernels/mamba2/mamba2.cu`.
+3. `Mamba2.lean` to finish the lcsf / warp-specialized structure from `thirdparty/ThunderKittens/kernels/mamba2/mamba2.cu`.
 4. `RingAttn*.lean` and `UlyssesAttn*.lean` once the communication/runtime surface can express the real collectives.

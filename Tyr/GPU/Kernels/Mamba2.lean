@@ -39,7 +39,7 @@ def mamba2Fwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat16)
     (V_ptr : GPtr GpuFloat.BFloat16) (A_ptr : GPtr GpuFloat.Float32)
     (O_ptr : GPtr GpuFloat.BFloat16) (state_ptr : GPtr GpuFloat.Float32)
     (seq_len : KVal UInt64) (head_dim : KVal UInt64) : KernelM Unit := do
-  let _ := (A_ptr, state_ptr, seq_len, head_dim)
+  let _ := (seq_len, head_dim)
   comment "=== Mamba2 Forward Pass ==="
 
   let numChunks : Nat := 8
@@ -58,17 +58,41 @@ def mamba2Fwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat16)
   let decay : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
 
   -- Decay vector (log-space cumulative sum)
-  let _aVec : RV GpuFloat.Float32 64 ← allocRV .Float32 64
+  let aVec : RV GpuFloat.Float32 64 ← allocRV .Float32 64
   let cumsum : RV GpuFloat.Float32 64 ← allocRV .Float32 64
+  let totalDecay : RV GpuFloat.Float32 64 ← allocRV .Float32 64
+  let kDecay : RV GpuFloat.Float32 64 ← allocRV .Float32 64
 
   -- State tiles (KV accumulator)
-  let _kv : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
+  let kv : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
+
+  -- State contribution temporaries
+  let qF : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
+  let qScaled : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
+  let qScaledBf : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
+  let kF : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
+  let kScaled : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
+  let kScaledBf : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
+  let stateBfRow : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
+  let stateBf : RT GpuFloat.BFloat16 64 64 .Col ← allocRT .BFloat16 64 64 .Col
+  let kCol : RT GpuFloat.BFloat16 64 64 .Col ← allocRT .BFloat16 64 64 .Col
+  let prefixRows : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
+  let prefixCols : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
+  let prefixHead : RT GpuFloat.Float32 1 64 ← allocRT .Float32 1 64
+  let prefixLastCol : RT GpuFloat.Float32 64 1 ← allocRT .Float32 64 1
 
   -- Shared memory
   let qShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
   let kShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
   let vShared : ST GpuFloat.BFloat16 64 64 .Col ← allocST .BFloat16 64 64 .Col
+  let aShared : SV GpuFloat.Float32 64 ← allocSV .Float32 64
+  let stateShared : ST GpuFloat.Float32 64 64 ← allocST .Float32 64 64
   let outShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
+
+  comment "Load running KV state"
+  loadGlobal stateShared state_ptr coord
+  sync
+  load kv stateShared
 
   comment "Main loop over sequence chunks"
   for chunkIdx in krange 0 numChunks do
@@ -76,21 +100,23 @@ def mamba2Fwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat16)
     loadGlobal qShared Q_ptr (coord.withRow chunkIdx.id)
     loadGlobal kShared K_ptr (coord.withRow chunkIdx.id)
     loadGlobal vShared V_ptr (coord.withRow chunkIdx.id)
+    loadVecGlobalRow aShared A_ptr (coord.withRow chunkIdx.id)
     sync
     load q qShared
     load k kShared
     load v vShared
+    loadVec aVec aShared
 
     comment "Step 1: Compute decay cumsum (Hillis-Steele scan)"
-    -- Load decay factors and compute cumulative sum
-    -- cumsum[i] = sum(a[0:i])
-    cumsumRow decay decay  -- Using tile as scratch for cumsum computation
+    broadcastRow prefixRows aVec
+    cumsumRow prefixRows prefixRows
+    sliceRows prefixHead prefixRows 0 1
+    colSum cumsum prefixHead
 
     comment "Step 2: Compute decay matrix"
-    -- decay[i,j] = exp(cumsum[i] - cumsum[j])
-    -- This creates the causal decay pattern
-    -- (Simplified: using outer product pattern)
-    outer decay cumsum cumsum
+    broadcastRow prefixRows cumsum
+    broadcastCol prefixCols cumsum
+    sub decay prefixCols prefixRows
     exp decay decay
 
     comment "Step 3: Apply causal mask"
@@ -102,15 +128,32 @@ def mamba2Fwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat16)
     -- Scale by decay
     mul att att decay
 
-    comment "Step 5: Compute output"
-    -- O += att @ V
+    comment "Step 5: Compute local output and recurrent state contribution"
     let attBf : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
     convert attBf att
+    zero o
     mma o attBf v o
 
+    convert qF q
+    expVec totalDecay cumsum
+    mulCol qScaled qF totalDecay
+    convert qScaledBf qScaled
+    convert stateBfRow kv
+    swapLayout stateBf stateBfRow
+    mma o qScaledBf stateBf o
+
     comment "Step 6: Update state (KV accumulator)"
-    -- State update with total decay from this chunk
-    -- kv = kv * total_decay + K^T @ V (simplified)
+    sliceCols prefixLastCol prefixRows 63 1
+    rowSum totalDecay prefixLastCol
+    mulCol kv kv totalDecay
+
+    subVec kDecay totalDecay cumsum
+    expVec kDecay kDecay
+    convert kF k
+    mulCol kScaled kF kDecay
+    convert kScaledBf kScaled
+    swapLayout kCol kScaledBf
+    mmaAtB kv kCol v kv
 
     comment "Store output"
     convert outBf o
@@ -118,6 +161,10 @@ def mamba2Fwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat16)
     storeGlobal O_ptr outShared (coord.withRow chunkIdx.id)
 
     sync
+
+  comment "Store updated KV state"
+  store stateShared kv
+  storeGlobal state_ptr stateShared coord
 
 -- Verify auto-generated kernel
 
