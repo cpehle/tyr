@@ -9,44 +9,12 @@
 -/
 
 import Tyr.GPU.Kernels.Prelude
+import Tyr.GPU.Kernels.Support
 
 namespace Tyr.GPU.Kernels.UlyssesAttn
 
 open Tyr.GPU
 open Tyr.GPU.Codegen
-
-private def asyncTileLoad {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
-    (dst : ST dtype rows cols layout) (src : GPtr dtype) (coord : RTileCoord)
-    (bytes : Nat) : KernelM Unit := do
-  let sem ← allocSemaphore
-  initSemaphore sem 1
-  expectBytes sem bytes
-  loadGlobalAsync dst src coord sem.id
-  waitSemaphore sem
-
-private def barrierAllDevices (label : String) (barrierId : Nat) : KernelM Unit := do
-  comment s!"Cross-device barrier: {label}"
-  arriveAndWait barrierId
-
-private def allToAllTile (label : String) (output_ptr : GPtr GpuFloat.BFloat16)
-    (input_ptr : GPtr GpuFloat.BFloat16) (coord : RTileCoord)
-    (storeAdd : Bool := false) : KernelM Unit := do
-  let tileRows : Nat := 16
-  let tileCols : Nat := 128
-  let shard : RT GpuFloat.BFloat16 tileRows tileCols ← allocRT .BFloat16 tileRows tileCols
-  let inputShared : ST GpuFloat.BFloat16 tileRows tileCols ← allocST .BFloat16 tileRows tileCols
-  let exchangeShared : ST GpuFloat.BFloat16 tileRows tileCols ← allocST .BFloat16 tileRows tileCols
-
-  comment s!"All-to-all transport for {label}"
-  asyncTileLoad inputShared input_ptr coord (tileRows * tileCols * 2)
-  load shard inputShared
-  multimemStore exchangeShared shard
-  barrierAllDevices s!"{label} exchange complete" 0
-  if storeAdd then
-    storeGlobalAdd output_ptr exchangeShared coord
-  else
-    storeGlobalAsync output_ptr exchangeShared coord
-  sync
 
 /-- Phase 1 of Ulysses backward: redistribute `dO` from head-parallel shards to
 sequence-parallel shards before the local backward launch. -/
@@ -58,8 +26,8 @@ def ulyssesDoAllToAllBwd (dO_seq_ptr : GPtr GpuFloat.BFloat16)
   let coord ← blockCoord2D
 
   comment "Ulysses backward phase 1: head-parallel dO -> sequence-parallel dO"
-  allToAllTile "dO heads->seq" dO_seq_ptr dO_heads_ptr coord
-  barrierAllDevices "backward dO transport complete" 1
+  Support.allToAllTile "dO heads->seq" dO_seq_ptr dO_heads_ptr coord
+  Support.barrierAllDevices "backward dO transport complete" 1
 
 /-- Phase 3 of Ulysses backward: return `dQ/dK/dV` from sequence-parallel views
 to head-parallel views. `storeGlobalAdd` is used to make the reduction boundary
@@ -74,10 +42,10 @@ def ulyssesGradReturnAllToAll (dQ_heads_ptr : GPtr GpuFloat.BFloat16)
   let coord ← blockCoord2D
 
   comment "Ulysses backward phase 3: sequence-parallel grads -> head-parallel grads"
-  allToAllTile "dQ seq->heads" dQ_heads_ptr dQ_seq_ptr coord true
-  allToAllTile "dK seq->heads" dK_heads_ptr dK_seq_ptr coord true
-  allToAllTile "dV seq->heads" dV_heads_ptr dV_seq_ptr coord true
-  barrierAllDevices "backward gradient return complete" 1
+  Support.allToAllTile "dQ seq->heads" dQ_heads_ptr dQ_seq_ptr coord true
+  Support.allToAllTile "dK seq->heads" dK_heads_ptr dK_seq_ptr coord true
+  Support.allToAllTile "dV seq->heads" dV_heads_ptr dV_seq_ptr coord true
+  Support.barrierAllDevices "backward gradient return complete" 1
 
 /-- Speculative orchestration shell for Ulysses backward.
 This kernel documents the intended launch boundary:
@@ -110,20 +78,20 @@ def ulyssesAttnBwd (q_seq_ptr : GPtr GpuFloat.BFloat16) (k_seq_ptr : GPtr GpuFlo
   comment "Mark the sequence-parallel backward window as ready"
   let marker : RT GpuFloat.BFloat16 16 128 ← allocRT .BFloat16 16 128
   let markerShared : ST GpuFloat.BFloat16 16 128 ← allocST .BFloat16 16 128
-  asyncTileLoad markerShared dQ_seq_ptr coord (16 * 128 * 2)
+  Support.asyncTileLoad markerShared dQ_seq_ptr coord (16 * 128 * 2)
   load marker markerShared
   multimemStore markerShared marker
-  barrierAllDevices "local backward window opened" 0
+  Support.barrierAllDevices "local backward window opened" 0
 
   comment "Return dQ/dK/dV after the local backward launch completes"
   let _markerOut : RT GpuFloat.BFloat16 16 128 ← allocRT .BFloat16 16 128
   let gradShared : ST GpuFloat.BFloat16 16 128 ← allocST .BFloat16 16 128
-  asyncTileLoad gradShared dQ_seq_ptr coord (16 * 128 * 2)
+  Support.asyncTileLoad gradShared dQ_seq_ptr coord (16 * 128 * 2)
   storeGlobalAdd dQ_heads_ptr gradShared coord
-  asyncTileLoad gradShared dK_seq_ptr coord (16 * 128 * 2)
+  Support.asyncTileLoad gradShared dK_seq_ptr coord (16 * 128 * 2)
   storeGlobalAdd dK_heads_ptr gradShared coord
-  asyncTileLoad gradShared dV_seq_ptr coord (16 * 128 * 2)
+  Support.asyncTileLoad gradShared dV_seq_ptr coord (16 * 128 * 2)
   storeGlobalAdd dV_heads_ptr gradShared coord
-  barrierAllDevices "local backward window closed" 1
+  Support.barrierAllDevices "local backward window closed" 1
 
 end Tyr.GPU.Kernels.UlyssesAttn

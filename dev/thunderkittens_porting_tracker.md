@@ -13,6 +13,7 @@ into the Lean GPU DSL so that:
 
 - every imported kernel module is part of the normal build,
 - docs generation includes the kernel catalog,
+- the catalog is grouped into logical family entrypoints,
 - canonical surfaces are separated from sketch/demo kernels,
 - duplicated APIs and alias layers are removed,
 - the remaining gaps are explicitly recorded by module.
@@ -31,6 +32,20 @@ into the Lean GPU DSL so that:
 | `891627fb` | Tightened H100 FP8 and B200 NVFP4 compatibility GEMM surfaces. |
 
 ## Current Module Status
+
+## Catalog Organization
+
+The public import surface is now intended to be:
+
+- `Tyr.GPU.Kernels.Attention`
+- `Tyr.GPU.Kernels.StateSpace`
+- `Tyr.GPU.Kernels.Parallel`
+- `Tyr.GPU.Kernels.Gemm`
+- `Tyr.GPU.Kernels.Normalization`
+- `Tyr.GPU.Kernels.Experimental`
+
+The root `Tyr.GPU.Kernels` module should remain the full-catalog umbrella built
+out of those family modules rather than a flat import list of every leaf file.
 
 ### Canonical Or Near-Canonical
 
@@ -51,7 +66,7 @@ into the Lean GPU DSL so that:
 | --- | --- | --- |
 | `Tyr/GPU/Kernels/Based.lean` | `kernels/based/linear_attn.cu` | Still uses portable slice/broadcast helpers instead of the exact warp-shuffle `mul_slice_row` / `mul_slice_col` implementation. |
 | `Tyr/GPU/Kernels/LinearAttn.lean` | `kernels/linear_attention/linear_attention.cu` | Uses explicit decay-vector inputs rather than constructing decays from slope in-kernel. |
-| `Tyr/GPU/Kernels/LinearAttnBwd.lean` | `kernels/linear_attention/linear_attention.cu` | Still conceptual; needs alignment with forward state decomposition. |
+| `Tyr/GPU/Kernels/LinearAttnBwd.lean` (`linearAttnBwdSketch`) | `kernels/linear_attention/linear_attention.cu` | Explicitly demoted to a backward sketch; still needs alignment with the decayed forward state decomposition. |
 | `Tyr/GPU/Kernels/Mamba2.lean` | `kernels/mamba2/mamba2.cu` | Decay/state are wired, but lcsf producer/consumer and exact warpgroup structure are incomplete. |
 | `Tyr/GPU/Kernels/RingAttn.lean` | `kernels/parallel/ring_attn/ring_attn_h100.cu` | Forward is now split into partial/comm/reduction kernels, but the exact peer scheduling and ping-pong launch structure are still simplified. |
 | `Tyr/GPU/Kernels/RingAttnBwd.lean` | `kernels/parallel/ring_attn/ring_attn_h100.cu` | Explicitly speculative phased scaffold; needs correct global causal indexing and exact ring accumulation semantics. |
@@ -74,7 +89,7 @@ into the Lean GPU DSL so that:
 
 ## Planned Tranches
 
-1. `LinearAttnBwd.lean`
+1. `LinearAttnBwd.lean` (`linearAttnBwdSketch`)
 2. Finish exact peer arithmetic and launch boundaries for `RingAttn*.lean`, `UlyssesAttn*.lean`, and `Distributed.lean`
 3. `Mamba2.lean` follow-up
 4. `PrecisionGemm.lean`, `NvFp4Gemm.lean`, `MOE.lean`

@@ -8,28 +8,12 @@
 -/
 
 import Tyr.GPU.Kernels.Prelude
+import Tyr.GPU.Kernels.Support
 
 namespace Tyr.GPU.Kernels.Distributed
 
 open Tyr.GPU
 open Tyr.GPU.Codegen
-
-private def asyncTileLoad {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
-    (dst : ST dtype rows cols layout) (src : GPtr dtype) (coord : RTileCoord)
-    (bytes : Nat) : KernelM Unit := do
-  let sem ← allocSemaphore
-  initSemaphore sem 1
-  expectBytes sem bytes
-  loadGlobalAsync dst src coord sem.id
-  waitSemaphore sem
-
-private def barrierAllDevices (label : String) (barrierId : Nat) : KernelM Unit := do
-  comment s!"Cross-device barrier: {label}"
-  arriveAndWait barrierId
-
-private def maxVec {dtype : GpuFloat} {len : Nat}
-    (dst a b : RV dtype len) : KernelM Unit := do
-  emit (.binary .Max dst.id a.id b.id)
 
 /-! ## Concrete Collectives -/
 
@@ -51,15 +35,15 @@ def allGatherFwd (output_ptr : GPtr GpuFloat.BFloat16) (input_ptr : GPtr GpuFloa
   let outputShared : ST GpuFloat.BFloat16 tileRows tileCols ← allocST .BFloat16 tileRows tileCols
 
   comment "ThunderKittens all_gather: load local shard -> multimem publish -> barrier -> store gathered view"
-  asyncTileLoad inputShared input_ptr coord (tileRows * tileCols * 2)
+  Support.asyncTileLoad inputShared input_ptr coord (tileRows * tileCols * 2)
   load localShard inputShared
   multimemStore multicastShared localShard
-  barrierAllDevices "all_gather publish complete" 0
+  Support.barrierAllDevices "all_gather publish complete" 0
 
   load gathered multicastShared
   store outputShared gathered
   storeGlobal output_ptr outputShared coord
-  barrierAllDevices "all_gather epilogue" 1
+  Support.barrierAllDevices "all_gather epilogue" 1
 
 /-- ThunderKittens-style all-reduce: multimem reduce, republish the reduced tile,
 then store through the local output view. -/
@@ -78,14 +62,14 @@ def allReduceFwd (output_ptr : GPtr GpuFloat.Float32) (input_ptr : GPtr GpuFloat
   let outputShared : ST GpuFloat.Float32 tileRows tileCols ← allocST .Float32 tileRows tileCols
 
   comment "ThunderKittens all_reduce: ld_reduce over multicast source, then publish the reduced result"
-  asyncTileLoad inputShared input_ptr coord (tileRows * tileCols * 4)
+  Support.asyncTileLoad inputShared input_ptr coord (tileRows * tileCols * 4)
   multimemLoadReduce reduced inputShared .Sum
   multimemStore publishShared reduced
-  barrierAllDevices "all_reduce publish complete" 0
+  Support.barrierAllDevices "all_reduce publish complete" 0
 
   store outputShared reduced
   storeGlobal output_ptr outputShared coord
-  barrierAllDevices "all_reduce epilogue" 1
+  Support.barrierAllDevices "all_reduce epilogue" 1
 
 /-- ThunderKittens-style reduce-scatter: reduce a multicast source and store the
 caller-selected shard view. -/
@@ -102,13 +86,13 @@ def reduceScatterFwd (output_ptr : GPtr GpuFloat.Float32) (input_ptr : GPtr GpuF
   let outputShared : ST GpuFloat.Float32 tileRows tileCols ← allocST .Float32 tileRows tileCols
 
   comment "ThunderKittens reduce_scatter: reduce from multimem view, store only the local shard"
-  asyncTileLoad inputShared input_ptr coord (tileRows * tileCols * 4)
+  Support.asyncTileLoad inputShared input_ptr coord (tileRows * tileCols * 4)
   multimemLoadReduce reduced inputShared .Sum
-  barrierAllDevices "reduce_scatter reduction complete" 0
+  Support.barrierAllDevices "reduce_scatter reduction complete" 0
 
   store outputShared reduced
   storeGlobal output_ptr outputShared coord
-  barrierAllDevices "reduce_scatter epilogue" 1
+  Support.barrierAllDevices "reduce_scatter epilogue" 1
 
 /-- Concrete all-to-all surface for head-parallel -> sequence-parallel transport.
 The caller supplies already-partitioned input/output views; this kernel owns the
@@ -117,44 +101,22 @@ TMA load, barrier, and store choreography. -/
 def allToAllHeadsToSeq (output_ptr : GPtr GpuFloat.BFloat16) (input_ptr : GPtr GpuFloat.BFloat16)
     (dev_idx : KVal UInt32) (world_size : KVal UInt32) : KernelM Unit := do
   let _ := (dev_idx, world_size)
-  let tileRows : Nat := 16
-  let tileCols : Nat := 128
   let coord ← blockCoord2D
 
-  let shard : RT GpuFloat.BFloat16 tileRows tileCols ← allocRT .BFloat16 tileRows tileCols
-  let inputShared : ST GpuFloat.BFloat16 tileRows tileCols ← allocST .BFloat16 tileRows tileCols
-  let exchangeShared : ST GpuFloat.BFloat16 tileRows tileCols ← allocST .BFloat16 tileRows tileCols
-
   comment "ThunderKittens all_to_all<scatter=head, gather=seq>"
-  asyncTileLoad inputShared input_ptr coord (tileRows * tileCols * 2)
-  load shard inputShared
-  multimemStore exchangeShared shard
-  barrierAllDevices "all_to_all heads->seq exchange complete" 0
-  storeGlobalAsync output_ptr exchangeShared coord
-  sync
-  barrierAllDevices "all_to_all heads->seq epilogue" 1
+  Support.allToAllTile "heads->seq shard" output_ptr input_ptr coord
+  Support.barrierAllDevices "all_to_all heads->seq epilogue" 1
 
 /-- Concrete all-to-all surface for sequence-parallel -> head-parallel transport. -/
 @[gpu_kernel .SM90]
 def allToAllSeqToHeads (output_ptr : GPtr GpuFloat.BFloat16) (input_ptr : GPtr GpuFloat.BFloat16)
     (dev_idx : KVal UInt32) (world_size : KVal UInt32) : KernelM Unit := do
   let _ := (dev_idx, world_size)
-  let tileRows : Nat := 16
-  let tileCols : Nat := 128
   let coord ← blockCoord2D
 
-  let shard : RT GpuFloat.BFloat16 tileRows tileCols ← allocRT .BFloat16 tileRows tileCols
-  let inputShared : ST GpuFloat.BFloat16 tileRows tileCols ← allocST .BFloat16 tileRows tileCols
-  let exchangeShared : ST GpuFloat.BFloat16 tileRows tileCols ← allocST .BFloat16 tileRows tileCols
-
   comment "ThunderKittens all_to_all<scatter=seq, gather=head>"
-  asyncTileLoad inputShared input_ptr coord (tileRows * tileCols * 2)
-  load shard inputShared
-  multimemStore exchangeShared shard
-  barrierAllDevices "all_to_all seq->heads exchange complete" 0
-  storeGlobalAsync output_ptr exchangeShared coord
-  sync
-  barrierAllDevices "all_to_all seq->heads epilogue" 1
+  Support.allToAllTile "seq->heads shard" output_ptr input_ptr coord
+  Support.barrierAllDevices "all_to_all seq->heads epilogue" 1
 
 /-! ## Communication + GEMM Surfaces -/
 
@@ -192,7 +154,7 @@ def agGemmFwd (c_ptr : GPtr GpuFloat.BFloat16) (a_local_ptr : GPtr GpuFloat.BFlo
       let aLocal : RT GpuFloat.BFloat16 rowBlock redBlock ← allocRT .BFloat16 rowBlock redBlock
       load aLocal aStage
       multimemStore aGatherStage aLocal
-      barrierAllDevices "ag_gemm all-gather row shard ready" 0
+      Support.barrierAllDevices "ag_gemm all-gather row shard ready" 0
 
       expectBytes semB (redBlock * colBlock * 2)
       loadGlobalAsync bStage b_ptr (coord.withRow redIdx.id) semB.id
@@ -268,7 +230,7 @@ def gemmArFwd (c_ptr : GPtr GpuFloat.BFloat16) (a_ptr : GPtr GpuFloat.BFloat16)
     let cReduced : RT GpuFloat.Float32 rowBlock colBlock ← allocRT .Float32 rowBlock colBlock
     load cPartial partialShared
     multimemRed reducedShared cPartial .Sum
-    barrierAllDevices "gemm_ar reduction complete" 0
+    Support.barrierAllDevices "gemm_ar reduction complete" 0
     load cReduced reducedShared
 
     let out : RT GpuFloat.BFloat16 rowBlock colBlock ← allocRT .BFloat16 rowBlock colBlock
@@ -321,7 +283,7 @@ def gemmRsFwd (c_ptr : GPtr GpuFloat.BFloat16) (a_ptr : GPtr GpuFloat.BFloat16)
   store partialShared cAcc
   let cReduced : RT GpuFloat.Float32 rowBlock colBlock ← allocRT .Float32 rowBlock colBlock
   multimemLoadReduce cReduced partialShared .Sum
-  barrierAllDevices "gemm_rs reduction complete" 0
+  Support.barrierAllDevices "gemm_rs reduction complete" 0
 
   let out : RT GpuFloat.BFloat16 rowBlock colBlock ← allocRT .BFloat16 rowBlock colBlock
   convert out cReduced

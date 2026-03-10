@@ -4,6 +4,15 @@ This note tracks which `Tyr.GPU.Kernels` modules are already close to their
 vendored ThunderKittens sources and which ones are still sketch-level DSL
 prototypes.
 
+The catalog is also grouped into logical family entrypoints:
+
+- `Tyr.GPU.Kernels.Attention`
+- `Tyr.GPU.Kernels.StateSpace`
+- `Tyr.GPU.Kernels.Parallel`
+- `Tyr.GPU.Kernels.Gemm`
+- `Tyr.GPU.Kernels.Normalization`
+- `Tyr.GPU.Kernels.Experimental`
+
 ## Canonical Or Closer Ports
 
 | Tyr module | Vendored ThunderKittens source | Notes |
@@ -24,7 +33,7 @@ prototypes.
 
 | Tyr module | Vendored ThunderKittens source | Main gap |
 | --- | --- | --- |
-| `Tyr/GPU/Kernels/LinearAttnBwd.lean` | `thirdparty/ThunderKittens/kernels/linear_attention/linear_attention.cu` | Backward path is a conceptual derivation, not a source-backed port. |
+| `Tyr/GPU/Kernels/LinearAttnBwd.lean` (`linearAttnBwdSketch`) | `thirdparty/ThunderKittens/kernels/linear_attention/linear_attention.cu` | Backward path is now explicitly named as a sketch; it remains a conceptual derivation rather than a source-backed port. |
 | `Tyr/GPU/Kernels/LayerNorm.lean` | `thirdparty/ThunderKittens/kernels/layernorm/layernorm.cu` | Generic tiling sketches, separate from the canonical fused residual port. |
 | `Tyr/GPU/Kernels/LayerNormBwd.lean` | `thirdparty/ThunderKittens/kernels/layernorm/layernorm.cu` | Conceptual backward kernel with broadcast/gradient assumptions still mocked. |
 | `Tyr/GPU/Kernels/FusedLayerNorm.lean` (`FusedLayerNorm.*`) | `thirdparty/ThunderKittens/kernels/layernorm/layernorm.cu` | Kept as sketches for IR experimentation; not the canonical port. |
@@ -40,6 +49,7 @@ prototypes.
 ## Recommended Next Tranches
 
 1. `LinearAttnBwd.lean` once the decayed forward contract is settled and shared derivative helpers exist.
+   Current sketch surface: `linearAttnBwdSketch`.
 2. `Mamba2.lean` to finish the lcsf / warp-specialized structure from `thirdparty/ThunderKittens/kernels/mamba2/mamba2.cu`.
 3. Finish exact peer arithmetic and launch boundaries for `RingAttn*.lean`, `UlyssesAttn*.lean`, and `Distributed.lean` now that the collective/transport substrate is concrete.
 4. `FFTConv.lean`, `Hedgehog.lean`, and the quantized GEMM family once the common pipeline abstractions are tightened.

@@ -1,7 +1,7 @@
 /-
-  Tyr/GPU/Kernels/MambaNew.lean
+  Tyr/GPU/Kernels/Mamba.lean
 
-  Mamba2 (Selective State Space Model) using native Lean4 GPU DSL.
+  Educational Mamba-style sketches using the native Lean4 GPU DSL.
 -/
 
 import Tyr.GPU.Kernels.Prelude
@@ -11,7 +11,7 @@ namespace Tyr.GPU.Kernels
 open Tyr.GPU
 open Tyr.GPU.Codegen
 
-/-- Mamba2 forward kernel
+/-- Educational Mamba-style forward sketch.
 
 Selective State Space Model with:
 1. Cumulative decay tracking via prefix sum
@@ -19,14 +19,14 @@ Selective State Space Model with:
 3. Cross-position state accumulation
 -/
 @[gpu_kernel .SM90]
-def mamba2FwdNew (q_ptr : GPtr GpuFloat.BFloat16) (k_ptr : GPtr GpuFloat.BFloat16)
+def mambaSketchFwd (q_ptr : GPtr GpuFloat.BFloat16) (k_ptr : GPtr GpuFloat.BFloat16)
     (v_ptr : GPtr GpuFloat.BFloat16) (a_ptr : GPtr GpuFloat.Float32)
     (o_ptr : GPtr GpuFloat.BFloat16) (batch_size : KVal UInt64)
     (num_heads : KVal UInt64) (seq_len : KVal UInt64) : KernelM Unit := do
   let _ := (a_ptr, batch_size, num_heads, seq_len)
   let headDim : Nat := 64
   let numChunks : Nat := 16
-  comment "=== Mamba2 Forward ==="
+  comment "=== Mamba Forward Sketch ==="
 
   let coord ← blockCoord2D
 
@@ -98,9 +98,9 @@ def mamba2FwdNew (q_ptr : GPtr GpuFloat.BFloat16) (k_ptr : GPtr GpuFloat.BFloat1
 
     sync
 
-/-- Simplified Mamba SSM recurrence for understanding -/
+/-- Simplified Mamba SSM recurrence sketch for understanding. -/
 @[gpu_kernel .SM90]
-def mambaSimpleNew (x_ptr : GPtr GpuFloat.BFloat16) (A_ptr : GPtr GpuFloat.Float32)
+def mambaSketchRecurrence (x_ptr : GPtr GpuFloat.BFloat16) (A_ptr : GPtr GpuFloat.Float32)
     (out_ptr : GPtr GpuFloat.BFloat16) (seq_len : KVal UInt64) : KernelM Unit := do
   let _ := (x_ptr, A_ptr, out_ptr, seq_len)
   let headDim : Nat := 64
@@ -134,6 +134,12 @@ def mambaSimpleNew (x_ptr : GPtr GpuFloat.BFloat16) (A_ptr : GPtr GpuFloat.Float
     -- dot product
 
     sync
+
+@[deprecated mambaSketchFwd (since := "2026-03-10")]
+abbrev mamba2FwdNew := mambaSketchFwd
+
+@[deprecated mambaSketchRecurrence (since := "2026-03-10")]
+abbrev mambaSimpleNew := mambaSketchRecurrence
 
 -- Verify auto-generated kernel and launch definitions
 

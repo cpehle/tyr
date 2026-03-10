@@ -14,28 +14,12 @@
 -/
 
 import Tyr.GPU.Kernels.Prelude
+import Tyr.GPU.Kernels.Support
 
 namespace Tyr.GPU.Kernels.RingAttn
 
 open Tyr.GPU
 open Tyr.GPU.Codegen
-
-private def asyncTileLoad {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
-    (dst : ST dtype rows cols layout) (src : GPtr dtype) (coord : RTileCoord)
-    (bytes : Nat) : KernelM Unit := do
-  let sem ← allocSemaphore
-  initSemaphore sem 1
-  expectBytes sem bytes
-  loadGlobalAsync dst src coord sem.id
-  waitSemaphore sem
-
-private def barrierAllDevices (label : String) (barrierId : Nat) : KernelM Unit := do
-  comment s!"Cross-device barrier: {label}"
-  arriveAndWait barrierId
-
-private def maxVec {dtype : GpuFloat} {len : Nat}
-    (dst a b : RV dtype len) : KernelM Unit := do
-  emit (.binary .Max dst.id a.id b.id)
 
 /-- Ring phase 1: compute attention for the current K/V shard and emit a partial
 output tile plus its per-row log-sum-exp summary. -/
@@ -70,9 +54,9 @@ def ringAttnPartial (Q_ptr : GPtr GpuFloat.BFloat16) (K_curr_ptr : GPtr GpuFloat
   let lseShared : SV GpuFloat.Float32 qoBlock ← allocSV .Float32 qoBlock
 
   comment "Ring partial phase: stationary Q, current-ring K/V"
-  asyncTileLoad qShared Q_ptr coord (qoBlock * d * 2)
-  asyncTileLoad kShared K_curr_ptr coord (kvBlock * d * 2)
-  asyncTileLoad vShared V_curr_ptr coord (kvBlock * d * 2)
+  Support.asyncTileLoad qShared Q_ptr coord (qoBlock * d * 2)
+  Support.asyncTileLoad kShared K_curr_ptr coord (kvBlock * d * 2)
+  Support.asyncTileLoad vShared V_curr_ptr coord (kvBlock * d * 2)
   sync
   load q qShared
   load k kShared
@@ -121,17 +105,17 @@ def ringAttnComm (K_next_ptr : GPtr GpuFloat.BFloat16) (V_next_ptr : GPtr GpuFlo
   let vExchange : ST GpuFloat.BFloat16 kvBlock d ← allocST .BFloat16 kvBlock d
 
   comment "Ring communication phase: current K/V -> next ping-pong buffer"
-  asyncTileLoad kShared K_curr_ptr coord (kvBlock * d * 2)
-  asyncTileLoad vShared V_curr_ptr coord (kvBlock * d * 2)
+  Support.asyncTileLoad kShared K_curr_ptr coord (kvBlock * d * 2)
+  Support.asyncTileLoad vShared V_curr_ptr coord (kvBlock * d * 2)
   load kCurr kShared
   load vCurr vShared
   multimemStore kExchange kCurr
   multimemStore vExchange vCurr
-  barrierAllDevices "ring K/V transfer complete" 0
+  Support.barrierAllDevices "ring K/V transfer complete" 0
   storeGlobalAsync K_next_ptr kExchange coord
   storeGlobalAsync V_next_ptr vExchange coord
   sync
-  barrierAllDevices "ring K/V epilogue" 1
+  Support.barrierAllDevices "ring K/V epilogue" 1
 
 /-- Ring phase 3: merge the running `(O, L)` state with the current partial
 contribution using the standard log-sum-exp reduction. -/
@@ -177,7 +161,7 @@ def ringAttnReduce (O_running_ptr : GPtr GpuFloat.Float32) (O_block_ptr : GPtr G
   loadVec lRunning lRunningShared
   loadVec lBlock lBlockShared
 
-  maxVec lMax lRunning lBlock
+  Support.maxVec lMax lRunning lBlock
   subVec lScaleRunning lRunning lMax
   expVec lScaleRunning lScaleRunning
   subVec lScaleBlock lBlock lMax
@@ -216,6 +200,6 @@ def ringAttnFull (Q_ptr : GPtr GpuFloat.BFloat16) (K_curr_ptr : GPtr GpuFloat.BF
   comment "  1. ringAttnPartial on the current K/V shard"
   comment "  2. ringAttnComm to advance K/V around the ring"
   comment "  3. ringAttnReduce once a running O/L state already exists"
-  barrierAllDevices "ring orchestration handoff" 0
+  Support.barrierAllDevices "ring orchestration handoff" 0
 
 end Tyr.GPU.Kernels.RingAttn

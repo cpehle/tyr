@@ -51,7 +51,7 @@ def mamba2Bwd (q_ptr : GPtr GpuFloat.BFloat16) (k_ptr : GPtr GpuFloat.BFloat16)
 
   let coord ← blockCoord2D
   
-  let seqTile : Nat := 16 -- Matching mamba2FwdNew dimensions
+  let seqTile : Nat := 16 -- Matching the educational mamba sketch dimensions
   let headDim : Nat := 64
   
   comment "=== Mamba2 Backward ==="
@@ -62,10 +62,10 @@ def mamba2Bwd (q_ptr : GPtr GpuFloat.BFloat16) (k_ptr : GPtr GpuFloat.BFloat16)
   let v : RT GpuFloat.BFloat16 seqTile headDim .Col ← allocRT .BFloat16 seqTile headDim .Col
   let dO : RT GpuFloat.BFloat16 seqTile headDim ← allocRT .BFloat16 seqTile headDim
   let _a : RT GpuFloat.Float32 seqTile seqTile ← allocRT .Float32 seqTile seqTile -- Stores 'A' broadcasted or processed?
-  -- Actually A is vector of length seqTile (per chunk) usually. 
-  -- But mamba2FwdNew uses `localDecay` 16x16.
+  -- Actually A is vector of length seqTile (per chunk) usually.
+  -- But the sketch forward uses `localDecay` 16x16.
   -- We'll load A into a vector-like structure or diagonal of a tile?
-  -- `mamba2FwdNew` used `cumsumRow localDecay localDecay`. 
+  -- `mambaSketchFwd` used `cumsumRow localDecay localDecay`.
   -- Implies `localDecay` init with A on diagonal or first col?
   -- Let's assume A is loaded into a row/col vector and broadcasted.
   

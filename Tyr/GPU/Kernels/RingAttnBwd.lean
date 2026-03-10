@@ -8,24 +8,12 @@
 -/
 
 import Tyr.GPU.Kernels.Prelude
+import Tyr.GPU.Kernels.Support
 
 namespace Tyr.GPU.Kernels.RingAttn
 
 open Tyr.GPU
 open Tyr.GPU.Codegen
-
-private def asyncTileLoad {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
-    (dst : ST dtype rows cols layout) (src : GPtr dtype) (coord : RTileCoord)
-    (bytes : Nat) : KernelM Unit := do
-  let sem ← allocSemaphore
-  initSemaphore sem 1
-  expectBytes sem bytes
-  loadGlobalAsync dst src coord sem.id
-  waitSemaphore sem
-
-private def barrierAllDevices (label : String) (barrierId : Nat) : KernelM Unit := do
-  comment s!"Cross-device barrier: {label}"
-  arriveAndWait barrierId
 
 private def ringBwdPartialStep
     (q : RT GpuFloat.BFloat16 64 64) (dO : RT GpuFloat.BFloat16 64 64)
@@ -87,7 +75,7 @@ private def ringBwdCommStep
   multimemStore vShared v
   multimemStore dKShared dK
   multimemStore dVShared dV
-  barrierAllDevices "ring backward communication complete" 0
+  Support.barrierAllDevices "ring backward communication complete" 0
   load k kShared
   load v vShared
   load dK dKShared
@@ -148,10 +136,10 @@ def ringAttnBwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat16
   let lseVec : RV GpuFloat.Float32 64 ← allocRV .Float32 64
   let dVec : RV GpuFloat.Float32 64 ← allocRV .Float32 64
 
-  asyncTileLoad qShared Q_ptr coord (64 * 64 * 2)
-  asyncTileLoad dOShared dO_ptr coord (64 * 64 * 2)
-  asyncTileLoad kShared K_ptr coord (64 * 64 * 2)
-  asyncTileLoad vShared V_ptr coord (64 * 64 * 2)
+  Support.asyncTileLoad qShared Q_ptr coord (64 * 64 * 2)
+  Support.asyncTileLoad dOShared dO_ptr coord (64 * 64 * 2)
+  Support.asyncTileLoad kShared K_ptr coord (64 * 64 * 2)
+  Support.asyncTileLoad vShared V_ptr coord (64 * 64 * 2)
   loadVecGlobalRow lseShared L_ptr coord
   loadVecGlobalRow dVecShared D_ptr coord
   sync
@@ -165,6 +153,6 @@ def ringAttnBwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat16
   ringBwdPartialStep q dO k v lseVec dVec dQ dK dV
   ringBwdCommStep k v dK dV kShared vShared dKShared dVShared
   ringBwdFinalize dQ dK dV dQ_ptr dK_ptr dV_ptr coord
-  barrierAllDevices "ring backward finalize" 1
+  Support.barrierAllDevices "ring backward finalize" 1
 
 end Tyr.GPU.Kernels.RingAttn

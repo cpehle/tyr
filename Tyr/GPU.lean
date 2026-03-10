@@ -65,9 +65,11 @@ def addKernel
 
 ## Canonical Example Declarations
 
-Use `Tyr.GPU.Kernels` for the full kernel catalog, or
-`Tyr.GPU.Kernels.Examples` for the curated documentation entrypoint with concrete
-`@[gpu_kernel]` declarations:
+Use `Tyr.GPU.Kernels` for the full kernel catalog, or one of the family modules
+such as `Tyr.GPU.Kernels.Attention`, `StateSpace`, `Parallel`, `Gemm`, or
+`Normalization` when you want a narrower slice of the catalog. For the curated
+documentation entrypoint with concrete `@[gpu_kernel]` declarations, use
+`Tyr.GPU.Kernels.Examples`:
 
 - `Tyr.GPU.Kernels.Examples.simpleGemm`
 - `Tyr.GPU.Kernels.Examples.flashAttnFwd`

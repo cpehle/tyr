@@ -1,8 +1,12 @@
 /-
   Tyr/GPU/Kernels/LinearAttnBwd.lean
 
-  Linear Attention backward kernel implementation.
-  Computes gradients dQ, dK, dV for linear attention.
+  Educational decayed linear attention backward sketches.
+
+  The vendored ThunderKittens `linear_attention.cu` source only provides the
+  forward kernel. The kernels in this module therefore remain conceptual
+  derivative sketches rather than source-backed ports, and the exported names
+  say so explicitly.
 -/
 
 import Tyr.GPU.Kernels.Prelude
@@ -29,7 +33,7 @@ Backward:
 -/
 
 @[gpu_kernel .SM90]
-def linearAttnBwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat16)
+def linearAttnBwdSketch (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat16)
     (V_ptr : GPtr GpuFloat.BFloat16) (dO_ptr : GPtr GpuFloat.BFloat16)
     (dQ_ptr : GPtr GpuFloat.Float32) (dK_ptr : GPtr GpuFloat.Float32)
     (dV_ptr : GPtr GpuFloat.Float32)
@@ -38,7 +42,7 @@ def linearAttnBwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat
     : KernelM Unit := do
   let _ := (Q_ptr, K_ptr, V_ptr, dO_ptr, dQ_ptr, dK_ptr, dV_ptr, state_ptr, seq_len)
   let tileSize : Nat := 64
-  comment "=== Linear Attention Backward ==="
+  comment "=== Linear Attention Backward Sketch ==="
 
   -- Inputs
   let q : RT GpuFloat.BFloat16 tileSize tileSize ← allocRT .BFloat16 tileSize tileSize
@@ -160,8 +164,8 @@ def linearAttnBwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat
 /-! ## Causal Linear Attention Backward -/
 
 @[gpu_kernel .SM90]
-def causalLinearAttnBwd : KernelM Unit := do
-  comment "=== Causal Linear Attention Backward ==="
+def causalLinearAttnBwdSketch : KernelM Unit := do
+  comment "=== Causal Linear Attention Backward Sketch ==="
   comment "Iterate backwards, maintaining dS state"
   
   let _dS : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
@@ -182,5 +186,11 @@ def causalLinearAttnBwd : KernelM Unit := do
 -- Verify
 
 -- Generate
+
+@[deprecated linearAttnBwdSketch (since := "2026-03-10")]
+abbrev linearAttnBwd := linearAttnBwdSketch
+
+@[deprecated causalLinearAttnBwdSketch (since := "2026-03-10")]
+abbrev causalLinearAttnBwd := causalLinearAttnBwdSketch
 
 end Tyr.GPU.Kernels.LinearAttn

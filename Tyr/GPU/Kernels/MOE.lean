@@ -17,24 +17,12 @@
 -/
 
 import Tyr.GPU.Kernels.Prelude
+import Tyr.GPU.Kernels.Support
 
 namespace Tyr.GPU.Kernels.MOE
 
 open Tyr.GPU
 open Tyr.GPU.Codegen
-
-private def asyncTileLoad {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
-    (dst : ST dtype rows cols layout) (src : GPtr dtype) (coord : RTileCoord)
-    (bytes : Nat) : KernelM Unit := do
-  let sem ← allocSemaphore
-  initSemaphore sem 1
-  expectBytes sem bytes
-  loadGlobalAsync dst src coord sem.id
-  waitSemaphore sem
-
-private def barrierAllDevices (label : String) (barrierId : Nat) : KernelM Unit := do
-  comment s!"Cross-device barrier: {label}"
-  arriveAndWait barrierId
 
 private def groupedExpertMma
     (tokens : RT GpuFloat.BFloat16 128 64 .Row)
@@ -70,20 +58,20 @@ def tkMoeDispatch
   let outShared : ST GpuFloat.BFloat16 tokenRows hidden ← allocST .BFloat16 tokenRows hidden
   let metaShared : ST GpuFloat.Float32 1 64 ← allocST .Float32 1 64
 
-  asyncTileLoad preShared pre_tokens_ptr coord (tokenRows * hidden * 2)
-  asyncTileLoad metaShared dispatch_meta_ptr coord (64 * 4)
+  Support.asyncTileLoad preShared pre_tokens_ptr coord (tokenRows * hidden * 2)
+  Support.asyncTileLoad metaShared dispatch_meta_ptr coord (64 * 4)
   load preTokens preShared
   load dispatchMeta metaShared
 
   comment "Publish dispatched token block through the cluster-visible multimem stage"
   multimemStore publishShared preTokens
-  barrierAllDevices "moe dispatch publish complete" 0
+  Support.barrierAllDevices "moe dispatch publish complete" 0
 
   comment "Consume the local post-dispatch view after the barrier"
   load dispatched publishShared
   store outShared dispatched
   storeGlobal post_tokens_ptr outShared coord
-  barrierAllDevices "moe dispatch epilogue" 1
+  Support.barrierAllDevices "moe dispatch epilogue" 1
 
 /-- Grouped expert GEMM over already-dispatched local tokens.
 
@@ -123,8 +111,8 @@ def tkMoeGroupedGemm
   for stageIdx in krange 0 pipelineStages do
     let tokenCoord := coord.withCol stageIdx.id
     let weightCoord := coord.withRow stageIdx.id
-    asyncTileLoad tokenShared post_tokens_ptr tokenCoord (rowBlock * redBlock * 2)
-    asyncTileLoad weightShared weights_ptr weightCoord (redBlock * colBlock * 2)
+    Support.asyncTileLoad tokenShared post_tokens_ptr tokenCoord (rowBlock * redBlock * 2)
+    Support.asyncTileLoad weightShared weights_ptr weightCoord (redBlock * colBlock * 2)
     load tokens tokenShared
     load weights weightShared
     groupedExpertMma tokens weights accum
