@@ -4,16 +4,8 @@
   Rotary Position Embedding (RoPE) backward kernel implementation.
   Computes gradients w.r.t input x.
 -/
-import Tyr.GPU.Types
-import Tyr.GPU.Codegen.Var
-import Tyr.GPU.Codegen.TileTypes
-import Tyr.GPU.Codegen.IR
-import Tyr.GPU.Codegen.Monad
-import Tyr.GPU.Codegen.Ops
-import Tyr.GPU.Codegen.Loop
-import Tyr.GPU.Codegen.GlobalLayout
-import Tyr.GPU.Codegen.EmitNew
-import Tyr.GPU.Codegen.Attribute
+
+import Tyr.GPU.Kernels.Prelude
 
 namespace Tyr.GPU.Kernels.Rotary
 
@@ -133,11 +125,7 @@ def rotaryBwd (dO_ptr : GPtr GpuFloat.BFloat16) (sin_ptr : GPtr GpuFloat.Float32
     sync
 
 -- Verify auto-generated kernel
-#check rotaryBwd.kernel
-#check rotaryBwd.launch
 
 -- Generate
-#eval IO.println "=== Rotary Backward ===" *>
-      IO.println (generateKernel rotaryBwd.kernel)
 
 end Tyr.GPU.Kernels.Rotary

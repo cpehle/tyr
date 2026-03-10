@@ -11,16 +11,8 @@
   - S = φ(K)^T @ V  (state accumulation)
   - O = φ(Q) @ S    (output computation)
 -/
-import Tyr.GPU.Types
-import Tyr.GPU.Codegen.Var
-import Tyr.GPU.Codegen.TileTypes
-import Tyr.GPU.Codegen.IR
-import Tyr.GPU.Codegen.Monad
-import Tyr.GPU.Codegen.Ops
-import Tyr.GPU.Codegen.Loop
-import Tyr.GPU.Codegen.GlobalLayout
-import Tyr.GPU.Codegen.EmitNew
-import Tyr.GPU.Codegen.Attribute
+
+import Tyr.GPU.Kernels.Prelude
 
 namespace Tyr.GPU.Kernels.LinearAttn
 
@@ -133,8 +125,6 @@ def linearAttnFwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat
   storeGlobal state_ptr stateShared coord
 
 -- Verify auto-generated kernel
-#check linearAttnFwd.kernel
-#check linearAttnFwd.launch
 
 /-! ## Causal Linear Attention
 
@@ -221,11 +211,7 @@ def causalLinearAttnFwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.
     sync
 
 -- Verify auto-generated kernels
-#check causalLinearAttnFwd.kernel
-#check causalLinearAttnFwd.launch
 
 -- Print generated kernels
-#eval IO.println "=== Linear Attention ===" *> IO.println (generateKernel linearAttnFwd.kernel)
-#eval IO.println "\n=== Causal Linear Attention ===" *> IO.println (generateKernel causalLinearAttnFwd.kernel)
 
 end Tyr.GPU.Kernels.LinearAttn

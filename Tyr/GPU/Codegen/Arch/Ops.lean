@@ -27,6 +27,9 @@ namespace Tyr.GPU.Codegen.Arch
 open Tyr.GPU
 open Tyr.GPU.Codegen
 
+private def liftPortableOp {arch : ArchLevel} (m : KernelM α) : ArchKernelM arch α :=
+  ArchKernelM.liftPortable <| ArchKernelM.liftKernelM m
+
 /-! ## MMA Operation Dispatch
 
 MMA uses warp mma on Ampere and WGMMA on Hopper+.
@@ -267,127 +270,119 @@ variable {arch : ArchLevel}
 def archLoad {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
     (dst : RT dtype rows cols layout)
     (src : ST dtype rows cols layout) : ArchKernelM arch Unit :=
-  ⟨emit (.load dst.id src.id)⟩
+  liftPortableOp <| Codegen.load dst src
 
 /-- Store from register to shared -/
 def archStore {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
     (dst : ST dtype rows cols layout)
     (src : RT dtype rows cols layout) : ArchKernelM arch Unit :=
-  ⟨emit (.store dst.id src.id)⟩
+  liftPortableOp <| Codegen.store dst src
 
 /-- Element-wise add -/
 def archAdd {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
     (dst a b : RT dtype rows cols layout) : ArchKernelM arch Unit :=
-  ⟨emit (.binary .Add dst.id a.id b.id)⟩
+  liftPortableOp <| Codegen.add dst a b
 
 /-- Element-wise subtract -/
 def archSub {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
     (dst a b : RT dtype rows cols layout) : ArchKernelM arch Unit :=
-  ⟨emit (.binary .Sub dst.id a.id b.id)⟩
+  liftPortableOp <| Codegen.sub dst a b
 
 /-- Element-wise multiply -/
 def archMul {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
     (dst a b : RT dtype rows cols layout) : ArchKernelM arch Unit :=
-  ⟨emit (.binary .Mul dst.id a.id b.id)⟩
+  liftPortableOp <| Codegen.mul dst a b
 
 /-- Element-wise divide -/
 def archDiv {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
     (dst a b : RT dtype rows cols layout) : ArchKernelM arch Unit :=
-  ⟨emit (.binary .Div dst.id a.id b.id)⟩
+  liftPortableOp <| Codegen.div dst a b
 
 /-- Element-wise exp -/
 def archExp {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
     (dst src : RT dtype rows cols layout) : ArchKernelM arch Unit :=
-  ⟨emit (.unary .Exp dst.id src.id)⟩
+  liftPortableOp <| Codegen.exp dst src
 
 /-- Element-wise log -/
 def archLog {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
     (dst src : RT dtype rows cols layout) : ArchKernelM arch Unit :=
-  ⟨emit (.unary .Log dst.id src.id)⟩
+  liftPortableOp <| Codegen.log dst src
 
 /-- Zero a tile -/
 def archZero {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
     (t : RT dtype rows cols layout) : ArchKernelM arch Unit :=
-  ⟨emit (.unary .Zero t.id t.id)⟩
+  liftPortableOp <| Codegen.zero t
 
 /-- Copy tile -/
 def archCopy {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
     (dst src : RT dtype rows cols layout) : ArchKernelM arch Unit :=
-  ⟨emit (.unary .Copy dst.id src.id)⟩
+  liftPortableOp <| Codegen.copy dst src
 
 /-- Type conversion -/
 def archConvert {dtype1 dtype2 : GpuFloat} {rows cols : Nat} {layout : TileLayout}
     (dst : RT dtype1 rows cols layout)
     (src : RT dtype2 rows cols layout) : ArchKernelM arch Unit :=
-  ⟨emit (.convert dst.id src.id)⟩
+  liftPortableOp <| Codegen.convert dst src
 
 /-- Row-wise max reduction -/
 def archRowMax {dtype : GpuFloat} {rows cols : Nat}
     (dst : RV dtype rows)
     (src : RT dtype rows cols .Row) : ArchKernelM arch Unit :=
-  ⟨emit (.reduce .Max .Row dst.id src.id)⟩
+  liftPortableOp <| Codegen.rowMax dst src
 
 /-- Row-wise sum reduction -/
 def archRowSum {dtype : GpuFloat} {rows cols : Nat}
     (dst : RV dtype rows)
     (src : RT dtype rows cols .Row) : ArchKernelM arch Unit :=
-  ⟨emit (.reduce .Sum .Row dst.id src.id)⟩
+  liftPortableOp <| Codegen.rowSum dst src
 
 /-- Causal mask -/
 def archMakeCausal {dtype : GpuFloat} {rows cols : Nat}
     (dst src : RT dtype rows cols .Row)
     (fillVal : Option Float := none) : ArchKernelM arch Unit :=
-  ⟨emit (.mask .MakeCausal dst.id src.id fillVal)⟩
+  liftPortableOp <| Codegen.makeCausal dst src fillVal
 
 /-- Subtract column vector from each column -/
 def archSubCol {dtype : GpuFloat} {rows cols : Nat}
     (dst tile : RT dtype rows cols .Row)
     (vec : RV dtype rows) : ArchKernelM arch Unit :=
-  ⟨emit (.binaryBroadcast .Sub .Col dst.id tile.id vec.id)⟩
+  liftPortableOp <| Codegen.subCol dst tile vec
 
 /-- Divide each column by vector -/
 def archDivCol {dtype : GpuFloat} {rows cols : Nat}
     (dst tile : RT dtype rows cols .Row)
     (vec : RV dtype rows) : ArchKernelM arch Unit :=
-  ⟨emit (.binaryBroadcast .Div .Col dst.id tile.id vec.id)⟩
+  liftPortableOp <| Codegen.divCol dst tile vec
 
 /-- Allocate a register vector -/
-def archAllocRV (dtype : GpuFloat) (len : Nat) : ArchKernelM arch (RV dtype len) := ⟨do
-  let v ← freshVar
-  emit (.declRV v dtype len)
-  pure ⟨v⟩⟩
+def archAllocRV (dtype : GpuFloat) (len : Nat) : ArchKernelM arch (RV dtype len) :=
+  liftPortableOp <| Codegen.allocRV dtype len
 
 /-- Allocate a zero-initialized register vector -/
-def archZeroRV (dtype : GpuFloat) (len : Nat) : ArchKernelM arch (RV dtype len) := ⟨do
-  let vec ← Codegen.allocRV dtype len
-  emit (.unary .Zero vec.id vec.id)
-  pure vec⟩
+def archZeroRV (dtype : GpuFloat) (len : Nat) : ArchKernelM arch (RV dtype len) :=
+  liftPortableOp <| Codegen.zeroRV dtype len
 
 /-- Allocate vector with negative infinity -/
-def archNegInftyRV (dtype : GpuFloat) (len : Nat) : ArchKernelM arch (RV dtype len) := ⟨do
-  let vec ← Codegen.allocRV dtype len
-  emit (.unary .NegInfty vec.id vec.id)
-  pure vec⟩
+def archNegInftyRV (dtype : GpuFloat) (len : Nat) : ArchKernelM arch (RV dtype len) :=
+  liftPortableOp <| Codegen.negInftyRV dtype len
 
 /-- Allocate a semaphore -/
-def archAllocSemaphore : ArchKernelM arch Semaphore := ⟨do
-  let v ← freshVar
-  emit (.declSemaphore v)
-  pure ⟨v⟩⟩
+def archAllocSemaphore : ArchKernelM arch Semaphore :=
+  liftPortableOp Codegen.allocSemaphore
 
 /-- Row-wise max with accumulator -/
 def archRowMaxAccum {dtype : GpuFloat} {rows cols : Nat}
     (dst : RV dtype rows)
     (src : RT dtype rows cols .Row)
     (accum : RV dtype rows) : ArchKernelM arch Unit :=
-  ⟨emit (.reduceAccum .Max .Row dst.id src.id accum.id)⟩
+  liftPortableOp <| Codegen.rowMaxAccum dst src accum
 
 /-- Row-wise sum with accumulator -/
 def archRowSumAccum {dtype : GpuFloat} {rows cols : Nat}
     (dst : RV dtype rows)
     (src : RT dtype rows cols .Row)
     (accum : RV dtype rows) : ArchKernelM arch Unit :=
-  ⟨emit (.reduceAccum .Sum .Row dst.id src.id accum.id)⟩
+  liftPortableOp <| Codegen.rowSumAccum dst src accum
 
 end ArchOps
 

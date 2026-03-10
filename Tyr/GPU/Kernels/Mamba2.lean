@@ -1,23 +1,17 @@
 /-
   Tyr/GPU/Kernels/Mamba2.lean
 
-  Mamba2 state-space model kernel implementation.
+  Mamba2 state-space model forward kernels.
   Based on ThunderKittens patterns:
   - Hillis-Steele prefix sum for cumulative decay
   - Exponential state decay computation
   - Attention with decay masking
   - State accumulation across chunks
+
+  Backward ownership lives in `Tyr.GPU.Kernels.MambaBwd`.
 -/
-import Tyr.GPU.Types
-import Tyr.GPU.Codegen.Var
-import Tyr.GPU.Codegen.TileTypes
-import Tyr.GPU.Codegen.IR
-import Tyr.GPU.Codegen.Monad
-import Tyr.GPU.Codegen.Ops
-import Tyr.GPU.Codegen.Loop
-import Tyr.GPU.Codegen.GlobalLayout
-import Tyr.GPU.Codegen.EmitNew
-import Tyr.GPU.Codegen.Attribute
+
+import Tyr.GPU.Kernels.Prelude
 
 namespace Tyr.GPU.Kernels.Mamba2
 
@@ -125,117 +119,5 @@ def mamba2Fwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat16)
     sync
 
 -- Verify auto-generated kernel
-#check mamba2Fwd.kernel
-#check mamba2Fwd.launch
-
-/-! ## Mamba2 Backward Kernel -/
-
-/-- Mamba2 backward pass -/
-@[gpu_kernel .SM90]
-def mamba2Bwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat16)
-    (V_ptr : GPtr GpuFloat.BFloat16) (A_ptr : GPtr GpuFloat.Float32)
-    (dO_ptr : GPtr GpuFloat.Float32) (dQ_ptr : GPtr GpuFloat.Float32)
-    (dK_ptr : GPtr GpuFloat.Float32) (dV_ptr : GPtr GpuFloat.Float32)
-    (dA_ptr : GPtr GpuFloat.Float32) : KernelM Unit := do
-  comment "=== Mamba2 Backward Pass ==="
-
-  let numChunks : Nat := 8
-
-  let coord ← blockCoord2D
-
-  -- Gradient tiles
-  let dQ : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
-  let dK : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
-  let dV : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
-
-  -- Input tiles
-  let q : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-  let k : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-  let v : RT GpuFloat.BFloat16 64 64 .Col ← allocRT .BFloat16 64 64 .Col
-  let dO : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
-
-  -- Intermediate tiles
-  let att : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
-  let decay : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
-  let dAtt : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
-
-  -- Shared memory
-  let qShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
-  let kShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
-  let vShared : ST GpuFloat.BFloat16 64 64 .Col ← allocST .BFloat16 64 64 .Col
-  let dOShared : ST GpuFloat.Float32 64 64 ← allocST .Float32 64 64
-  let dQShared : ST GpuFloat.Float32 64 64 ← allocST .Float32 64 64
-  let dKShared : ST GpuFloat.Float32 64 64 ← allocST .Float32 64 64
-  let dVShared : ST GpuFloat.Float32 64 64 ← allocST .Float32 64 64
-
-  comment "Backward loop - reverse order"
-  for chunkIdx in krange 0 numChunks do
-    loadGlobal qShared Q_ptr (coord.withRow chunkIdx.id)
-    loadGlobal kShared K_ptr (coord.withRow chunkIdx.id)
-    loadGlobal vShared V_ptr (coord.withRow chunkIdx.id)
-    loadGlobal dOShared dO_ptr (coord.withRow chunkIdx.id)
-    sync
-    load q qShared
-    load k kShared
-    load v vShared
-    load dO dOShared
-
-    comment "Recompute forward attention"
-    mmaT att q k att
-    makeCausal decay decay (some 0.0)
-    mul att att decay
-
-    comment "Compute dV = att^T @ dO"
-    let attT : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
-    transpose attT att
-    let attTBf : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-    convert attTBf attT
-    let dOBf : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-    convert dOBf dO
-    let dOBfCol : RT GpuFloat.BFloat16 64 64 .Col ← allocRT .BFloat16 64 64 .Col
-    swapLayout dOBfCol dOBf
-    mma dV attTBf dOBfCol dV
-
-    comment "Compute dAtt = dO @ V^T"
-    let vT : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-    swapLayout vT v
-    mmaT dAtt dOBf vT dAtt
-
-    comment "Apply decay mask to dAtt"
-    mul dAtt dAtt decay
-
-    comment "Compute dQ = dAtt @ K"
-    let dAttBf : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-    convert dAttBf dAtt
-    let kCol : RT GpuFloat.BFloat16 64 64 .Col ← allocRT .BFloat16 64 64 .Col
-    swapLayout kCol k
-    mma dQ dAttBf kCol dQ
-
-    comment "Compute dK = dAtt^T @ Q"
-    let dAttT : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
-    transpose dAttT dAtt
-    let dAttTBf : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-    convert dAttTBf dAttT
-    let qCol : RT GpuFloat.BFloat16 64 64 .Col ← allocRT .BFloat16 64 64 .Col
-    swapLayout qCol q
-    mma dK dAttTBf qCol dK
-
-    comment "Store gradients with atomic add"
-    store dQShared dQ
-    store dKShared dK
-    store dVShared dV
-    storeGlobalAdd dQ_ptr dQShared (coord.withRow chunkIdx.id)
-    storeGlobalAdd dK_ptr dKShared (coord.withRow chunkIdx.id)
-    storeGlobalAdd dV_ptr dVShared (coord.withRow chunkIdx.id)
-
-    sync
-
--- Verify auto-generated kernels
-#check mamba2Bwd.kernel
-#check mamba2Bwd.launch
-
--- Print generated kernels
-#eval IO.println "=== Mamba2 Forward ===" *> IO.println (generateKernel mamba2Fwd.kernel)
-#eval IO.println "\n=== Mamba2 Backward ===" *> IO.println (generateKernel mamba2Bwd.kernel)
 
 end Tyr.GPU.Kernels.Mamba2

@@ -9,16 +9,8 @@
   - Fused linear layer + activation
   - Hardware-accelerated fast_tanh for GELU
 -/
-import Tyr.GPU.Types
-import Tyr.GPU.Codegen.Var
-import Tyr.GPU.Codegen.TileTypes
-import Tyr.GPU.Codegen.IR
-import Tyr.GPU.Codegen.Monad
-import Tyr.GPU.Codegen.Ops
-import Tyr.GPU.Codegen.Loop
-import Tyr.GPU.Codegen.GlobalLayout
-import Tyr.GPU.Codegen.EmitNew
-import Tyr.GPU.Codegen.Attribute
+
+import Tyr.GPU.Kernels.Prelude
 
 namespace Tyr.GPU.Kernels.Flux
 
@@ -118,8 +110,6 @@ def fluxGeluFwd (X_ptr : GPtr GpuFloat.BFloat16) (W_ptr : GPtr GpuFloat.BFloat16
   storeGlobal O_ptr outShared coord
 
 -- Verify auto-generated kernel
-#check fluxGeluFwd.kernel
-#check fluxGeluFwd.launch
 
 /-! ## Flux Gate Kernel (SwiGLU-style)
 
@@ -201,7 +191,6 @@ def fluxGateFwd (X_ptr : GPtr GpuFloat.BFloat16) (Gate_ptr : GPtr GpuFloat.BFloa
     sync
     storeGlobal O_ptr outShared tileCoord
 
-
 /-! ## Flux Linear + SiLU (GLU variant)
 
 Linear transformation followed by SiLU gating.
@@ -280,12 +269,7 @@ def fluxSiluFwd (X_ptr : GPtr GpuFloat.BFloat16) (W_up_ptr : GPtr GpuFloat.BFloa
   storeGlobal O_ptr outShared coord
 
 -- Verify auto-generated kernel
-#check fluxSiluFwd.kernel
-#check fluxSiluFwd.launch
 
 -- Print generated kernels
-#eval IO.println "=== Flux GELU ===" *> IO.println (generateKernel fluxGeluFwd.kernel)
-#eval IO.println "\n=== Flux Gate ===" *> IO.println (generateKernel fluxGateFwd.kernel)
-#eval IO.println "\n=== Flux SiLU ===" *> IO.println (generateKernel fluxSiluFwd.kernel)
 
 end Tyr.GPU.Kernels.Flux

@@ -10,16 +10,8 @@
   - Custom multiply-slice operations for efficient computation
   - Causal attention via state propagation
 -/
-import Tyr.GPU.Types
-import Tyr.GPU.Codegen.Var
-import Tyr.GPU.Codegen.TileTypes
-import Tyr.GPU.Codegen.IR
-import Tyr.GPU.Codegen.Monad
-import Tyr.GPU.Codegen.Ops
-import Tyr.GPU.Codegen.Loop
-import Tyr.GPU.Codegen.GlobalLayout
-import Tyr.GPU.Codegen.EmitNew
-import Tyr.GPU.Codegen.Attribute
+
+import Tyr.GPU.Kernels.Prelude
 
 namespace Tyr.GPU.Kernels.Based
 
@@ -207,8 +199,6 @@ def basedLinearAttnFwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.B
   storeGlobal _kv_state_ptr a1Shared coord
 
 -- Verify auto-generated kernel
-#check basedLinearAttnFwd.kernel
-#check basedLinearAttnFwd.launch
 
 /-! ## Based Linear Attention - Inference Mode
 
@@ -316,10 +306,7 @@ def basedLinearAttnInference (q_ptr : GPtr GpuFloat.BFloat16) (k_ptr : GPtr GpuF
   storeVecGlobalCoord o_ptr oShared coord.c
 
 -- Verify auto-generated kernel
-#check basedLinearAttnInference.kernel
-#check basedLinearAttnInference.launch
 
 -- Print generated kernels
-#eval IO.println "=== Based Linear Attn ===" *> IO.println (generateKernel basedLinearAttnFwd.kernel)
 
 end Tyr.GPU.Kernels.Based

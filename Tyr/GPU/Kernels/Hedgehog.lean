@@ -11,16 +11,8 @@
   - exp2 for efficient softmax
   - Block-wise processing with state carry-over
 -/
-import Tyr.GPU.Types
-import Tyr.GPU.Codegen.Var
-import Tyr.GPU.Codegen.TileTypes
-import Tyr.GPU.Codegen.IR
-import Tyr.GPU.Codegen.Monad
-import Tyr.GPU.Codegen.Ops
-import Tyr.GPU.Codegen.Loop
-import Tyr.GPU.Codegen.GlobalLayout
-import Tyr.GPU.Codegen.EmitNew
-import Tyr.GPU.Codegen.Attribute
+
+import Tyr.GPU.Kernels.Prelude
 
 namespace Tyr.GPU.Kernels.Hedgehog
 
@@ -199,8 +191,6 @@ def hedgehogFwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat16
   storeVecGlobalCoord z_state_ptr zStateShared coord.c
 
 -- Verify auto-generated kernel
-#check hedgehogFwd.kernel
-#check hedgehogFwd.launch
 
 /-! ## Hedgehog with Learned Mixing
 
@@ -299,11 +289,7 @@ def hedgehogLearnedFwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.B
     sync
 
 -- Verify auto-generated kernels
-#check hedgehogLearnedFwd.kernel
-#check hedgehogLearnedFwd.launch
 
 -- Print generated kernels
-#eval IO.println "=== Hedgehog ===" *> IO.println (generateKernel hedgehogFwd.kernel)
-#eval IO.println "\n=== Hedgehog Learned ===" *> IO.println (generateKernel hedgehogLearnedFwd.kernel)
 
 end Tyr.GPU.Kernels.Hedgehog

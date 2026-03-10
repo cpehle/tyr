@@ -10,6 +10,10 @@ fi
 
 extra=()
 is_compile=0
+is_macos=0
+if [[ "${OSTYPE:-}" == darwin* ]]; then
+  is_macos=1
+fi
 for arg in "$@"; do
   if [[ "$arg" == "-c" ]]; then
     is_compile=1
@@ -64,13 +68,17 @@ done
 
 if [[ "$need_uv" -eq 1 ]]; then
   if [[ -n "$sysroot" && -f "$sysroot/lib/libuv.a" ]]; then
-    mapped+=("-Wl,--whole-archive" "$sysroot/lib/libuv.a" "-Wl,--no-whole-archive")
+    if [[ "$is_macos" -eq 1 ]]; then
+      mapped+=("-Wl,-force_load,$sysroot/lib/libuv.a")
+    else
+      mapped+=("-Wl,--whole-archive" "$sysroot/lib/libuv.a" "-Wl,--no-whole-archive")
+    fi
   else
     mapped+=("-luv")
   fi
 fi
 
-cuda_link_args=()
+declare -a cuda_link_args=()
 if [[ "$is_compile" -eq 0 ]]; then
   has_ltorch=0
   has_ltorch_cuda=0
@@ -112,4 +120,12 @@ if [[ "$is_compile" -eq 0 ]]; then
   fi
 fi
 
-exec "$gcc_bin" "${mapped[@]}" "${cuda_link_args[@]}" "${extra[@]}"
+cmd=("$gcc_bin" "${mapped[@]}")
+if ((${#cuda_link_args[@]} > 0)); then
+  cmd+=("${cuda_link_args[@]}")
+fi
+if ((${#extra[@]} > 0)); then
+  cmd+=("${extra[@]}")
+fi
+
+exec "${cmd[@]}"

@@ -15,16 +15,8 @@
   - crt_bf<M, N> → CRT BFloat16 M N (working tiles)
   - cst_bf<M, N> → CST BFloat16 M N (shared memory)
 -/
-import Tyr.GPU.Types
-import Tyr.GPU.Codegen.Var
-import Tyr.GPU.Codegen.TileTypes
-import Tyr.GPU.Codegen.IR
-import Tyr.GPU.Codegen.Monad
-import Tyr.GPU.Codegen.Ops
-import Tyr.GPU.Codegen.Loop
-import Tyr.GPU.Codegen.GlobalLayout
-import Tyr.GPU.Codegen.EmitNew
-import Tyr.GPU.Codegen.Attribute
+
+import Tyr.GPU.Kernels.Prelude
 
 namespace Tyr.GPU.Kernels.FFTConv
 
@@ -47,6 +39,18 @@ ThunderKittens FFTConv algorithm (from fftconv_pc.cu):
 All matrices (F, F_inv, tw, tw_inv, kf) are complex bf16.
 Input and output are real bf16.
 -/
+
+private def asCol {dtype : GpuFloat} {rows cols : Nat}
+    (src : RT dtype rows cols .Row) : KernelM (RT dtype rows cols .Col) := do
+  let dst : RT dtype rows cols .Col ← allocRT dtype rows cols .Col
+  swapLayout dst src
+  pure dst
+
+private def complexAsCol {dtype : GpuFloat} {rows cols : Nat}
+    (src : CRT dtype rows cols .Row) : KernelM (CRT dtype rows cols .Col) := do
+  let dst : CRT dtype rows cols .Col ← allocCRT dtype rows cols .Col
+  complexSwapLayout dst src
+  pure dst
 
 /-- FFT Convolution forward pass - matches ThunderKittens fftconv_pc.cu -/
 @[gpu_kernel .SM90]
@@ -88,11 +92,14 @@ def fftConvFwd : KernelM Unit := do
   loadComplex fInv fInvShared
   loadComplex tw twShared
   loadComplex twInv twInvShared
+  let fCol ← complexAsCol f
+  let fInvCol ← complexAsCol fInv
 
   comment "Process batches"
   for batchIdx in krange 0 16 do
     comment "Load input (real only)"
     load x xShared
+    let xCol ← asCol x
 
     comment "Load filter for this head"
     loadComplex kf kfShared
@@ -101,8 +108,8 @@ def fftConvFwd : KernelM Unit := do
     comment "mma_reg.real = f.real @ x, mma_reg.imag = f.imag @ x"
     -- Since x is real, the complex multiply simplifies:
     -- (f_r + i*f_i) @ x_r = f_r @ x_r + i*(f_i @ x_r)
-    mma mmaReg.real f.real x (← zeroRT .Float32 64 64)
-    mma mmaReg.imag f.imag x (← zeroRT .Float32 64 64)
+    mma mmaReg.real f.real xCol (← zeroRT .Float32 64 64)
+    mma mmaReg.imag f.imag xCol (← zeroRT .Float32 64 64)
 
     comment "Copy f32 accumulator to bf16 working tile"
     convert accum.real mmaReg.real
@@ -116,7 +123,7 @@ def fftConvFwd : KernelM Unit := do
 
     comment "Step 3: Y @ F (right multiply)"
     -- ThunderKittens uses: mm_AB(mma_reg, accum, f) with complex semantics
-    complexMma mmaReg accum f (← zeroCRT .Float32 64 64)
+    complexMma mmaReg accum fCol (← zeroCRT .Float32 64 64)
     convert accum.real mmaReg.real
     convert accum.imag mmaReg.imag
 
@@ -125,7 +132,7 @@ def fftConvFwd : KernelM Unit := do
     complexMul accum accum kf
 
     comment "Step 5: Y @ F_inv (right multiply by inverse DFT)"
-    complexMma mmaReg accum fInv (← zeroCRT .Float32 64 64)
+    complexMma mmaReg accum fInvCol (← zeroCRT .Float32 64 64)
     convert accum.real mmaReg.real
     convert accum.imag mmaReg.imag
 
@@ -139,7 +146,8 @@ def fftConvFwd : KernelM Unit := do
 
     comment "Step 8: F_inv @ Y (left multiply by inverse DFT)"
     loadComplex tmp tmpShared
-    complexMma mmaReg fInv tmp (← zeroCRT .Float32 64 64)
+    let tmpCol ← complexAsCol tmp
+    complexMma mmaReg fInv tmpCol (← zeroCRT .Float32 64 64)
 
     comment "Step 9: Output real part"
     convert out mmaReg.real
@@ -148,8 +156,6 @@ def fftConvFwd : KernelM Unit := do
     sync
 
 -- Verify auto-generated kernel
-#check fftConvFwd.kernel
-#check fftConvFwd.launch
 
 /-! ## Persistent Cache Variant
 
@@ -195,6 +201,8 @@ def fftConvPersistentFwd : KernelM Unit := do
   loadComplex fInv fInvShared
   loadComplex tw twShared
   loadComplex twInv twInvShared
+  let fCol ← complexAsCol f
+  let fInvCol ← complexAsCol fInv
 
   comment "Process batches with persistent cache"
   for batchIdx in krange 0 16 do
@@ -203,12 +211,13 @@ def fftConvPersistentFwd : KernelM Unit := do
 
     comment "Load input"
     load x xShared
+    let xCol ← asCol x
 
     comment "FFT convolution steps (same as non-persistent)"
 
     comment "1. F @ X"
-    mma mmaReg.real f.real x (← zeroRT .Float32 64 64)
-    mma mmaReg.imag f.imag x (← zeroRT .Float32 64 64)
+    mma mmaReg.real f.real xCol (← zeroRT .Float32 64 64)
+    mma mmaReg.imag f.imag xCol (← zeroRT .Float32 64 64)
     convert accum.real mmaReg.real
     convert accum.imag mmaReg.imag
 
@@ -218,7 +227,7 @@ def fftConvPersistentFwd : KernelM Unit := do
     sync
 
     comment "3. Y @ F"
-    complexMma mmaReg accum f (← zeroCRT .Float32 64 64)
+    complexMma mmaReg accum fCol (← zeroCRT .Float32 64 64)
     convert accum.real mmaReg.real
     convert accum.imag mmaReg.imag
 
@@ -226,7 +235,7 @@ def fftConvPersistentFwd : KernelM Unit := do
     complexMul accum accum kf
 
     comment "5. Y @ F_inv"
-    complexMma mmaReg accum fInv (← zeroCRT .Float32 64 64)
+    complexMma mmaReg accum fInvCol (← zeroCRT .Float32 64 64)
     convert accum.real mmaReg.real
     convert accum.imag mmaReg.imag
 
@@ -237,7 +246,8 @@ def fftConvPersistentFwd : KernelM Unit := do
     storeComplex tmpShared accum
     sync
     loadComplex tmp tmpShared
-    complexMma mmaReg fInv tmp (← zeroCRT .Float32 64 64)
+    let tmpCol ← complexAsCol tmp
+    complexMma mmaReg fInv tmpCol (← zeroCRT .Float32 64 64)
 
     comment "8. Output real part"
     convert out mmaReg.real
@@ -246,11 +256,7 @@ def fftConvPersistentFwd : KernelM Unit := do
     sync
 
 -- Verify auto-generated kernel
-#check fftConvPersistentFwd.kernel
-#check fftConvPersistentFwd.launch
 
 -- Print generated kernels
-#eval IO.println "=== FFT Conv ===" *> IO.println (generateKernel fftConvFwd.kernel)
-#eval IO.println "\n=== FFT Conv Persistent ===" *> IO.println (generateKernel fftConvPersistentFwd.kernel)
 
 end Tyr.GPU.Kernels.FFTConv

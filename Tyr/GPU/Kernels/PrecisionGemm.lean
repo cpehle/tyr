@@ -10,16 +10,8 @@
   - NVFp4 (4-bit floating point) for maximum throughput
   - Mixed-precision accumulation (FP8 inputs → FP32 accumulator)
 -/
-import Tyr.GPU.Types
-import Tyr.GPU.Codegen.Var
-import Tyr.GPU.Codegen.TileTypes
-import Tyr.GPU.Codegen.IR
-import Tyr.GPU.Codegen.Monad
-import Tyr.GPU.Codegen.Ops
-import Tyr.GPU.Codegen.Loop
-import Tyr.GPU.Codegen.GlobalLayout
-import Tyr.GPU.Codegen.EmitNew
-import Tyr.GPU.Codegen.Attribute
+
+import Tyr.GPU.Kernels.Prelude
 
 namespace Tyr.GPU.Kernels.PrecisionGemm
 
@@ -84,8 +76,6 @@ def gemmFp8E4M3Fwd (A_ptr : GPtr GpuFloat.FP8E4M3) (B_ptr : GPtr GpuFloat.FP8E4M
   storeGlobal C_ptr outShared coord
 
 -- Verify auto-generated kernel
-#check gemmFp8E4M3Fwd.kernel
-#check gemmFp8E4M3Fwd.launch
 
 /-- FP8 GEMM (E5M2 inputs) -/
 @[gpu_kernel .SM90]
@@ -122,8 +112,6 @@ def gemmFp8E5M2Fwd (A_ptr : GPtr GpuFloat.FP8E5M2) (B_ptr : GPtr GpuFloat.FP8E5M
   storeGlobal C_ptr outShared coord
 
 -- Verify auto-generated kernel
-#check gemmFp8E5M2Fwd.kernel
-#check gemmFp8E5M2Fwd.launch
 
 /-! ## Microscaling FP8 (MxFP8)
 
@@ -195,8 +183,6 @@ def gemmMxFp8Fwd (A_ptr : GPtr GpuFloat.FP8E4M3) (B_ptr : GPtr GpuFloat.FP8E4M3)
   storeGlobal C_ptr outShared coord
 
 -- Verify auto-generated kernel
-#check gemmMxFp8Fwd.kernel
-#check gemmMxFp8Fwd.launch
 
 /-! ## Mixed Precision GEMM
 
@@ -254,8 +240,6 @@ def gemmMixedFwd (A_ptr : GPtr GpuFloat.BFloat16) (B_ptr : GPtr GpuFloat.FP8E4M3
   storeGlobal C_ptr outShared coord
 
 -- Verify auto-generated kernel
-#check gemmMixedFwd.kernel
-#check gemmMixedFwd.launch
 
 /-! ## Scaled FP8 GEMM with Bias
 
@@ -323,14 +307,7 @@ def gemmFp8ScaledBiasFwd (A_ptr : GPtr GpuFloat.FP8E4M3) (B_ptr : GPtr GpuFloat.
   storeGlobal C_ptr outShared coord
 
 -- Verify auto-generated kernels
-#check gemmFp8ScaledBiasFwd.kernel
-#check gemmFp8ScaledBiasFwd.launch
 
 -- Print generated kernels
-#eval IO.println "=== FP8 E4M3 GEMM ===" *> IO.println (generateKernel gemmFp8E4M3Fwd.kernel)
-#eval IO.println "\n=== FP8 E5M2 GEMM ===" *> IO.println (generateKernel gemmFp8E5M2Fwd.kernel)
-#eval IO.println "\n=== MxFP8 GEMM ===" *> IO.println (generateKernel gemmMxFp8Fwd.kernel)
-#eval IO.println "\n=== Mixed GEMM ===" *> IO.println (generateKernel gemmMixedFwd.kernel)
-#eval IO.println "\n=== FP8 Scaled Bias ===" *> IO.println (generateKernel gemmFp8ScaledBiasFwd.kernel)
 
 end Tyr.GPU.Kernels.PrecisionGemm

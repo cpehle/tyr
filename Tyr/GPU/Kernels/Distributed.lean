@@ -10,16 +10,8 @@
   - AllGather, AllReduce, ReduceScatter operations
   - Distributed GEMM variants (AG-GEMM, GEMM-AR, GEMM-RS)
 -/
-import Tyr.GPU.Types
-import Tyr.GPU.Codegen.Var
-import Tyr.GPU.Codegen.TileTypes
-import Tyr.GPU.Codegen.IR
-import Tyr.GPU.Codegen.Monad
-import Tyr.GPU.Codegen.Ops
-import Tyr.GPU.Codegen.Loop
-import Tyr.GPU.Codegen.GlobalLayout
-import Tyr.GPU.Codegen.EmitNew
-import Tyr.GPU.Codegen.Attribute
+
+import Tyr.GPU.Kernels.Prelude
 
 namespace Tyr.GPU.Kernels.Distributed
 
@@ -63,8 +55,6 @@ def allGatherFwd : KernelM Unit := do
   sync
 
 -- Verify auto-generated kernel
-#check allGatherFwd.kernel
-#check allGatherFwd.launch
 
 /-- AllReduce kernel - sum across all GPUs, result on all GPUs -/
 @[gpu_kernel .SM90]
@@ -93,8 +83,6 @@ def allReduceFwd : KernelM Unit := do
   sync
 
 -- Verify auto-generated kernel
-#check allReduceFwd.kernel
-#check allReduceFwd.launch
 
 /-- ReduceScatter kernel - reduce across GPUs, scatter slices -/
 @[gpu_kernel .SM90]
@@ -120,8 +108,6 @@ def reduceScatterFwd : KernelM Unit := do
   sync
 
 -- Verify auto-generated kernel
-#check reduceScatterFwd.kernel
-#check reduceScatterFwd.launch
 
 /-! ## Distributed GEMM Operations
 
@@ -170,8 +156,6 @@ def agGemmFwd : KernelM Unit := do
   store outShared out
 
 -- Verify auto-generated kernel
-#check agGemmFwd.kernel
-#check agGemmFwd.launch
 
 /-- GEMM-AllReduce: Compute A @ B, then allreduce result -/
 @[gpu_kernel .SM90]
@@ -207,8 +191,6 @@ def gemmArFwd : KernelM Unit := do
   store outShared out
 
 -- Verify auto-generated kernel
-#check gemmArFwd.kernel
-#check gemmArFwd.launch
 
 /-- GEMM-ReduceScatter: Compute A @ B, then reduce-scatter result -/
 @[gpu_kernel .SM90]
@@ -241,15 +223,7 @@ def gemmRsFwd : KernelM Unit := do
   store outShared out
 
 -- Verify auto-generated kernel
-#check gemmRsFwd.kernel
-#check gemmRsFwd.launch
 
 -- Print generated kernels
-#eval IO.println "=== AllGather ===" *> IO.println (generateKernel allGatherFwd.kernel)
-#eval IO.println "\n=== AllReduce ===" *> IO.println (generateKernel allReduceFwd.kernel)
-#eval IO.println "\n=== ReduceScatter ===" *> IO.println (generateKernel reduceScatterFwd.kernel)
-#eval IO.println "\n=== AG-GEMM ===" *> IO.println (generateKernel agGemmFwd.kernel)
-#eval IO.println "\n=== GEMM-AR ===" *> IO.println (generateKernel gemmArFwd.kernel)
-#eval IO.println "\n=== GEMM-RS ===" *> IO.println (generateKernel gemmRsFwd.kernel)
 
 end Tyr.GPU.Kernels.Distributed

@@ -593,6 +593,12 @@ def convert {dtype1 dtype2 : GpuFloat} {rows cols : Nat} {layout : TileLayout}
     (src : RT dtype2 rows cols layout) : KernelM Unit := do
   emit (.convert dst.id src.id)
 
+/-- Vector type conversion (e.g., bf16 to float32). -/
+def convertVec {dtype1 dtype2 : GpuFloat} {len : Nat}
+    (dst : RV dtype1 len)
+    (src : RV dtype2 len) : KernelM Unit := do
+  emit (.convert dst.id src.id)
+
 /-! ## Masking Operations -/
 
 /-- Apply causal mask (zero out upper triangle) -/

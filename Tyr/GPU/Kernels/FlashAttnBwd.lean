@@ -1,25 +1,15 @@
 /-
-  Tyr/GPU/Kernels/FlashAttnBwdNew.lean
+  Tyr/GPU/Kernels/FlashAttnBwd.lean
 
-  FlashAttention forward and backward kernels using native Lean4 GPU DSL.
-  Based on ThunderKittens MHA patterns.
-
-  Forward pass stores L_vec (log-sum-exp) for use in backward.
-  Backward pass computes dQ, dK, dV from dO.
+  FlashAttention training-companion kernels using native Lean4 GPU DSL.
+  `FlashAttn.lean` owns the forward-only examples; this module owns the
+  forward-with-LSE and backward variants used together during training.
 -/
-import Tyr.GPU.Types
-import Tyr.GPU.Codegen.Var
-import Tyr.GPU.Codegen.TileTypes
-import Tyr.GPU.Codegen.IR
-import Tyr.GPU.Codegen.Monad
-import Tyr.GPU.Codegen.Ops
-import Tyr.GPU.Codegen.Loop
-import Tyr.GPU.Codegen.GlobalLayout
 import Tyr.GPU.Codegen.Macros
-import Tyr.GPU.Codegen.EmitNew
-import Tyr.GPU.Codegen.Attribute
 
-namespace Tyr.GPU.Kernels
+import Tyr.GPU.Kernels.Prelude
+
+namespace Tyr.GPU.Kernels.FlashAttnBwd
 
 open Tyr.GPU
 open Tyr.GPU.Codegen
@@ -111,7 +101,6 @@ def flashAttnFwdWithLse (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.
   storeVec lseShared lseVec
   storeVecGlobalRow L_ptr lseShared coord
 
-
 /-! ## FlashAttention Backward Preparation Kernel -/
 
 /-- Backward preparation: compute D_vec = rowSum(dO * O)
@@ -165,7 +154,6 @@ def flashAttnBwdPrep (dO_ptr : GPtr GpuFloat.BFloat16) (O_ptr : GPtr GpuFloat.BF
   comment "Store D_vec"
   storeVec dVecShared dVec
   storeVecGlobalRow D_ptr dVecShared coord
-
 
 /-! ## FlashAttention Main Backward Kernel -/
 
@@ -321,7 +309,6 @@ def flashAttnBwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat1
   storeGlobalAdd dK_ptr dKShared coord  -- Atomic add for accumulation across query blocks
   storeGlobalAdd dV_ptr dVShared coord  -- Atomic add for accumulation across query blocks
 
-
 /-! ## Combined Forward+Backward Example -/
 
 /-- Full training iteration pattern: forward then backward
@@ -339,25 +326,8 @@ def trainingPattern : String :=
   "// 3. Prep: flash_attn_bwd_prep(dO, O) -> D_vec\n" ++
   "// 4. Backward: flash_attn_bwd(Q, K, V, dO, L_vec, D_vec) -> dQ, dK, dV"
 
-
 -- Verify auto-generated kernel and launch definitions
-#check flashAttnFwdWithLse.kernel
-#check flashAttnFwdWithLse.launch
-#check flashAttnBwdPrep.kernel
-#check flashAttnBwdPrep.launch
-#check flashAttnBwd.kernel
-#check flashAttnBwd.launch
 
 -- Generate C++ code
-#eval IO.println "=== FlashAttention Forward (with LSE) ===" *>
-      IO.println (generateKernel flashAttnFwdWithLse.kernel)
 
-#eval IO.println "\n=== FlashAttention Backward Prep ===" *>
-      IO.println (generateKernel flashAttnBwdPrep.kernel)
-
-#eval IO.println "\n=== FlashAttention Backward ===" *>
-      IO.println (generateKernel flashAttnBwd.kernel)
-
-#eval IO.println "\n" *> IO.println trainingPattern
-
-end Tyr.GPU.Kernels
+end Tyr.GPU.Kernels.FlashAttnBwd

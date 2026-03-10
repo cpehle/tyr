@@ -16,7 +16,7 @@ def usage : String :=
     "Usage: lake exe GenerateGpuKernels [OPTIONS] <Module> [<Module> ...]",
     "",
     "Positional arguments:",
-    "  <Module>                 Lean module to import (e.g. Tyr.GPU.Kernels.TestNewStyle)",
+    "  <Module>                 Lean module to import (e.g. Tyr.GPU.Kernels.Examples)",
     "",
     "Options:",
     "  --out-dir <path>         Output directory for generated .cu files (default: cc/src/generated)",

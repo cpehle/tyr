@@ -4,16 +4,8 @@
   Linear Attention backward kernel implementation.
   Computes gradients dQ, dK, dV for linear attention.
 -/
-import Tyr.GPU.Types
-import Tyr.GPU.Codegen.Var
-import Tyr.GPU.Codegen.TileTypes
-import Tyr.GPU.Codegen.IR
-import Tyr.GPU.Codegen.Monad
-import Tyr.GPU.Codegen.Ops
-import Tyr.GPU.Codegen.Loop
-import Tyr.GPU.Codegen.GlobalLayout
-import Tyr.GPU.Codegen.EmitNew
-import Tyr.GPU.Codegen.Attribute
+
+import Tyr.GPU.Kernels.Prelude
 
 namespace Tyr.GPU.Kernels.LinearAttn
 
@@ -111,11 +103,13 @@ def linearAttnBwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat
     
     -- Accumulate dS += phi(Q)^T @ dO
     let phiQCol : RT GpuFloat.BFloat16 tileSize tileSize .Col ← allocRT .BFloat16 tileSize tileSize .Col
+    let dOCol : RT GpuFloat.BFloat16 tileSize tileSize .Col ← allocRT .BFloat16 tileSize tileSize .Col
     let phiQBf : RT GpuFloat.BFloat16 tileSize tileSize ← allocRT .BFloat16 tileSize tileSize
     convert phiQBf phiQ
     swapLayout phiQCol phiQBf
-    
-    mma dS phiQCol dO dS
+    swapLayout dOCol dO
+
+    mmaAtB dS phiQCol dOCol dS
     
     sync
     
@@ -136,10 +130,12 @@ def linearAttnBwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat
     
     -- dV = phi(K) @ dS
     let dSBf : RT GpuFloat.BFloat16 tileSize tileSize ← allocRT .BFloat16 tileSize tileSize
+    let dSBfCol : RT GpuFloat.BFloat16 tileSize tileSize .Col ← allocRT .BFloat16 tileSize tileSize .Col
     convert dSBf dS
+    swapLayout dSBfCol dSBf
     let phiKBf : RT GpuFloat.BFloat16 tileSize tileSize ← allocRT .BFloat16 tileSize tileSize
     convert phiKBf phiK
-    mma dV phiKBf dSBf (← zeroRT .Float32 tileSize tileSize)
+    mma dV phiKBf dSBfCol (← zeroRT .Float32 tileSize tileSize)
     
     -- dPhi(K) = V @ dS^T
     let dST : RT GpuFloat.BFloat16 tileSize tileSize .Col ← allocRT .BFloat16 tileSize tileSize .Col
@@ -184,11 +180,7 @@ def causalLinearAttnBwd : KernelM Unit := do
     sync
 
 -- Verify
-#check linearAttnBwd.kernel
-#check causalLinearAttnBwd.kernel
 
 -- Generate
-#eval IO.println "=== Linear Attention Backward ===" *>
-      IO.println (generateKernel linearAttnBwd.kernel)
 
 end Tyr.GPU.Kernels.LinearAttn

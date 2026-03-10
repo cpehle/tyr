@@ -10,16 +10,8 @@
   - Efficient token permutation for expert processing
   - Expert load balancing
 -/
-import Tyr.GPU.Types
-import Tyr.GPU.Codegen.Var
-import Tyr.GPU.Codegen.TileTypes
-import Tyr.GPU.Codegen.IR
-import Tyr.GPU.Codegen.Monad
-import Tyr.GPU.Codegen.Ops
-import Tyr.GPU.Codegen.Loop
-import Tyr.GPU.Codegen.GlobalLayout
-import Tyr.GPU.Codegen.EmitNew
-import Tyr.GPU.Codegen.Attribute
+
+import Tyr.GPU.Kernels.Prelude
 
 namespace Tyr.GPU.Kernels.MOE
 
@@ -93,8 +85,6 @@ def moeGatingFwd : KernelM Unit := do
     sync
 
 -- Verify auto-generated kernel
-#check moeGatingFwd.kernel
-#check moeGatingFwd.launch
 
 /-- MOE Dispatch - route tokens to experts -/
 @[gpu_kernel .SM90]
@@ -139,8 +129,6 @@ def moeDispatchFwd : KernelM Unit := do
   sync
 
 -- Verify auto-generated kernel
-#check moeDispatchFwd.kernel
-#check moeDispatchFwd.launch
 
 /-- MOE Combine - gather expert outputs and weight -/
 @[gpu_kernel .SM90]
@@ -190,8 +178,6 @@ def moeCombineFwd : KernelM Unit := do
   store outShared out
 
 -- Verify auto-generated kernel
-#check moeCombineFwd.kernel
-#check moeCombineFwd.launch
 
 /-! ## Expert-Choice MOE
 
@@ -249,8 +235,6 @@ def moeExpertChoiceFwd : KernelM Unit := do
   sync
 
 -- Verify auto-generated kernel
-#check moeExpertChoiceFwd.kernel
-#check moeExpertChoiceFwd.launch
 
 /-! ## Full MOE Block
 
@@ -338,14 +322,7 @@ def moeFfnFwd : KernelM Unit := do
     sync
 
 -- Verify auto-generated kernel
-#check moeFfnFwd.kernel
-#check moeFfnFwd.launch
 
 -- Print generated kernels
-#eval IO.println "=== MOE Gating ===" *> IO.println (generateKernel moeGatingFwd.kernel)
-#eval IO.println "\n=== MOE Dispatch ===" *> IO.println (generateKernel moeDispatchFwd.kernel)
-#eval IO.println "\n=== MOE Combine ===" *> IO.println (generateKernel moeCombineFwd.kernel)
-#eval IO.println "\n=== Expert-Choice MOE ===" *> IO.println (generateKernel moeExpertChoiceFwd.kernel)
-#eval IO.println "\n=== MOE FFN ===" *> IO.println (generateKernel moeFfnFwd.kernel)
 
 end Tyr.GPU.Kernels.MOE

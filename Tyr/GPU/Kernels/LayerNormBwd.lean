@@ -1,21 +1,13 @@
 /-
   Tyr/GPU/Kernels/LayerNormBwd.lean
 
-  LayerNorm backward kernel using native Lean4 GPU DSL.
-  Computes gradients for input, weight, and bias.
+  LayerNorm backward kernels using native Lean4 GPU DSL.
+  Forward ownership lives in `Tyr.GPU.Kernels.LayerNorm`.
 -/
-import Tyr.GPU.Types
-import Tyr.GPU.Codegen.Var
-import Tyr.GPU.Codegen.TileTypes
-import Tyr.GPU.Codegen.IR
-import Tyr.GPU.Codegen.Monad
-import Tyr.GPU.Codegen.Ops
-import Tyr.GPU.Codegen.Loop
-import Tyr.GPU.Codegen.GlobalLayout
-import Tyr.GPU.Codegen.EmitNew
-import Tyr.GPU.Codegen.Attribute
 
-namespace Tyr.GPU.Kernels
+import Tyr.GPU.Kernels.Prelude
+
+namespace Tyr.GPU.Kernels.LayerNormBwd
 
 open Tyr.GPU
 open Tyr.GPU.Codegen
@@ -40,6 +32,7 @@ def layerNormBwdTiled (dO_ptr : GPtr GpuFloat.BFloat16) (x_ptr : GPtr GpuFloat.B
     (batch_size : KVal UInt64) (hidden_dim : KVal UInt64) : KernelM Unit := do
   let tileSize : Nat := 64
   let hiddenDimFloat : Float := 64.0 -- Approximation for H
+  let coord ← blockCoord2D
   comment "=== LayerNorm Backward ==="
 
   comment "Register tiles"
@@ -141,8 +134,8 @@ def layerNormBwdTiled (dO_ptr : GPtr GpuFloat.BFloat16) (x_ptr : GPtr GpuFloat.B
     -- term1 -= sum_term1 / H
     -- term1 -= x_hat * sum_term2 / H
     -- We need to divide sums by H
-    scalarMul sumTerm1 sumTerm1 (1.0 / hiddenDimFloat)
-    scalarMul sumTerm2 sumTerm2 (1.0 / hiddenDimFloat)
+    scalarMulVec sumTerm1 sumTerm1 (1.0 / hiddenDimFloat)
+    scalarMulVec sumTerm2 sumTerm2 (1.0 / hiddenDimFloat)
 
     subCol term1 term1 sumTerm1 -- term1 - mean(term1)
     
@@ -177,6 +170,5 @@ def layerNormBwdTiled (dO_ptr : GPtr GpuFloat.BFloat16) (x_ptr : GPtr GpuFloat.B
   storeVecGlobalAddCol dbias_ptr dBetaSV coord
 
 -- Generate C++ code
-#eval IO.println "=== LayerNorm Backward ===" *> IO.println (generateKernel layerNormBwdTiled.kernel)
 
-end Tyr.GPU.Kernels
+end Tyr.GPU.Kernels.LayerNormBwd

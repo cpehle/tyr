@@ -10,16 +10,8 @@
   - Ring-shift KV blocks between GPUs
   - Overlapped communication and computation
 -/
-import Tyr.GPU.Types
-import Tyr.GPU.Codegen.Var
-import Tyr.GPU.Codegen.TileTypes
-import Tyr.GPU.Codegen.IR
-import Tyr.GPU.Codegen.Monad
-import Tyr.GPU.Codegen.Ops
-import Tyr.GPU.Codegen.Loop
-import Tyr.GPU.Codegen.GlobalLayout
-import Tyr.GPU.Codegen.EmitNew
-import Tyr.GPU.Codegen.Attribute
+
+import Tyr.GPU.Kernels.Prelude
 
 namespace Tyr.GPU.Kernels.RingAttn
 
@@ -133,8 +125,6 @@ def ringAttnPartial (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFlo
   sync
 
 -- Verify auto-generated kernel
-#check ringAttnPartial.kernel
-#check ringAttnPartial.launch
 
 /-- Ring Attention - Phase 2: Full ring processing -/
 @[gpu_kernel .SM90]
@@ -265,8 +255,6 @@ def ringAttnFull (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat1
   storeVecGlobalCoord lse_ptr lseShared coord.c
 
 -- Verify auto-generated kernel
-#check ringAttnFull.kernel
-#check ringAttnFull.launch
 
 /-- Ring Attention - Phase 3: Reduction combining partial outputs -/
 @[gpu_kernel .SM90]
@@ -360,12 +348,7 @@ def ringAttnReduce (O1_ptr : GPtr GpuFloat.Float32) (O2_ptr : GPtr GpuFloat.Floa
   sync
 
 -- Verify auto-generated kernels
-#check ringAttnReduce.kernel
-#check ringAttnReduce.launch
 
 -- Print generated kernels
-#eval IO.println "=== Ring Attn Partial ===" *> IO.println (generateKernel ringAttnPartial.kernel)
-#eval IO.println "\n=== Ring Attn Full ===" *> IO.println (generateKernel ringAttnFull.kernel)
-#eval IO.println "\n=== Ring Attn Reduce ===" *> IO.println (generateKernel ringAttnReduce.kernel)
 
 end Tyr.GPU.Kernels.RingAttn

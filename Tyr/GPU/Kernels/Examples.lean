@@ -1,15 +1,6 @@
-import Tyr.GPU.Types
-import Tyr.GPU.Codegen.Var
-import Tyr.GPU.Codegen.TileTypes
-import Tyr.GPU.Codegen.IR
-import Tyr.GPU.Codegen.Monad
-import Tyr.GPU.Codegen.Ops
 import Tyr.GPU.Codegen.Constraints
-import Tyr.GPU.Codegen.Loop
-import Tyr.GPU.Codegen.GlobalLayout
-import Tyr.GPU.Codegen.EmitNew
-import Tyr.GPU.Codegen.Attribute
 import Tyr.GPU.Codegen.Arch
+import Tyr.GPU.Kernels.Prelude
 
 /-!
 # Tyr.GPU.Kernels.Examples
@@ -28,22 +19,8 @@ If you are looking for minimal lowering-only snippets, use `Tyr.GPU.Codegen.Test
 
 namespace Tyr.GPU.Kernels.Examples
 
+open Tyr.GPU
 open Tyr.GPU.Codegen
-
-abbrev GpuFloat := Tyr.GPU.GpuFloat
-abbrev TileLayout := Tyr.GPU.TileLayout
-
-abbrev RT (dtype : GpuFloat) (rows cols : Nat) (layout : TileLayout := .Row) :=
-  Tyr.GPU.Codegen.RT dtype rows cols layout
-
-abbrev ST (dtype : GpuFloat) (rows cols : Nat) (layout : TileLayout := .Row) :=
-  Tyr.GPU.Codegen.ST dtype rows cols layout
-
-abbrev RV (dtype : GpuFloat) (len : Nat) := Tyr.GPU.Codegen.RV dtype len
-
-abbrev GPtr (dtype : GpuFloat) := Tyr.GPU.Codegen.GPtr dtype
-abbrev KVal (T : Type) := Tyr.GPU.Codegen.KVal T
-abbrev KernelM := Tyr.GPU.Codegen.KernelM
 
 private def gemmMainLoop (numKBlocks : Nat)
     (aPtr : GPtr GpuFloat.BFloat16)
@@ -246,15 +223,5 @@ abbrev simpleGemmNew := simpleGemm
 abbrev flashAttnFwdNew := flashAttnFwd
 
 -- Verify generated companion declarations on canonical examples.
-#check simpleGemm.kernel
-#check simpleGemm.launch
-#check flashAttnFwd.kernel
-#check flashAttnFwd.launch
-#check ampereGemm.kernel
-#check ampereGemm.launch
-#check blackwellGemm.kernel
-#check blackwellGemm.launch
-#check layerNorm.kernel
-#check layerNorm.launch
 
 end Tyr.GPU.Kernels.Examples

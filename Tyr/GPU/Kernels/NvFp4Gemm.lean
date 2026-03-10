@@ -10,16 +10,8 @@
   - Tensor Memory (TMEM) utilization
   - Cluster-level cooperation (2 CTAs)
 -/
-import Tyr.GPU.Types
-import Tyr.GPU.Codegen.Var
-import Tyr.GPU.Codegen.TileTypes
-import Tyr.GPU.Codegen.IR
-import Tyr.GPU.Codegen.Monad
-import Tyr.GPU.Codegen.Ops
-import Tyr.GPU.Codegen.Loop
-import Tyr.GPU.Codegen.GlobalLayout
-import Tyr.GPU.Codegen.EmitNew
-import Tyr.GPU.Codegen.Attribute
+
+import Tyr.GPU.Kernels.Prelude
 
 namespace Tyr.GPU.Kernels.NvFp4Gemm
 
@@ -112,8 +104,6 @@ def nvfp4GemmFwd : KernelM Unit := do
   store outShared out
 
 -- Verify auto-generated kernel
-#check nvfp4GemmFwd.kernel
-#check nvfp4GemmFwd.launch
 
 /-! ## FP4 Quantization Kernel
 
@@ -159,8 +149,6 @@ def quantizeToFp4 : KernelM Unit := do
     sync
 
 -- Verify auto-generated kernel
-#check quantizeToFp4.kernel
-#check quantizeToFp4.launch
 
 /-! ## Mixed FP4/FP8 GEMM
 
@@ -215,12 +203,7 @@ def mixedFp4Fp8GemmFwd : KernelM Unit := do
   store outShared out
 
 -- Verify auto-generated kernel
-#check mixedFp4Fp8GemmFwd.kernel
-#check mixedFp4Fp8GemmFwd.launch
 
 -- Print generated kernels
-#eval IO.println "=== NVFP4 GEMM ===" *> IO.println (generateKernel nvfp4GemmFwd.kernel)
-#eval IO.println "\n=== Quantize to FP4 ===" *> IO.println (generateKernel quantizeToFp4.kernel)
-#eval IO.println "\n=== Mixed FP4/FP8 GEMM ===" *> IO.println (generateKernel mixedFp4Fp8GemmFwd.kernel)
 
 end Tyr.GPU.Kernels.NvFp4Gemm

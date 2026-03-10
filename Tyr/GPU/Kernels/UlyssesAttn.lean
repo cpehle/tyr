@@ -10,16 +10,8 @@
   - Efficient for multi-head attention parallelism
   - Head-parallel → sequence-parallel → head-parallel transformation
 -/
-import Tyr.GPU.Types
-import Tyr.GPU.Codegen.Var
-import Tyr.GPU.Codegen.TileTypes
-import Tyr.GPU.Codegen.IR
-import Tyr.GPU.Codegen.Monad
-import Tyr.GPU.Codegen.Ops
-import Tyr.GPU.Codegen.Loop
-import Tyr.GPU.Codegen.GlobalLayout
-import Tyr.GPU.Codegen.EmitNew
-import Tyr.GPU.Codegen.Attribute
+
+import Tyr.GPU.Kernels.Prelude
 
 namespace Tyr.GPU.Kernels.UlyssesAttn
 
@@ -139,8 +131,6 @@ def ulyssesAttnFwd : KernelM Unit := do
   sync
 
 -- Verify auto-generated kernel
-#check ulyssesAttnFwd.kernel
-#check ulyssesAttnFwd.launch
 
 /-! ## Ulysses with Fused All-to-all
 
@@ -234,8 +224,6 @@ def ulyssesAttnFusedFwd : KernelM Unit := do
   store outShared out
 
 -- Verify auto-generated kernel
-#check ulyssesAttnFusedFwd.kernel
-#check ulyssesAttnFusedFwd.launch
 
 /-! ## All-to-all Kernel
 
@@ -271,12 +259,7 @@ def allToAllFwd : KernelM Unit := do
   sync
 
 -- Verify auto-generated kernel
-#check allToAllFwd.kernel
-#check allToAllFwd.launch
 
 -- Print generated kernels
-#eval IO.println "=== Ulysses Attn ===" *> IO.println (generateKernel ulyssesAttnFwd.kernel)
-#eval IO.println "\n=== Ulysses Attn Fused ===" *> IO.println (generateKernel ulyssesAttnFusedFwd.kernel)
-#eval IO.println "\n=== All-to-all ===" *> IO.println (generateKernel allToAllFwd.kernel)
 
 end Tyr.GPU.Kernels.UlyssesAttn

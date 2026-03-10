@@ -3,16 +3,8 @@
 
   Activation kernels (GELU, SwiGLU, GeGLU) using native Lean4 GPU DSL.
 -/
-import Tyr.GPU.Types
-import Tyr.GPU.Codegen.Var
-import Tyr.GPU.Codegen.TileTypes
-import Tyr.GPU.Codegen.IR
-import Tyr.GPU.Codegen.Monad
-import Tyr.GPU.Codegen.Ops
-import Tyr.GPU.Codegen.Loop
-import Tyr.GPU.Codegen.GlobalLayout
-import Tyr.GPU.Codegen.EmitNew
-import Tyr.GPU.Codegen.Attribute
+
+import Tyr.GPU.Kernels.Prelude
 
 namespace Tyr.GPU.Kernels
 
@@ -126,16 +118,7 @@ def geGluFwd (x_ptr : GPtr GpuFloat.BFloat16) (gate_ptr : GPtr GpuFloat.BFloat16
     sync
 
 -- Verify auto-generated kernel and launch definitions
-#check geluFwd.kernel
-#check geluFwd.launch
-#check swiGluFwd.kernel
-#check swiGluFwd.launch
-#check geGluFwd.kernel
-#check geGluFwd.launch
 
 -- Generate C++ code
-#eval IO.println "=== GELU ===" *> IO.println (generateKernel geluFwd.kernel)
-#eval IO.println "\n=== SwiGLU ===" *> IO.println (generateKernel swiGluFwd.kernel)
-#eval IO.println "\n=== GeGLU ===" *> IO.println (generateKernel geGluFwd.kernel)
 
 end Tyr.GPU.Kernels

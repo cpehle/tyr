@@ -1,19 +1,15 @@
 /-
   Tyr/GPU/Kernels/TestNewStyle.lean
 
-  Test file for the new @[gpu_kernel] attribute style.
-  Demonstrates typed kernel parameters with automatic extraction.
+  Legacy attribute smoke-test kernels.
+
+  Prefer `Tyr.GPU.Kernels.Examples` for the canonical public examples; this file
+  remains as a focused compatibility/testing surface for the original
+  `@[gpu_kernel]` migration work.
 -/
-import Tyr.GPU.Types
-import Tyr.GPU.Codegen.Var
-import Tyr.GPU.Codegen.TileTypes
-import Tyr.GPU.Codegen.IR
-import Tyr.GPU.Codegen.Monad
-import Tyr.GPU.Codegen.Ops
-import Tyr.GPU.Codegen.GlobalLayout
-import Tyr.GPU.Codegen.EmitNew
-import Tyr.GPU.Codegen.Attribute
 import Tyr.GPU.Codegen.FFI
+
+import Tyr.GPU.Kernels.Prelude
 
 namespace Tyr.GPU.Kernels
 
@@ -127,14 +123,7 @@ We can verify the types are correct.
 -/
 
 -- Verify the companion definitions exist and have the correct type
-#check vecAdd.kernel
-#check layerNormNew.kernel
 
 -- Test code generation from the attribute-generated kernels
-#eval IO.println "=== vecAdd.kernel (auto-generated) ==="
-#eval IO.println (generateKernel vecAdd.kernel)
-
-#eval IO.println "\n=== layerNormNew.kernel (auto-generated) ==="
-#eval IO.println (generateKernel layerNormNew.kernel)
 
 end Tyr.GPU.Kernels

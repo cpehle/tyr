@@ -5,16 +5,12 @@ import Tyr.GPU.Capabilities
 # Tyr.GPU.Tile
 
 `Tyr.GPU.Tile` defines the abstract tile model used by the DSL.
-It separates:
+It focuses on the shared concepts (`Tile`, `RegisterTile`, `SharedTile`) and
+generic helper functions over those concepts.
 
-- **concepts** (`Tile`, `RegisterTile`, `SharedTile`) from
-- **concrete carriers** (`RT`, `ST`, `RV`, `SV`, `GL`).
-
-These structures are primarily type-level handles. In codegen workflows they
-represent declarations and constraints, not host-side tensor data.
-
-The goal is to preserve compile-time shape/layout information so downstream
-operations can reject invalid combinations early.
+Concrete codegen handles such as `RT`, `ST`, `RV`, `SV`, and `GL` live in the
+codegen layer. Keeping those handle definitions there avoids maintaining two
+parallel carrier hierarchies with the same names.
 -/
 
 namespace Tyr.GPU
@@ -40,59 +36,6 @@ class SharedTile (α : Type) extends Tile α where
   location_is_shared : location = TileLoc.Shared
   /-- Swizzle pattern for bank conflict avoidance -/
   swizzleMode : SwizzleMode := .Swizzle128B
-
-/-- Register tile: rt<T, rows, cols, layout> -/
-structure RT (dtype : GpuFloat) (rows cols : Nat) (layout : TileLayout := .Row) where
-  /-- Placeholder - in codegen this becomes a declaration -/
-  mk ::
-  deriving Repr, Inhabited
-
-instance {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout} :
-    Tile (RT dtype rows cols layout) where
-  dtype := dtype
-  rows := rows
-  cols := cols
-  location := .Register
-  layout := layout
-
-instance {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout} :
-    RegisterTile (RT dtype rows cols layout) where
-  location_is_register := rfl
-  height := rows / 16
-  width := cols / 16
-
-/-- Shared tile: st<T, rows, cols, layout> -/
-structure ST (dtype : GpuFloat) (rows cols : Nat) (layout : TileLayout := .Row) where
-  mk ::
-  deriving Repr, Inhabited
-
-instance {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout} :
-    Tile (ST dtype rows cols layout) where
-  dtype := dtype
-  rows := rows
-  cols := cols
-  location := .Shared
-  layout := layout
-
-instance {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout} :
-    SharedTile (ST dtype rows cols layout) where
-  location_is_shared := rfl
-
-/-- Register vector: rv<T, length> -/
-structure RV (dtype : GpuFloat) (length : Nat) where
-  mk ::
-  deriving Repr, Inhabited
-
-/-- Shared vector: sv<T, length> -/
-structure SV (dtype : GpuFloat) (length : Nat) where
-  mk ::
-  deriving Repr, Inhabited
-
-/-- Global layout for device memory -/
-structure GL (dtype : GpuFloat) where
-  shape : Array Nat
-  strides : Array Nat
-  deriving Repr, Inhabited
 
 /-- Compute total elements in a tile -/
 def Tile.elements [t : Tile α] : Nat :=

@@ -8,6 +8,7 @@ import Tyr.GPU.Codegen.Monad
 import Tyr.GPU.Codegen.Loop
 import Tyr.GPU.Codegen.GlobalLayout
 import Tyr.GPU.Codegen.EmitNew
+import Tyr.GPU.Kernels
 
 /-!
 # Tyr.GPU
@@ -64,7 +65,8 @@ def addKernel
 
 ## Canonical Example Declarations
 
-Use `Tyr.GPU.Kernels.Examples` as the documentation entrypoint for concrete
+Use `Tyr.GPU.Kernels` for the full kernel catalog, or
+`Tyr.GPU.Kernels.Examples` for the curated documentation entrypoint with concrete
 `@[gpu_kernel]` declarations:
 
 - `Tyr.GPU.Kernels.Examples.simpleGemm`
@@ -105,13 +107,13 @@ namespace Tyr
 -- Re-export main types from GPU submodules
 export GPU (GpuFloat TileLoc TileLayout GpuArch SwizzleMode Scope)
 export GPU (GpuCapabilities RequiresTMA RequiresWGMMA)
-export GPU (Tile RegisterTile SharedTile RT ST RV SV)
-export GPU.Codegen (RegTile SmemTile RegVec SmemVec GpuPtr KernelVal)
+export GPU (Tile RegisterTile SharedTile)
+export GPU.Codegen (RT ST RV SV GPtr KVal)
 export GPU.Codegen (MMATranspose ReduceOp ReduceAxis UnaryOp BinaryOp
                     BroadcastAxis MaskOp TernaryOp SemaphoreOp)
 export GPU.Codegen (KStmt Kernel KParam KernelM buildKernelM generateKernel)
 -- GlobalLayout types for memory I/O
-export GPU.Codegen (GlobalLayout GL GL2 GL3 GL4 TileCoord RTileCoord GPtr)
+export GPU.Codegen (GlobalLayout GL GL2 GL3 GL4 TileCoord RTileCoord)
 -- Global memory operations
 export GPU.Codegen (loadGlobal storeGlobal loadGlobalAsync storeGlobalAsync storeGlobalAdd)
 export GPU.Codegen (blockCoord2D getBlockIdxX getBlockIdxY getBlockIdxZ)

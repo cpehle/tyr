@@ -11,17 +11,9 @@
 
   Reference: FlashAttention-3 (Dao et al., 2024)
 -/
-import Tyr.GPU.Types
-import Tyr.GPU.Codegen.Var
-import Tyr.GPU.Codegen.TileTypes
-import Tyr.GPU.Codegen.IR
-import Tyr.GPU.Codegen.Monad
-import Tyr.GPU.Codegen.Ops
-import Tyr.GPU.Codegen.Loop
-import Tyr.GPU.Codegen.GlobalLayout
 import Tyr.GPU.Codegen.Macros
-import Tyr.GPU.Codegen.EmitNew
-import Tyr.GPU.Codegen.Attribute
+
+import Tyr.GPU.Kernels.Prelude
 
 namespace Tyr.GPU.Kernels.FlashAttn3
 
@@ -780,31 +772,7 @@ def flashAttn3FwdPersistent (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFl
 /-! ## Kernel Verification -/
 
 -- Verify auto-generated kernel definitions
-#check flashAttn3Fwd.kernel
-#check flashAttn3Fwd.launch
-#check flashAttn3BwdPrep.kernel
-#check flashAttn3BwdPrep.launch
-#check flashAttn3Bwd.kernel
-#check flashAttn3Bwd.launch
-#check flashAttn3FwdGQA.kernel
-#check flashAttn3FwdGQA.launch
-#check flashAttn3FwdPersistent.kernel
-#check flashAttn3FwdPersistent.launch
 
 -- Generate C++ code for inspection
-#eval IO.println "=== FlashAttention3 Forward ===" *>
-      IO.println (generateKernel flashAttn3Fwd.kernel)
-
-#eval IO.println "\n=== FlashAttention3 Backward Prep ===" *>
-      IO.println (generateKernel flashAttn3BwdPrep.kernel)
-
-#eval IO.println "\n=== FlashAttention3 Backward ===" *>
-      IO.println (generateKernel flashAttn3Bwd.kernel)
-
-#eval IO.println "\n=== FlashAttention3 Forward GQA ===" *>
-      IO.println (generateKernel flashAttn3FwdGQA.kernel)
-
-#eval IO.println "\n=== FlashAttention3 Forward Persistent ===" *>
-      IO.println (generateKernel flashAttn3FwdPersistent.kernel)
 
 end Tyr.GPU.Kernels.FlashAttn3

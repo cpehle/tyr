@@ -4,16 +4,8 @@
   Mamba2 (Selective State Space Model) backward kernel.
   Computes gradients dQ, dK, dV, dA.
 -/
-import Tyr.GPU.Types
-import Tyr.GPU.Codegen.Var
-import Tyr.GPU.Codegen.TileTypes
-import Tyr.GPU.Codegen.IR
-import Tyr.GPU.Codegen.Monad
-import Tyr.GPU.Codegen.Ops
-import Tyr.GPU.Codegen.Loop
-import Tyr.GPU.Codegen.GlobalLayout
-import Tyr.GPU.Codegen.EmitNew
-import Tyr.GPU.Codegen.Attribute
+
+import Tyr.GPU.Kernels.Prelude
 
 namespace Tyr.GPU.Kernels
 
@@ -294,12 +286,8 @@ def mamba2Bwd (q_ptr : GPtr GpuFloat.BFloat16) (k_ptr : GPtr GpuFloat.BFloat16)
     storeGlobalAdd dV_ptr dVShared (coord.withRow chunkIdx.id)
     storeGlobalAdd dA_ptr dAShared (coord.withRow chunkIdx.id)
 
-
 -- Verify
-#check mamba2Bwd.kernel
 
 -- Generate
-#eval IO.println "=== Mamba2 Backward ===" *>
-      IO.println (generateKernel mamba2Bwd.kernel)
 
 end Tyr.GPU.Kernels

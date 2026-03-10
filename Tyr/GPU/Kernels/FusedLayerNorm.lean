@@ -10,16 +10,8 @@
   - Efficient vector-based computation for d_model dimension
   - Pipelined loading for high throughput
 -/
-import Tyr.GPU.Types
-import Tyr.GPU.Codegen.Var
-import Tyr.GPU.Codegen.TileTypes
-import Tyr.GPU.Codegen.IR
-import Tyr.GPU.Codegen.Monad
-import Tyr.GPU.Codegen.Ops
-import Tyr.GPU.Codegen.Loop
-import Tyr.GPU.Codegen.GlobalLayout
-import Tyr.GPU.Codegen.EmitNew
-import Tyr.GPU.Codegen.Attribute
+
+import Tyr.GPU.Kernels.Prelude
 
 namespace Tyr.GPU.Kernels.FusedLayerNorm
 
@@ -87,13 +79,13 @@ def fusedLayerNormFwd : KernelM Unit := do
     comment "Step 2: Residual connection"
     let xF : RV GpuFloat.Float32 64 ← allocRV .Float32 64
     let residualF : RV GpuFloat.Float32 64 ← allocRV .Float32 64
-    convert xF x
-    convert residualF residual
+    convertVec xF x
+    convertVec residualF residual
     addVec xResid xF residualF
 
     comment "Store x_resid for use in backward pass"
     let xResidBf : RV GpuFloat.BFloat16 64 ← allocRV .BFloat16 64
-    convert xResidBf xResid
+    convertVec xResidBf xResid
     storeVec outResidShared xResidBf
 
     comment "Step 3: Compute mean"
@@ -123,20 +115,18 @@ def fusedLayerNormFwd : KernelM Unit := do
     comment "Step 8: Scale and shift"
     let weightF : RV GpuFloat.Float32 64 ← allocRV .Float32 64
     let biasF : RV GpuFloat.Float32 64 ← allocRV .Float32 64
-    convert weightF weight
-    convert biasF bias
+    convertVec weightF weight
+    convertVec biasF bias
     mulVec xResid xResid weightF
     addVec xResid xResid biasF
 
     comment "Store output"
-    convert out xResid
+    convertVec out xResid
     storeVec outShared out
 
     sync
 
 -- Verify auto-generated kernel
-#check fusedLayerNormFwd.kernel
-#check fusedLayerNormFwd.launch
 
 /-! ## Tiled LayerNorm
 
@@ -225,11 +215,7 @@ def fusedLayerNormTiledFwd : KernelM Unit := do
     sync
 
 -- Verify auto-generated kernel
-#check fusedLayerNormTiledFwd.kernel
-#check fusedLayerNormTiledFwd.launch
 
 -- Print generated kernels
-#eval IO.println "=== Fused LayerNorm ===" *> IO.println (generateKernel fusedLayerNormFwd.kernel)
-#eval IO.println "\n=== Fused LayerNorm Tiled ===" *> IO.println (generateKernel fusedLayerNormTiledFwd.kernel)
 
 end Tyr.GPU.Kernels.FusedLayerNorm

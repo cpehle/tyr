@@ -4,16 +4,8 @@
   Ring Attention backward kernel implementation.
   Computes dQ, dK, dV using ring communication for sequence parallelism.
 -/
-import Tyr.GPU.Types
-import Tyr.GPU.Codegen.Var
-import Tyr.GPU.Codegen.TileTypes
-import Tyr.GPU.Codegen.IR
-import Tyr.GPU.Codegen.Monad
-import Tyr.GPU.Codegen.Ops
-import Tyr.GPU.Codegen.Loop
-import Tyr.GPU.Codegen.GlobalLayout
-import Tyr.GPU.Codegen.EmitNew
-import Tyr.GPU.Codegen.Attribute
+
+import Tyr.GPU.Kernels.Prelude
 
 namespace Tyr.GPU.Kernels.RingAttn
 
@@ -210,10 +202,7 @@ def ringAttnBwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat16
   storeGlobalAdd dV_ptr dVShared coord
 
 -- Verify
-#check ringAttnBwd.kernel
 
 -- Generate
-#eval IO.println "=== Ring Attention Backward ===" *>
-      IO.println (generateKernel ringAttnBwd.kernel)
 
 end Tyr.GPU.Kernels.RingAttn

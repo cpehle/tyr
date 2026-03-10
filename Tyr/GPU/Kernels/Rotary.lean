@@ -1,12 +1,6 @@
 /- Rotary embedding forward kernel (ThunderKittens-style tile program). -/
-import Tyr.GPU.Types
-import Tyr.GPU.Codegen.Var
-import Tyr.GPU.Codegen.TileTypes
-import Tyr.GPU.Codegen.IR
-import Tyr.GPU.Codegen.Monad
-import Tyr.GPU.Codegen.Ops
-import Tyr.GPU.Codegen.GlobalLayout
-import Tyr.GPU.Codegen.Attribute
+
+import Tyr.GPU.Kernels.Prelude
 
 namespace Tyr.GPU.Kernels.Rotary
 
@@ -65,8 +59,5 @@ def rotaryFwd (x_ptr : GPtr GpuFloat.Float32) (sin_ptr : GPtr GpuFloat.Float32)
   store outShared out
   sync
   storeGlobal out_ptr outShared coord
-
-#check rotaryFwd.kernel
-#check rotaryFwd.launch
 
 end Tyr.GPU.Kernels.Rotary

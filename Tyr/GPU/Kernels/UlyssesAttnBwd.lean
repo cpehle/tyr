@@ -4,23 +4,15 @@
   Ulysses Attention backward kernel implementation.
   Wraps FlashAttention backward with All-to-All communication.
 -/
-import Tyr.GPU.Types
-import Tyr.GPU.Codegen.Var
-import Tyr.GPU.Codegen.TileTypes
-import Tyr.GPU.Codegen.IR
-import Tyr.GPU.Codegen.Monad
-import Tyr.GPU.Codegen.Ops
-import Tyr.GPU.Codegen.Loop
-import Tyr.GPU.Codegen.GlobalLayout
-import Tyr.GPU.Codegen.EmitNew
-import Tyr.GPU.Codegen.Attribute
 import Tyr.GPU.Kernels.FlashAttnBwd
+
+import Tyr.GPU.Kernels.Prelude
 
 namespace Tyr.GPU.Kernels.UlyssesAttn
 
 open Tyr.GPU
 open Tyr.GPU.Codegen
-open Tyr.GPU.Kernels (flashAttnBwd flashAttnBwdPrep)
+open Tyr.GPU.Kernels.FlashAttnBwd (flashAttnBwd flashAttnBwdPrep)
 
 /-! ## Ulysses Attention Backward
 
@@ -173,12 +165,8 @@ def ulyssesAttnBwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloa
   storeGlobalAdd dK_ptr dKShared coord
   storeGlobalAdd dV_ptr dVShared coord
 
-
 -- Verify
-#check ulyssesAttnBwd.kernel
 
 -- Generate
-#eval IO.println "=== Ulysses Attention Backward ===" *>
-      IO.println (generateKernel ulyssesAttnBwd.kernel)
 
 end Tyr.GPU.Kernels.UlyssesAttn
