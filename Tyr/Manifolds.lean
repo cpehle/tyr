@@ -23,20 +23,20 @@ constrained parameterization code can depend on a single import.
 
 ## Major Components
 
-- [`Basic`](./Manifolds/Basic.html): foundational manifold/typeclass definitions.
-- [`Embedded`](./Manifolds/Embedded.html): embedded-manifold interface for ambient/tangent projections.
-- [`Optimizer`](./Manifolds/Optimizer.html): geometry-aware optimizer interfaces, including dual-map/Finsler hooks.
-- [`Sphere`](./Manifolds/Sphere.html): unit-norm vectors in Euclidean space.
-- [`Stiefel`](./Manifolds/Stiefel.html): orthonormal-column matrix manifolds.
-- [`Orthogonal`](./Manifolds/Orthogonal.html): orthogonal-group manifold utilities.
-- [`Grassmann`](./Manifolds/Grassmann.html): subspace-valued manifold representation.
-- [`Oblique`](./Manifolds/Oblique.html): matrices with unit-norm columns.
-- [`Positive`](./Manifolds/Positive.html): elementwise-positive matrices.
-- [`PositiveDefinite`](./Manifolds/PositiveDefinite.html): symmetric positive definite matrix geometry.
-- [`PSD`](./Manifolds/PSD.html): fixed-rank PSD factor and elliptope manifolds.
-- [`FixedRank`](./Manifolds/FixedRank.html): embedded fixed-rank matrix manifolds.
-- [`PoincareBall`](./Manifolds/PoincareBall.html): hyperbolic geometry in the ball model.
-- [`Hyperbolic`](./Manifolds/Hyperbolic.html): hyperboloid-model hyperbolic geometry.
+- [`Basic`](##Tyr.Manifolds.Basic): foundational manifold/typeclass definitions.
+- [`Embedded`](##Tyr.Manifolds.Embedded): embedded-manifold interface for ambient/tangent projections.
+- [`Optimizer`](##Tyr.Manifolds.Optimizer): geometry-aware optimizer interfaces, including dual-map/Finsler hooks.
+- [`Sphere`](##Tyr.Manifolds.Sphere): unit-norm vectors in Euclidean space.
+- [`Stiefel`](##Tyr.Manifolds.Stiefel): orthonormal-column matrix manifold geometry.
+- [`Orthogonal`](##Tyr.Manifolds.Orthogonal): orthogonal-group manifold utilities.
+- [`Grassmann`](##Tyr.Manifolds.Grassmann): subspace-valued manifold representation.
+- [`Oblique`](##Tyr.Manifolds.Oblique): matrices with unit-norm columns.
+- [`Positive`](##Tyr.Manifolds.Positive): elementwise-positive matrices.
+- [`PositiveDefinite`](##Tyr.Manifolds.PositiveDefinite): symmetric positive definite matrix geometry.
+- [`PSD`](##Tyr.Manifolds.PSD): fixed-rank PSD factor and elliptope manifolds.
+- [`FixedRank`](##Tyr.Manifolds.FixedRank): embedded fixed-rank matrix manifold geometry.
+- [`PoincareBall`](##Tyr.Manifolds.PoincareBall): hyperbolic geometry in the ball model.
+- [`Hyperbolic`](##Tyr.Manifolds.Hyperbolic): hyperboloid-model hyperbolic geometry.
 
 ## Scope
 
