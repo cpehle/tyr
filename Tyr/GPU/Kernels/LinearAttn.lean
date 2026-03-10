@@ -1,15 +1,18 @@
 /-
   Tyr/GPU/Kernels/LinearAttn.lean
 
-  Linear Attention kernel implementation.
-  Based on ThunderKittens patterns.
+  ThunderKittens-shaped decayed linear attention kernels.
 
-  Linear attention replaces softmax(Q @ K^T) with φ(Q) @ φ(K)^T
-  where φ is a feature map (often identity or ReLU).
+  The vendored reference in
+  `thirdparty/ThunderKittens/kernels/linear_attention/linear_attention.cu`
+  is not a generic feature-map attention kernel. It has two paths per chunk:
 
-  This allows O(N) complexity instead of O(N^2) by computing:
-  - S = φ(K)^T @ V  (state accumulation)
-  - O = φ(Q) @ S    (output computation)
+  - a local causal `QK^T V` path with exponential row/column decay, and
+  - a recurrent `KV` state path decayed across blocks.
+
+  The canonical kernel below matches that structure. To keep the Lean DSL
+  surface explicit, it takes precomputed decay vectors instead of constructing
+  them from `slope` in-kernel.
 -/
 
 import Tyr.GPU.Kernels.Prelude
@@ -19,201 +22,152 @@ namespace Tyr.GPU.Kernels.LinearAttn
 open Tyr.GPU
 open Tyr.GPU.Codegen
 
-/-! ## Linear Attention
+/-- Load one 64-token chunk of Q/K/V tiles. -/
+private def loadQKVChunk
+    (qShared : ST GpuFloat.BFloat16 64 64 .Row)
+    (kShared : ST GpuFloat.BFloat16 64 64 .Row)
+    (vShared : ST GpuFloat.BFloat16 64 64 .Col)
+    (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat16)
+    (V_ptr : GPtr GpuFloat.BFloat16)
+    (coord : RTileCoord) : KernelM Unit := do
+  loadGlobal qShared Q_ptr coord
+  loadGlobal kShared K_ptr coord
+  loadGlobal vShared V_ptr coord
 
-Linear attention uses the associativity of matrix multiplication:
-  softmax(Q @ K^T) @ V ≈ φ(Q) @ (φ(K)^T @ V)
+/-- Convert a Float32 row tile to a BF16 col-layout tile for `mma`. -/
+private def toBf16Col
+    (src : RT GpuFloat.Float32 64 64 .Row) : KernelM (RT GpuFloat.BFloat16 64 64 .Col) := do
+  let bfRow : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
+  let bfCol : RT GpuFloat.BFloat16 64 64 .Col ← allocRT .BFloat16 64 64 .Col
+  convert bfRow src
+  swapLayout bfCol bfRow
+  pure bfCol
 
-Where φ can be:
-- Identity (simplest)
-- ReLU (RetNet style)
-- ELU + 1 (Linear Transformer)
-- Learned feature map
+/-- Update the recurrent `K^T V` state after applying block decay. -/
+private def updateStateKtV
+    (state : RT GpuFloat.Float32 64 64 .Row)
+    (kF : RT GpuFloat.Float32 64 64 .Row)
+    (v : RT GpuFloat.BFloat16 64 64 .Col)
+    (kDecay : RV GpuFloat.Float32 64)
+    (stateDecay : RV GpuFloat.Float32 64) : KernelM Unit := do
+  let kDecayed : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
+  let kDecayedBf : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
+  let kDecayedCol : RT GpuFloat.BFloat16 64 64 .Col ← allocRT .BFloat16 64 64 .Col
+  let updated : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
+  mulCol state state stateDecay
+  mulCol kDecayed kF kDecay
+  convert kDecayedBf kDecayed
+  swapLayout kDecayedCol kDecayedBf
+  mmaAtB updated kDecayedCol v state
+  copy state updated
 
-The state S = φ(K)^T @ V can be accumulated across chunks.
+/-- Decayed causal linear attention forward.
+
+`q_decay_ptr`, `k_decay_ptr`, and `state_decay_ptr` are explicit precomputed
+decay vectors for the current head/chunk family:
+
+- `q_decay_ptr`: row decay applied to local scores and recurrent queries
+- `k_decay_ptr`: row decay applied to keys before the `K^T V` state update
+- `state_decay_ptr`: repeated block decay applied to the recurrent state
 -/
-
-/-- Linear attention forward with state accumulation -/
 @[gpu_kernel .SM90]
 def linearAttnFwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat16)
     (V_ptr : GPtr GpuFloat.BFloat16) (O_ptr : GPtr GpuFloat.BFloat16)
-    (state_ptr : GPtr GpuFloat.Float32) (seq_len : KVal UInt64) : KernelM Unit := do
-  let _ := seq_len
-  comment "=== Linear Attention Forward ==="
-
-  let numChunks : Nat := 16
+    (state_ptr : GPtr GpuFloat.Float32)
+    (q_decay_ptr : GPtr GpuFloat.Float32) (k_decay_ptr : GPtr GpuFloat.Float32)
+    (state_decay_ptr : GPtr GpuFloat.Float32)
+    (_seq_len : KVal UInt64) (_head_dim : KVal UInt64) : KernelM Unit := do
+  comment "=== Decayed Linear Attention Forward ==="
+  comment "Local causal decayed QK^T V + recurrent decayed KV state"
 
   let coord ← blockCoord2D
+  let numChunks : Nat := 16
 
-  -- Q, K, V tiles
   let q : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
   let k : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
   let v : RT GpuFloat.BFloat16 64 64 .Col ← allocRT .BFloat16 64 64 .Col
 
-  -- Feature-mapped versions (after φ)
-  let phiQ : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
-  let phiK : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
+  let qF : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
+  let kF : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
+  let qDecayed : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
+  let qDecayedBf : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
 
-  -- State: S = φ(K)^T @ V, shape [head_dim x head_dim]
-  let state : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
+  let state : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
+  let stateBf : RT GpuFloat.BFloat16 64 64 .Col ← allocRT .BFloat16 64 64 .Col
 
-  -- Output accumulator
-  let o : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
+  let localScores : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
+  let localScoresBf : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
+  let o : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
   let outBf : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
 
-  -- Normalization (for numerical stability)
-  let zVec : RV GpuFloat.Float32 64 ← allocRV .Float32 64
-  let zState : RV GpuFloat.Float32 64 ← zeroRV .Float32 64
+  let qDecay : RV GpuFloat.Float32 64 ← allocRV .Float32 64
+  let kDecay : RV GpuFloat.Float32 64 ← allocRV .Float32 64
+  let stateDecay : RV GpuFloat.Float32 64 ← allocRV .Float32 64
 
-  -- Shared memory
   let qShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
   let kShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
   let vShared : ST GpuFloat.BFloat16 64 64 .Col ← allocST .BFloat16 64 64 .Col
   let stateShared : ST GpuFloat.Float32 64 64 ← allocST .Float32 64 64
+  let qDecayShared : SV GpuFloat.Float32 64 ← allocSV .Float32 64
+  let kDecayShared : SV GpuFloat.Float32 64 ← allocSV .Float32 64
+  let stateDecayShared : SV GpuFloat.Float32 64 ← allocSV .Float32 64
   let outShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
 
-  comment "Initialize state from previous chunk (if any)"
+  comment "Load recurrent state and decay vectors"
   loadGlobal stateShared state_ptr coord
+  loadVecGlobalCoord qDecayShared q_decay_ptr coord.c
+  loadVecGlobalCoord kDecayShared k_decay_ptr coord.c
+  loadVecGlobalCoord stateDecayShared state_decay_ptr coord.c
   sync
   load state stateShared
+  loadVec qDecay qDecayShared
+  loadVec kDecay kDecayShared
+  loadVec stateDecay stateDecayShared
 
-  comment "Process sequence chunks"
   for chunkIdx in krange 0 numChunks do
-    comment "Load Q, K, V from global"
-    loadGlobal qShared Q_ptr (coord.withRow chunkIdx.id)
-    loadGlobal kShared K_ptr (coord.withRow chunkIdx.id)
-    loadGlobal vShared V_ptr (coord.withRow chunkIdx.id)
+    let chunkCoord := coord.withRow chunkIdx.id
+    loadQKVChunk qShared kShared vShared Q_ptr K_ptr V_ptr chunkCoord
     sync
     load q qShared
     load k kShared
     load v vShared
+    convert qF q
+    convert kF k
+    zero o
 
-    comment "Apply feature map φ (using ReLU)"
-    convert phiQ q
-    convert phiK k
-    relu phiQ phiQ
-    relu phiK phiK
+    comment "Local decayed causal attention path"
+    zero localScores
+    mmaT localScores q k localScores
+    makeCausal localScores localScores (some 0.0)
+    mulCol localScores localScores qDecay
+    mulRow localScores localScores kDecay
+    convert localScoresBf localScores
+    mma o localScoresBf v o
 
-    comment "Update state: S += φ(K)^T @ V"
-    let phiKBf : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-    convert phiKBf phiK
-    let phiKT : RT GpuFloat.BFloat16 64 64 .Col ← allocRT .BFloat16 64 64 .Col
-    swapLayout phiKT phiKBf
-    mma state phiKBf v state
+    comment "Recurrent decayed state path"
+    mulCol qDecayed qF qDecay
+    convert qDecayedBf qDecayed
+    let stateBf' ← toBf16Col state
+    copy stateBf stateBf'
+    let recurrent : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
+    mma recurrent qDecayedBf stateBf recurrent
+    add o o recurrent
 
-    comment "Compute output: O = φ(Q) @ S"
-    let phiQBf : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-    convert phiQBf phiQ
-    let stateBfRow : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-    convert stateBfRow state
-    let stateBf : RT GpuFloat.BFloat16 64 64 .Col ← allocRT .BFloat16 64 64 .Col
-    swapLayout stateBf stateBfRow
-    mma o phiQBf stateBf o
+    comment "State update: state = decay(state) + K^T V"
+    updateStateKtV state kF v kDecay stateDecay
 
-    comment "Update normalization: z += φ(K)^T @ 1"
-    rowSum zVec phiK
-    addVec zState zState zVec
-
-    comment "Store output for this chunk"
     convert outBf o
     store outShared outBf
-    storeGlobal O_ptr outShared (coord.withRow chunkIdx.id)
-
+    storeGlobal O_ptr outShared chunkCoord
     sync
 
-  comment "Store final state for next chunk"
   store stateShared state
   storeGlobal state_ptr stateShared coord
 
--- Verify auto-generated kernel
+/-- Compatibility alias for the old duplicated causal entrypoint. -/
+abbrev causalLinearAttnFwd := linearAttnFwd
 
-/-! ## Causal Linear Attention
-
-For causal (autoregressive) linear attention, we need to maintain
-the running state and compute outputs incrementally.
--/
-
-/-- Causal linear attention with chunk-wise state -/
-@[gpu_kernel .SM90]
-def causalLinearAttnFwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat16)
-    (V_ptr : GPtr GpuFloat.BFloat16) (O_ptr : GPtr GpuFloat.BFloat16)
-    (state_ptr : GPtr GpuFloat.Float32) : KernelM Unit := do
-  let _ := state_ptr
-  comment "=== Causal Linear Attention Forward ==="
-
-  let numChunks : Nat := 16
-
-  let coord ← blockCoord2D
-
-  let q : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-  let k : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-  let v : RT GpuFloat.BFloat16 64 64 .Col ← allocRT .BFloat16 64 64 .Col
-
-  let phiQ : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
-  let phiK : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
-  let _vF : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
-
-  -- Running state and output
-  let state : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
-  let o : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
-  let outBf : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-
-  -- Intra-chunk attention (quadratic within chunk)
-  let intraAtt : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
-
-  -- Shared memory
-  let qShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
-  let kShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
-  let vShared : ST GpuFloat.BFloat16 64 64 .Col ← allocST .BFloat16 64 64 .Col
-  let outShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
-
-  for chunkIdx in krange 0 numChunks do
-    loadGlobal qShared Q_ptr (coord.withRow chunkIdx.id)
-    loadGlobal kShared K_ptr (coord.withRow chunkIdx.id)
-    loadGlobal vShared V_ptr (coord.withRow chunkIdx.id)
-    sync
-    load q qShared
-    load k kShared
-    load v vShared
-
-    comment "Apply feature map"
-    convert phiQ q
-    convert phiK k
-    relu phiQ phiQ
-    relu phiK phiK
-
-    comment "Inter-chunk: O_inter = φ(Q) @ state_prev"
-    let phiQBf : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-    convert phiQBf phiQ
-    let stateBfRow : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-    convert stateBfRow state
-    let stateBf : RT GpuFloat.BFloat16 64 64 .Col ← allocRT .BFloat16 64 64 .Col
-    swapLayout stateBf stateBfRow
-    mma o phiQBf stateBf o
-
-    comment "Intra-chunk: causal attention within chunk"
-    mmaT intraAtt phiQ phiK intraAtt
-    makeCausal intraAtt intraAtt (some 0.0)
-
-    comment "O_intra = intra_att @ V"
-    let intraAttBf : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-    convert intraAttBf intraAtt
-    mma o intraAttBf v o
-
-    comment "Update state: state += φ(K)^T @ V"
-    let phiKBf : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-    convert phiKBf phiK
-    mma state phiKBf v state
-
-    comment "Store output for this chunk"
-    convert outBf o
-    store outShared outBf
-    storeGlobal O_ptr outShared (coord.withRow chunkIdx.id)
-
-    sync
-
--- Verify auto-generated kernels
-
--- Print generated kernels
+/-- Canonical ThunderKittens-aligned name. -/
+abbrev tkLinearAttnFwd := linearAttnFwd
 
 end Tyr.GPU.Kernels.LinearAttn
