@@ -1,4 +1,5 @@
 import Tyr.TensorStruct
+import Tyr.Log
 
 /-!
 # Tyr.Checkpoint
@@ -24,6 +25,7 @@ custom binary formats or distributed snapshot orchestration.
 namespace torch.checkpoint
 
 open torch
+open torch.Log
 
 private def parseNatLine (key : String) (line : String) : Except String Nat :=
   let value := (line.drop key.length).trimAscii.toString
@@ -113,7 +115,12 @@ structure SaveState where
   index : IO.Ref Nat
 
 /-- Save all tensors in a TensorStruct to a directory with a namePrefix -/
-def saveParams [TensorStruct α] (params : α) (dir : String) (namePrefix : String := "param") : IO Unit := do
+def saveParams [TensorStruct α]
+    (params : α)
+    (dir : String)
+    (namePrefix : String := "param")
+    (log : Handlers := {})
+    : IO Unit := do
   IO.FS.createDirAll dir
   let indexRef ← IO.mkRef 0
   let _ ← TensorStruct.fold (fun {s} (t : T s) (acc : IO Unit) => do
@@ -124,11 +131,16 @@ def saveParams [TensorStruct α] (params : α) (dir : String) (namePrefix : Stri
     indexRef.set (idx + 1)
   ) (pure ()) params
   let finalIdx ← indexRef.get
-  IO.println s!"Saved {finalIdx} tensors to {dir}"
+  log.onInfo s!"Saved {finalIdx} tensors to {dir}"
 
 /-- Load all tensors in a TensorStruct from a directory with a namePrefix.
     Requires a template structure to know the shapes. -/
-def loadParams [TensorStruct α] (template : α) (dir : String) (namePrefix : String := "param") : IO α := do
+def loadParams [TensorStruct α]
+    (template : α)
+    (dir : String)
+    (namePrefix : String := "param")
+    (log : Handlers := {})
+    : IO α := do
   let indexRef ← IO.mkRef 0
   let result ← TensorStruct.mapM (fun {s} (_ : T s) => do
     let idx ← indexRef.get
@@ -138,7 +150,7 @@ def loadParams [TensorStruct α] (template : α) (dir : String) (namePrefix : St
     pure t
   ) template
   let finalIdx ← indexRef.get
-  IO.println s!"Loaded {finalIdx} tensors from {dir}"
+  log.onInfo s!"Loaded {finalIdx} tensors from {dir}"
   return TensorStruct.makeLeafParams result
 
 /-- Save full checkpoint (params + metadata) -/
@@ -148,19 +160,23 @@ def saveCheckpoint [TensorStruct α]
     (bestValLoss : Float)
     (trainLoss : Float)
     (dir : String)
-    (namePrefix : String := "param") : IO Unit := do
-  saveParams params dir namePrefix
+    (namePrefix : String := "param")
+    (log : Handlers := {})
+    : IO Unit := do
+  saveParams params dir namePrefix log
   saveCheckpointMeta { iteration, bestValLoss, trainLoss } (dir ++ "/meta.txt")
-  IO.println s!"Checkpoint saved at iteration {iteration}"
+  log.onInfo s!"Checkpoint saved at iteration {iteration}"
 
 /-- Load checkpoint (params + metadata) -/
 def loadCheckpoint [TensorStruct α]
     (template : α)
     (dir : String)
-    (namePrefix : String := "param") : IO (α × CheckpointMeta) := do
-  let params ← loadParams template dir namePrefix
+    (namePrefix : String := "param")
+    (log : Handlers := {})
+    : IO (α × CheckpointMeta) := do
+  let params ← loadParams template dir namePrefix log
   let m ← loadCheckpointMeta (dir ++ "/meta.txt")
-  IO.println s!"Checkpoint loaded from iteration {m.iteration}"
+  log.onInfo s!"Checkpoint loaded from iteration {m.iteration}"
   return (params, m)
 
 /-! ## Optimizer State Checkpointing
@@ -173,21 +189,25 @@ use saveParams/loadParams with different namePrefixes.
 def saveOptimizerState [TensorStruct α]
     (mu nu : α)
     (count : Nat)
-    (dir : String) : IO Unit := do
-  saveParams mu dir "optim_mu"
-  saveParams nu dir "optim_nu"
+    (dir : String)
+    (log : Handlers := {})
+    : IO Unit := do
+  saveParams mu dir "optim_mu" log
+  saveParams nu dir "optim_nu" log
   IO.FS.writeFile (dir ++ "/optim_count.txt") (toString count)
-  IO.println s!"Optimizer state saved to {dir}"
+  log.onInfo s!"Optimizer state saved to {dir}"
 
 /-- Load optimizer state -/
 def loadOptimizerState [TensorStruct α]
     (template : α)
-    (dir : String) : IO (α × α × Nat) := do
-  let mu ← loadParams template dir "optim_mu"
-  let nu ← loadParams template dir "optim_nu"
+    (dir : String)
+    (log : Handlers := {})
+    : IO (α × α × Nat) := do
+  let mu ← loadParams template dir "optim_mu" log
+  let nu ← loadParams template dir "optim_nu" log
   let countStr ← IO.FS.readFile (dir ++ "/optim_count.txt")
   let count := countStr.trimAscii.toString.toNat!
-  IO.println s!"Optimizer state loaded from {dir} (count={count})"
+  log.onInfo s!"Optimizer state loaded from {dir} (count={count})"
   return (mu, nu, count)
 
 /-- Check if optimizer state exists -/

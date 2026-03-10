@@ -411,10 +411,9 @@ def evaluateBPBOnBatches (b s : UInt64)
     perplexity := perplexity avgLoss
   }
 
-/-- Log BPB evaluation results -/
-def logBPBResult (result : BPBResult) (label : String := "Eval") : IO Unit := do
-  let msg := s!"{label}: BPB={result.bpb} loss={result.avgLoss} ppl={result.perplexity} " ++
+/-- Format BPB evaluation results for external logging. -/
+def formatBPBResult (result : BPBResult) (label : String := "Eval") : String :=
+  s!"{label}: BPB={result.bpb} loss={result.avgLoss} ppl={result.perplexity} " ++
     s!"tokens={result.totalTokens} bytes={result.totalBytes}"
-  IO.println msg
 
 end torch.metrics

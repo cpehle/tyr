@@ -12,10 +12,12 @@
 -/
 import Tyr.Torch
 import Tyr.Distributed
+import Tyr.Log
 
 namespace torch.Data.Pretraining
 
 open torch
+open torch.Log
 
 /-! ## Parquet FFI Declarations
 
@@ -184,12 +186,12 @@ structure RowGroupIterator where
   deriving Repr
 
 /-- Initialize row group iterator from a data directory -/
-def RowGroupIterator.init (dataPath : String) (rank worldSize : UInt64) : IO RowGroupIterator := do
+def RowGroupIterator.init (dataPath : String) (rank worldSize : UInt64) (log : Handlers := {}) : IO RowGroupIterator := do
   -- List and sort parquet files
   let parquetFiles ← listParquetFiles dataPath
 
   if parquetFiles.isEmpty then
-    IO.eprintln s!"Warning: No parquet files found in {dataPath}"
+    log.onWarn s!"Warning: No parquet files found in {dataPath}"
     return {
       parquetFiles := #[]
       fileMetadata := #[]

@@ -12,8 +12,11 @@
 import Tyr.Tokenizer.Types
 import Tyr.Tokenizer.TokenBytes
 import Tyr.Tokenizer.SpecialTokens
+import Tyr.Log
 
 namespace tokenizer
+
+open torch.Log
 
 /-- GPT-4 style split pattern (modified for smaller vocab).
     Changes \\d{1,3} to \\d{1,2} to handle numbers more granularly. -/
@@ -205,12 +208,12 @@ def bpeMergeStep (tok : BPETokenizer) (docs : Array (Array TokenId))
 /-- Train a BPE tokenizer on a corpus of documents.
     This is a simple implementation for testing.
     For production use, prefer rustbpe or similar. -/
-def trainBPE (docs : Array String) (config : TrainConfig) : IO TrainResult := do
-  IO.println s!"Starting BPE training with target vocab size: {config.vocabSize}"
+def trainBPE (docs : Array String) (config : TrainConfig) (log : Handlers := {}) : IO TrainResult := do
+  log.onInfo s!"Starting BPE training with target vocab size: {config.vocabSize}"
 
   -- Initialize tokenizer with base vocabulary
   let mut tok := initBaseTokenizer config.specialTokens
-  IO.println s!"Initialized base vocabulary: {tok.vocabSize} tokens"
+  log.onInfo s!"Initialized base vocabulary: {tok.vocabSize} tokens"
 
   -- Tokenize documents to bytes
   let mut tokenizedDocs : Array (Array TokenId) := #[]
@@ -222,7 +225,7 @@ def trainBPE (docs : Array String) (config : TrainConfig) : IO TrainResult := do
     let tokenIds : Array TokenId := bytes.toList.toArray.map (·.toUInt32)
     tokenizedDocs := tokenizedDocs.push tokenIds
 
-  IO.println s!"Processed {docs.size} documents, {totalChars} characters"
+  log.onInfo s!"Processed {docs.size} documents, {totalChars} characters"
 
   -- Perform merges until target vocab size reached
   let targetMerges := config.vocabSize - tok.vocabSize.toNat
@@ -235,11 +238,11 @@ def trainBPE (docs : Array String) (config : TrainConfig) : IO TrainResult := do
     -- Find best pair
     match findBestPair counts with
     | none =>
-      IO.println "No more pairs to merge"
+      log.onInfo "No more pairs to merge"
       break
     | some ((left, right), count) =>
       if count < 2 then
-        IO.println "Best pair frequency < 2, stopping"
+        log.onInfo "Best pair frequency < 2, stopping"
         break
 
       -- Perform merge
@@ -251,9 +254,9 @@ def trainBPE (docs : Array String) (config : TrainConfig) : IO TrainResult := do
       -- Progress update
       if numMerges % 1000 == 0 then
         let progress := (numMerges.toFloat / targetMerges.toFloat) * 100.0
-        IO.println s!"Merge {numMerges}/{targetMerges} ({progress.floor}%): vocab size = {tok.vocabSize}"
+        log.onInfo s!"Merge {numMerges}/{targetMerges} ({progress.floor}%): vocab size = {tok.vocabSize}"
 
-  IO.println s!"Training complete: {tok.vocabSize} tokens, {numMerges} merges"
+  log.onInfo s!"Training complete: {tok.vocabSize} tokens, {numMerges} merges"
 
   -- Calculate compression ratio
   let totalTokens := tokenizedDocs.foldl (fun acc doc => acc + doc.size) 0

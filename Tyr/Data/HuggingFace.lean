@@ -8,12 +8,14 @@
 -/
 import Tyr.Data.Download
 import Tyr.Data.Pretraining
+import Tyr.Log
 import Lean.Data.Json
 
 namespace torch.Data.HuggingFace
 
 open torch.Data.Download
 open torch.Data.Pretraining (readParquetAsJson readRowGroupAsJson getParquetMetadata)
+open torch.Log
 
 /-- HuggingFace dataset configuration -/
 structure HFDatasetConfig where
@@ -25,7 +27,7 @@ structure HFDatasetConfig where
 
 /-- Read parquet file and return JSON objects per row using FFI.
     This uses the Apache Arrow library via C++ bindings. -/
-def readParquetToJson (filePath : String) : IO (Array Lean.Json) := do
+def readParquetToJson (filePath : String) (log : Handlers := {}) : IO (Array Lean.Json) := do
   -- Use FFI to read parquet as JSON strings
   let jsonStrings ← readParquetAsJson filePath
 
@@ -35,8 +37,7 @@ def readParquetToJson (filePath : String) : IO (Array Lean.Json) := do
     match Lean.Json.parse jsonStr with
     | .ok json => jsons := jsons.push json
     | .error e =>
-      -- Log parse error but continue
-      IO.eprintln s!"Warning: Failed to parse JSON: {e}"
+      log.onWarn s!"Warning: Failed to parse JSON: {e}"
   return jsons
 
 /-- Read parquet file row group by row group for large files.
@@ -56,21 +57,27 @@ def readParquetToJsonStreaming (filePath : String) : IO (Array Lean.Json) := do
 
 /-- Load ARC dataset from HuggingFace -/
 def loadARC (subset : String) (split : String)
-    (cacheDir : String := "~/.cache/huggingface") : IO (Array Lean.Json) := do
-  let localPath ← ensureHFParquet "allenai/ai2_arc" subset split cacheDir
-  readParquetToJson localPath
+    (cacheDir : String := "~/.cache/huggingface")
+    (log : Handlers := {})
+    : IO (Array Lean.Json) := do
+  let localPath ← ensureHFParquet "allenai/ai2_arc" subset split cacheDir 0 log
+  readParquetToJson localPath log
 
 /-- Load GSM8K dataset from HuggingFace -/
 def loadGSM8K (subset : String := "main") (split : String := "train")
-    (cacheDir : String := "~/.cache/huggingface") : IO (Array Lean.Json) := do
-  let localPath ← ensureHFParquet "openai/gsm8k" subset split cacheDir
-  readParquetToJson localPath
+    (cacheDir : String := "~/.cache/huggingface")
+    (log : Handlers := {})
+    : IO (Array Lean.Json) := do
+  let localPath ← ensureHFParquet "openai/gsm8k" subset split cacheDir 0 log
+  readParquetToJson localPath log
 
 /-- Load MMLU dataset from HuggingFace -/
 def loadMMLU (subset : String) (split : String)
-    (cacheDir : String := "~/.cache/huggingface") : IO (Array Lean.Json) := do
-  let localPath ← ensureHFParquet "cais/mmlu" subset split cacheDir
-  readParquetToJson localPath
+    (cacheDir : String := "~/.cache/huggingface")
+    (log : Handlers := {})
+    : IO (Array Lean.Json) := do
+  let localPath ← ensureHFParquet "cais/mmlu" subset split cacheDir 0 log
+  readParquetToJson localPath log
 
 private def sortPaths (paths : Array String) : Array String :=
   paths.qsort (· < ·)
@@ -119,7 +126,7 @@ private def findSmolTalkLocalParquets (split : String) (cacheDir : String)
         return sortPaths files
   return #[]
 
-private def ensureSmolTalkParquet (split : String) (cacheDir : String)
+private def ensureSmolTalkParquet (split : String) (cacheDir : String) (log : Handlers := {})
     : IO (Array String) := do
   let localFiles ← findSmolTalkLocalParquets split cacheDir
   if !localFiles.isEmpty then
@@ -147,7 +154,7 @@ private def ensureSmolTalkParquet (split : String) (cacheDir : String)
   for url in urls do
     let filename := System.FilePath.fileName ⟨url⟩ |>.getD ""
     let localPath := s!"{outDir}/{filename}"
-    let ok ← downloadWithRetry url localPath 3
+    let ok ← downloadWithRetry url localPath 3 1000 log
     if ok then
       files := files.push localPath
 
@@ -158,20 +165,23 @@ private def ensureSmolTalkParquet (split : String) (cacheDir : String)
 /-- Load SmolTalk dataset from HuggingFace.
     Uses local HF cache snapshots when available; otherwise downloads known parquet shards. -/
 def loadSmolTalk (split : String)
-    (cacheDir : String := "~/.cache/huggingface") : IO (Array Lean.Json) := do
-  let files ← ensureSmolTalkParquet split cacheDir
+    (cacheDir : String := "~/.cache/huggingface")
+    (log : Handlers := {})
+    : IO (Array Lean.Json) := do
+  let files ← ensureSmolTalkParquet split cacheDir log
   let mut rows : Array Lean.Json := #[]
   for file in files do
-    let part ← readParquetToJson file
+    let part ← readParquetToJson file log
     rows := rows ++ part
   return rows
 
 /-- Load JSONL file from URL -/
 def loadJsonlFromUrl (url : String) (cacheDir : String) (filename : String)
+    (log : Handlers := {})
     : IO (Array Lean.Json) := do
   let expandedCacheDir ← expandHome cacheDir
   let localPath := s!"{expandedCacheDir}/{filename}"
-  let _ ← downloadWithRetry url localPath 3
+  let _ ← downloadWithRetry url localPath 3 1000 log
   let content ← IO.FS.readFile ⟨localPath⟩
   let lines := content.splitOn "\n" |>.filter (!·.isEmpty)
   let mut jsons : Array Lean.Json := #[]

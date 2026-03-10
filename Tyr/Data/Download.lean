@@ -9,7 +9,11 @@
   - ZIP extraction for evaluation bundles
   - Progress tracking for long downloads
 -/
+import Tyr.Log
+
 namespace torch.Data.Download
+
+open torch.Log
 
 /-! ## Configuration -/
 
@@ -54,12 +58,12 @@ def fileExists (path : String) : IO Bool := do
 /-- Download a file with exponential backoff retry.
     Returns true if successful, false otherwise. -/
 def downloadWithRetry (url : String) (dest : String) (maxRetries : Nat := 5)
-    (initialBackoffMs : Nat := 1000) : IO Bool := do
+    (initialBackoffMs : Nat := 1000) (log : Handlers := {}) : IO Bool := do
   let expandedDest ← expandHome dest
 
   -- Check if file already exists
   if ← fileExists expandedDest then
-    IO.println s!"  [cached] {expandedDest}"
+    log.onInfo s!"  [cached] {expandedDest}"
     return true
 
   -- Ensure parent directory exists
@@ -68,7 +72,7 @@ def downloadWithRetry (url : String) (dest : String) (maxRetries : Nat := 5)
   | some p => IO.FS.createDirAll p
   | none => pure ()
 
-  IO.println s!"  Downloading: {url}"
+  log.onInfo s!"  Downloading: {url}"
 
   for attempt in [1:maxRetries+1] do
     let tempPath := s!"{expandedDest}.tmp"
@@ -82,10 +86,10 @@ def downloadWithRetry (url : String) (dest : String) (maxRetries : Nat := 5)
     if result.exitCode == 0 then
       -- Move temp file to final location
       IO.FS.rename ⟨tempPath⟩ ⟨expandedDest⟩
-      IO.println s!"  Downloaded: {expandedDest}"
+      log.onInfo s!"  Downloaded: {expandedDest}"
       return true
     else
-      IO.println s!"  Attempt {attempt}/{maxRetries} failed: {result.stderr}"
+      log.onWarn s!"  Attempt {attempt}/{maxRetries} failed: {result.stderr}"
 
       -- Clean up temp file
       if ← fileExists tempPath then
@@ -94,26 +98,26 @@ def downloadWithRetry (url : String) (dest : String) (maxRetries : Nat := 5)
       if attempt < maxRetries then
         -- Exponential backoff: 2^attempt * initialBackoff
         let waitTime := (2 ^ attempt) * initialBackoffMs
-        IO.println s!"  Waiting {waitTime / 1000} seconds before retry..."
+        log.onInfo s!"  Waiting {waitTime / 1000} seconds before retry..."
         IO.sleep waitTime.toUInt32
 
-  IO.println s!"  Failed to download after {maxRetries} attempts: {url}"
+  log.onError s!"  Failed to download after {maxRetries} attempts: {url}"
   return false
 
 /-- Download and extract a ZIP file.
     Returns path to extracted directory. -/
 def downloadAndExtractZip (url : String) (destDir : String) (maxRetries : Nat := 5)
-    : IO String := do
+    (log : Handlers := {}) : IO String := do
   let expandedDestDir ← expandHome destDir
   let zipPath := s!"{expandedDestDir}.zip"
 
   -- Check if already extracted
   if ← fileExists expandedDestDir then
-    IO.println s!"  [cached] Extracted directory: {expandedDestDir}"
+    log.onInfo s!"  [cached] Extracted directory: {expandedDestDir}"
     return expandedDestDir
 
   -- Download the ZIP file
-  let success ← downloadWithRetry url zipPath maxRetries
+  let success ← downloadWithRetry url zipPath maxRetries 1000 log
   if !success then
     throw $ IO.userError s!"Failed to download: {url}"
 
@@ -121,7 +125,7 @@ def downloadAndExtractZip (url : String) (destDir : String) (maxRetries : Nat :=
   IO.FS.createDirAll ⟨expandedDestDir⟩
 
   -- Extract using unzip
-  IO.println s!"  Extracting to {expandedDestDir}..."
+  log.onInfo s!"  Extracting to {expandedDestDir}..."
   let result ← IO.Process.output {
     cmd := "unzip"
     args := #["-q", "-o", zipPath, "-d", expandedDestDir]
@@ -133,14 +137,14 @@ def downloadAndExtractZip (url : String) (destDir : String) (maxRetries : Nat :=
   -- Clean up ZIP file
   IO.FS.removeFile ⟨zipPath⟩
 
-  IO.println s!"  Extracted: {expandedDestDir}"
+  log.onInfo s!"  Extracted: {expandedDestDir}"
   return expandedDestDir
 
 /-! ## CORE Evaluation Bundle -/
 
 /-- Ensure CORE evaluation bundle is downloaded and extracted.
     Returns path to the extracted eval_bundle directory. -/
-def ensureCOREData (cacheDir : String := "~/.cache/nanochat") : IO String := do
+def ensureCOREData (cacheDir : String := "~/.cache/nanochat") (log : Handlers := {}) : IO String := do
   let expandedCacheDir ← expandHome cacheDir
   let evalBundleDir := s!"{expandedCacheDir}/eval_bundle"
   let evalBundleUrl := "https://karpathy-public.s3.us-west-2.amazonaws.com/eval_bundle.zip"
@@ -159,20 +163,20 @@ def ensureCOREData (cacheDir : String := "~/.cache/nanochat") : IO String := do
   if ← fileExists evalBundleDir then
     return (← resolveBundleRoot evalBundleDir)
 
-  IO.println "Downloading CORE evaluation bundle..."
-  let extractedRoot ← downloadAndExtractZip evalBundleUrl evalBundleDir 5
+  log.onInfo "Downloading CORE evaluation bundle..."
+  let extractedRoot ← downloadAndExtractZip evalBundleUrl evalBundleDir 5 log
 
   return (← resolveBundleRoot extractedRoot)
 
 /-- Ensure word list is downloaded for spelling tasks.
     Returns path to words_alpha.txt. -/
-def ensureWordList (cacheDir : String := "~/.cache/nanochat") : IO String := do
+def ensureWordList (cacheDir : String := "~/.cache/nanochat") (log : Handlers := {}) : IO String := do
   let expandedCacheDir ← expandHome cacheDir
   let wordListPath := s!"{expandedCacheDir}/words_alpha.txt"
   let wordListUrl := "https://raw.githubusercontent.com/dwyl/english-words/master/words_alpha.txt"
 
   -- Download if needed
-  let _ ← downloadWithRetry wordListUrl wordListPath 3
+  let _ ← downloadWithRetry wordListUrl wordListPath 3 1000 log
 
   return wordListPath
 
@@ -181,7 +185,9 @@ def ensureWordList (cacheDir : String := "~/.cache/nanochat") : IO String := do
 /-- Ensure HuggingFace dataset parquet file is downloaded.
     Returns local file path. -/
 def ensureHFParquet (repoId : String) (subset : String) (split : String)
-    (cacheDir : String := "~/.cache/huggingface") (_fileIdx : Nat := 0) : IO String := do
+    (cacheDir : String := "~/.cache/huggingface") (_fileIdx : Nat := 0)
+    (log : Handlers := {})
+    : IO String := do
   let expandedCacheDir ← expandHome cacheDir
   let safeRepoId := repoId.replace "/" "_"
   let localDir := s!"{expandedCacheDir}/datasets/{safeRepoId}/{subset}"
@@ -202,7 +208,7 @@ def ensureHFParquet (repoId : String) (subset : String) (split : String)
 
   -- Try each URL pattern
   for url in urls do
-    let success ← downloadWithRetry url localPath 3
+    let success ← downloadWithRetry url localPath 3 1000 log
     if success then
       return localPath
 

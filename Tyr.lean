@@ -1,5 +1,6 @@
 -- Core infrastructure
 import Tyr.Basic
+import Tyr.Log
 import Tyr.Torch
 import Tyr.SafeTensors
 import Tyr.TensorStruct
