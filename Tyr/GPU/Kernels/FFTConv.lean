@@ -9,6 +9,8 @@
   - `Tyr.GPU.Kernels.tkFFTConvPC1024` mirrors the persistent-cache
     producer/consumer flow of the ThunderKittens kernel as closely as the Lean
     DSL can express today.
+  - `Tyr.GPU.Kernels.tkFFTConvNonPC64` mirrors the non-persistent
+    single-stage flow of `fftconv_non_pc.cu`.
 
   The legacy names in `Tyr.GPU.Kernels.FFTConv` are retained as compatibility
   aliases to the canonical kernel.
@@ -186,6 +188,60 @@ def tkFFTConvPC1024
       storeGlobal o_ptr oStage tileCoord
       arriveSemaphore inputConsumed 1
 
+/-- Canonical ThunderKittens-aligned non-persistent FFTConv surface.
+
+This mirrors the structure of `fftconv_non_pc.cu`: one logical tile per launch,
+no persistent producer/consumer loop, and direct global-memory staging for the
+input/output tile while reusing the same FFT/filter core as the persistent
+variant. The complex factor globals are still modeled as long-resident shared
+inputs because the Lean DSL does not yet expose complex global layouts. -/
+@[gpu_kernel .SM90]
+def tkFFTConvNonPC64
+    (x_ptr : GPtr GpuFloat.BFloat16)
+    (o_ptr : GPtr GpuFloat.BFloat16) : KernelM Unit := do
+  comment "ThunderKittens fftconv_non_pc.cu: direct non-persistent FFTConv"
+
+  let coord ← blockCoord2D
+
+  let xStage : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
+  let oStage : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
+
+  let fShared : CST GpuFloat.BFloat16 64 64 ← allocCST .BFloat16 64 64
+  let fInvShared : CST GpuFloat.BFloat16 64 64 ← allocCST .BFloat16 64 64
+  let twShared : CST GpuFloat.BFloat16 64 64 ← allocCST .BFloat16 64 64
+  let twinvTShared : CST GpuFloat.BFloat16 64 64 ← allocCST .BFloat16 64 64
+  let kfShared : CST GpuFloat.BFloat16 64 64 ← allocCST .BFloat16 64 64
+  let scratchTmp : CST GpuFloat.BFloat16 64 64 ← allocCST .BFloat16 64 64
+
+  let f : CRT GpuFloat.BFloat16 64 64 ← allocCRT .BFloat16 64 64
+  let fInv : CRT GpuFloat.BFloat16 64 64 ← allocCRT .BFloat16 64 64
+  let tw : CRT GpuFloat.BFloat16 64 64 ← allocCRT .BFloat16 64 64
+  let twinvT : CRT GpuFloat.BFloat16 64 64 ← allocCRT .BFloat16 64 64
+  let kf : CRT GpuFloat.BFloat16 64 64 ← allocCRT .BFloat16 64 64
+
+  let x : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
+  let out : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
+  let mmaReg : CRT GpuFloat.Float32 64 64 ← zeroCRT .Float32 64 64
+  let accum : CRT GpuFloat.BFloat16 64 64 ← allocCRT .BFloat16 64 64
+  let tmp : CRT GpuFloat.BFloat16 64 64 ← allocCRT .BFloat16 64 64
+
+  comment "Non-persistent path: load factors and the current input tile directly"
+  loadComplex f fShared
+  loadComplex fInv fInvShared
+  loadComplex tw twShared
+  loadComplex twinvT twinvTShared
+  let fCol ← complexAsCol f
+  let fInvCol ← complexAsCol fInv
+  loadComplex kf kfShared
+
+  loadGlobal xStage x_ptr coord
+  sync
+  load x xStage
+  fftConvTileCore x mmaReg accum tmp out scratchTmp f fInv fCol fInvCol tw twinvT kf
+  store oStage out
+  sync
+  storeGlobal o_ptr oStage coord
+
 end Tyr.GPU.Kernels
 
 namespace Tyr.GPU.Kernels.FFTConv
@@ -209,5 +265,14 @@ def fftConvPersistentFwd
     (o_ptr : GPtr GpuFloat.BFloat16) : KernelM Unit := do
   comment "Compatibility alias to Tyr.GPU.Kernels.tkFFTConvPC1024"
   Tyr.GPU.Kernels.tkFFTConvPC1024 x_ptr o_ptr
+
+/-- Compatibility alias to the canonical ThunderKittens non-persistent FFTConv
+kernel. -/
+@[gpu_kernel .SM90]
+def fftConvNonPersistentFwd
+    (x_ptr : GPtr GpuFloat.BFloat16)
+    (o_ptr : GPtr GpuFloat.BFloat16) : KernelM Unit := do
+  comment "Compatibility alias to Tyr.GPU.Kernels.tkFFTConvNonPC64"
+  Tyr.GPU.Kernels.tkFFTConvNonPC64 x_ptr o_ptr
 
 end Tyr.GPU.Kernels.FFTConv

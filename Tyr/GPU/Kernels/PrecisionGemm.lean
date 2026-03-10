@@ -1,19 +1,22 @@
 /-
   Tyr/GPU/Kernels/PrecisionGemm.lean
 
-  H100-oriented FP8 GEMM kernels.
+  FP8-family GEMM kernels.
 
   This module now serves two roles:
 
   - `tkH100Fp8E4M3GemmFwd` and `tkH100Fp8ScaledGemmFwd` are the canonical
     ThunderKittens-shaped H100 FP8 surfaces, following
     `kernels/gemm/fp8_h100/*`.
+  - `tkB200Fp8E4M3Gemm1CtaCompatFwd`, `tkB200Fp8E4M3Gemm2CtaCompatFwd`, and
+    `tkB200MxFp8GemmCompatFwd` are Blackwell-oriented compatibility surfaces
+    for the vendored `fp8_b200/*` and `mxfp8_b200/*` kernels.
   - The older mixed-precision and fused-epilogue kernels remain as
     compatibility conveniences built on the same H100 tiled mainloop; they are
     not separate ThunderKittens source ports.
 -/
 
-import Tyr.GPU.Kernels.Prelude
+import Tyr.GPU.Kernels.GemmCommon
 
 namespace Tyr.GPU.Kernels.PrecisionGemm
 
@@ -25,6 +28,11 @@ private abbrev fp8TileK : Nat := 128
 private abbrev fp8TileN : Nat := 256
 private abbrev fp8KBlocks : Nat := 4
 
+private abbrev b200TileM : Nat := 128
+private abbrev b200TileK : Nat := 128
+private abbrev b200TileN : Nat := 256
+private abbrev b200KBlocks : Nat := 4
+
 private def h100Fp8Accumulator {inDtype : GpuFloat}
     (banner : String)
     (aPtr : GPtr inDtype)
@@ -32,67 +40,33 @@ private def h100Fp8Accumulator {inDtype : GpuFloat}
     (m : KVal UInt64)
     (n : KVal UInt64)
     (k : KVal UInt64)
-    : KernelM (RT GpuFloat.Float32 fp8TileM fp8TileN × RTileCoord) := do
-  let _ := (m, n, k)
-  comment banner
-  comment "ThunderKittens fp8_h100 tile shape: A 64x128, B 256x128, C 64x256"
+    : KernelM (RT GpuFloat.Float32 fp8TileM fp8TileN × RTileCoord) :=
+  GemmCommon.tiledAccumulator
+    (tileM := fp8TileM)
+    (tileK := fp8TileK)
+    (tileN := fp8TileN)
+    (kBlocks := fp8KBlocks)
+    banner
+    "ThunderKittens fp8_h100 tile family"
+    aPtr bPtr m n k
 
-  let coord ← blockCoord2D
-
-  let a : RT inDtype fp8TileM fp8TileK ← allocRT inDtype fp8TileM fp8TileK
-  let b : RT inDtype fp8TileN fp8TileK ← allocRT inDtype fp8TileN fp8TileK
-  let accum : RT GpuFloat.Float32 fp8TileM fp8TileN ← zeroRT .Float32 fp8TileM fp8TileN
-
-  let aShared : ST inDtype fp8TileM fp8TileK ← allocST inDtype fp8TileM fp8TileK
-  let bShared : ST inDtype fp8TileN fp8TileK ← allocST inDtype fp8TileN fp8TileK
-
-  for kBlk in krange 0 fp8KBlocks do
-    let aCoord := coord.withCol kBlk.id
-    let bCoord := (coord.withRow coord.c).withCol kBlk.id
-    loadGlobal aShared aPtr aCoord
-    loadGlobal bShared bPtr bCoord
-    sync
-    load a aShared
-    load b bShared
-    mmaT accum a b accum
-    sync
-
-  pure (accum, coord)
-
-private def storeConvertedTile {outDtype : GpuFloat}
-    (outPtr : GPtr outDtype)
-    (coord : RTileCoord)
-    (src : RT GpuFloat.Float32 fp8TileM fp8TileN)
-    : KernelM Unit := do
-  let out : RT outDtype fp8TileM fp8TileN ← allocRT outDtype fp8TileM fp8TileN
-  let outShared : ST outDtype fp8TileM fp8TileN ← allocST outDtype fp8TileM fp8TileN
-  convert out src
-  store outShared out
-  storeGlobal outPtr outShared coord
-
-private def storeFloat32Tile
-    (outPtr : GPtr GpuFloat.Float32)
-    (coord : RTileCoord)
-    (src : RT GpuFloat.Float32 fp8TileM fp8TileN)
-    : KernelM Unit := do
-  let outShared : ST GpuFloat.Float32 fp8TileM fp8TileN ← allocST .Float32 fp8TileM fp8TileN
-  store outShared src
-  storeGlobal outPtr outShared coord
-
-private def loadScaleVectors
-    (scaleAPtr : GPtr GpuFloat.Float32)
-    (scaleBPtr : GPtr GpuFloat.Float32)
-    (coord : RTileCoord)
-    : KernelM (RV GpuFloat.Float32 fp8TileM × RV GpuFloat.Float32 fp8TileN) := do
-  let scaleAShared : SV GpuFloat.Float32 fp8TileM ← allocSV .Float32 fp8TileM
-  let scaleBShared : SV GpuFloat.Float32 fp8TileN ← allocSV .Float32 fp8TileN
-  let scaleA : RV GpuFloat.Float32 fp8TileM ← allocRV .Float32 fp8TileM
-  let scaleB : RV GpuFloat.Float32 fp8TileN ← allocRV .Float32 fp8TileN
-  loadVecGlobalRow scaleAShared scaleAPtr coord
-  loadVecGlobalCol scaleBShared scaleBPtr coord
-  loadVec scaleA scaleAShared
-  loadVec scaleB scaleBShared
-  pure (scaleA, scaleB)
+private def b200Fp8CompatAccumulator {inDtype : GpuFloat}
+    (banner : String)
+    (sourceNote : String)
+    (aPtr : GPtr inDtype)
+    (bPtr : GPtr inDtype)
+    (m : KVal UInt64)
+    (n : KVal UInt64)
+    (k : KVal UInt64)
+    : KernelM (RT GpuFloat.Float32 b200TileM b200TileN × RTileCoord) :=
+  GemmCommon.tiledAccumulator
+    (tileM := b200TileM)
+    (tileK := b200TileK)
+    (tileN := b200TileN)
+    (kBlocks := b200KBlocks)
+    banner
+    sourceNote
+    aPtr bPtr m n k
 
 /-! ## Canonical H100 FP8 Surfaces -/
 
@@ -112,7 +86,7 @@ def tkH100Fp8E4M3GemmFwd
   let (accum, coord) ← h100Fp8Accumulator
     "=== H100 FP8 GEMM (E4M3 -> E4M3 epilogue) ==="
     aPtr bPtr m n k
-  storeConvertedTile cPtr coord accum
+  GemmCommon.storeConvertedTile cPtr coord accum
 
 /-- Canonical H100 scaled-FP8 surface following `fp8_h100_scaled_gemm.cu`.
 
@@ -133,11 +107,85 @@ def tkH100Fp8ScaledGemmFwd
   let (accum, coord) ← h100Fp8Accumulator
     "=== H100 FP8 GEMM with row/column scales ==="
     aPtr bPtr m n k
-  let (scaleA, scaleB) ← loadScaleVectors scaleAPtr scaleBPtr coord
-  let scaled : RT GpuFloat.Float32 fp8TileM fp8TileN ← allocRT .Float32 fp8TileM fp8TileN
-  mulCol scaled accum scaleA
-  mulRow scaled scaled scaleB
-  storeFloat32Tile cPtr coord scaled
+  let (scaleA, scaleB) ← GemmCommon.loadRowColScaleVectors
+    (tileM := fp8TileM)
+    (tileN := fp8TileN)
+    scaleAPtr scaleBPtr coord
+  let scaled ← GemmCommon.applyRowColScales accum scaleA scaleB
+  GemmCommon.storeFloat32Tile cPtr coord scaled
+
+/-! ## Blackwell Compatibility Surfaces -/
+
+/-- Blackwell-compatible surface corresponding to `fp8_b200_gemm_1cta.cu`.
+
+The vendored kernel is a single-CTA Blackwell kernel with TMEM-backed output
+staging. The current Lean DSL does not model TMEM explicitly, so this surface
+keeps the source-aligned 128x256x128 tile geometry while remaining explicit
+about its compatibility status. -/
+@[gpu_kernel .SM100]
+def tkB200Fp8E4M3Gemm1CtaCompatFwd
+    (aPtr : GPtr GpuFloat.FP8E4M3)
+    (bPtr : GPtr GpuFloat.FP8E4M3)
+    (dPtr : GPtr GpuFloat.BFloat16)
+    (m : KVal UInt64)
+    (n : KVal UInt64)
+    (k : KVal UInt64)
+    : KernelM Unit := do
+  let (accum, coord) ← b200Fp8CompatAccumulator
+    "=== B200 FP8 GEMM (1 CTA compatibility) ==="
+    "ThunderKittens fp8_b200_gemm_1cta shape, flattened to the CTA-local tiled operations available in the Lean DSL"
+    aPtr bPtr m n k
+  GemmCommon.storeConvertedTile dPtr coord accum
+
+/-- Blackwell-compatible surface corresponding to `fp8_b200_gemm_2cta.cu`.
+
+The source kernel splits the B tile and output handoff across a two-CTA
+cluster. This compatibility surface preserves the same logical output tile and
+input dtypes, but collapses the cluster choreography into one CTA-local
+register/shared-memory view. -/
+@[gpu_kernel .SM100]
+def tkB200Fp8E4M3Gemm2CtaCompatFwd
+    (aPtr : GPtr GpuFloat.FP8E4M3)
+    (bPtr : GPtr GpuFloat.FP8E4M3)
+    (dPtr : GPtr GpuFloat.BFloat16)
+    (m : KVal UInt64)
+    (n : KVal UInt64)
+    (k : KVal UInt64)
+    : KernelM Unit := do
+  let (accum, coord) ← b200Fp8CompatAccumulator
+    "=== B200 FP8 GEMM (2 CTA compatibility) ==="
+    "ThunderKittens fp8_b200_gemm_2cta tile family, represented as a single CTA-local compatibility surface because cluster/TMEM exchange is not modeled directly"
+    aPtr bPtr m n k
+  GemmCommon.storeConvertedTile dPtr coord accum
+
+/-- Blackwell-compatible MXFP8 surface corresponding to
+`mxfp8_b200_gemm.cu`.
+
+The source kernel uses packed `fp8e8m0` scale tiles. Since the current Lean
+DSL only models `FP8E4M3` and `FP8E5M2`, this surface takes explicit Float32
+row/column scale vectors as compatibility stand-ins and applies them after FP32
+accumulation. -/
+@[gpu_kernel .SM100]
+def tkB200MxFp8GemmCompatFwd
+    (aPtr : GPtr GpuFloat.FP8E4M3)
+    (bPtr : GPtr GpuFloat.FP8E4M3)
+    (scaleAPtr : GPtr GpuFloat.Float32)
+    (scaleBPtr : GPtr GpuFloat.Float32)
+    (dPtr : GPtr GpuFloat.BFloat16)
+    (m : KVal UInt64)
+    (n : KVal UInt64)
+    (k : KVal UInt64)
+    : KernelM Unit := do
+  let (accum, coord) ← b200Fp8CompatAccumulator
+    "=== B200 MXFP8 GEMM (compatibility) ==="
+    "ThunderKittens mxfp8_b200 tile family with row/column Float32 scale proxies standing in for packed e8m0 scale tiles"
+    aPtr bPtr m n k
+  let (scaleA, scaleB) ← GemmCommon.loadRowColScaleVectors
+    (tileM := b200TileM)
+    (tileN := b200TileN)
+    scaleAPtr scaleBPtr coord
+  let scaled ← GemmCommon.applyRowColScales accum scaleA scaleB
+  GemmCommon.storeConvertedTile dPtr coord scaled
 
 /-! ## Compatibility Convenience Kernels -/
 
@@ -154,7 +202,7 @@ def gemmFp8E4M3Fwd
   let (accum, coord) ← h100Fp8Accumulator
     "=== H100 FP8 GEMM compatibility epilogue (E4M3 -> BF16) ==="
     aPtr bPtr m n k
-  storeConvertedTile cPtr coord accum
+  GemmCommon.storeConvertedTile cPtr coord accum
 
 /-- Format-variant compatibility wrapper using the same H100 tiling with E5M2
 inputs and a BF16 epilogue. -/
@@ -170,7 +218,7 @@ def gemmFp8E5M2Fwd
   let (accum, coord) ← h100Fp8Accumulator
     "=== H100 FP8 GEMM compatibility epilogue (E5M2 -> BF16) ==="
     aPtr bPtr m n k
-  storeConvertedTile cPtr coord accum
+  GemmCommon.storeConvertedTile cPtr coord accum
 
 /-- BF16 activation / FP8 weight compatibility kernel using the canonical H100
 FP8 output tile shape. The BF16 activation tile is explicitly converted to E4M3
@@ -210,7 +258,7 @@ def gemmMixedFwd
     mmaT accum aFp8 b accum
     sync
 
-  storeConvertedTile cPtr coord accum
+  GemmCommon.storeConvertedTile cPtr coord accum
 
 /-- Compatibility fused-epilogue kernel: H100 FP8 mainloop followed by an
 elementwise scale tile and a per-column bias vector. -/
@@ -245,6 +293,6 @@ def gemmFp8ScaledBiasFwd
   mul scaled accum scale
   addRow scaled scaled bias
 
-  storeConvertedTile cPtr coord scaled
+  GemmCommon.storeConvertedTile cPtr coord scaled
 
 end Tyr.GPU.Kernels.PrecisionGemm

@@ -1,13 +1,17 @@
 /-
   Tyr/GPU/Kernels/Flux.lean
 
-  Flux activation kernels (fused linear + GELU/Gate).
-  Based on ThunderKittens patterns.
+  Flux fused matmul + activation kernels aligned to the vendored
+  `flux_gelu.cu` and `flux_gate.cu` kernels.
 
-  Key features:
-  - Producer-consumer pattern with TMA loads
-  - Fused linear layer + activation
-  - Hardware-accelerated fast_tanh for GELU
+  Canonical source-facing surfaces:
+
+  - `Tyr.GPU.Kernels.tkFluxMatmulGeluFwd`
+  - `Tyr.GPU.Kernels.tkFluxMatmulGateFwd`
+
+  The older `fluxGeluFwd`, `fluxGateFwd`, and `fluxSiluFwd` entries remain as
+  convenience kernels, but they are not the best approximation of the vendored
+  ThunderKittens signatures.
 -/
 
 import Tyr.GPU.Kernels.Prelude
@@ -16,6 +20,124 @@ namespace Tyr.GPU.Kernels.Flux
 
 open Tyr.GPU
 open Tyr.GPU.Codegen
+
+private abbrev fluxTileRows : Nat := 64
+private abbrev fluxTileCols : Nat := 64
+private abbrev fluxKBlocks : Nat := 8
+
+private def loadColumnVecF32
+    (ptr : GPtr GpuFloat.BFloat16) (coord : RTileCoord)
+    : KernelM (RV GpuFloat.Float32 fluxTileCols) := do
+  let shared : SV GpuFloat.BFloat16 fluxTileCols ← allocSV .BFloat16 fluxTileCols
+  let vecBf : RV GpuFloat.BFloat16 fluxTileCols ← allocRV .BFloat16 fluxTileCols
+  let vecF : RV GpuFloat.Float32 fluxTileCols ← allocRV .Float32 fluxTileCols
+  loadVecGlobalCol shared ptr coord
+  loadVec vecBf shared
+  convertVec vecF vecBf
+  pure vecF
+
+private def fluxMatmulAccumulator
+    (lhs_ptr : GPtr GpuFloat.BFloat16)
+    (rhs_ptr : GPtr GpuFloat.BFloat16)
+    (coord : RTileCoord)
+    : KernelM (RT GpuFloat.Float32 fluxTileRows fluxTileCols) := do
+  let x : RT GpuFloat.BFloat16 fluxTileRows fluxTileCols ← allocRT .BFloat16 fluxTileRows fluxTileCols
+  let w : RT GpuFloat.BFloat16 fluxTileRows fluxTileCols .Col ← allocRT .BFloat16 fluxTileRows fluxTileCols .Col
+  let acc : RT GpuFloat.Float32 fluxTileRows fluxTileCols ← zeroRT .Float32 fluxTileRows fluxTileCols
+  let xShared : ST GpuFloat.BFloat16 fluxTileRows fluxTileCols ← allocST .BFloat16 fluxTileRows fluxTileCols
+  let wShared : ST GpuFloat.BFloat16 fluxTileRows fluxTileCols .Col ← allocST .BFloat16 fluxTileRows fluxTileCols .Col
+
+  loadGlobal xShared lhs_ptr coord
+  sync
+  for kIdx in krange 0 fluxKBlocks do
+    loadGlobal wShared rhs_ptr (coord.withCol kIdx.id)
+    sync
+    load x xShared
+    load w wShared
+    mma acc x w acc
+    sync
+  pure acc
+
+/-! ## Canonical ThunderKittens Surfaces -/
+
+/-- Canonical `flux_gelu.cu`-shaped fused matmul + GELU surface.
+
+This surface adds the missing per-column bias vector that the vendored CUDA
+kernel carries through the prototype layout before applying the GELU epilogue. -/
+@[gpu_kernel .SM90]
+def tkFluxMatmulGeluFwd
+    (lhs_ptr : GPtr GpuFloat.BFloat16)
+    (rhs_ptr : GPtr GpuFloat.BFloat16)
+    (bias_ptr : GPtr GpuFloat.BFloat16)
+    (acc_ptr : GPtr GpuFloat.BFloat16)
+    (_m : KVal UInt64) (_n : KVal UInt64) (_k : KVal UInt64) : KernelM Unit := do
+  comment "=== ThunderKittens flux_gelu.cu: fused matmul + bias + GELU ==="
+
+  let coord ← blockCoord2D
+  let acc ← fluxMatmulAccumulator lhs_ptr rhs_ptr coord
+  let bias ← loadColumnVecF32 bias_ptr coord
+  let geluIn : RT GpuFloat.Float32 fluxTileRows fluxTileCols ← allocRT .Float32 fluxTileRows fluxTileCols
+  let sq : RT GpuFloat.Float32 fluxTileRows fluxTileCols ← allocRT .Float32 fluxTileRows fluxTileCols
+  let tanhArg : RT GpuFloat.Float32 fluxTileRows fluxTileCols ← allocRT .Float32 fluxTileRows fluxTileCols
+  let out : RT GpuFloat.BFloat16 fluxTileRows fluxTileCols ← allocRT .BFloat16 fluxTileRows fluxTileCols
+  let outShared : ST GpuFloat.BFloat16 fluxTileRows fluxTileCols ← allocST .BFloat16 fluxTileRows fluxTileCols
+
+  addRow geluIn acc bias
+  mul sq geluIn geluIn
+  scalarMul sq sq 0.044715
+  scalarAdd sq sq 1.0
+  scalarMul tanhArg geluIn 0.79788456
+  mul tanhArg tanhArg sq
+  fastTanh tanhArg tanhArg
+  scalarAdd tanhArg tanhArg 1.0
+  scalarMul geluIn geluIn 0.5
+  mul geluIn geluIn tanhArg
+
+  convert out geluIn
+  store outShared out
+  sync
+  storeGlobal acc_ptr outShared coord
+
+/-- Canonical `flux_gate.cu`-shaped fused matmul + bias + gate + residual
+surface.
+
+The vendored kernel multiplies the bias-adjusted accumulator by a per-column
+gate vector and then adds a pre-existing output tile `y`. This Lean surface
+keeps that contract explicit. -/
+@[gpu_kernel .SM90]
+def tkFluxMatmulGateFwd
+    (lhs_ptr : GPtr GpuFloat.BFloat16)
+    (rhs_ptr : GPtr GpuFloat.BFloat16)
+    (bias_ptr : GPtr GpuFloat.BFloat16)
+    (gate_ptr : GPtr GpuFloat.BFloat16)
+    (y_ptr : GPtr GpuFloat.BFloat16)
+    (acc_ptr : GPtr GpuFloat.BFloat16)
+    (_m : KVal UInt64) (_n : KVal UInt64) (_k : KVal UInt64) : KernelM Unit := do
+  comment "=== ThunderKittens flux_gate.cu: fused matmul + bias + gate + residual ==="
+
+  let coord ← blockCoord2D
+  let acc ← fluxMatmulAccumulator lhs_ptr rhs_ptr coord
+  let bias ← loadColumnVecF32 bias_ptr coord
+  let gate ← loadColumnVecF32 gate_ptr coord
+  let gated : RT GpuFloat.Float32 fluxTileRows fluxTileCols ← allocRT .Float32 fluxTileRows fluxTileCols
+  let yBf : RT GpuFloat.BFloat16 fluxTileRows fluxTileCols ← allocRT .BFloat16 fluxTileRows fluxTileCols
+  let yF : RT GpuFloat.Float32 fluxTileRows fluxTileCols ← allocRT .Float32 fluxTileRows fluxTileCols
+  let out : RT GpuFloat.BFloat16 fluxTileRows fluxTileCols ← allocRT .BFloat16 fluxTileRows fluxTileCols
+  let yShared : ST GpuFloat.BFloat16 fluxTileRows fluxTileCols ← allocST .BFloat16 fluxTileRows fluxTileCols
+  let outShared : ST GpuFloat.BFloat16 fluxTileRows fluxTileCols ← allocST .BFloat16 fluxTileRows fluxTileCols
+
+  addRow gated acc bias
+  mulRow gated gated gate
+  loadGlobal yShared y_ptr coord
+  sync
+  load yBf yShared
+  convert yF yBf
+  add gated gated yF
+
+  convert out gated
+  store outShared out
+  sync
+  storeGlobal acc_ptr outShared coord
 
 /-! ## Flux GELU Kernel
 
@@ -273,3 +395,13 @@ def fluxSiluFwd (X_ptr : GPtr GpuFloat.BFloat16) (W_up_ptr : GPtr GpuFloat.BFloa
 -- Print generated kernels
 
 end Tyr.GPU.Kernels.Flux
+
+namespace Tyr.GPU.Kernels
+
+/-- Canonical ThunderKittens-aligned flux GELU surface. -/
+abbrev tkFluxMatmulGeluFwd := Flux.tkFluxMatmulGeluFwd
+
+/-- Canonical ThunderKittens-aligned flux gate surface. -/
+abbrev tkFluxMatmulGateFwd := Flux.tkFluxMatmulGateFwd
+
+end Tyr.GPU.Kernels

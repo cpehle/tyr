@@ -5,6 +5,7 @@ import Tyr.GPU.Kernels.FlashAttnBwd
 import Tyr.GPU.Kernels.LinearAttn
 import Tyr.GPU.Kernels.LinearAttnBwd
 import Tyr.GPU.Kernels.MhaH100
+import Tyr.GPU.Kernels.MhaH100LCF
 import Tyr.GPU.Kernels.RingAttn
 import Tyr.GPU.Kernels.RingAttnBwd
 import Tyr.GPU.Kernels.Rotary
@@ -19,13 +20,13 @@ Attention-family kernels in the built-in catalog.
 
 This module groups:
 
-- local attention kernels (`FlashAttn*`, `MhaH100`, `LinearAttn`, `Based`)
+- local attention kernels (`FlashAttn*`, `MhaH100*`, `LinearAttn`, `Based`)
 - rotary position kernels
 - distributed attention transport/reduction families (`RingAttn*`, `UlyssesAttn*`)
 
-The root `Tyr.GPU.Kernels` namespace exposes the canonical forward entrypoints
-via abbreviations declared here, while the original family namespaces retain
-their detailed phase helpers and compatibility shims.
+The root `Tyr.GPU.Kernels` namespace exposes the composed transport/reduction
+entrypoints here, while the detailed `MhaH100*`, `MhaH100LCF*`, and
+`FlashAttn*` kernels are contributed directly by the imported leaf modules.
 -/
 
 namespace Tyr.GPU.Kernels
