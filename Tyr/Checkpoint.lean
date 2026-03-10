@@ -25,6 +25,38 @@ namespace torch.checkpoint
 
 open torch
 
+private def parseNatLine (key : String) (line : String) : Except String Nat :=
+  let value := (line.drop key.length).trimAscii.toString
+  match value.toNat? with
+  | some n => Except.ok n
+  | none => Except.error s!"Invalid Nat value for {key.dropEnd 1}: {value}"
+
+private def parseFloatLit? (s : String) : Option Float :=
+  let trimmed := s.trimAscii.toString
+  if trimmed.isEmpty then
+    none
+  else
+    let negative := trimmed.startsWith "-"
+    let body := if negative then (trimmed.drop 1).toString else trimmed
+    let unsigned? :=
+      match body.splitOn "." with
+      | [whole] =>
+        whole.toNat?.map Nat.toFloat
+      | [whole, frac] =>
+        match whole.toNat?, frac.toNat? with
+        | some w, some f =>
+          let denom : Float := (Nat.pow 10 frac.length).toFloat
+          some (w.toFloat + f.toFloat / denom)
+        | _, _ => none
+      | _ => none
+    unsigned?.map fun x => if negative then -x else x
+
+private def parseFloatLine (key : String) (line : String) : Except String Float :=
+  let value := (line.drop key.length).trimAscii.toString
+  match parseFloatLit? value with
+  | some x => Except.ok x
+  | none => Except.error s!"Invalid Float value for {key.dropEnd 1}: {value}"
+
 /-- Checkpoint metadata -/
 structure CheckpointMeta where
   iteration : Nat
@@ -48,15 +80,21 @@ def loadCheckpointMeta (path : String) : IO CheckpointMeta := do
   let mut optimCount : Nat := 0
   for line in lines do
     if line.startsWith "iteration=" then
-      iteration := (line.drop 10).toNat!
+      match parseNatLine "iteration=" line with
+      | .ok value => iteration := value
+      | .error err => throw <| IO.userError err
     else if line.startsWith "bestValLoss=" then
-      let valStr := line.drop 12
-      bestValLoss := valStr.toNat!.toFloat
+      match parseFloatLine "bestValLoss=" line with
+      | .ok value => bestValLoss := value
+      | .error err => throw <| IO.userError err
     else if line.startsWith "trainLoss=" then
-      let valStr := line.drop 10
-      trainLoss := valStr.toNat!.toFloat
+      match parseFloatLine "trainLoss=" line with
+      | .ok value => trainLoss := value
+      | .error err => throw <| IO.userError err
     else if line.startsWith "optimCount=" then
-      optimCount := (line.drop 11).toNat!
+      match parseNatLine "optimCount=" line with
+      | .ok value => optimCount := value
+      | .error err => throw <| IO.userError err
   return { iteration, bestValLoss, trainLoss, optimCount }
 
 /-- Check if a checkpoint exists -/

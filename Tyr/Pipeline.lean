@@ -105,6 +105,7 @@ instance : Lean.ToJson StageInfo where
     ("status", toJson info.status),
     ("startTime", match info.startTime with | some t => .num t | none => .null),
     ("endTime", match info.endTime with | some t => .num t | none => .null),
+    ("metrics", toJson info.metrics),
     ("retryCount", .num info.retryCount)
   ]
 
@@ -114,8 +115,9 @@ instance : Lean.FromJson StageInfo where
     let status ← json.getObjValAs? StageStatus "status"
     let startTime := (json.getObjValAs? Nat "startTime").toOption
     let endTime := (json.getObjValAs? Nat "endTime").toOption
+    let metrics := (json.getObjValAs? (List (String × String)) "metrics").toOption.getD []
     let retryCount := (json.getObjValAs? Nat "retryCount").toOption.getD 0
-    pure { name, status, startTime, endTime, metrics := [], retryCount }
+    pure { name, status, startTime, endTime, metrics, retryCount }
 
 /-- Get stage duration in milliseconds -/
 def StageInfo.durationMs (info : StageInfo) : Option Nat :=
@@ -378,7 +380,8 @@ def logStageFailed (name : String) (error : String) : PipelineM Unit := do
     IO.eprintln s!"[FAILED] Stage '{name}': {error}"
 
 /-- Define and execute a pipeline stage with error handling. -/
-def stage (name : String) (action : PipelineM Unit) : PipelineM Unit := do
+private def runStage (name : String) (action : PipelineM Unit) (propagateFailure : Bool)
+    : PipelineM Unit := do
   let mut state ← get
   let config := state.config
 
@@ -449,17 +452,22 @@ def stage (name : String) (action : PipelineM Unit) : PipelineM Unit := do
 
     logStageFailed name errorMsg
 
-    if config.failFast then
+    if propagateFailure then
       throw e
     else
-      throw e  -- For now, always propagate
+      return ()
+
+/-- Define and execute a pipeline stage with error handling. -/
+def stage (name : String) (action : PipelineM Unit) : PipelineM Unit := do
+  let config := (← get).config
+  runStage name action config.failFast
 
 /-- Execute a stage with retry logic. -/
 def stageWithRetry (name : String) (policy : RetryPolicy) (action : PipelineM Unit) : PipelineM Unit := do
   let mut lastError := ""
   for attempt in [:policy.maxAttempts] do
     try
-      stage name action
+      runStage name action true
       return ()
     catch e =>
       lastError := toString e

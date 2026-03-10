@@ -74,12 +74,14 @@ def testStageInfoJsonRoundTrip : IO Unit := do
     status := .completed
     startTime := some 1000
     endTime := some 2000
+    metrics := [("loss", "0.5"), ("tokens", "1024")]
     retryCount := 1
   }
   let json := toJson info
   match (fromJson? json : Except String StageInfo) with
   | .ok info' =>
     LeanTest.assertEqual info.name info'.name
+    LeanTest.assertEqual info.metrics info'.metrics
     LeanTest.assertEqual info.retryCount info'.retryCount
   | .error e => LeanTest.fail s!"Failed to parse StageInfo: {e}"
 
@@ -99,8 +101,10 @@ def testStageInfoDurationMs : IO Unit := do
 def testPipelineCheckpointJsonRoundTrip : IO Unit := do
   let checkpoint : PipelineCheckpoint := {
     stages := #[
-      { name := "stage1", status := .completed, startTime := some 100, endTime := some 200 },
-      { name := "stage2", status := .failed "error", startTime := some 300, endTime := some 400 }
+      { name := "stage1", status := .completed, startTime := some 100, endTime := some 200,
+        metrics := [("loss", "0.25")] },
+      { name := "stage2", status := .failed "error", startTime := some 300, endTime := some 400,
+        metrics := [("status", "failed")] }
     ]
     timestamp := 12345
     runId := "test-run-123"
@@ -110,7 +114,32 @@ def testPipelineCheckpointJsonRoundTrip : IO Unit := do
   | .ok checkpoint' =>
     LeanTest.assertEqual checkpoint.stages.size checkpoint'.stages.size
     LeanTest.assertEqual checkpoint.runId checkpoint'.runId
+    LeanTest.assertEqual checkpoint.stages[0]!.metrics checkpoint'.stages[0]!.metrics
   | .error e => LeanTest.fail s!"Failed to parse PipelineCheckpoint: {e}"
+
+@[test]
+def testStageFailFastFalseContinues : IO Unit := do
+  let ts ← IO.monoMsNow
+  let baseDir := s!"/tmp/tyr_pipeline_failfast_{ts}"
+  let cfg : PipelineConfig := {
+    baseDir := baseDir
+    checkpointAfterStage := false
+    resumeFromCheckpoint := false
+    failFast := false
+  }
+  let initial ← initPipeline cfg
+  let (_, finalState) ← (do
+    stage "fails" (throw <| IO.userError "boom")
+    stage "continues" (pure ())
+  ).run initial
+
+  LeanTest.assertEqual finalState.stages.size 2
+  match finalState.stages[0]!.status with
+  | .failed err => LeanTest.assertTrue (err.containsSubstr "boom") "first stage should fail"
+  | _ => LeanTest.fail "first stage should be marked failed"
+  match finalState.stages[1]!.status with
+  | .completed => pure ()
+  | _ => LeanTest.fail "second stage should complete when failFast is false"
 
 /-! ## Duration Formatting Tests -/
 

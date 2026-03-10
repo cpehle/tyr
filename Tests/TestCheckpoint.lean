@@ -14,6 +14,26 @@ import LeanTest
 open torch
 open torch.ModdedTrain
 open torch.Optim
+open torch.checkpoint
+
+@[test]
+def testCheckpointMetaParsesFloatLosses : IO Unit := do
+  let ts ← IO.monoMsNow
+  let path := s!"/tmp/tyr_checkpoint_meta_{ts}.txt"
+  let checkpointMeta : CheckpointMeta := {
+    iteration := 17
+    bestValLoss := 0.625
+    trainLoss := 1.75
+    optimCount := 3
+  }
+  saveCheckpointMeta checkpointMeta path
+  let loaded ← loadCheckpointMeta path
+  LeanTest.assertEqual loaded.iteration checkpointMeta.iteration
+  LeanTest.assertEqual loaded.optimCount checkpointMeta.optimCount
+  LeanTest.assertTrue (Float.abs (loaded.bestValLoss - checkpointMeta.bestValLoss) < 1e-6)
+    s!"bestValLoss should round-trip: {loaded.bestValLoss} vs {checkpointMeta.bestValLoss}"
+  LeanTest.assertTrue (Float.abs (loaded.trainLoss - checkpointMeta.trainLoss) < 1e-6)
+    s!"trainLoss should round-trip: {loaded.trainLoss} vs {checkpointMeta.trainLoss}"
 
 @[test]
 def testCheckpointCreation : IO Unit := do
