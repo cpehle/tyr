@@ -17,13 +17,13 @@ import Tyr.Distributed
 import Tyr.DataLoader
 import Tyr.Data.Pretraining
 import Tyr.Data.Task
+import Tyr.Train.ChatSFT
+import Tyr.RL.GRPO
 import Tyr.Data.Download
 import Tyr.Data.HuggingFace
 import Tyr.Tokenizer
 import Examples.NanoChat.ModdedGPT
 import Examples.NanoChat.ModdedTrain
-import Examples.NanoChat.ChatSFT
-import Examples.NanoChat.GRPO
 import Examples.NanoChat.Eval.CORE
 import Examples.NanoChat.Eval.COREData
 import Examples.NanoChat.Tasks.LLM

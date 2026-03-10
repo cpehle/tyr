@@ -40,6 +40,10 @@ import Tyr.Checkpoint
 -- Pipeline orchestration
 import Tyr.Pipeline
 
+-- Training loops
+import Tyr.Train.ChatSFT
+import Tyr.RL.GRPO
+
 -- Metrics
 import Tyr.Metrics
 
