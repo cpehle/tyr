@@ -4,6 +4,7 @@ import Tests.TestModdedGPT
 import Tests.TestCheckpoint
 import Tests.TestModelIO
 import Tests.TestPipeline
+import Tests.TestRunLedger
 import Tests.TestAutoGrad
 import Tests.TestManifoldMuon
 import Tests.TestDualOptimizerDispatch

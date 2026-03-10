@@ -1,5 +1,6 @@
 import Tyr.Torch
 import Tyr.Distributed
+import Tyr.Train.RunLedger
 import Lean.Data.Json.Basic
 import Lean.Data.Json.Parser
 import Lean.Data.Json.Printer
@@ -30,6 +31,7 @@ namespace torch.Pipeline
 
 open torch
 open Lean (Json)
+open torch.Train.RunLedger
 
 -- Re-export needed functions
 def toJson [Lean.ToJson α] (a : α) : Json := Lean.toJson a
@@ -47,7 +49,7 @@ structure RetryPolicy where
   backoffMultiplier : Float := 2.0
   /-- Maximum delay cap in milliseconds -/
   maxDelayMs : Nat := 60000
-  deriving Repr, Inhabited
+  deriving Repr, Inhabited, Lean.ToJson, Lean.FromJson
 
 /-- Calculate delay for a given attempt using exponential backoff -/
 def RetryPolicy.delayForAttempt (policy : RetryPolicy) (attempt : Nat) : Nat :=
@@ -366,7 +368,7 @@ structure PipelineConfig where
   failFast : Bool := true
   /-- Run identifier for this pipeline execution -/
   runId : String := ""
-  deriving Repr, Inhabited
+  deriving Repr, Inhabited, Lean.ToJson, Lean.FromJson
 
 /-- Pipeline execution state -/
 structure PipelineState where
@@ -641,6 +643,13 @@ def recordMetrics (metrics : List (String × String)) : PipelineM Unit := do
     let stageName := state.stages[lastIdx]!.name
     let report := state.report.logMetrics stageName metrics
     set { state with stages := stages, report := report }
+    if state.isMaster then
+      let baseDir := state.config.baseDir.replace "~" (← IO.getEnv "HOME" |>.map (·.getD ""))
+      let artifacts := RunArtifacts.ofBaseDir baseDir
+      appendMetricEvent artifacts {
+        scope := s!"stage/{stageName}"
+        metrics := metrics.map (fun (k, v) => metricStr k v)
+      }
 
 /-! ## Pipeline Initialization and Cleanup -/
 
@@ -666,6 +675,10 @@ def initPipeline (config : PipelineConfig) : IO PipelineState := do
     pure s!"run_{ts}"
   else
     pure config.runId
+
+  if rank == 0 then
+    let artifacts := RunArtifacts.ofBaseDir baseDir
+    prepare artifacts { config with runId := runId } .resume
 
   -- Try to load checkpoint for resume
   let resumedStages ← if config.resumeFromCheckpoint then

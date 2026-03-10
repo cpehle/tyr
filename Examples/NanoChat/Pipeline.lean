@@ -19,6 +19,7 @@ import Tyr.Data.Pretraining
 import Tyr.Data.Task
 import Tyr.Data.TaskClass
 import Tyr.Train.ChatSFT
+import Tyr.Train.RunLedger
 import Tyr.RL.GRPO
 import Tyr.Data.Download
 import Tyr.Data.HuggingFace
@@ -41,6 +42,7 @@ open torch.Data.TaskClass
 open torch.Data.Download
 open torch.Data.HuggingFace
 open torch.Train.ChatSFT
+open torch.Train.RunLedger
 open torch.RL.GRPO
 open torch.Eval.CORE
 open torch.Eval.COREData
@@ -1566,6 +1568,8 @@ def supervisedFineTune (cfg : NanoChatConfig) : PipelineM Unit := do
   let (rank, worldSize) ← if isDistributed then dist.getRankAndWorldSize else pure (0, 1)
   let localRank ← getLocalRankFromEnv
   let trainDevice ← resolveTrainingDevice rank localRank isDistributed
+  let runBaseDir := (← get).config.baseDir.replace "~" (← IO.getEnv "HOME" |>.map (·.getD ""))
+  let runArtifacts := RunArtifacts.ofBaseDir runBaseDir
   let sftDeviceBatchSize := max 1 sftEnv.deviceBatchSize.toNat
   let sftTargetExamplesPerStep := max 1 sftEnv.targetExamplesPerStep.toNat
 
@@ -1663,8 +1667,9 @@ def supervisedFineTune (cfg : NanoChatConfig) : PipelineM Unit := do
 
     -- Run SFT training loop
     log "Starting SFT training..."
+    let sftCallbacks := torch.Train.ChatSFT.artifactCallbacks runArtifacts "sft"
     let (finalParams, finalOptState, finalState) ← trainLoop sftCfg paramsOnDevice optState
-      forwardFn lossFn trainDataFn none numTrainExamples
+      forwardFn lossFn trainDataFn none numTrainExamples sftCallbacks
 
     log s!"SFT complete: {finalState.totalTokens} tokens trained"
 
@@ -1682,6 +1687,16 @@ def supervisedFineTune (cfg : NanoChatConfig) : PipelineM Unit := do
         bestValLoss := finalState.bestValLoss
       }
       saveCheckpoint sftCkpt s!"{sftCheckpointDir}/latest.ckpt"
+      appendCheckpointEvent runArtifacts {
+        name := "sft_latest"
+        path := s!"{sftCheckpointDir}/latest.ckpt"
+        kind := "model"
+        step := some finalState.step
+        metadata := [
+          metricStr "stage" "sft",
+          metricFloat "best_val_loss" finalState.bestValLoss
+        ]
+      }
 
     if rank == 0 then
       recordMetrics [
@@ -1712,6 +1727,8 @@ def reinforcementLearning (cfg : NanoChatConfig) : PipelineM Unit := do
   IO.FS.createDirAll ⟨rlCheckpointDir⟩
   let isDistributed ← dist.isInitialized
   let (rank, worldSize) ← if isDistributed then dist.getRankAndWorldSize else pure (0, 1)
+  let runBaseDir := (← get).config.baseDir.replace "~" (← IO.getEnv "HOME" |>.map (·.getD ""))
+  let runArtifacts := RunArtifacts.ofBaseDir runBaseDir
   let localRank ← getLocalRankFromEnv
   let trainDevice ← resolveTrainingDevice rank localRank isDistributed
 
@@ -1845,6 +1862,7 @@ def reinforcementLearning (cfg : NanoChatConfig) : PipelineM Unit := do
     let numEpochs := grpoEpochs  -- Multiple passes over GSM8K
 
     let initAdamState := adamStateOnDevice
+    let grpoCallbacks := torch.RL.GRPO.artifactCallbacks runArtifacts "grpo"
     let (finalParams, finalAdamState, result) ← trainOnPromptsWithUpdates 1 256
       gsm8kPrompts
       generateOneFn
@@ -1855,6 +1873,7 @@ def reinforcementLearning (cfg : NanoChatConfig) : PipelineM Unit := do
       rewardFn
       grpoCfg
       numEpochs
+      grpoCallbacks
 
     log s!"GRPO complete: best pass@1 = {result.bestPass1}"
 
@@ -1872,6 +1891,16 @@ def reinforcementLearning (cfg : NanoChatConfig) : PipelineM Unit := do
         bestValLoss := sftCkpt.bestValLoss
       }
       saveCheckpoint rlCkpt s!"{rlCheckpointDir}/latest.ckpt"
+      appendCheckpointEvent runArtifacts {
+        name := "rl_latest"
+        path := s!"{rlCheckpointDir}/latest.ckpt"
+        kind := "model"
+        step := some result.totalSteps
+        metadata := [
+          metricStr "stage" "rl",
+          metricFloat "best_pass_at_1" result.bestPass1
+        ]
+      }
 
     if rank == 0 then
       recordMetrics [

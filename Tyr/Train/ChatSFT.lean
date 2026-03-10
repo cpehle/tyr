@@ -15,6 +15,7 @@ import Tyr.Module
 import Tyr.Optim
 import Tyr.Distributed
 import Tyr.Data.Task
+import Tyr.Train.RunLedger
 
 namespace torch.Train.ChatSFT
 
@@ -302,6 +303,46 @@ def defaultLogger : LogCallback := fun step trainLoss lrm numTokens => do
   IO.println s!"Step {step}: loss={trainLoss}, lrm={lrm}, tokens={numTokens}"
   (← IO.getStdout).flush
 
+/-- Validation logging callback type. -/
+def ValidationCallback := Nat → Float → IO Unit
+
+/-- Default validation callback. -/
+def defaultValidationLogger : ValidationCallback := fun step valLoss => do
+  IO.println s!"Step {step}: val_loss={valLoss}"
+  (← IO.getStdout).flush
+
+/-- Hook set for SFT training progress and evaluation. -/
+structure Callbacks where
+  onTrainStep : LogCallback := defaultLogger
+  onValidation : ValidationCallback := defaultValidationLogger
+
+/-- Emit SFT metrics to the run ledger and optionally to stdout. -/
+def artifactCallbacks
+    (artifacts : RunLedger.RunArtifacts)
+    (scopePrefix : String := "sft")
+    (stdout : Bool := true) : Callbacks := {
+  onTrainStep := fun step trainLoss lrm numTokens => do
+    if stdout then
+      defaultLogger step trainLoss lrm numTokens
+    RunLedger.appendMetricEvent artifacts {
+      scope := s!"{scopePrefix}/train"
+      step := some step
+      metrics := [
+        RunLedger.metricFloat "loss" trainLoss,
+        RunLedger.metricFloat "lr_multiplier" lrm,
+        RunLedger.metricNat "num_tokens" numTokens
+      ]
+    }
+  onValidation := fun step valLoss => do
+    if stdout then
+      defaultValidationLogger step valLoss
+    RunLedger.appendMetricEvent artifacts {
+      scope := s!"{scopePrefix}/eval"
+      step := some step
+      metrics := [RunLedger.metricFloat "val_loss" valLoss]
+    }
+}
+
 /-! ## Main Training Loop -/
 
 /-- Run SFT training loop.
@@ -332,7 +373,7 @@ def trainLoop [TensorStruct P]
     (trainDataFn : IO SFTBatch)
     (valDataFn : Option (IO SFTBatch) := none)
     (numTrainExamples : Nat := 10000)
-    (logger : LogCallback := defaultLogger)
+    (callbacks : Callbacks := {})
     : IO (P × Optim.AdamWState P × SFTState) := do
   let isDistributed ← dist.isInitialized
   let worldSizeU64 ← if isDistributed then dist.getWorldSize else pure 1
@@ -366,7 +407,7 @@ def trainLoop [TensorStruct P]
     if let some valFn := valDataFn then
       if isLastStep || (step > 0 && step % cfg.evalEvery == 0) then
         let valLoss ← evalValidationLoss valFn (forwardFn currentParams) cfg.evalSteps cfg.device
-        IO.println s!"Step {step}: val_loss={valLoss}"
+        callbacks.onValidation step valLoss
         if valLoss < state.bestValLoss then
           state := { state with bestValLoss := valLoss }
           IO.println "  [new best val_loss!]"
@@ -427,7 +468,7 @@ def trainLoop [TensorStruct P]
       let avgLoss := if gradAccumSteps > 0
         then accumLoss / gradAccumSteps.toFloat
         else 0.0
-      logger step avgLoss lrm numTokens
+      callbacks.onTrainStep step avgLoss lrm numTokens
 
   IO.println s!"SFT training complete!"
   IO.println s!"  Final step: {state.step}"

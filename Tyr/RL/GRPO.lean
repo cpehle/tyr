@@ -24,11 +24,13 @@ import Tyr.Torch
 import Tyr.TensorStruct
 import Tyr.Optim
 import Tyr.Distributed
+import Tyr.Train.RunLedger
 
 namespace torch.RL.GRPO
 
 open torch
 open torch.dist
+open torch.Train.RunLedger
 
 /-! ## Configuration -/
 
@@ -539,6 +541,43 @@ def logEval (passK : PassKResult) (step : Nat) : IO Unit := do
     s!"pass@{passK.k}={passK.passK}"
   IO.println msg
 
+/-- Hook set for GRPO training progress and evaluation. -/
+structure Callbacks where
+  onTrainStep : StepResult → GRPOState → IO Unit := logProgress
+  onEval : PassKResult → Nat → IO Unit := logEval
+
+/-- Emit GRPO metrics to the run ledger and optionally to stdout. -/
+def artifactCallbacks
+    (artifacts : RunArtifacts)
+    (scopePrefix : String := "grpo")
+    (stdout : Bool := true) : Callbacks := {
+  onTrainStep := fun result state => do
+    if stdout then
+      logProgress result state
+    appendMetricEvent artifacts {
+      scope := s!"{scopePrefix}/train"
+      step := some state.step
+      metrics := [
+        metricFloat "mean_reward" result.meanReward,
+        metricFloat "pg_loss" result.pgLoss,
+        metricNat "num_valid_samples" result.numValidSamples,
+        metricFloat "mean_gen_len" result.meanGenLen,
+        metricFloat "running_mean_reward" state.runningMeanReward
+      ]
+    }
+  onEval := fun passK step => do
+    if stdout then
+      logEval passK step
+    appendMetricEvent artifacts {
+      scope := s!"{scopePrefix}/eval"
+      step := some step
+      metrics := [
+        metricFloat "pass_at_1" passK.pass1,
+        metricFloat s!"pass_at_{passK.k}" passK.passK
+      ]
+    }
+}
+
 /-! ## Generation for Rollouts -/
 
 /-- Configuration for generation during RL -/
@@ -663,6 +702,7 @@ def trainLoop (b t : UInt64)
     (rewardFn : String → String → Float)
     (config : GRPOConfig)
     (numSteps : Nat)
+    (callbacks : Callbacks := {})
     : IO TrainResult := do
 
   let genConfig : GenerationConfig := {
@@ -700,12 +740,12 @@ def trainLoop (b t : UInt64)
 
     -- Log progress
     if step % logEvery == 0 || step + 1 == numSteps then
-      logProgress result state
+      callbacks.onTrainStep result state
 
     -- Evaluation
     if step > 0 && step % config.evalEvery == 0 then
       let passK := computePassK rollouts config.numSamples
-      logEval passK step
+      callbacks.onEval passK step
       if passK.pass1 > bestPass1 then
         bestPass1 := passK.pass1
         IO.println s!"New best pass@1: {bestPass1}"
@@ -847,6 +887,7 @@ def trainLoopWithUpdates (b t : UInt64) [TensorStruct P]
     (rewardFn : String → String → Float)
     (config : GRPOConfig)
     (numSteps : Nat)
+    (callbacks : Callbacks := {})
     : IO (P × Optim.AdamWState P × TrainResult) := do
 
   let genConfig : GenerationConfig := {
@@ -887,11 +928,11 @@ def trainLoopWithUpdates (b t : UInt64) [TensorStruct P]
     state := newState
 
     if step % logEvery == 0 || step + 1 == numSteps then
-      logProgress result state
+      callbacks.onTrainStep result state
 
     if step > 0 && step % config.evalEvery == 0 then
       let passK := computePassK rollouts config.numSamples
-      logEval passK step
+      callbacks.onEval passK step
       if passK.pass1 > bestPass1 then
         bestPass1 := passK.pass1
         IO.println s!"New best pass@1: {bestPass1}"
@@ -914,6 +955,7 @@ def trainOnPrompts (b t : UInt64)
     (rewardFn : String → String → Float)
     (config : GRPOConfig)
     (numEpochs : Nat := 1)
+    (callbacks : Callbacks := {})
     : IO TrainResult := do
 
   let numSteps := numEpochs * (prompts.size / config.examplesPerStep)
@@ -923,7 +965,7 @@ def trainOnPrompts (b t : UInt64)
     let idx := step % prompts.size
     return prompts[idx]!
 
-  trainLoop b t getPromptFn generateOneFn forwardFn decodeFn rewardFn config numSteps
+  trainLoop b t getPromptFn generateOneFn forwardFn decodeFn rewardFn config numSteps callbacks
 
 /-- Prompt-array convenience wrapper for the update-enabled GRPO loop. -/
 def trainOnPromptsWithUpdates (b t : UInt64) [TensorStruct P]
@@ -936,6 +978,7 @@ def trainOnPromptsWithUpdates (b t : UInt64) [TensorStruct P]
     (rewardFn : String → String → Float)
     (config : GRPOConfig)
     (numEpochs : Nat := 1)
+    (callbacks : Callbacks := {})
     : IO (P × Optim.AdamWState P × TrainResult) := do
 
   let numSteps := numEpochs * (prompts.size / config.examplesPerStep)
@@ -944,6 +987,6 @@ def trainOnPromptsWithUpdates (b t : UInt64) [TensorStruct P]
     let idx := step % prompts.size
     return prompts[idx]!
 
-  trainLoopWithUpdates b t getPromptFn generateOneFn forwardFn params optState decodeFn rewardFn config numSteps
+  trainLoopWithUpdates b t getPromptFn generateOneFn forwardFn params optState decodeFn rewardFn config numSteps callbacks
 
 end torch.RL.GRPO
