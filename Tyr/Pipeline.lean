@@ -264,6 +264,62 @@ instance : Lean.FromJson PipelineCheckpoint where
 def checkpointPath (baseDir : String) : String :=
   s!"{baseDir}/.pipeline_checkpoint.json"
 
+/-- Current distributed rank, or 0 when not initialized. -/
+def currentDistributedRank : IO UInt64 := do
+  let isDistributed ← dist.isInitialized
+  if isDistributed then
+    let (rank, _) ← dist.getRankAndWorldSize
+    pure rank
+  else
+    pure 0
+
+/-- Rank-scoped artifact filename under a checkpoint or run directory. -/
+def rankArtifactFile (basePath stem ext : String) (rank : UInt64) : System.FilePath :=
+  ⟨s!"{basePath}/{stem}_rank{rank}.{ext}"⟩
+
+/-- Write a JSON payload to disk. -/
+def writeJsonPayload [Lean.ToJson α] (path : System.FilePath) (payload : α) : IO Unit := do
+  IO.FS.writeFile path (Lean.toJson payload).pretty
+
+/-- Read a typed JSON payload from disk. -/
+def readJsonPayload [Lean.FromJson α] (path : System.FilePath) : IO α := do
+  let content ← IO.FS.readFile path
+  match Json.parse content with
+  | .error err =>
+    throw <| IO.userError s!"Failed to parse JSON {path}: {err}"
+  | .ok json =>
+    match (Lean.fromJson? json : Except String α) with
+    | .error err =>
+      throw <| IO.userError s!"Invalid JSON payload in {path}: {err}"
+    | .ok payload =>
+      pure payload
+
+/-- Get `LOCAL_RANK` from the environment, defaulting to 0. -/
+def getLocalRankFromEnv : IO UInt64 := do
+  let envVar ← IO.getEnv "LOCAL_RANK"
+  match envVar with
+  | some r => pure r.toNat!.toUInt64
+  | none => pure 0
+
+/-- Resolve the training device from `TYR_DEVICE` and distributed rank state. -/
+def resolveTrainingDevice (_rank localRank : UInt64) (isDistributed : Bool) : IO Device := do
+  let cudaOrdinal := if isDistributed then localRank else 0
+  let requested? := (← IO.getEnv "TYR_DEVICE").map String.toLower
+  match requested? with
+  | some "cpu" => pure Device.CPU
+  | some "mps" => pure Device.MPS
+  | some "cuda" => pure (Device.CUDA cudaOrdinal)
+  | some "auto" | none =>
+    if isDistributed then
+      if ← cuda_is_available then pure (Device.CUDA cudaOrdinal) else pure Device.CPU
+    else
+      getBestDevice
+  | some _ =>
+    if isDistributed then
+      if ← cuda_is_available then pure (Device.CUDA cudaOrdinal) else pure Device.CPU
+    else
+      getBestDevice
+
 /-- Save checkpoint to disk -/
 def saveCheckpoint (baseDir : String) (stages : Array StageInfo) (runId : String) (configRepr : String := "") : IO Unit := do
   let timestamp ← IO.monoMsNow

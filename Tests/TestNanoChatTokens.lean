@@ -178,7 +178,7 @@ def testTaskTokenStreamWindowShift : IO Unit := do
   ]
   let task : LoadedTask := { name := "toy", conversations := #[conv], config := {} }
   let mix := TaskMixture.create #[{ task := task, weight := 1 }] 0
-  let stream := TaskTokenStream.new mix 1 6 toyChatTokens toyEncode 0 1
+  let stream := TaskTokenStream.new mix.toConversationMixture 1 6 toyChatTokens toyEncode 0 1
   let (batch?, stream') ← stream.nextGPTBatch
   let some (inputs, targets) := batch?
     | LeanTest.fail "Expected TaskTokenStream to produce one batch"
@@ -210,7 +210,7 @@ def testTaskTokenStreamRankStrideCursor : IO Unit := do
     config := {}
   }
   let mix := TaskMixture.create #[{ task := task, weight := 1 }] 123
-  let stream := TaskTokenStream.new mix 1 3 toyChatTokens toyEncode 1 2
+  let stream := TaskTokenStream.new mix.toConversationMixture 1 3 toyChatTokens toyEncode 1 2
 
   let expectedConv ← mix.get 1
   let expectedRendered := renderConversation expectedConv toyChatTokens toyEncode

@@ -125,6 +125,22 @@ private def moveBatchToDevice (batch : SFTBatch) (device : Device) : SFTBatch :=
     mask := batch.mask.to device
   }
 
+/-- Convert a collated conversation batch into the SFT batch format. -/
+def SFTBatch.ofConversationBatch (batch : ConversationBatch) : SFTBatch :=
+  let shape := batch.tokens.runtimeShape
+  let batchSize := shape.getD 0 0
+  let seqLen := shape.getD 1 0
+  let numValidInt := nn.itemInt (nn.sumAll batch.mask)
+  let numValidTokens := if numValidInt <= 0 then 0 else numValidInt.toUInt64.toNat
+  {
+    inputs := batch.tokens
+    targets := batch.tokens
+    mask := batch.mask
+    batchSize := batchSize
+    seqLen := seqLen
+    numValidTokens := numValidTokens
+  }
+
 /-! ## Masked Loss Computation -/
 
 /-- Compute cross-entropy loss with mask.
@@ -430,15 +446,6 @@ def makeTaskDataGenerator
     (_padTokenId : UInt64)
     : IO (IO SFTBatch) := do
   let iterRef ← IO.mkRef iter
-  let toSFTBatch := fun (convBatch : ConversationBatch) =>
-    let numValidInt := nn.itemInt (nn.sumAll convBatch.mask)
-    let numValidTokens := if numValidInt <= 0 then 0 else numValidInt.toUInt64.toNat
-    { SFTBatch.empty with
-      inputs := convBatch.tokens
-      targets := convBatch.tokens
-      mask := convBatch.mask
-      numValidTokens := numValidTokens
-    }
   return do
     let mut currentIter ← iterRef.get
 
@@ -454,9 +461,9 @@ def makeTaskDataGenerator
         currentIter := newerIter
         match maybeBatch' with
         | none => pure SFTBatch.empty
-        | some convBatch => pure (toSFTBatch convBatch)
+        | some convBatch => pure (SFTBatch.ofConversationBatch convBatch)
       | some convBatch =>
-        pure (toSFTBatch convBatch)
+        pure (SFTBatch.ofConversationBatch convBatch)
 
     iterRef.set currentIter
     return batch

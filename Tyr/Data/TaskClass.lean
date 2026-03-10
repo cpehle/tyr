@@ -204,6 +204,33 @@ def GenericTaskMixture.reward (mix : GenericTaskMixture) (index : Nat) (response
   let conv ← entry.task.getExample localIdx
   return entry.task.reward conv response
 
+/-- Project a boxed task mixture onto the shared conversation mixture interface. -/
+def GenericTaskMixture.toConversationMixture (mix : GenericTaskMixture) : ConversationMixture :=
+  {
+    size := mix.size
+    seed := mix.seed
+    getAtSeed := fun seed index =>
+      pure <| ((GenericTaskMixture.create mix.entries seed).getExample index).getD Conversation.empty
+  }
+
+/-- Shard a boxed task mixture by rank without materializing `LoadedTask`s. -/
+def GenericTaskMixture.toConversationMixtureSharded
+    (mix : GenericTaskMixture) (rank worldSize : Nat) : ConversationMixture :=
+  let worldSize := max 1 worldSize
+  let localSize :=
+    if rank >= mix.size then
+      0
+    else
+      ((mix.size - rank - 1) / worldSize) + 1
+  {
+    size := localSize
+    seed := mix.seed
+    getAtSeed := fun seed index => do
+      let shuffled := GenericTaskMixture.create mix.entries seed
+      let globalIdx := rank + index * worldSize
+      pure <| (shuffled.getExample globalIdx).getD Conversation.empty
+  }
+
 /-! ## Convenience Functions -/
 
 /-- Create a mixture entry from any EvalTask instance -/

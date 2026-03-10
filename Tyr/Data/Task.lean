@@ -175,6 +175,28 @@ def TaskMixture.get (mix : TaskMixture) (idx : Nat) : IO Conversation := do
   let task := mix.entries[taskIdx]!.task
   return task.conversations[exampleIdx]?.getD Conversation.empty
 
+/-- Shared conversation mixture surface used by SFT and streaming token pipelines. -/
+structure ConversationMixture where
+  size : Nat
+  seed : UInt64
+  getAtSeed : UInt64 → Nat → IO Conversation
+
+/-- Get a conversation from the mixture using its current seed. -/
+def ConversationMixture.get (mix : ConversationMixture) (idx : Nat) : IO Conversation :=
+  mix.getAtSeed mix.seed idx
+
+/-- Reuse the same logical mixture with a different shuffle seed. -/
+def ConversationMixture.reshuffle (mix : ConversationMixture) (seed : UInt64) : ConversationMixture :=
+  { mix with seed := seed }
+
+/-- Project a `TaskMixture` onto the shared conversation mixture interface. -/
+def TaskMixture.toConversationMixture (mix : TaskMixture) : ConversationMixture :=
+  {
+    size := mix.size
+    seed := mix.seed
+    getAtSeed := fun seed idx => (TaskMixture.create mix.entries seed).get idx
+  }
+
 
 /-! ## Conversation Rendering -/
 
@@ -367,7 +389,7 @@ def collate (convs : Array TokenizedConversation) (maxLen : Nat) (padToken : UIn
 
 /-- Iterator for task-based training -/
 structure TaskIterator where
-  mixture : TaskMixture
+  mixture : ConversationMixture
   currentIdx : Nat
   batchSize : Nat
   maxSeqLen : Nat
@@ -376,7 +398,7 @@ structure TaskIterator where
   epoch : Nat
 
 def TaskIterator.new
-    (mixture : TaskMixture)
+    (mixture : ConversationMixture)
     (batchSize maxSeqLen : Nat)
     (chatTokens : ChatTokens)
     (encode : String → Array UInt64)
@@ -389,7 +411,7 @@ def TaskIterator.nextBatch (iter : TaskIterator)
   -- Check if we've exhausted the mixture
   if iter.currentIdx >= iter.mixture.size then
     -- Start new epoch with re-shuffled mixture
-    let newMixture := TaskMixture.create iter.mixture.entries (iter.mixture.seed + iter.epoch.toUInt64 + 1)
+    let newMixture := iter.mixture.reshuffle (iter.mixture.seed + iter.epoch.toUInt64 + 1)
     let newIter := { iter with
       mixture := newMixture
       currentIdx := 0
@@ -430,7 +452,7 @@ def TaskIterator.progress (iter : TaskIterator) : Float :=
     - form `(inputs, targets)` by one-token shift
 -/
 structure TaskTokenStream where
-  mixture : TaskMixture
+  mixture : ConversationMixture
   chatTokens : ChatTokens
   encode : String → Array UInt64
   batchSize : Nat
@@ -446,7 +468,7 @@ structure TaskTokenStream where
 
 /-- Construct a task token stream. -/
 def TaskTokenStream.new
-    (mixture : TaskMixture)
+    (mixture : ConversationMixture)
     (batchSize seqLen : Nat)
     (chatTokens : ChatTokens)
     (encode : String → Array UInt64)

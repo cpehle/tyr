@@ -17,6 +17,7 @@ import Tyr.Distributed
 import Tyr.DataLoader
 import Tyr.Data.Pretraining
 import Tyr.Data.Task
+import Tyr.Data.TaskClass
 import Tyr.Train.ChatSFT
 import Tyr.RL.GRPO
 import Tyr.Data.Download
@@ -36,6 +37,7 @@ open torch.ModdedTrain
 open torch.moddedGpt
 open torch.Data.Pretraining
 open torch.Data.Task
+open torch.Data.TaskClass
 open torch.Data.Download
 open torch.Data.HuggingFace
 open torch.Train.ChatSFT
@@ -407,60 +409,7 @@ private def runOnMasterIO (action : IO Unit) : IO Unit := do
   if rank == 0 then
     action
 
-private def currentDistributedRank : IO UInt64 := do
-  let isDistributed ← dist.isInitialized
-  if isDistributed then
-    let (rank, _) ← dist.getRankAndWorldSize
-    pure rank
-  else
-    pure 0
-
-private def streamCursorFile (checkpointPath : String) (rank : UInt64) : System.FilePath :=
-  ⟨s!"{checkpointPath}/stream_cursor_rank{rank}.json"⟩
-
-private def writeJsonPayload [Lean.ToJson α] (path : System.FilePath) (payload : α) : IO Unit := do
-  IO.FS.writeFile path (Lean.toJson payload).pretty
-
-private def readJsonPayload [Lean.FromJson α] (path : System.FilePath) : IO α := do
-  let content ← IO.FS.readFile path
-  match Lean.Json.parse content with
-  | .error err =>
-    throw <| IO.userError s!"Failed to parse JSON {path}: {err}"
-  | .ok json =>
-    match (Lean.fromJson? json : Except String α) with
-    | .error err =>
-      throw <| IO.userError s!"Invalid JSON payload in {path}: {err}"
-    | .ok payload =>
-      pure payload
-
 /-! ## Device & Data Adapters -/
-
-/-- Get local rank from environment (for torchrun). -/
-def getLocalRankFromEnv : IO UInt64 := do
-  let envVar ← IO.getEnv "LOCAL_RANK"
-  match envVar with
-  | some r => pure r.toNat!.toUInt64
-  | none => pure 0
-
-/-- Resolve training device from TYR_DEVICE.
-    In distributed mode, CUDA ordinal follows LOCAL_RANK (per-node index). -/
-def resolveTrainingDevice (_rank localRank : UInt64) (isDistributed : Bool) : IO Device := do
-  let cudaOrdinal := if isDistributed then localRank else 0
-  let requested? := (← IO.getEnv "TYR_DEVICE").map String.toLower
-  match requested? with
-  | some "cpu" => pure Device.CPU
-  | some "mps" => pure Device.MPS
-  | some "cuda" => pure (Device.CUDA cudaOrdinal)
-  | some "auto" | none =>
-    if isDistributed then
-      if ← cuda_is_available then pure (Device.CUDA cudaOrdinal) else pure Device.CPU
-    else
-      getBestDevice
-  | some _ =>
-    if isDistributed then
-      if ← cuda_is_available then pure (Device.CUDA cudaOrdinal) else pure Device.CPU
-    else
-      getBestDevice
 
 /-- Move YaRN rotary cache tensors to the target device. -/
 private def moveYarnToDevice {headDim maxSeqLen : UInt64}
@@ -1084,11 +1033,11 @@ def pretrainBaseModel (cfg : NanoChatConfig) : PipelineM Unit := do
       train := (← trainStreamRef.get).captureCursor
       val := (← valStreamRef.get).captureCursor
     }
-    writeJsonPayload (streamCursorFile checkpointPath rank) payload
+    writeJsonPayload (rankArtifactFile checkpointPath "stream_cursor" "json" rank) payload
 
   let restorePretrainStreamCursor : String → IO Unit := fun checkpointPath => do
     let rank ← currentDistributedRank
-    let cursorPath := streamCursorFile checkpointPath rank
+    let cursorPath := rankArtifactFile checkpointPath "stream_cursor" "json" rank
     if !(← cursorPath.pathExists) then
       throw <| IO.userError s!"Missing pretrain stream cursor file for rank {rank}: {cursorPath}"
     let payload : PretrainStreamCursors ← readJsonPayload cursorPath
@@ -1227,7 +1176,7 @@ def evalBaseModel (cfg : NanoChatConfig) : PipelineM Unit := runOnMaster do
 /-! ## Midtraining Stage -/
 
 /-- Create task mixture for midtraining -/
-def createMidtrainTaskMixture (cfg : NanoChatConfig) : IO AnyTaskMixture := do
+def createMidtrainTaskMixture (cfg : NanoChatConfig) : IO GenericTaskMixture := do
   -- Get cache directory
   let cacheDir := cfg.baseDir.replace "~" (← IO.getEnv "HOME" |>.map (·.getD ""))
   let identityPath ← resolveIdentityConversationsPath cacheDir cfg.envState.eval.identityConversationsPath
@@ -1243,20 +1192,20 @@ def createMidtrainTaskMixture (cfg : NanoChatConfig) : IO AnyTaskMixture := do
   let simpleSpelling ← createSimpleSpellingTaskWithDownload cacheDir 200000 "train"
   let spellingBee ← createSpellingBeeTaskWithDownload cacheDir 80000 "train"
 
-  let entries : Array AnyMixtureEntry := #[
-    { task := .smolTalk smolTalk, weight := 1 },
-    { task := .mmlu mmluAux, weight := 1 },
-    { task := .gsm8k gsm8k, weight := 1 },
-    { task := .customJSON identityTask, weight := 2 },
-    { task := .simpleSpelling simpleSpelling, weight := 1 },
-    { task := .spellingBee spellingBee, weight := 1 }
+  let entries : Array torch.Data.TaskClass.MixtureEntry := #[
+    entry smolTalk 1,
+    entry mmluAux 1,
+    entry gsm8k 1,
+    entry identityTask 2,
+    entry simpleSpelling 1,
+    entry spellingBee 1
   ]
 
   IO.println s!"Created mixture with {entries.size} tasks"
-  return AnyTaskMixture.create entries
+  return GenericTaskMixture.create entries
 
 /-- Create validation task mixture for midtraining (matches nanochat/scripts/mid_train.py). -/
-def createMidtrainValTaskMixture (cfg : NanoChatConfig) : IO AnyTaskMixture := do
+def createMidtrainValTaskMixture (cfg : NanoChatConfig) : IO GenericTaskMixture := do
   let cacheDir := cfg.baseDir.replace "~" (← IO.getEnv "HOME" |>.map (·.getD ""))
 
   IO.println "Creating midtraining validation task mixture..."
@@ -1274,41 +1223,14 @@ def createMidtrainValTaskMixture (cfg : NanoChatConfig) : IO AnyTaskMixture := d
     config := { stop := some 420 }
   }
 
-  let entries : Array AnyMixtureEntry := #[
-    { task := .smolTalk smolTalkTest, weight := 1 },
-    { task := .mmlu mmluVal, weight := 1 },
-    { task := .gsm8k gsm8kVal, weight := 1 }
+  let entries : Array torch.Data.TaskClass.MixtureEntry := #[
+    entry smolTalkTest 1,
+    entry mmluVal 1,
+    entry gsm8kVal 1
   ]
 
   IO.println s!"Created midtraining validation mixture with {entries.size} tasks"
-  return AnyTaskMixture.create entries
-
-private def anyTaskName (task : AnyTask) : String :=
-  match task with
-  | .arc t => s!"arc_{t.subset}"
-  | .mmlu t => s!"mmlu_{t.subset}"
-  | .gsm8k _ => "gsm8k"
-  | .smolTalk _ => "smoltalk"
-  | .customJSON _ => "customjson"
-  | .spellingBee _ => "spelling_bee"
-  | .simpleSpelling _ => "simple_spelling"
-  | .humanEval _ => "humaneval"
-
-private def materializeAnyTask (task : AnyTask) : LoadedTask := Id.run do
-  let mut convs : Array Conversation := #[]
-  for i in [:task.size] do
-    if let some conv := task.getExample i then
-      convs := convs.push conv
-  return {
-    name := anyTaskName task
-    conversations := convs
-    config := {}
-  }
-
-private def materializeAnyTaskMixture (mix : AnyTaskMixture) : TaskMixture :=
-  let entries : Array MixtureEntry := mix.entries.map fun entry =>
-    { task := materializeAnyTask entry.task, weight := entry.weight }
-  TaskMixture.create entries mix.seed
+  return GenericTaskMixture.create entries
 
 /-- Serializable cursor for task-token streaming in midtraining. -/
 private structure TaskTokenStreamCursor where
@@ -1354,7 +1276,7 @@ private def restoreTaskTokenStreamCursor (s : TaskTokenStream) (c : TaskTokenStr
   }
 
 /-- Create task mixture for chat SFT (matches nanochat/scripts/chat_sft.py). -/
-def createSFTTaskMixture (cfg : NanoChatConfig) : IO AnyTaskMixture := do
+def createSFTTaskMixture (cfg : NanoChatConfig) : IO GenericTaskMixture := do
   let cacheDir := cfg.baseDir.replace "~" (← IO.getEnv "HOME" |>.map (·.getD ""))
   let identityPath ← resolveIdentityConversationsPath cacheDir cfg.envState.eval.identityConversationsPath
 
@@ -1372,18 +1294,18 @@ def createSFTTaskMixture (cfg : NanoChatConfig) : IO AnyTaskMixture := do
   let simpleSpelling ← createSimpleSpellingTaskWithDownload cacheDir 300 "train"
   let spellingBee ← createSpellingBeeTaskWithDownload cacheDir 300 "train"
 
-  let entries : Array AnyMixtureEntry := #[
-    { task := .arc arcEasy, weight := 1 },
-    { task := .arc arcChallenge, weight := 1 },
-    { task := .gsm8k gsm8k, weight := 1 },
-    { task := .smolTalk smolTalk, weight := 1 },
-    { task := .customJSON identityTask, weight := 1 },
-    { task := .simpleSpelling simpleSpelling, weight := 1 },
-    { task := .spellingBee spellingBee, weight := 1 }
+  let entries : Array torch.Data.TaskClass.MixtureEntry := #[
+    entry arcEasy 1,
+    entry arcChallenge 1,
+    entry gsm8k 1,
+    entry smolTalk 1,
+    entry identityTask 1,
+    entry simpleSpelling 1,
+    entry spellingBee 1
   ]
 
   IO.println s!"Created SFT mixture with {entries.size} tasks"
-  return AnyTaskMixture.create entries
+  return GenericTaskMixture.create entries
 
 /-- Run midtraining with conversation data and task mixture -/
 def midtrain (cfg : NanoChatConfig) : PipelineM Unit := do
@@ -1466,10 +1388,8 @@ def midtrain (cfg : NanoChatConfig) : PipelineM Unit := do
   let encode := fun (text : String) =>
     (tokenizer.encodeWithSpecials tok text).map (·.toUInt64)
 
-  let trainAnyMixture ← createMidtrainTaskMixture cfg
-  let valAnyMixture ← createMidtrainValTaskMixture cfg
-  let trainTaskMixture := materializeAnyTaskMixture trainAnyMixture
-  let valTaskMixture := materializeAnyTaskMixture valAnyMixture
+  let trainTaskMixture := (← createMidtrainTaskMixture cfg).toConversationMixture
+  let valTaskMixture := (← createMidtrainValTaskMixture cfg).toConversationMixture
 
   let trainStream0 := TaskTokenStream.new
     trainTaskMixture hp.deviceBatchSize.toNat hp.maxSeqLen.toNat
@@ -1486,11 +1406,11 @@ def midtrain (cfg : NanoChatConfig) : PipelineM Unit := do
       train := captureTaskTokenStreamCursor (← trainStreamRef.get)
       val := captureTaskTokenStreamCursor (← valStreamRef.get)
     }
-    writeJsonPayload (streamCursorFile checkpointPath rank) payload
+    writeJsonPayload (rankArtifactFile checkpointPath "stream_cursor" "json" rank) payload
 
   let restoreMidtrainStreamCursor : String → IO Unit := fun checkpointPath => do
     let rank ← currentDistributedRank
-    let cursorPath := streamCursorFile checkpointPath rank
+    let cursorPath := rankArtifactFile checkpointPath "stream_cursor" "json" rank
     if !(← cursorPath.pathExists) then
       throw <| IO.userError s!"Missing midtrain stream cursor file for rank {rank}: {cursorPath}"
     let payload : MidtrainStreamCursors ← readJsonPayload cursorPath
@@ -1633,25 +1553,6 @@ def evalChat (cfg : NanoChatConfig) (checkpoint : String) : PipelineM Unit := ru
 
 /-! ## Supervised Fine-tuning Stage -/
 
-/-- Convert ConversationBatch to SFTBatch for training -/
-def convertConversationBatchToSFT (batch : ConversationBatch) : IO SFTBatch := do
-  -- Read tensor shape directly and count supervised tokens from the mask.
-  let shape := batch.tokens.runtimeShape
-  let batchSize := shape.getD 0 0
-  let seqLen := shape.getD 1 0
-  let numValidInt := nn.itemInt (nn.sumAll batch.mask)
-  let numValidTokens := if numValidInt <= 0 then 0 else numValidInt.toUInt64.toNat
-
-  -- SFTBatch wraps the token and mask tensors
-  return {
-    inputs := batch.tokens
-    targets := batch.tokens  -- Shifted internally by loss function
-    mask := batch.mask
-    batchSize := batchSize
-    seqLen := seqLen
-    numValidTokens := numValidTokens
-  }
-
 /-- Run supervised fine-tuning using ChatSFT infrastructure -/
 def supervisedFineTune (cfg : NanoChatConfig) : PipelineM Unit := do
   log "Running supervised fine-tuning..."
@@ -1739,37 +1640,7 @@ def supervisedFineTune (cfg : NanoChatConfig) : PipelineM Unit := do
 
     -- Create task mixture from HuggingFace data
     let sftMixture ← createSFTTaskMixture cfg
-
-    -- Convert AnyTaskMixture to LoadedTask-based TaskMixture
-    let loadedEntries : Array MixtureEntry ← sftMixture.entries.mapM fun entry => do
-      -- Get all conversations from this task
-      let taskSize := entry.task.size
-      let mut convs : Array Conversation := #[]
-      for i in [:taskSize] do
-        if !isDistributed || (i % worldSize.toNat == rank.toNat) then
-          if let some conv := entry.task.getExample i then
-            convs := convs.push conv
-      if convs.isEmpty then
-        -- Keep every rank trainable even for tiny tasks.
-        for i in [:taskSize] do
-          if let some conv := entry.task.getExample i then
-            convs := convs.push conv
-      let loadedTask : LoadedTask := {
-        name := match entry.task with
-          | .arc t => s!"arc_{t.subset}"
-          | .mmlu t => s!"mmlu_{t.subset}"
-          | .gsm8k _ => "gsm8k"
-          | .smolTalk _ => "smoltalk"
-          | .customJSON _ => "customjson"
-          | .spellingBee _ => "spelling_bee"
-          | .simpleSpelling _ => "simple_spelling"
-          | .humanEval _ => "humaneval"
-        conversations := convs
-        config := {}
-      }
-      return { task := loadedTask, weight := entry.weight }
-
-    let taskMixture := TaskMixture.create loadedEntries
+    let taskMixture := sftMixture.toConversationMixtureSharded rank.toNat worldSize.toNat
 
     -- Create chat tokens from tokenizer special tokens
     let chatTokens ← buildChatTokensFromTokenizer tok
@@ -1779,24 +1650,7 @@ def supervisedFineTune (cfg : NanoChatConfig) : PipelineM Unit := do
 
     -- Create task iterator
     let taskIterator := TaskIterator.new taskMixture sftCfg.deviceBatchSize sftCfg.maxSeqLen chatTokens encode
-    let iterRef ← IO.mkRef taskIterator
-
-    -- Create data generator that yields SFTBatches
-    let trainDataFn : IO SFTBatch := do
-      let iter ← iterRef.get
-      let (maybeBatch, newIter) ← iter.nextBatch
-      iterRef.set newIter
-      match maybeBatch with
-      | none =>
-        -- Epoch ended, reset iterator
-        let resetIter := newIter.reset
-        let (batch, newerIter) ← resetIter.nextBatch
-        iterRef.set newerIter
-        match batch with
-        | none => pure SFTBatch.empty
-        | some b => convertConversationBatchToSFT b
-      | some batch =>
-        convertConversationBatchToSFT batch
+    let trainDataFn ← makeTaskDataGenerator taskIterator sftCfg.maxSeqLen chatTokens.assistantEnd
 
     -- Get number of training examples from mixture (optionally capped for fast validation runs)
     let totalTrainExamples := taskMixture.size
