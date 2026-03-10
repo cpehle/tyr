@@ -1,297 +1,303 @@
 /-
   Tyr/GPU/Kernels/Hedgehog.lean
 
-  Hedgehog hybrid attention kernel implementation.
-  Based on ThunderKittens patterns.
+  Hedgehog hybrid attention kernels aligned to
+  `thirdparty/ThunderKittens/kernels/hedgehog/hedgehog.cu`.
 
-  Key features:
-  - Hybrid of linear attention + sliding window attention
-  - State accumulation for linear attention component
-  - Feature map application (ReLU or learned)
-  - exp2 for efficient softmax
-  - Block-wise processing with state carry-over
+  This module now provides a canonical surface:
+
+  - `Tyr.GPU.Kernels.tkHedgehogFwd` tracks the source-backed chunk/state flow:
+    long-resident feature maps, previous/current sliding-window blocks,
+    recurrent `k_state` / `kv_state` accumulation, and final state writeout.
+
+  The legacy `Tyr.GPU.Kernels.Hedgehog.*` names remain as compatibility aliases
+  to the canonical kernel.
+
+  Current DSL limitation:
+
+  - The vendored CUDA kernel uses a double-buffered Q path, a 3-ring K/V path,
+    and per-head scalar `alpha` / `beta`. The Lean DSL currently expresses this
+    as a previous/current sliding-window staging with row-broadcast mixing
+    vectors, which preserves the state/data flow even though the warpgroup-level
+    schedule is compressed.
 -/
 
 import Tyr.GPU.Kernels.Prelude
+import Tyr.GPU.Codegen.Macros
+
+namespace Tyr.GPU.Kernels
+
+open Tyr.GPU
+open Tyr.GPU.Codegen
+
+private def asCol {dtype : GpuFloat} {rows cols : Nat}
+    (src : RT dtype rows cols .Row) : KernelM (RT dtype rows cols .Col) := do
+  let dst : RT dtype rows cols .Col ← allocRT dtype rows cols .Col
+  swapLayout dst src
+  pure dst
+
+private def softmaxFeatureMapInplace {rows cols : Nat}
+    (tile : RT GpuFloat.Float32 rows cols .Row) : KernelM Unit := do
+  let rowMaxVec : RV GpuFloat.Float32 rows ← allocRV .Float32 rows
+  let rowSumVec : RV GpuFloat.Float32 rows ← allocRV .Float32 rows
+  rowMax rowMaxVec tile
+  subCol tile tile rowMaxVec
+  exp2 tile tile
+  rowSum rowSumVec tile
+  divCol tile tile rowSumVec
+
+private def onlineSoftmaxExp2 {rows cols outCols : Nat}
+    (scores : RT GpuFloat.Float32 rows cols .Row)
+    (output : RT GpuFloat.Float32 rows outCols .Row)
+    (state : SoftmaxState GpuFloat.Float32 rows) : KernelM Unit := do
+  copyVec state.prevMax state.rowMax
+  rowMaxAccum state.rowMax scores state.rowMax
+  subVec state.scale state.prevMax state.rowMax
+  expVec state.scale state.scale
+  mulCol output output state.scale
+  mulVec state.rowSum state.rowSum state.scale
+  subCol scores scores state.rowMax
+  exp2 scores scores
+  rowSumAccum state.rowSum scores state.rowSum
+
+private def slidingWindowBlock
+    (q : RT GpuFloat.BFloat16 64 64 .Row)
+    (k : RT GpuFloat.BFloat16 64 64 .Row)
+    (v : RT GpuFloat.BFloat16 64 64 .Col)
+    (beta : RV GpuFloat.Float32 64)
+    (scores : RT GpuFloat.Float32 64 64 .Row)
+    (weights : RT GpuFloat.BFloat16 64 64 .Row)
+    (output : RT GpuFloat.Float32 64 64 .Row)
+    (state : SoftmaxState GpuFloat.Float32 64)
+    (causal : Bool) : KernelM Unit := do
+  let zeros : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
+  mmaT scores q k zeros
+  if causal then
+    makeCausal scores scores (some (-1.0e10))
+  mulCol scores scores beta
+  onlineSoftmaxExp2 scores output state
+  convert weights scores
+  mma output weights v output
+
+/-- Canonical ThunderKittens-aligned Hedgehog surface.
+
+This keeps the major source-backed phases from `hedgehog.cu`:
+
+- per-head feature-map loads (`qmap`, `kmap`, mixing vectors)
+- chunk loop over `(batch, head)` tiles
+- sliding-window path over previous/current K/V blocks
+- linear path over recurrent `kv_state` and cumulative `k_state`
+- final writeout of output, `kv_state`, and `k_state`
+
+The source kernel's multi-stage producer/consumer schedule is compressed to
+previous/current block staging because the Lean DSL does not yet expose the full
+ring-buffer/TMA protocol. -/
+@[gpu_kernel .SM90]
+def tkHedgehogFwd
+    (Q_ptr : GPtr GpuFloat.BFloat16)
+    (K_ptr : GPtr GpuFloat.BFloat16)
+    (V_ptr : GPtr GpuFloat.BFloat16)
+    (QMap_ptr : GPtr GpuFloat.BFloat16)
+    (KMap_ptr : GPtr GpuFloat.BFloat16)
+    (alpha_ptr : GPtr GpuFloat.Float32)
+    (beta_ptr : GPtr GpuFloat.Float32)
+    (O_ptr : GPtr GpuFloat.BFloat16)
+    (k_state_ptr : GPtr GpuFloat.Float32)
+    (kv_state_ptr : GPtr GpuFloat.Float32)
+    (_batch_size : KVal UInt64)
+    (_num_heads : KVal UInt64)
+    (_seq_len : KVal UInt64) : KernelM Unit := do
+  comment "ThunderKittens hedgehog.cu: chunked sliding + recurrent linear attention"
+
+  let numChunks : Nat := 16
+
+  let batchIdx ← getBlockIdxY
+  let headIdx ← getBlockIdxX
+  let zeroIdx ← freshVar
+  emit (.constInt zeroIdx 0)
+
+  let mapCoord : RTileCoord := { b := zeroIdx, d := headIdx, r := zeroIdx, c := zeroIdx }
+
+  let qShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
+  let kShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
+  let vShared : ST GpuFloat.BFloat16 64 64 .Col ← allocST .BFloat16 64 64 .Col
+  let outShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
+  let kvStateShared : ST GpuFloat.Float32 64 64 ← allocST .Float32 64 64
+  let kStateShared : ST GpuFloat.Float32 1 64 ← allocST .Float32 1 64
+  let qMapShared : ST GpuFloat.BFloat16 64 64 .Col ← allocST .BFloat16 64 64 .Col
+  let kMapShared : ST GpuFloat.BFloat16 64 64 .Col ← allocST .BFloat16 64 64 .Col
+  let alphaShared : SV GpuFloat.Float32 64 ← allocSV .Float32 64
+  let betaShared : SV GpuFloat.Float32 64 ← allocSV .Float32 64
+
+  let q : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
+  let k : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
+  let v : RT GpuFloat.BFloat16 64 64 .Col ← allocRT .BFloat16 64 64 .Col
+  let kPrev : RT GpuFloat.BFloat16 64 64 ← zeroRT .BFloat16 64 64
+  let vPrev : RT GpuFloat.BFloat16 64 64 .Col ← zeroRT .BFloat16 64 64 .Col
+
+  let qMap : RT GpuFloat.BFloat16 64 64 .Col ← allocRT .BFloat16 64 64 .Col
+  let kMap : RT GpuFloat.BFloat16 64 64 .Col ← allocRT .BFloat16 64 64 .Col
+  let alpha : RV GpuFloat.Float32 64 ← allocRV .Float32 64
+  let beta : RV GpuFloat.Float32 64 ← allocRV .Float32 64
+
+  let qFeat : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
+  let kFeat : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
+  let qFeatBf : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
+  let kFeatBf : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
+  let kFeatCol : RT GpuFloat.BFloat16 64 64 .Col ← allocRT .BFloat16 64 64 .Col
+  let kvState : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
+  let kvStateBf : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
+  let kvStateCol : RT GpuFloat.BFloat16 64 64 .Col ← allocRT .BFloat16 64 64 .Col
+  let kState : RV GpuFloat.Float32 64 ← zeroRV .Float32 64
+  let kStateRows : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
+  let linearNormTile : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
+  let linearNorm : RV GpuFloat.Float32 64 ← allocRV .Float32 64
+  let kFeatSum : RV GpuFloat.Float32 64 ← allocRV .Float32 64
+
+  let slidingScores : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
+  let slidingWeights : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
+  let slidingOut : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
+  let slidingState ← allocSoftmaxState .Float32 64
+
+  let linearOut : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
+  let combinedOut : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
+  let combinedNorm : RV GpuFloat.Float32 64 ← allocRV .Float32 64
+  let out : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
+
+  comment "Long-resident feature maps and mixing vectors for this head"
+  loadGlobal qMapShared QMap_ptr mapCoord
+  loadGlobal kMapShared KMap_ptr mapCoord
+  loadVecGlobalCoord alphaShared alpha_ptr headIdx
+  loadVecGlobalCoord betaShared beta_ptr headIdx
+  sync
+  load qMap qMapShared
+  load kMap kMapShared
+  loadVec alpha alphaShared
+  loadVec beta betaShared
+
+  comment "Chunk loop: previous/current staging compresses the source 3-ring schedule"
+  for chunkIdx in krange 0 numChunks do
+    let chunkCoord : RTileCoord :=
+      { b := batchIdx, d := headIdx, r := chunkIdx.id, c := zeroIdx }
+
+    loadGlobal qShared Q_ptr chunkCoord
+    loadGlobal kShared K_ptr chunkCoord
+    loadGlobal vShared V_ptr chunkCoord
+    sync
+    load q qShared
+    load k kShared
+    load v vShared
+
+    comment "Sliding-window path across previous and current K/V chunks"
+    zero slidingOut
+    zeroVec slidingState.rowSum
+    copyVec slidingState.prevMax slidingState.rowSum
+    copyVec slidingState.scale slidingState.rowSum
+    let negInf : RV GpuFloat.Float32 64 ← negInftyRV .Float32 64
+    copyVec slidingState.rowMax negInf
+
+    slidingWindowBlock q kPrev vPrev beta slidingScores slidingWeights slidingOut slidingState false
+    slidingWindowBlock q k v beta slidingScores slidingWeights slidingOut slidingState true
+    divCol slidingOut slidingOut slidingState.rowSum
+
+    comment "Linear path from feature maps and recurrent state"
+    let zeroFeatQ : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
+    let zeroFeatK : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
+    mma qFeat q qMap zeroFeatQ
+    mma kFeat k kMap zeroFeatK
+    mmaCommitGroup
+    mmaAsyncWait 0
+    softmaxFeatureMapInplace qFeat
+    softmaxFeatureMapInplace kFeat
+    mulCol qFeat qFeat alpha
+    convert qFeatBf qFeat
+    convert kvStateBf kvState
+    swapLayout kvStateCol kvStateBf
+    let zeroLinear : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
+    mma linearOut qFeatBf kvStateCol zeroLinear
+
+    broadcastRow kStateRows kState
+    mul linearNormTile qFeat kStateRows
+    rowSum linearNorm linearNormTile
+
+    comment "Combine sliding and linear paths with shared normalization"
+    add combinedOut slidingOut linearOut
+    addVec combinedNorm slidingState.rowSum linearNorm
+    divCol combinedOut combinedOut combinedNorm
+
+    convert out combinedOut
+    store outShared out
+    storeGlobal O_ptr outShared chunkCoord
+
+    comment "Update recurrent K and KV states for the next chunk"
+    convert kFeatBf kFeat
+    swapLayout kFeatCol kFeatBf
+    mmaAtB kvState kFeatCol v kvState
+    rowSum kFeatSum kFeat
+    addVec kState kState kFeatSum
+
+    copy kPrev k
+    copy vPrev v
+    sync
+
+  comment "Write final recurrent state tensors"
+  store kvStateShared kvState
+  storeGlobal kv_state_ptr kvStateShared { b := batchIdx, d := headIdx, r := zeroIdx, c := zeroIdx }
+
+  let kStateTile : RT GpuFloat.Float32 1 64 ← allocRT .Float32 1 64
+  broadcastRow kStateTile kState
+  store kStateShared kStateTile
+  storeGlobal k_state_ptr kStateShared { b := batchIdx, d := headIdx, r := zeroIdx, c := zeroIdx }
+
+end Tyr.GPU.Kernels
 
 namespace Tyr.GPU.Kernels.Hedgehog
 
 open Tyr.GPU
 open Tyr.GPU.Codegen
 
-/-! ## Hedgehog Hybrid Attention
-
-Hedgehog combines:
-1. **Linear Attention**: O(N) complexity using φ(Q) @ (φ(K)^T @ V)
-2. **Sliding Window**: Local attention within a window for fine-grained patterns
-
-The output is: O = α * O_linear + (1-α) * O_window
-where α can be learned or fixed.
--/
-
-/-- Hedgehog forward pass - hybrid linear + sliding window attention -/
+/-- Compatibility alias to the canonical ThunderKittens-aligned Hedgehog port. -/
 @[gpu_kernel .SM90]
-def hedgehogFwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat16)
-    (V_ptr : GPtr GpuFloat.BFloat16) (O_ptr : GPtr GpuFloat.BFloat16)
-    (state_ptr : GPtr GpuFloat.Float32) (z_state_ptr : GPtr GpuFloat.Float32)
-    (_batch_size : KVal UInt64) (_num_heads : KVal UInt64)
-    (seq_len : KVal UInt64) (head_dim : KVal UInt64) : KernelM Unit := do
-  let _ := (seq_len, head_dim)
-  comment "=== Hedgehog Hybrid Attention Forward ==="
+def hedgehogFwd
+    (Q_ptr : GPtr GpuFloat.BFloat16)
+    (K_ptr : GPtr GpuFloat.BFloat16)
+    (V_ptr : GPtr GpuFloat.BFloat16)
+    (QMap_ptr : GPtr GpuFloat.BFloat16)
+    (KMap_ptr : GPtr GpuFloat.BFloat16)
+    (alpha_ptr : GPtr GpuFloat.Float32)
+    (beta_ptr : GPtr GpuFloat.Float32)
+    (O_ptr : GPtr GpuFloat.BFloat16)
+    (k_state_ptr : GPtr GpuFloat.Float32)
+    (kv_state_ptr : GPtr GpuFloat.Float32)
+    (batch_size : KVal UInt64)
+    (num_heads : KVal UInt64)
+    (seq_len : KVal UInt64) : KernelM Unit := do
+  comment "Compatibility alias to Tyr.GPU.Kernels.tkHedgehogFwd"
+  Tyr.GPU.Kernels.tkHedgehogFwd
+    Q_ptr K_ptr V_ptr QMap_ptr KMap_ptr alpha_ptr beta_ptr
+    O_ptr k_state_ptr kv_state_ptr batch_size num_heads seq_len
 
-  let numChunks : Nat := 16
-
-  let coord ← blockCoord2D
-
-  -- Q, K, V tiles
-  let q : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-  let k : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-  let v : RT GpuFloat.BFloat16 64 64 .Col ← allocRT .BFloat16 64 64 .Col
-
-  -- Feature-mapped versions (after φ)
-  let phiQ : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
-  let phiK : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
-
-  -- State for linear attention: S = φ(K)^T @ V
-  let state : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
-
-  -- Normalization state for linear attention
-  let zState : RV GpuFloat.Float32 64 ← zeroRV .Float32 64
-
-  -- Sliding window attention scores
-  let att : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
-
-  -- Softmax tracking
-  let maxVec : RV GpuFloat.Float32 64 ← negInftyRV .Float32 64
-  let sumVec : RV GpuFloat.Float32 64 ← zeroRV .Float32 64
-  let prevMax : RV GpuFloat.Float32 64 ← allocRV .Float32 64
-
-  -- Outputs
-  let oLinear : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
-  let oWindow : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
-  let oFinal : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
-  let out : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-
-  -- Shared memory
-  let qShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
-  let kShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
-  let vShared : ST GpuFloat.BFloat16 64 64 .Col ← allocST .BFloat16 64 64 .Col
-  let stateShared : ST GpuFloat.Float32 64 64 ← allocST .Float32 64 64
-  let outShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
-
-  comment "Load previous state (if any)"
-  loadGlobal stateShared state_ptr coord
-  sync
-  load state stateShared
-
-  comment "Process sequence chunks"
-  for chunkIdx in krange 0 numChunks do
-    comment "Load Q, K, V for this chunk from global"
-    loadGlobal qShared Q_ptr (coord.withRow chunkIdx.id)
-    loadGlobal kShared K_ptr (coord.withRow chunkIdx.id)
-    loadGlobal vShared V_ptr (coord.withRow chunkIdx.id)
-    sync
-    load q qShared
-    load k kShared
-    load v vShared
-
-    comment "=== Linear Attention Component ==="
-
-    comment "Apply feature map φ (ReLU for efficiency)"
-    convert phiQ q
-    convert phiK k
-    relu phiQ phiQ
-    relu phiK phiK
-
-    comment "O_linear = φ(Q) @ state"
-    let phiQBf : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-    convert phiQBf phiQ
-    let stateBfRow : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-    convert stateBfRow state
-    let stateBf : RT GpuFloat.BFloat16 64 64 .Col ← allocRT .BFloat16 64 64 .Col
-    swapLayout stateBf stateBfRow
-    mma oLinear phiQBf stateBf oLinear
-
-    comment "Update state: state += φ(K)^T @ V"
-    let phiKBf : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-    convert phiKBf phiK
-    mma state phiKBf v state
-
-    comment "Update normalization: z += row_sum(φ(K))"
-    let kSum : RV GpuFloat.Float32 64 ← allocRV .Float32 64
-    rowSum kSum phiK
-    addVec zState zState kSum
-
-    comment "=== Sliding Window Attention Component ==="
-
-    comment "Compute attention scores: att = Q @ K^T"
-    let qF : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
-    let kF : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
-    convert qF q
-    convert kF k
-    mmaT att qF kF (← zeroRT .Float32 64 64)
-
-    comment "Apply causal mask for sliding window"
-    makeCausal att att (some (-1.0e10))
-
-    comment "Online softmax with exp2 for efficiency"
-    -- Save previous max for rescaling
-    copyVec prevMax maxVec
-
-    -- Update max: max = max(max, row_max(att))
-    rowMaxAccum maxVec att maxVec
-
-    -- Compute exp2(att - max)
-    subCol att att maxVec
-    exp2 att att
-
-    -- Rescale previous sum and output
-    let scale : RV GpuFloat.Float32 64 ← allocRV .Float32 64
-    subVec scale prevMax maxVec
-    expVec scale scale
-    mulVec sumVec sumVec scale
-    mulCol oWindow oWindow scale
-
-    -- Update sum
-    let rowS : RV GpuFloat.Float32 64 ← allocRV .Float32 64
-    rowSum rowS att
-    addVec sumVec sumVec rowS
-
-    comment "O_window += att @ V"
-    let attBf : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-    convert attBf att
-    mma oWindow attBf v oWindow
-
-    comment "=== Combine Linear and Window Attention ==="
-
-    comment "Normalize window attention: O_window = O_window / sum"
-    divCol oWindow oWindow sumVec
-
-    comment "Normalize linear attention: O_linear = O_linear / z"
-    divCol oLinear oLinear zState
-
-    comment "Combine: O = 0.5 * O_linear + 0.5 * O_window (equal weighting)"
-    scalarMul oLinear oLinear 0.5
-    scalarMul oWindow oWindow 0.5
-    add oFinal oLinear oWindow
-
-    comment "Store output"
-    convert out oFinal
-    store outShared out
-    storeGlobal O_ptr outShared (coord.withRow chunkIdx.id)
-
-    sync
-
-  comment "Store final state for next chunk"
-  store stateShared state
-  storeGlobal state_ptr stateShared coord
-
-  comment "Store final z_state for normalization"
-  let zStateShared : SV GpuFloat.Float32 64 ← allocSV .Float32 64
-  storeVec zStateShared zState
-  storeVecGlobalCoord z_state_ptr zStateShared coord.c
-
--- Verify auto-generated kernel
-
-/-! ## Hedgehog with Learned Mixing
-
-Variant with learnable mixing coefficients α.
--/
-
-/-- Hedgehog with learned mixing weights -/
+/-- Compatibility alias retained for older call sites that used the
+learned-mixing name explicitly. The canonical kernel already models learned
+mixing through `alpha_ptr` and `beta_ptr`. -/
 @[gpu_kernel .SM90]
-def hedgehogLearnedFwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat16)
-    (V_ptr : GPtr GpuFloat.BFloat16) (alpha_ptr : GPtr GpuFloat.Float32)
-    (O_ptr : GPtr GpuFloat.BFloat16) (state_ptr : GPtr GpuFloat.Float32)
-    (_batch_size : KVal UInt64) (_num_heads : KVal UInt64)
-    (_seq_len : KVal UInt64) (_head_dim : KVal UInt64) : KernelM Unit := do
-  let _ := state_ptr
-  comment "=== Hedgehog with Learned Mixing ==="
-
-  let numChunks : Nat := 16
-
-  let coord ← blockCoord2D
-
-  let q : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-  let k : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-  let v : RT GpuFloat.BFloat16 64 64 .Col ← allocRT .BFloat16 64 64 .Col
-
-  -- Mixing weights (per-position or per-head)
-  let alpha : RV GpuFloat.Float32 64 ← allocRV .Float32 64
-
-  let phiQ : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
-  let phiK : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
-  let state : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
-  let att : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
-  let oLinear : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
-  let oWindow : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
-  let oFinal : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
-  let out : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-
-  let qShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
-  let kShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
-  let vShared : ST GpuFloat.BFloat16 64 64 .Col ← allocST .BFloat16 64 64 .Col
-  let alphaShared : SV GpuFloat.Float32 64 ← allocSV .Float32 64
-  let outShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
-
-  comment "Load mixing weights from global memory"
-  loadVecGlobalCoord alphaShared alpha_ptr coord.c
-  sync
-  loadVec alpha alphaShared
-
-  for chunkIdx in krange 0 numChunks do
-    loadGlobal qShared Q_ptr (coord.withRow chunkIdx.id)
-    loadGlobal kShared K_ptr (coord.withRow chunkIdx.id)
-    loadGlobal vShared V_ptr (coord.withRow chunkIdx.id)
-    sync
-    load q qShared
-    load k kShared
-    load v vShared
-
-    comment "Linear attention"
-    convert phiQ q
-    convert phiK k
-    relu phiQ phiQ
-    relu phiK phiK
-    let phiQBf ← allocRT .BFloat16 64 64
-    convert phiQBf phiQ
-    let stateBfRow ← allocRT .BFloat16 64 64
-    convert stateBfRow state
-    let stateBf : RT GpuFloat.BFloat16 64 64 .Col ← allocRT .BFloat16 64 64 .Col
-    swapLayout stateBf stateBfRow
-    mma oLinear phiQBf stateBf oLinear
-    let phiKBf ← allocRT .BFloat16 64 64
-    convert phiKBf phiK
-    mma state phiKBf v state
-
-    comment "Window attention"
-    let qF ← allocRT .Float32 64 64
-    let kF ← allocRT .Float32 64 64
-    convert qF q
-    convert kF k
-    mmaT att qF kF (← zeroRT .Float32 64 64)
-    makeCausal att att (some (-1.0e10))
-    exp att att
-    let rowS ← allocRV .Float32 64
-    rowSum rowS att
-    divCol att att rowS
-    let attBf ← allocRT .BFloat16 64 64
-    convert attBf att
-    mma oWindow attBf v oWindow
-
-    comment "Learned mixing: O = α * O_linear + (1-α) * O_window"
-    comment "Reformulated as: O = O_window + α * (O_linear - O_window)"
-    sub oFinal oLinear oWindow          -- O_linear - O_window
-    mulCol oFinal oFinal alpha           -- α * (O_linear - O_window)
-    add oFinal oFinal oWindow            -- O_window + α * (O_linear - O_window)
-
-    convert out oFinal
-    store outShared out
-    storeGlobal O_ptr outShared (coord.withRow chunkIdx.id)
-    sync
-
--- Verify auto-generated kernels
-
--- Print generated kernels
+def hedgehogLearnedFwd
+    (Q_ptr : GPtr GpuFloat.BFloat16)
+    (K_ptr : GPtr GpuFloat.BFloat16)
+    (V_ptr : GPtr GpuFloat.BFloat16)
+    (QMap_ptr : GPtr GpuFloat.BFloat16)
+    (KMap_ptr : GPtr GpuFloat.BFloat16)
+    (alpha_ptr : GPtr GpuFloat.Float32)
+    (beta_ptr : GPtr GpuFloat.Float32)
+    (O_ptr : GPtr GpuFloat.BFloat16)
+    (k_state_ptr : GPtr GpuFloat.Float32)
+    (kv_state_ptr : GPtr GpuFloat.Float32)
+    (batch_size : KVal UInt64)
+    (num_heads : KVal UInt64)
+    (seq_len : KVal UInt64) : KernelM Unit := do
+  comment "Compatibility alias to Tyr.GPU.Kernels.tkHedgehogFwd"
+  Tyr.GPU.Kernels.tkHedgehogFwd
+    Q_ptr K_ptr V_ptr QMap_ptr KMap_ptr alpha_ptr beta_ptr
+    O_ptr k_state_ptr kv_state_ptr batch_size num_heads seq_len
 
 end Tyr.GPU.Kernels.Hedgehog

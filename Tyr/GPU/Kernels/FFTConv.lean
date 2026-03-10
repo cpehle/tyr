@@ -1,44 +1,32 @@
 /-
   Tyr/GPU/Kernels/FFTConv.lean
 
-  FFT-based convolution kernel implementation.
-  Based on ThunderKittens fftconv_pc.cu patterns.
+  FFT-based convolution kernels aligned to the structure of
+  `thirdparty/ThunderKittens/kernels/fftconv/fftconv_pc.cu`.
 
-  Key features:
-  - FFT via matrix multiplication (not traditional Cooley-Tukey)
-  - Complex number handling via CRT (zero-cost abstraction over real/imag RTs)
-  - All matrices in bf16, MMA accumulator in f32, copy back to bf16
-  - Matches ThunderKittens semantics exactly
+  This module now has a canonical surface:
 
-  Type conventions (matching ThunderKittens):
-  - crt_fl<M, N> → CRT Float32 M N (accumulator)
-  - crt_bf<M, N> → CRT BFloat16 M N (working tiles)
-  - cst_bf<M, N> → CST BFloat16 M N (shared memory)
+  - `Tyr.GPU.Kernels.tkFFTConvPC1024` mirrors the persistent-cache
+    producer/consumer flow of the ThunderKittens kernel as closely as the Lean
+    DSL can express today.
+
+  The legacy names in `Tyr.GPU.Kernels.FFTConv` are retained as compatibility
+  aliases to the canonical kernel.
+
+  Current DSL limitation:
+
+  - The vendored CUDA kernel models complex global layouts for `f`, `finv`,
+    `tw`, `twinv_t`, and `kf`. The Lean DSL still lacks a convenient complex
+    global-layout surface, so those factors remain modeled as long-resident
+    shared-memory inputs that are loaded into registers once per head.
 -/
 
 import Tyr.GPU.Kernels.Prelude
 
-namespace Tyr.GPU.Kernels.FFTConv
+namespace Tyr.GPU.Kernels
 
 open Tyr.GPU
 open Tyr.GPU.Codegen
-
-/-! ## FFT via Matrix Multiplication
-
-ThunderKittens FFTConv algorithm (from fftconv_pc.cu):
-
-1. F @ X        -- Left multiply by DFT matrix (X is real input)
-2. *= tw        -- Apply twiddle factors (elementwise complex)
-3. Y @ F        -- Right multiply by DFT matrix
-4. *= kf        -- Apply filter in frequency domain (elementwise complex)
-5. Y @ F_inv    -- Right multiply by inverse DFT
-6. *= tw_inv    -- Apply inverse twiddle
-7. F_inv @ Y    -- Left multiply by inverse DFT
-8. Output real  -- Take real part of result
-
-All matrices (F, F_inv, tw, tw_inv, kf) are complex bf16.
-Input and output are real bf16.
--/
 
 private def asCol {dtype : GpuFloat} {rows cols : Nat}
     (src : RT dtype rows cols .Row) : KernelM (RT dtype rows cols .Col) := do
@@ -52,211 +40,174 @@ private def complexAsCol {dtype : GpuFloat} {rows cols : Nat}
   complexSwapLayout dst src
   pure dst
 
-/-- FFT Convolution forward pass - matches ThunderKittens fftconv_pc.cu -/
+private def fftConvTileCore
+    (x : RT GpuFloat.BFloat16 64 64 .Row)
+    (mmaReg : CRT GpuFloat.Float32 64 64 .Row)
+    (accum : CRT GpuFloat.BFloat16 64 64 .Row)
+    (tmp : CRT GpuFloat.BFloat16 64 64 .Row)
+    (out : RT GpuFloat.BFloat16 64 64 .Row)
+    (scratchTmp : CST GpuFloat.BFloat16 64 64 .Row)
+    (f : CRT GpuFloat.BFloat16 64 64 .Row)
+    (fInv : CRT GpuFloat.BFloat16 64 64 .Row)
+    (fCol : CRT GpuFloat.BFloat16 64 64 .Col)
+    (fInvCol : CRT GpuFloat.BFloat16 64 64 .Col)
+    (tw : CRT GpuFloat.BFloat16 64 64 .Row)
+    (twinvT : CRT GpuFloat.BFloat16 64 64 .Row)
+    (kf : CRT GpuFloat.BFloat16 64 64 .Row)
+    : KernelM Unit := do
+  let xCol ← asCol x
+
+  comment "X = F^T @ X for real input"
+  let zeroReal : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
+  let zeroImag : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
+  mma mmaReg.real f.real xCol zeroReal
+  mma mmaReg.imag f.imag xCol zeroImag
+  mmaCommitGroup
+  mmaAsyncWait 0
+  convert accum.real mmaReg.real
+  convert accum.imag mmaReg.imag
+
+  comment "Apply twiddle, spectral filter, and inverse factors"
+  complexMul accum accum tw
+
+  let zeroComplex0 : CRT GpuFloat.Float32 64 64 ← zeroCRT .Float32 64 64
+  complexMma mmaReg accum fCol zeroComplex0
+  mmaCommitGroup
+  mmaAsyncWait 0
+  convert accum.real mmaReg.real
+  convert accum.imag mmaReg.imag
+
+  complexMul accum accum kf
+
+  let zeroComplex1 : CRT GpuFloat.Float32 64 64 ← zeroCRT .Float32 64 64
+  complexMma mmaReg accum fInvCol zeroComplex1
+  mmaCommitGroup
+  mmaAsyncWait 0
+  convert accum.real mmaReg.real
+  convert accum.imag mmaReg.imag
+
+  complexMul accum accum twinvT
+
+  comment "Store/reload through scratch for the final AtB-style inverse transform"
+  storeComplex scratchTmp accum
+  sync
+  loadComplex tmp scratchTmp
+  let tmpCol ← complexAsCol tmp
+
+  let zeroComplex2 : CRT GpuFloat.Float32 64 64 ← zeroCRT .Float32 64 64
+  complexMma mmaReg fInv tmpCol zeroComplex2
+  mmaCommitGroup
+  mmaAsyncWait 0
+
+  convert out mmaReg.real
+
+/-- Canonical ThunderKittens-aligned FFTConv surface for the 1024-sequence path.
+
+This keeps the source-backed shape of `fftconv_pc.cu`:
+
+- long-resident `f`, `finv`, `tw`, `twinv_t`
+- per-head `kf` reload
+- producer/consumer split across warp groups
+- persistent looping over batch tiles for one logical head
+
+The input/output tiles are modeled explicitly as global-memory pointers; the
+FFT factors remain abstract shared-memory inputs until the DSL grows complex
+global layout descriptors. -/
 @[gpu_kernel .SM90]
-def fftConvFwd : KernelM Unit := do
-  comment "=== FFT Convolution Forward (ThunderKittens semantics) ==="
+def tkFFTConvPC1024
+    (x_ptr : GPtr GpuFloat.BFloat16)
+    (o_ptr : GPtr GpuFloat.BFloat16) : KernelM Unit := do
+  comment "ThunderKittens fftconv_pc.cu: persistent producer/consumer FFTConv"
 
-  -- Input tile (real only, bf16) - corresponds to args.input.x
-  let x : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
+  let batchTilesPerHead : Nat := 8
 
-  -- MMA accumulator (complex f32) - corresponds to crt_fl<16, 64> mma_reg
-  let mmaReg : CRT GpuFloat.Float32 64 64 ← zeroCRT .Float32 64 64
+  let zeroIdx ← freshVar
+  emit (.constInt zeroIdx 0)
+  let headIdx ← getBlockIdxX
 
-  -- Working tiles (complex bf16) - corresponds to crt_bf<16, 64> accum, tmp
-  let accum : CRT GpuFloat.BFloat16 64 64 ← allocCRT .BFloat16 64 64
-  let tmp : CRT GpuFloat.BFloat16 64 64 ← allocCRT .BFloat16 64 64
+  let xStage : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
+  let oStage : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
 
-  -- Output tile (real only, bf16)
-  let out : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-
-  -- Shared memory (complex bf16) - corresponds to scratch_block
-  let xShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
-  let fShared : CST GpuFloat.BFloat16 64 64 ← allocCST .BFloat16 64 64       -- DFT matrix
-  let fInvShared : CST GpuFloat.BFloat16 64 64 ← allocCST .BFloat16 64 64   -- Inverse DFT
-  let twShared : CST GpuFloat.BFloat16 64 64 ← allocCST .BFloat16 64 64     -- Twiddle factors
-  let twInvShared : CST GpuFloat.BFloat16 64 64 ← allocCST .BFloat16 64 64  -- Inverse twiddle (pre-transposed)
-  let kfShared : CST GpuFloat.BFloat16 64 64 ← allocCST .BFloat16 64 64     -- Filter in freq domain
-  let tmpShared : CST GpuFloat.BFloat16 64 64 ← allocCST .BFloat16 64 64    -- Scratch for AtB
-  let outShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
-
-  -- Register tiles for DFT matrices
-  let f : CRT GpuFloat.BFloat16 64 64 ← allocCRT .BFloat16 64 64
-  let fInv : CRT GpuFloat.BFloat16 64 64 ← allocCRT .BFloat16 64 64
-  let tw : CRT GpuFloat.BFloat16 64 64 ← allocCRT .BFloat16 64 64
-  let twInv : CRT GpuFloat.BFloat16 64 64 ← allocCRT .BFloat16 64 64
-  let kf : CRT GpuFloat.BFloat16 64 64 ← allocCRT .BFloat16 64 64
-
-  comment "Load persistent DFT matrices and factors"
-  loadComplex f fShared
-  loadComplex fInv fInvShared
-  loadComplex tw twShared
-  loadComplex twInv twInvShared
-  let fCol ← complexAsCol f
-  let fInvCol ← complexAsCol fInv
-
-  comment "Process batches"
-  for _batchIdx in krange 0 16 do
-    comment "Load input (real only)"
-    load x xShared
-    let xCol ← asCol x
-
-    comment "Load filter for this head"
-    loadComplex kf kfShared
-
-    comment "Step 1: F @ X (left multiply)"
-    comment "mma_reg.real = f.real @ x, mma_reg.imag = f.imag @ x"
-    -- Since x is real, the complex multiply simplifies:
-    -- (f_r + i*f_i) @ x_r = f_r @ x_r + i*(f_i @ x_r)
-    mma mmaReg.real f.real xCol (← zeroRT .Float32 64 64)
-    mma mmaReg.imag f.imag xCol (← zeroRT .Float32 64 64)
-
-    comment "Copy f32 accumulator to bf16 working tile"
-    convert accum.real mmaReg.real
-    convert accum.imag mmaReg.imag
-
-    comment "Step 2: Apply twiddle (elementwise complex multiply)"
-    -- accum = accum * tw (matches warp::mul(accum, accum, tmp))
-    complexMul accum accum tw
-
-    sync
-
-    comment "Step 3: Y @ F (right multiply)"
-    -- ThunderKittens uses: mm_AB(mma_reg, accum, f) with complex semantics
-    complexMma mmaReg accum fCol (← zeroCRT .Float32 64 64)
-    convert accum.real mmaReg.real
-    convert accum.imag mmaReg.imag
-
-    comment "Step 4: Apply filter (elementwise complex multiply)"
-    -- accum = accum * kf (matches warp::mul(accum, accum, tmp))
-    complexMul accum accum kf
-
-    comment "Step 5: Y @ F_inv (right multiply by inverse DFT)"
-    complexMma mmaReg accum fInvCol (← zeroCRT .Float32 64 64)
-    convert accum.real mmaReg.real
-    convert accum.imag mmaReg.imag
-
-    comment "Step 6: Apply inverse twiddle (elementwise complex multiply)"
-    -- accum = accum * twInv (matches warp::mul(accum, accum, tmp))
-    complexMul accum accum twInv
-
-    comment "Step 7: Store to shared memory for F_inv @ Y (A^T @ B pattern)"
-    storeComplex tmpShared accum
-    sync
-
-    comment "Step 8: F_inv @ Y (left multiply by inverse DFT)"
-    loadComplex tmp tmpShared
-    let tmpCol ← complexAsCol tmp
-    complexMma mmaReg fInv tmpCol (← zeroCRT .Float32 64 64)
-
-    comment "Step 9: Output real part"
-    convert out mmaReg.real
-    store outShared out
-
-    sync
-
--- Verify auto-generated kernel
-
-/-! ## Persistent Cache Variant
-
-This variant keeps DFT matrices resident in shared memory
-across multiple batches, only reloading the per-head filter.
--/
-
-/-- FFT Convolution with persistent DFT matrices -/
-@[gpu_kernel .SM90]
-def fftConvPersistentFwd : KernelM Unit := do
-  comment "=== FFT Convolution (Persistent Cache) ==="
-
-  -- Working tiles
-  let x : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-  let mmaReg : CRT GpuFloat.Float32 64 64 ← zeroCRT .Float32 64 64
-  let accum : CRT GpuFloat.BFloat16 64 64 ← allocCRT .BFloat16 64 64
-  let tmp : CRT GpuFloat.BFloat16 64 64 ← allocCRT .BFloat16 64 64
-  let out : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-
-  -- Persistent shared memory for DFT matrices
   let fShared : CST GpuFloat.BFloat16 64 64 ← allocCST .BFloat16 64 64
   let fInvShared : CST GpuFloat.BFloat16 64 64 ← allocCST .BFloat16 64 64
   let twShared : CST GpuFloat.BFloat16 64 64 ← allocCST .BFloat16 64 64
-  let twInvShared : CST GpuFloat.BFloat16 64 64 ← allocCST .BFloat16 64 64
-
-  -- Per-head filter (reloaded)
+  let twinvTShared : CST GpuFloat.BFloat16 64 64 ← allocCST .BFloat16 64 64
   let kfShared : CST GpuFloat.BFloat16 64 64 ← allocCST .BFloat16 64 64
+  let scratchTmp : CST GpuFloat.BFloat16 64 64 ← allocCST .BFloat16 64 64
 
-  -- Input/output/scratch
-  let xShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
-  let tmpShared : CST GpuFloat.BFloat16 64 64 ← allocCST .BFloat16 64 64
-  let outShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
-
-  -- Register copies
   let f : CRT GpuFloat.BFloat16 64 64 ← allocCRT .BFloat16 64 64
   let fInv : CRT GpuFloat.BFloat16 64 64 ← allocCRT .BFloat16 64 64
   let tw : CRT GpuFloat.BFloat16 64 64 ← allocCRT .BFloat16 64 64
-  let twInv : CRT GpuFloat.BFloat16 64 64 ← allocCRT .BFloat16 64 64
+  let twinvT : CRT GpuFloat.BFloat16 64 64 ← allocCRT .BFloat16 64 64
   let kf : CRT GpuFloat.BFloat16 64 64 ← allocCRT .BFloat16 64 64
 
-  comment "Load DFT matrices (persistent across all iterations)"
+  let x : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
+  let out : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
+  let mmaReg : CRT GpuFloat.Float32 64 64 ← zeroCRT .Float32 64 64
+  let accum : CRT GpuFloat.BFloat16 64 64 ← allocCRT .BFloat16 64 64
+  let tmp : CRT GpuFloat.BFloat16 64 64 ← allocCRT .BFloat16 64 64
+
+  let inputConsumed ← allocSemaphore
+  let inputReady ← allocSemaphore
+  initSemaphore inputConsumed 1
+  initSemaphore inputReady 0
+
+  comment "Long-resident FFT factors stay live across all batch tiles for this head"
   loadComplex f fShared
   loadComplex fInv fInvShared
   loadComplex tw twShared
-  loadComplex twInv twInvShared
+  loadComplex twinvT twinvTShared
   let fCol ← complexAsCol f
   let fInvCol ← complexAsCol fInv
 
-  comment "Process batches with persistent cache"
-  for _batchIdx in krange 0 16 do
-    comment "Load per-head filter"
-    loadComplex kf kfShared
+  comment "Reload only the per-head frequency-domain filter"
+  loadComplex kf kfShared
 
-    comment "Load input"
-    load x xShared
-    let xCol ← asCol x
+  ifWarpGroup 0 do
+    comment "Producer warp group: stream batch tiles for the current head"
+    for batchIdx in krange 0 batchTilesPerHead do
+      let tileCoord : RTileCoord :=
+        { b := batchIdx.id, d := headIdx, r := zeroIdx, c := zeroIdx }
+      waitSemaphore inputConsumed
+      loadGlobal xStage x_ptr tileCoord
+      sync
+      arriveSemaphore inputReady 1
 
-    comment "FFT convolution steps (same as non-persistent)"
+  ifWarpGroup 1 do
+    comment "Consumer warp group: FFT pipeline with persistent factors"
+    for batchIdx in krange 0 batchTilesPerHead do
+      let tileCoord : RTileCoord :=
+        { b := batchIdx.id, d := headIdx, r := zeroIdx, c := zeroIdx }
+      waitSemaphore inputReady
+      load x xStage
+      fftConvTileCore x mmaReg accum tmp out scratchTmp f fInv fCol fInvCol tw twinvT kf
+      store oStage out
+      sync
+      storeGlobal o_ptr oStage tileCoord
+      arriveSemaphore inputConsumed 1
 
-    comment "1. F @ X"
-    mma mmaReg.real f.real xCol (← zeroRT .Float32 64 64)
-    mma mmaReg.imag f.imag xCol (← zeroRT .Float32 64 64)
-    convert accum.real mmaReg.real
-    convert accum.imag mmaReg.imag
+end Tyr.GPU.Kernels
 
-    comment "2. *= tw"
-    complexMul accum accum tw
+namespace Tyr.GPU.Kernels.FFTConv
 
-    sync
+open Tyr.GPU
+open Tyr.GPU.Codegen
 
-    comment "3. Y @ F"
-    complexMma mmaReg accum fCol (← zeroCRT .Float32 64 64)
-    convert accum.real mmaReg.real
-    convert accum.imag mmaReg.imag
+/-- Compatibility alias to the canonical ThunderKittens-aligned FFTConv kernel. -/
+@[gpu_kernel .SM90]
+def fftConvFwd
+    (x_ptr : GPtr GpuFloat.BFloat16)
+    (o_ptr : GPtr GpuFloat.BFloat16) : KernelM Unit := do
+  comment "Compatibility alias to Tyr.GPU.Kernels.tkFFTConvPC1024"
+  Tyr.GPU.Kernels.tkFFTConvPC1024 x_ptr o_ptr
 
-    comment "4. *= kf"
-    complexMul accum accum kf
-
-    comment "5. Y @ F_inv"
-    complexMma mmaReg accum fInvCol (← zeroCRT .Float32 64 64)
-    convert accum.real mmaReg.real
-    convert accum.imag mmaReg.imag
-
-    comment "6. *= tw_inv"
-    complexMul accum accum twInv
-
-    comment "7. Store, then F_inv @ Y"
-    storeComplex tmpShared accum
-    sync
-    loadComplex tmp tmpShared
-    let tmpCol ← complexAsCol tmp
-    complexMma mmaReg fInv tmpCol (← zeroCRT .Float32 64 64)
-
-    comment "8. Output real part"
-    convert out mmaReg.real
-    store outShared out
-
-    sync
-
--- Verify auto-generated kernel
-
--- Print generated kernels
+/-- Compatibility alias retained for older call sites that referred to the
+persistent-cache name explicitly. -/
+@[gpu_kernel .SM90]
+def fftConvPersistentFwd
+    (x_ptr : GPtr GpuFloat.BFloat16)
+    (o_ptr : GPtr GpuFloat.BFloat16) : KernelM Unit := do
+  comment "Compatibility alias to Tyr.GPU.Kernels.tkFFTConvPC1024"
+  Tyr.GPU.Kernels.tkFFTConvPC1024 x_ptr o_ptr
 
 end Tyr.GPU.Kernels.FFTConv
