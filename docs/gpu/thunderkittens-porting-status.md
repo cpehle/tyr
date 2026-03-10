@@ -16,6 +16,9 @@ prototypes.
 | `Tyr/GPU/Kernels/MhaH100.lean` | `thirdparty/ThunderKittens/kernels/attention/mha_h100/mha_h100.cu` | Closest attention-side port in the Lean tree today. |
 | `Tyr/GPU/Kernels/Based.lean` (`tkBasedLinearAttnFwd`) | `thirdparty/ThunderKittens/kernels/based/linear_attn.cu` | Now owns explicit `a0/a1/a2` state plus local causal polynomial attention; still uses portable slice/broadcast helpers instead of exact warp-shuffle `mul_slice_*`. |
 | `Tyr/GPU/Kernels/LinearAttn.lean` (`tkLinearAttnFwd`) | `thirdparty/ThunderKittens/kernels/linear_attention/linear_attention.cu` | Now a canonical decayed recurrent/local forward surface rather than generic feature-map attention; still relies on externally supplied decay vectors instead of in-kernel slope construction. |
+| `Tyr/GPU/Kernels/PrecisionGemm.lean` (`tkH100Fp8E4M3GemmFwd`, `tkH100Fp8ScaledGemmFwd`) | `thirdparty/ThunderKittens/kernels/gemm/fp8_h100/*` | Canonical H100 FP8 surfaces now share a concrete 64x128x256 mainloop and explicit row/column-scale epilogues; B200/MxFP8 stays split into separate modules. |
+| `Tyr/GPU/Kernels/NvFp4Gemm.lean` (`tkB200NvFp4GemmCompatFwd`) | `thirdparty/ThunderKittens/kernels/gemm/nvfp4_b200/nvfp4_b200_gemm.cu` | Canonical B200 control-flow surface is explicit, but intentionally compatibility-only until the DSL gains packed NVFP4 and tensor-memory types. |
+| `Tyr/GPU/Kernels/MOE.lean` (`tkMoeDispatchGemm`) | `thirdparty/ThunderKittens/kernels/parallel/moe_dispatch_gemm/moe_dispatch_gemm_h100.cu` | Canonical fused dispatch/grouped-GEMM surface now models multimem publication and explicit cross-device barriers; sparse pull-dispatch metadata and the exact warpgroup protocol remain abstract. |
 
 ## Outstanding Sketch-Level Modules
 
@@ -28,14 +31,11 @@ prototypes.
 | `Tyr/GPU/Kernels/Mamba2.lean` | `thirdparty/ThunderKittens/kernels/mamba2/mamba2.cu` | The decay vector and recurrent KV state are now wired, but the full lcsf producer/consumer structure and exact warpgroup decay handling are still missing. |
 | `Tyr/GPU/Kernels/Mamba.lean` | `thirdparty/ThunderKittens/kernels/mamba2/mamba2.cu` | Educational sketch, not a faithful source-backed port. |
 | `Tyr/GPU/Kernels/MambaBwd.lean` | `thirdparty/ThunderKittens/kernels/mamba2/mamba2.cu` | Backward logic is conceptual and still uses placeholder mask/cumsum handling. |
-| `Tyr/GPU/Kernels/MOE.lean` | `thirdparty/ThunderKittens/kernels/parallel/moe_dispatch_gemm/moe_dispatch_gemm_h100.cu` | Top-k routing, dispatch, and combine are still mocked. |
 | `Tyr/GPU/Kernels/Distributed.lean` | `thirdparty/ThunderKittens/kernels/parallel/*` | Collectives and AG/GEMM-AR/GEMM-RS surfaces now use explicit multimem/barrier/producer-consumer structure, but they still rely on caller-provided views instead of full PGL/cluster arithmetic. |
 | `Tyr/GPU/Kernels/RingAttn.lean` | `thirdparty/ThunderKittens/kernels/parallel/ring_attn/ring_attn_h100.cu` | Forward is now split into explicit partial/comm/reduction kernels, but the exact peer scheduling and ping-pong launch structure remain simplified. |
 | `Tyr/GPU/Kernels/RingAttnBwd.lean` | `thirdparty/ThunderKittens/kernels/parallel/ring_attn/ring_attn_h100.cu` | Backward is explicitly demoted to a speculative phased scaffold; the phase split is there, but global causal indexing and exact ring accumulation are still incomplete. |
 | `Tyr/GPU/Kernels/UlyssesAttn.lean` | `thirdparty/ThunderKittens/kernels/parallel/ulysses_attn/ulysses_attn.cu` | Ulysses is now modeled as all-to-all transport/orchestration around a separate local attention launch rather than a bespoke fused attention sketch. |
 | `Tyr/GPU/Kernels/UlyssesAttnBwd.lean` | `thirdparty/ThunderKittens/kernels/parallel/ulysses_attn/ulysses_attn.cu` | Backward now mirrors the transport/orchestration split, but the local FlashAttention backward launch boundary is still represented only as a speculative shell. |
-| `Tyr/GPU/Kernels/PrecisionGemm.lean` | `thirdparty/ThunderKittens/kernels/gemm/*` | Missing the real TMA, scaling, and datatype-specific scheduling. |
-| `Tyr/GPU/Kernels/NvFp4Gemm.lean` | `thirdparty/ThunderKittens/kernels/gemm/nvfp4_b200/nvfp4_b200_gemm.cu` | Still uses FP8 proxies instead of real FP4 packing/types. |
 
 ## Recommended Next Tranches
 

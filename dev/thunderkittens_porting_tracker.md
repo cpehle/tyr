@@ -25,7 +25,10 @@ into the Lean GPU DSL so that:
 | `0f6dfebd` | Silenced kernel build warnings across the GPU tree. |
 | `7a2fc13e` | Canonicalized the ThunderKittens fused residual + layernorm port in `FusedLayerNorm.lean`. |
 | `8a01adfc` | Wired `Mamba2.lean` decay/state flow instead of leaving `A_ptr`/`state_ptr` unused. |
-| `pending` | Reworked `Based.lean` and `LinearAttn.lean` into canonical source-backed forward surfaces. |
+| `06dafb55` | Aligned `FFTConv.lean` and `Hedgehog.lean` to source-backed ThunderKittens chunk/state surfaces. |
+| `9c2a9d3d` | Refined `Distributed.lean`, `RingAttn*.lean`, and `UlyssesAttn*.lean` around concrete collective/transport phases. |
+| `23bcfbf7` | Reworked `Based.lean`, `LinearAttn.lean`, and `MOE.lean` into canonical source-backed forward surfaces. |
+| `891627fb` | Tightened H100 FP8 and B200 NVFP4 compatibility GEMM surfaces. |
 
 ## Current Module Status
 
@@ -57,7 +60,7 @@ into the Lean GPU DSL so that:
 | `Tyr/GPU/Kernels/Distributed.lean` | `kernels/parallel/*` | Collectives plus AG/GEMM-AR/GEMM-RS now have multimem/barrier/producer-consumer structure; still missing full PGL/cluster arithmetic and peer indexing. |
 | `Tyr/GPU/Kernels/PrecisionGemm.lean` | `kernels/gemm/fp8_h100/*` | Canonical H100 FP8 surfaces now live here; remaining gap is a separate source-backed B200/MxFP8 module rather than more H100 sketch kernels. |
 | `Tyr/GPU/Kernels/NvFp4Gemm.lean` | `kernels/gemm/nvfp4_b200/nvfp4_b200_gemm.cu` | Canonical B200 control-flow surface is explicit, but intentionally compatibility-only until the DSL gains native packed NVFP4/tensor-memory types. |
-| `Tyr/GPU/Kernels/MOE.lean` | `kernels/parallel/moe_dispatch_gemm/moe_dispatch_gemm_h100.cu` | Dense routing, dispatch, and combine structure are now modeled; remaining gap is sparse pull-dispatch plus inter-device barrier semantics. |
+| `Tyr/GPU/Kernels/MOE.lean` | `kernels/parallel/moe_dispatch_gemm/moe_dispatch_gemm_h100.cu` | Canonical fused dispatch/grouped-GEMM surface now models multimem publication and explicit cross-device barriers; remaining gap is sparse pull-dispatch metadata plus the exact warpgroup producer/consumer protocol. |
 
 ### Still Explicitly Sketch / Educational
 
