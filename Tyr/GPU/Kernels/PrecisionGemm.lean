@@ -1,14 +1,16 @@
 /-
   Tyr/GPU/Kernels/PrecisionGemm.lean
 
-  Mixed-precision GEMM kernels for FP8, MxFP8, and NVFp4.
-  Based on ThunderKittens patterns.
+  H100-oriented FP8 GEMM kernels.
 
-  Key features:
-  - FP8 (E4M3 and E5M2 variants) for efficient inference
-  - Microscaling FP8 (MxFP8) with per-block scaling
-  - NVFp4 (4-bit floating point) for maximum throughput
-  - Mixed-precision accumulation (FP8 inputs → FP32 accumulator)
+  This module now serves two roles:
+
+  - `tkH100Fp8E4M3GemmFwd` and `tkH100Fp8ScaledGemmFwd` are the canonical
+    ThunderKittens-shaped H100 FP8 surfaces, following
+    `kernels/gemm/fp8_h100/*`.
+  - The older mixed-precision and fused-epilogue kernels remain as
+    compatibility conveniences built on the same H100 tiled mainloop; they are
+    not separate ThunderKittens source ports.
 -/
 
 import Tyr.GPU.Kernels.Prelude
@@ -18,301 +20,231 @@ namespace Tyr.GPU.Kernels.PrecisionGemm
 open Tyr.GPU
 open Tyr.GPU.Codegen
 
-/-! ## FP8 GEMM
+private abbrev fp8TileM : Nat := 64
+private abbrev fp8TileK : Nat := 128
+private abbrev fp8TileN : Nat := 256
+private abbrev fp8KBlocks : Nat := 4
 
-FP8 provides 2x throughput over FP16 on Hopper with similar precision.
-Two variants:
-- E4M3: 4 exponent bits, 3 mantissa bits (larger range)
-- E5M2: 5 exponent bits, 2 mantissa bits (more precision)
-
-Typically: weights in E4M3, activations in E5M2 or E4M3.
--/
-
-/-- FP8 GEMM (E4M3 inputs) -/
-@[gpu_kernel .SM90]
-def gemmFp8E4M3Fwd (A_ptr : GPtr GpuFloat.FP8E4M3) (B_ptr : GPtr GpuFloat.FP8E4M3)
-    (C_ptr : GPtr GpuFloat.BFloat16) (M : KVal UInt64) (N : KVal UInt64)
-    (K_dim : KVal UInt64) : KernelM Unit := do
-  let _ := (M, N, K_dim)
-  comment "=== FP8 GEMM (E4M3) ==="
-  comment "A (E4M3) @ B (E4M3) → C (FP32)"
-
-  let numBlocks : Nat := 8
+private def h100Fp8Accumulator {inDtype : GpuFloat}
+    (banner : String)
+    (aPtr : GPtr inDtype)
+    (bPtr : GPtr inDtype)
+    (m : KVal UInt64)
+    (n : KVal UInt64)
+    (k : KVal UInt64)
+    : KernelM (RT GpuFloat.Float32 fp8TileM fp8TileN × RTileCoord) := do
+  let _ := (m, n, k)
+  comment banner
+  comment "ThunderKittens fp8_h100 tile shape: A 64x128, B 256x128, C 64x256"
 
   let coord ← blockCoord2D
 
-  -- FP8 E4M3 inputs
-  let a : RT GpuFloat.FP8E4M3 64 64 ← allocRT .FP8E4M3 64 64
-  let b : RT GpuFloat.FP8E4M3 64 64 .Col ← allocRT .FP8E4M3 64 64 .Col
+  let a : RT inDtype fp8TileM fp8TileK ← allocRT inDtype fp8TileM fp8TileK
+  let b : RT inDtype fp8TileN fp8TileK ← allocRT inDtype fp8TileN fp8TileK
+  let accum : RT GpuFloat.Float32 fp8TileM fp8TileN ← zeroRT .Float32 fp8TileM fp8TileN
 
-  -- FP32 accumulator (higher precision for accumulation)
-  let c : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
+  let aShared : ST inDtype fp8TileM fp8TileK ← allocST inDtype fp8TileM fp8TileK
+  let bShared : ST inDtype fp8TileN fp8TileK ← allocST inDtype fp8TileN fp8TileK
 
-  -- Output (can be FP32 or downcast to BF16/FP8)
-  let out : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-
-  -- Shared memory
-  let aShared : ST GpuFloat.FP8E4M3 64 64 ← allocST .FP8E4M3 64 64
-  let bShared : ST GpuFloat.FP8E4M3 64 64 .Col ← allocST .FP8E4M3 64 64 .Col
-  let outShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
-
-  comment "GEMM loop"
-  for blkIdx in krange 0 numBlocks do
-    comment "Load FP8 tiles"
-    loadGlobal aShared A_ptr (coord.withCol blkIdx.id)
-    loadGlobal bShared B_ptr (coord.withRow blkIdx.id)
+  for kBlk in krange 0 fp8KBlocks do
+    let aCoord := coord.withCol kBlk.id
+    let bCoord := (coord.withRow coord.c).withCol kBlk.id
+    loadGlobal aShared aPtr aCoord
+    loadGlobal bShared bPtr bCoord
     sync
     load a aShared
     load b bShared
-
-    comment "FP8 tensor core GEMM (accumulates to FP32)"
-    -- On Hopper, tensor cores support FP8 inputs with FP32 accumulation
-    mma c a b c
-
+    mmaT accum a b accum
     sync
 
-  comment "Convert to output dtype and store"
-  convert out c
+  pure (accum, coord)
+
+private def storeConvertedTile {outDtype : GpuFloat}
+    (outPtr : GPtr outDtype)
+    (coord : RTileCoord)
+    (src : RT GpuFloat.Float32 fp8TileM fp8TileN)
+    : KernelM Unit := do
+  let out : RT outDtype fp8TileM fp8TileN ← allocRT outDtype fp8TileM fp8TileN
+  let outShared : ST outDtype fp8TileM fp8TileN ← allocST outDtype fp8TileM fp8TileN
+  convert out src
   store outShared out
-  storeGlobal C_ptr outShared coord
+  storeGlobal outPtr outShared coord
 
--- Verify auto-generated kernel
+private def storeFloat32Tile
+    (outPtr : GPtr GpuFloat.Float32)
+    (coord : RTileCoord)
+    (src : RT GpuFloat.Float32 fp8TileM fp8TileN)
+    : KernelM Unit := do
+  let outShared : ST GpuFloat.Float32 fp8TileM fp8TileN ← allocST .Float32 fp8TileM fp8TileN
+  store outShared src
+  storeGlobal outPtr outShared coord
 
-/-- FP8 GEMM (E5M2 inputs) -/
-@[gpu_kernel .SM90]
-def gemmFp8E5M2Fwd (A_ptr : GPtr GpuFloat.FP8E5M2) (B_ptr : GPtr GpuFloat.FP8E5M2)
-    (C_ptr : GPtr GpuFloat.BFloat16) (M : KVal UInt64) (N : KVal UInt64)
-    (K_dim : KVal UInt64) : KernelM Unit := do
-  let _ := (M, N, K_dim)
-  comment "=== FP8 GEMM (E5M2) ==="
-  comment "A (E5M2) @ B (E5M2) → C (FP32)"
-
-  let numBlocks : Nat := 8
-
-  let coord ← blockCoord2D
-
-  let a : RT GpuFloat.FP8E5M2 64 64 ← allocRT .FP8E5M2 64 64
-  let b : RT GpuFloat.FP8E5M2 64 64 .Col ← allocRT .FP8E5M2 64 64 .Col
-  let c : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
-  let out : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-
-  let aShared : ST GpuFloat.FP8E5M2 64 64 ← allocST .FP8E5M2 64 64
-  let bShared : ST GpuFloat.FP8E5M2 64 64 .Col ← allocST .FP8E5M2 64 64 .Col
-  let outShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
-
-  for blkIdx in krange 0 numBlocks do
-    loadGlobal aShared A_ptr (coord.withCol blkIdx.id)
-    loadGlobal bShared B_ptr (coord.withRow blkIdx.id)
-    sync
-    load a aShared
-    load b bShared
-    mma c a b c
-    sync
-
-  convert out c
-  store outShared out
-  storeGlobal C_ptr outShared coord
-
--- Verify auto-generated kernel
-
-/-! ## Microscaling FP8 (MxFP8)
-
-MxFP8 adds per-block scaling factors to FP8 for better dynamic range:
-- Each 32x32 or 64x64 block has a shared scale factor
-- Values are: actual_value = fp8_value * scale
-- Maintains precision while using efficient FP8 compute
--/
-
-/-- MxFP8 GEMM with per-block scaling -/
-@[gpu_kernel .SM90]
-def gemmMxFp8Fwd (A_ptr : GPtr GpuFloat.FP8E4M3) (B_ptr : GPtr GpuFloat.FP8E4M3)
-    (scale_A_ptr : GPtr GpuFloat.Float32) (scale_B_ptr : GPtr GpuFloat.Float32)
-    (C_ptr : GPtr GpuFloat.BFloat16) (M : KVal UInt64) (N : KVal UInt64)
-    (K_dim : KVal UInt64) : KernelM Unit := do
-  let _ := (scale_A_ptr, scale_B_ptr, M, N, K_dim)
-  comment "=== Microscaling FP8 GEMM ==="
-  comment "FP8 values with per-block scale factors"
-
-  let numBlocks : Nat := 8
-
-  let coord ← blockCoord2D
-
-  -- FP8 data
-  let a : RT GpuFloat.FP8E4M3 64 64 ← allocRT .FP8E4M3 64 64
-  let b : RT GpuFloat.FP8E4M3 64 64 .Col ← allocRT .FP8E4M3 64 64 .Col
-
-  -- Per-block scales (FP32)
-  let scaleA : RV GpuFloat.Float32 64 ← allocRV .Float32 64  -- One scale per row block
-  let scaleB : RV GpuFloat.Float32 64 ← allocRV .Float32 64  -- One scale per col block
-
-  -- FP32 accumulator
-  let c : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
-  let cScaled : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
-
-  -- Output
-  let out : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-
-  -- Shared memory
-  let aShared : ST GpuFloat.FP8E4M3 64 64 ← allocST .FP8E4M3 64 64
-  let bShared : ST GpuFloat.FP8E4M3 64 64 .Col ← allocST .FP8E4M3 64 64 .Col
-  let scaleAShared : SV GpuFloat.Float32 64 ← allocSV .Float32 64
-  let scaleBShared : SV GpuFloat.Float32 64 ← allocSV .Float32 64
-  let outShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
-
-  comment "Load scale factors"
+private def loadScaleVectors
+    (scaleAPtr : GPtr GpuFloat.Float32)
+    (scaleBPtr : GPtr GpuFloat.Float32)
+    (coord : RTileCoord)
+    : KernelM (RV GpuFloat.Float32 fp8TileM × RV GpuFloat.Float32 fp8TileN) := do
+  let scaleAShared : SV GpuFloat.Float32 fp8TileM ← allocSV .Float32 fp8TileM
+  let scaleBShared : SV GpuFloat.Float32 fp8TileN ← allocSV .Float32 fp8TileN
+  let scaleA : RV GpuFloat.Float32 fp8TileM ← allocRV .Float32 fp8TileM
+  let scaleB : RV GpuFloat.Float32 fp8TileN ← allocRV .Float32 fp8TileN
+  loadVecGlobalRow scaleAShared scaleAPtr coord
+  loadVecGlobalCol scaleBShared scaleBPtr coord
   loadVec scaleA scaleAShared
   loadVec scaleB scaleBShared
+  pure (scaleA, scaleB)
 
-  comment "GEMM with FP8"
-  for blkIdx in krange 0 numBlocks do
-    loadGlobal aShared A_ptr (coord.withCol blkIdx.id)
-    loadGlobal bShared B_ptr (coord.withRow blkIdx.id)
-    sync
-    load a aShared
-    load b bShared
-    mma c a b c
-    sync
+/-! ## Canonical H100 FP8 Surfaces -/
 
-  comment "Apply scale factors"
-  comment "C_scaled[i,j] = C[i,j] * scaleA[i] * scaleB[j]"
-  -- First scale by scaleA (row-wise)
-  mulCol cScaled c scaleA
-  -- Then scale by scaleB (col-wise)
-  mulRow cScaled cScaled scaleB
+/-- Canonical ThunderKittens-shaped H100 FP8 GEMM surface.
 
-  comment "Store output"
-  convert out cScaled
-  store outShared out
-  storeGlobal C_ptr outShared coord
-
--- Verify auto-generated kernel
-
-/-! ## Mixed Precision GEMM
-
-Common patterns: BF16 activations with FP8 weights for inference.
--/
-
-/-- Mixed precision GEMM: BF16 @ FP8 → FP32 -/
+This mirrors the source-backed `fp8_h100_gemm.cu` layout: E4M3 inputs, FP32
+accumulation, and an FP8 output epilogue on 64x256 output tiles. -/
 @[gpu_kernel .SM90]
-def gemmMixedFwd (A_ptr : GPtr GpuFloat.BFloat16) (B_ptr : GPtr GpuFloat.FP8E4M3)
-    (C_ptr : GPtr GpuFloat.BFloat16) (M : KVal UInt64) (N : KVal UInt64)
-    (K_dim : KVal UInt64) : KernelM Unit := do
-  let _ := (M, N, K_dim)
-  comment "=== Mixed Precision GEMM ==="
-  comment "A (BF16) @ B (FP8) → C (FP32)"
+def tkH100Fp8E4M3GemmFwd
+    (aPtr : GPtr GpuFloat.FP8E4M3)
+    (bPtr : GPtr GpuFloat.FP8E4M3)
+    (cPtr : GPtr GpuFloat.FP8E4M3)
+    (m : KVal UInt64)
+    (n : KVal UInt64)
+    (k : KVal UInt64)
+    : KernelM Unit := do
+  let (accum, coord) ← h100Fp8Accumulator
+    "=== H100 FP8 GEMM (E4M3 -> E4M3 epilogue) ==="
+    aPtr bPtr m n k
+  storeConvertedTile cPtr coord accum
 
-  let numBlocks : Nat := 8
+/-- Canonical H100 scaled-FP8 surface following `fp8_h100_scaled_gemm.cu`.
+
+The ThunderKittens source applies explicit row/column dequant scales in the
+consumer epilogue, so this surface keeps the mainloop unscaled and applies the
+scales after FP32 accumulation. -/
+@[gpu_kernel .SM90]
+def tkH100Fp8ScaledGemmFwd
+    (aPtr : GPtr GpuFloat.FP8E4M3)
+    (bPtr : GPtr GpuFloat.FP8E4M3)
+    (scaleAPtr : GPtr GpuFloat.Float32)
+    (scaleBPtr : GPtr GpuFloat.Float32)
+    (cPtr : GPtr GpuFloat.Float32)
+    (m : KVal UInt64)
+    (n : KVal UInt64)
+    (k : KVal UInt64)
+    : KernelM Unit := do
+  let (accum, coord) ← h100Fp8Accumulator
+    "=== H100 FP8 GEMM with row/column scales ==="
+    aPtr bPtr m n k
+  let (scaleA, scaleB) ← loadScaleVectors scaleAPtr scaleBPtr coord
+  let scaled : RT GpuFloat.Float32 fp8TileM fp8TileN ← allocRT .Float32 fp8TileM fp8TileN
+  mulCol scaled accum scaleA
+  mulRow scaled scaled scaleB
+  storeFloat32Tile cPtr coord scaled
+
+/-! ## Compatibility Convenience Kernels -/
+
+/-- Compatibility BF16-output wrapper over the canonical H100 E4M3 mainloop. -/
+@[gpu_kernel .SM90]
+def gemmFp8E4M3Fwd
+    (aPtr : GPtr GpuFloat.FP8E4M3)
+    (bPtr : GPtr GpuFloat.FP8E4M3)
+    (cPtr : GPtr GpuFloat.BFloat16)
+    (m : KVal UInt64)
+    (n : KVal UInt64)
+    (k : KVal UInt64)
+    : KernelM Unit := do
+  let (accum, coord) ← h100Fp8Accumulator
+    "=== H100 FP8 GEMM compatibility epilogue (E4M3 -> BF16) ==="
+    aPtr bPtr m n k
+  storeConvertedTile cPtr coord accum
+
+/-- Format-variant compatibility wrapper using the same H100 tiling with E5M2
+inputs and a BF16 epilogue. -/
+@[gpu_kernel .SM90]
+def gemmFp8E5M2Fwd
+    (aPtr : GPtr GpuFloat.FP8E5M2)
+    (bPtr : GPtr GpuFloat.FP8E5M2)
+    (cPtr : GPtr GpuFloat.BFloat16)
+    (m : KVal UInt64)
+    (n : KVal UInt64)
+    (k : KVal UInt64)
+    : KernelM Unit := do
+  let (accum, coord) ← h100Fp8Accumulator
+    "=== H100 FP8 GEMM compatibility epilogue (E5M2 -> BF16) ==="
+    aPtr bPtr m n k
+  storeConvertedTile cPtr coord accum
+
+/-- BF16 activation / FP8 weight compatibility kernel using the canonical H100
+FP8 output tile shape. The BF16 activation tile is explicitly converted to E4M3
+before entering the shared H100 FP8 mainloop. -/
+@[gpu_kernel .SM90]
+def gemmMixedFwd
+    (aPtr : GPtr GpuFloat.BFloat16)
+    (bPtr : GPtr GpuFloat.FP8E4M3)
+    (cPtr : GPtr GpuFloat.BFloat16)
+    (m : KVal UInt64)
+    (n : KVal UInt64)
+    (k : KVal UInt64)
+    : KernelM Unit := do
+  let _ := (m, n, k)
+  comment "=== Mixed BF16/FP8 GEMM compatibility kernel ==="
+  comment "Uses the H100 FP8 mainloop after converting BF16 activations to E4M3"
 
   let coord ← blockCoord2D
 
-  -- BF16 activations
-  let a : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
+  let aBf16 : RT GpuFloat.BFloat16 fp8TileM fp8TileK ← allocRT .BFloat16 fp8TileM fp8TileK
+  let aFp8 : RT GpuFloat.FP8E4M3 fp8TileM fp8TileK ← allocRT .FP8E4M3 fp8TileM fp8TileK
+  let b : RT GpuFloat.FP8E4M3 fp8TileN fp8TileK ← allocRT .FP8E4M3 fp8TileN fp8TileK
+  let accum : RT GpuFloat.Float32 fp8TileM fp8TileN ← zeroRT .Float32 fp8TileM fp8TileN
 
-  -- FP8 weights
-  let b : RT GpuFloat.FP8E4M3 64 64 .Col ← allocRT .FP8E4M3 64 64 .Col
+  let aShared : ST GpuFloat.BFloat16 fp8TileM fp8TileK ← allocST .BFloat16 fp8TileM fp8TileK
+  let bShared : ST GpuFloat.FP8E4M3 fp8TileN fp8TileK ← allocST .FP8E4M3 fp8TileN fp8TileK
 
-  -- FP32 accumulator
-  let c : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
-
-  -- Output
-  let out : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-
-  -- Shared memory
-  let aShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
-  let bShared : ST GpuFloat.FP8E4M3 64 64 .Col ← allocST .FP8E4M3 64 64 .Col
-  let outShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
-
-  comment "Mixed precision GEMM"
-  for blkIdx in krange 0 numBlocks do
-    loadGlobal aShared A_ptr (coord.withCol blkIdx.id)
-    loadGlobal bShared B_ptr (coord.withRow blkIdx.id)
+  for kBlk in krange 0 fp8KBlocks do
+    let aCoord := coord.withCol kBlk.id
+    let bCoord := (coord.withRow coord.c).withCol kBlk.id
+    loadGlobal aShared aPtr aCoord
+    loadGlobal bShared bPtr bCoord
     sync
-    load a aShared
+    load aBf16 aShared
     load b bShared
-
-    comment "Convert BF16 to FP8 for tensor core"
-    let aFp8 : RT GpuFloat.FP8E4M3 64 64 ← allocRT .FP8E4M3 64 64
-    convert aFp8 a
-
-    comment "FP8 GEMM"
-    mma c aFp8 b c
+    convert aFp8 aBf16
+    mmaT accum aFp8 b accum
     sync
 
-  comment "Store output"
-  convert out c
-  store outShared out
-  storeGlobal C_ptr outShared coord
+  storeConvertedTile cPtr coord accum
 
--- Verify auto-generated kernel
-
-/-! ## Scaled FP8 GEMM with Bias
-
-Common inference pattern: FP8 GEMM + scale + bias + activation.
--/
-
-/-- FP8 GEMM with scale and bias fusion -/
+/-- Compatibility fused-epilogue kernel: H100 FP8 mainloop followed by an
+elementwise scale tile and a per-column bias vector. -/
 @[gpu_kernel .SM90]
-def gemmFp8ScaledBiasFwd (A_ptr : GPtr GpuFloat.FP8E4M3) (B_ptr : GPtr GpuFloat.FP8E4M3)
-    (scale_ptr : GPtr GpuFloat.Float32) (bias_ptr : GPtr GpuFloat.Float32)
-    (C_ptr : GPtr GpuFloat.BFloat16) (M : KVal UInt64) (N : KVal UInt64)
-    (K_dim : KVal UInt64) : KernelM Unit := do
-  let _ := (bias_ptr, M, N, K_dim)
-  comment "=== FP8 GEMM with Scale and Bias ==="
-  comment "C = scale * (A @ B) + bias"
+def gemmFp8ScaledBiasFwd
+    (aPtr : GPtr GpuFloat.FP8E4M3)
+    (bPtr : GPtr GpuFloat.FP8E4M3)
+    (scalePtr : GPtr GpuFloat.Float32)
+    (biasPtr : GPtr GpuFloat.Float32)
+    (cPtr : GPtr GpuFloat.BFloat16)
+    (m : KVal UInt64)
+    (n : KVal UInt64)
+    (k : KVal UInt64)
+    : KernelM Unit := do
+  let (accum, coord) ← h100Fp8Accumulator
+    "=== H100 FP8 GEMM compatibility epilogue (scale tile + bias) ==="
+    aPtr bPtr m n k
 
-  let numBlocks : Nat := 8
+  let scale : RT GpuFloat.Float32 fp8TileM fp8TileN ← allocRT .Float32 fp8TileM fp8TileN
+  let scaled : RT GpuFloat.Float32 fp8TileM fp8TileN ← allocRT .Float32 fp8TileM fp8TileN
+  let bias : RV GpuFloat.Float32 fp8TileN ← allocRV .Float32 fp8TileN
 
-  let coord ← blockCoord2D
+  let scaleShared : ST GpuFloat.Float32 fp8TileM fp8TileN ← allocST .Float32 fp8TileM fp8TileN
+  let biasShared : SV GpuFloat.Float32 fp8TileN ← allocSV .Float32 fp8TileN
 
-  let a : RT GpuFloat.FP8E4M3 64 64 ← allocRT .FP8E4M3 64 64
-  let b : RT GpuFloat.FP8E4M3 64 64 .Col ← allocRT .FP8E4M3 64 64 .Col
-  let c : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
-
-  -- Scale factor (for dequantization)
-  let scale : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
-
-  -- Bias (per output column)
-  let bias : RV GpuFloat.Float32 64 ← allocRV .Float32 64
-
-  -- Output
-  let out : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-
-  -- Shared memory
-  let aShared : ST GpuFloat.FP8E4M3 64 64 ← allocST .FP8E4M3 64 64
-  let bShared : ST GpuFloat.FP8E4M3 64 64 .Col ← allocST .FP8E4M3 64 64 .Col
-  let scaleShared : ST GpuFloat.Float32 64 64 ← allocST .Float32 64 64
-  let biasShared : SV GpuFloat.Float32 64 ← allocSV .Float32 64
-  let outShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
-
-  comment "Load scale and bias"
-  loadGlobal scaleShared scale_ptr coord
+  loadGlobal scaleShared scalePtr coord
   sync
   load scale scaleShared
+  loadVecGlobalCol biasShared biasPtr coord
   loadVec bias biasShared
 
-  comment "FP8 GEMM"
-  for blkIdx in krange 0 numBlocks do
-    loadGlobal aShared A_ptr (coord.withCol blkIdx.id)
-    loadGlobal bShared B_ptr (coord.withRow blkIdx.id)
-    sync
-    load a aShared
-    load b bShared
-    mma c a b c
-    sync
+  mul scaled accum scale
+  addRow scaled scaled bias
 
-  comment "Apply scale"
-  mul c c scale
-
-  comment "Add bias (broadcast to all rows)"
-  addRow c c bias
-
-  comment "Store output"
-  convert out c
-  store outShared out
-  storeGlobal C_ptr outShared coord
-
--- Verify auto-generated kernels
-
--- Print generated kernels
+  storeConvertedTile cPtr coord scaled
 
 end Tyr.GPU.Kernels.PrecisionGemm

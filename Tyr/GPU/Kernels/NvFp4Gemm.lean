@@ -1,14 +1,18 @@
 /-
   Tyr/GPU/Kernels/NvFp4Gemm.lean
 
-  NVFP4 GEMM kernel for Blackwell (B200) GPUs.
-  Based on ThunderKittens nvfp4_b200_gemm.cu patterns.
+  Blackwell-oriented NVFP4 GEMM compatibility surfaces.
 
-  Key features:
-  - 4-bit floating point (fp4e2m1) for extreme throughput
-  - Per-block scaling factors for dynamic range
-  - Tensor Memory (TMEM) utilization
-  - Cluster-level cooperation (2 CTAs)
+  The ThunderKittens source for `kernels/gemm/nvfp4_b200/nvfp4_b200_gemm.cu`
+  depends on packed `fp4e2m1` storage, tensor-memory fragments, and cluster/TMA
+  choreography that the current Lean DSL cannot represent directly. This module
+  therefore makes that status explicit:
+
+  - `tkB200NvFp4GemmCompatFwd` is the canonical B200/NVFP4 control-flow surface
+    in Tyr today, but it is compatibility-only because `GpuFloat` does not yet
+    model packed NVFP4 values.
+  - The helper kernels below are also compatibility kernels and say so in their
+    names; none of them should be read as native FP8 GEMMs.
 -/
 
 import Tyr.GPU.Kernels.Prelude
@@ -18,192 +22,193 @@ namespace Tyr.GPU.Kernels.NvFp4Gemm
 open Tyr.GPU
 open Tyr.GPU.Codegen
 
-/-! ## NVFP4 GEMM
+private abbrev ctaTileM : Nat := 128
+private abbrev quantTileK : Nat := 256
+private abbrev ctaTileN : Nat := 256
+private abbrev quantScaleRows : Nat := 4
+private abbrev quantKBlocks : Nat := 4
 
-NVFP4 (fp4e2m1) is a 4-bit floating point format:
-- 1 sign bit, 2 exponent bits, 1 mantissa bit
-- Range: ±{0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0}
-- Packed as fp4x2 (two fp4 values in one byte)
+private def b200NvFp4CompatAccumulator
+    (aPtr : GPtr GpuFloat.FP8E4M3)
+    (bPtr : GPtr GpuFloat.FP8E4M3)
+    (aScalePtr : GPtr GpuFloat.Float16)
+    (bScalePtr : GPtr GpuFloat.Float16)
+    (m : KVal UInt64)
+    (n : KVal UInt64)
+    (k : KVal UInt64)
+    : KernelM (RT GpuFloat.Float32 ctaTileM ctaTileN × RTileCoord) := do
+  let _ := (m, n, k)
+  comment "=== B200 NVFP4 compatibility GEMM ==="
+  comment "CTA-local view of the ThunderKittens producer/consumer NVFP4 pipeline"
+  comment "Packed fp4e2m1 tiles are represented with FP8E4M3 proxy storage until the DSL grows native NVFP4 types"
 
-For numerical stability, uses per-block scaling:
-- A_dequant[i,j] = A_fp4[i,j] * A_scale[block_i, block_j] * A_global_scale
-- Block size typically 128×64
+  let coord ← blockCoord2D
 
-Blackwell features used:
-- Tensor Memory (TMEM) for accumulator storage
-- 2-CTA clusters for doubled throughput
-- TMA for efficient async loads
--/
+  let a : RT GpuFloat.FP8E4M3 ctaTileM quantTileK ← allocRT .FP8E4M3 ctaTileM quantTileK
+  let b : RT GpuFloat.FP8E4M3 ctaTileN quantTileK ← allocRT .FP8E4M3 ctaTileN quantTileK
+  let accum : RT GpuFloat.Float32 ctaTileM ctaTileN ← zeroRT .Float32 ctaTileM ctaTileN
 
-/-- NVFP4 GEMM forward pass (Blackwell)
+  let aScale : RT GpuFloat.Float16 quantScaleRows quantTileK ← allocRT .Float16 quantScaleRows quantTileK
+  let bScale : RT GpuFloat.Float16 quantScaleRows quantTileK ← allocRT .Float16 quantScaleRows quantTileK
 
-Note: This is a conceptual port. Actual FP4 types would need
-to be added to the type system. Currently uses FP8 as proxy.
--/
-@[gpu_kernel .SM100]  -- Blackwell architecture
-def nvfp4GemmFwd : KernelM Unit := do
-  comment "=== NVFP4 GEMM (Blackwell B200) ==="
-  comment "4-bit floating point with per-block scaling"
+  let aShared : ST GpuFloat.FP8E4M3 ctaTileM quantTileK ← allocST .FP8E4M3 ctaTileM quantTileK
+  let bShared : ST GpuFloat.FP8E4M3 ctaTileN quantTileK ← allocST .FP8E4M3 ctaTileN quantTileK
+  let aScaleShared : ST GpuFloat.Float16 quantScaleRows quantTileK ← allocST .Float16 quantScaleRows quantTileK
+  let bScaleShared : ST GpuFloat.Float16 quantScaleRows quantTileK ← allocST .Float16 quantScaleRows quantTileK
 
-  -- Tile sizes (from ThunderKittens config)
-  -- Mb = 256, Nb = 256, Kb = 256
-  -- Each CTA handles 128×256 output tile
-
-  -- Input tiles (FP4 packed as FP8 for now)
-  -- In actual implementation: st_fp4e2m1_2<128, 128> (packed pairs)
-  let a : RT GpuFloat.FP8E4M3 64 64 ← allocRT .FP8E4M3 64 64
-  let b : RT GpuFloat.FP8E4M3 64 64 .Col ← allocRT .FP8E4M3 64 64 .Col
-
-  -- Scale factors (FP16 for precision)
-  -- A_scale: per 128×64 block
-  -- B_scale: per 64×128 block
-  let aScale : RT GpuFloat.Float16 4 256 ← allocRT .Float16 4 256
-  let bScale : RT GpuFloat.Float16 4 256 ← allocRT .Float16 4 256
-
-  -- Global scales (single float per matrix)
-  let _aGlobalScale : RV GpuFloat.Float32 1 ← allocRV .Float32 1
-  let _bGlobalScale : RV GpuFloat.Float32 1 ← allocRV .Float32 1
-
-  -- Output accumulator (FP32 for precision)
-  let c : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
-
-  -- Output (BF16)
-  let out : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-
-  -- Shared memory
-  let aShared : ST GpuFloat.FP8E4M3 64 64 ← allocST .FP8E4M3 64 64
-  let bShared : ST GpuFloat.FP8E4M3 64 64 .Col ← allocST .FP8E4M3 64 64 .Col
-  let aScaleShared : ST GpuFloat.Float16 4 256 ← allocST .Float16 4 256
-  let bScaleShared : ST GpuFloat.Float16 4 256 ← allocST .Float16 4 256
-  let outShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
-
-  comment "Load scale factors"
-  load aScale aScaleShared
-  load bScale bScaleShared
-
-  comment "GEMM loop (K dimension)"
-  for _kBlkIdx in krange 0 4 do  -- Kb/64 iterations
-    comment "Load FP4 tiles (async TMA)"
+  for kBlk in krange 0 quantKBlocks do
+    let aCoord := coord.withCol kBlk.id
+    let bCoord := (coord.withRow coord.c).withCol kBlk.id
+    loadGlobal aShared aPtr aCoord
+    loadGlobal bShared bPtr bCoord
+    loadGlobal aScaleShared aScalePtr aCoord
+    loadGlobal bScaleShared bScalePtr bCoord
+    sync
     load a aShared
     load b bShared
-
-    comment "FP4 GEMM (tensor core)"
-    -- On Blackwell, tensor cores support FP4
-    -- C += dequant(A) @ dequant(B)
-    -- The dequantization is implicit in hardware
-    mma c a b c
-
+    load aScale aScaleShared
+    load bScale bScaleShared
+    let _ := (aScale, bScale)
+    comment "Per-block NVFP4 scales are explicitly staged here; in the real kernel they feed the tensor-memory dequant path"
+    mmaT accum a b accum
     sync
 
-  comment "Apply global scales"
-  -- c *= aGlobalScale * bGlobalScale
-  -- Simplified: scale is applied per-element
+  pure (accum, coord)
 
-  comment "Convert to output dtype"
-  convert out c
+private def storeCompatOutput
+    (outPtr : GPtr GpuFloat.BFloat16)
+    (coord : RTileCoord)
+    (src : RT GpuFloat.Float32 ctaTileM ctaTileN)
+    : KernelM Unit := do
+  let out : RT GpuFloat.BFloat16 ctaTileM ctaTileN ← allocRT .BFloat16 ctaTileM ctaTileN
+  let outShared : ST GpuFloat.BFloat16 ctaTileM ctaTileN ← allocST .BFloat16 ctaTileM ctaTileN
+  convert out src
   store outShared out
+  storeGlobal outPtr outShared coord
 
--- Verify auto-generated kernel
+/-- Canonical B200 NVFP4 control-flow surface for the current DSL.
 
-/-! ## FP4 Quantization Kernel
-
-Helper kernel to quantize FP16/BF16 weights to FP4 format.
--/
-
-/-- Quantize weights to FP4 format -/
+This keeps the ThunderKittens block geometry and explicit scale staging, while
+remaining compatibility-only because the Lean type system still lacks packed
+`fp4e2m1` storage and tensor-memory fragments. -/
 @[gpu_kernel .SM100]
-def quantizeToFp4 : KernelM Unit := do
-  comment "=== Quantize to FP4 ==="
+def tkB200NvFp4GemmCompatFwd
+    (aPtr : GPtr GpuFloat.FP8E4M3)
+    (bPtr : GPtr GpuFloat.FP8E4M3)
+    (aScalePtr : GPtr GpuFloat.Float16)
+    (bScalePtr : GPtr GpuFloat.Float16)
+    (dPtr : GPtr GpuFloat.BFloat16)
+    (m : KVal UInt64)
+    (n : KVal UInt64)
+    (k : KVal UInt64)
+    : KernelM Unit := do
+  let (accum, coord) ← b200NvFp4CompatAccumulator aPtr bPtr aScalePtr bScalePtr m n k
+  comment "Consumer epilogue: materialize the CTA-local BF16 tile"
+  storeCompatOutput dPtr coord accum
 
-  -- Input (BF16 or FP16)
+/-- Compatibility quantizer that produces the FP8 proxy storage plus the
+row-wise scale vector needed by the NVFP4 compatibility kernels. -/
+@[gpu_kernel .SM100]
+def quantizeToFp4Compat
+    (xPtr : GPtr GpuFloat.BFloat16)
+    (scalePtr : GPtr GpuFloat.Float32)
+    (xQPtr : GPtr GpuFloat.FP8E4M3)
+    (m : KVal UInt64)
+    (n : KVal UInt64)
+    : KernelM Unit := do
+  let _ := (m, n)
+  comment "=== Compatibility quantization to NVFP4 proxy storage ==="
+  comment "Computes a row-wise scale, normalizes by the NVFP4 max magnitude (6.0), then stores FP8 proxy values"
+
+  let coord ← blockCoord2D
+
   let x : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-
-  -- Output (FP4 packed as FP8 for now)
+  let xF : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
+  let absX : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
+  let normalized : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
   let xQ : RT GpuFloat.FP8E4M3 64 64 ← allocRT .FP8E4M3 64 64
 
-  -- Scale factors (computed per block)
-  let scale : RV GpuFloat.Float32 1 ← allocRV .Float32 1
+  let absMax : RV GpuFloat.Float32 64 ← allocRV .Float32 64
+  let scale : RV GpuFloat.Float32 64 ← allocRV .Float32 64
+  let safeScale : RV GpuFloat.Float32 64 ← allocRV .Float32 64
 
-  -- Shared memory
   let xShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
   let xQShared : ST GpuFloat.FP8E4M3 64 64 ← allocST .FP8E4M3 64 64
-  let scaleShared : SV GpuFloat.Float32 1 ← allocSV .Float32 1
+  let scaleShared : SV GpuFloat.Float32 64 ← allocSV .Float32 64
 
-  comment "Process blocks"
-  for _blkIdx in krange 0 16 do
-    comment "Load input block"
-    load x xShared
+  loadGlobal xShared xPtr coord
+  sync
+  load x xShared
+  convert xF x
+  abs absX xF
+  rowMax absMax absX
+  scalarMulVec scale absMax 0.16666666666666666
+  scalarAddVec safeScale scale 1.0e-6
+  divCol normalized xF safeScale
+  convert xQ normalized
 
-    comment "Find max absolute value for scaling"
-    -- absMax = reduce_max(abs(x))
-    -- scale = absMax / 6.0  (FP4 max representable value)
+  store xQShared xQ
+  storeGlobal xQPtr xQShared coord
+  storeVec scaleShared safeScale
+  storeVecGlobalRow scalePtr scaleShared coord
 
-    comment "Quantize: x_q = round(x / scale)"
-    -- Clamp to FP4 range and pack
-    convert xQ x  -- Simplified
-
-    comment "Store quantized values and scale"
-    store xQShared xQ
-    storeVec scaleShared scale
-
-    sync
-
--- Verify auto-generated kernel
-
-/-! ## Mixed FP4/FP8 GEMM
-
-Some workloads benefit from FP4 weights with FP8 activations.
--/
-
-/-- Mixed precision GEMM: FP8 activations @ FP4 weights -/
+/-- Compatibility-only mixed GEMM where activations stay in FP8 and the weight
+matrix uses the NVFP4 proxy storage plus a per-column dequant vector. -/
 @[gpu_kernel .SM100]
-def mixedFp4Fp8GemmFwd : KernelM Unit := do
-  comment "=== Mixed FP4/FP8 GEMM ==="
-  comment "FP8 activations @ FP4 weights"
+def mixedFp4Fp8CompatGemmFwd
+    (aPtr : GPtr GpuFloat.FP8E4M3)
+    (wPtr : GPtr GpuFloat.FP8E4M3)
+    (wScalePtr : GPtr GpuFloat.Float32)
+    (dPtr : GPtr GpuFloat.BFloat16)
+    (m : KVal UInt64)
+    (n : KVal UInt64)
+    (k : KVal UInt64)
+    : KernelM Unit := do
+  let _ := (m, n, k)
+  comment "=== FP8 by NVFP4-proxy weight GEMM (compatibility) ==="
 
-  -- Activations (FP8)
-  let a : RT GpuFloat.FP8E4M3 64 64 ← allocRT .FP8E4M3 64 64
+  let coord ← blockCoord2D
 
-  -- Weights (FP4, represented as FP8 for now)
-  let w : RT GpuFloat.FP8E4M3 64 64 .Col ← allocRT .FP8E4M3 64 64 .Col
+  let a : RT GpuFloat.FP8E4M3 64 128 ← allocRT .FP8E4M3 64 128
+  let w : RT GpuFloat.FP8E4M3 256 128 ← allocRT .FP8E4M3 256 128
+  let accum : RT GpuFloat.Float32 64 256 ← zeroRT .Float32 64 256
 
-  -- Weight scale
-  let wScale : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
+  let wScale : RV GpuFloat.Float32 256 ← allocRV .Float32 256
 
-  -- Accumulator
-  let c : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
+  let aShared : ST GpuFloat.FP8E4M3 64 128 ← allocST .FP8E4M3 64 128
+  let wShared : ST GpuFloat.FP8E4M3 256 128 ← allocST .FP8E4M3 256 128
+  let wScaleShared : SV GpuFloat.Float32 256 ← allocSV .Float32 256
 
-  -- Output
-  let out : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
+  loadVecGlobalCol wScaleShared wScalePtr coord
+  loadVec wScale wScaleShared
 
-  -- Shared memory
-  let aShared : ST GpuFloat.FP8E4M3 64 64 ← allocST .FP8E4M3 64 64
-  let wShared : ST GpuFloat.FP8E4M3 64 64 .Col ← allocST .FP8E4M3 64 64 .Col
-  let wScaleShared : ST GpuFloat.Float32 64 64 ← allocST .Float32 64 64
-  let outShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
-
-  comment "Load weight scale"
-  load wScale wScaleShared
-
-  comment "GEMM loop"
-  for _kBlkIdx in krange 0 8 do
+  for kBlk in krange 0 4 do
+    let aCoord := coord.withCol kBlk.id
+    let wCoord := (coord.withRow coord.c).withCol kBlk.id
+    loadGlobal aShared aPtr aCoord
+    loadGlobal wShared wPtr wCoord
+    sync
     load a aShared
     load w wShared
-
-    comment "Mixed precision MMA"
-    mma c a w c
-
+    mmaT accum a w accum
     sync
 
-  comment "Apply weight dequantization scale"
-  mul c c wScale
-
-  comment "Store output"
-  convert out c
+  let dequantized : RT GpuFloat.Float32 64 256 ← allocRT .Float32 64 256
+  mulRow dequantized accum wScale
+  let out : RT GpuFloat.BFloat16 64 256 ← allocRT .BFloat16 64 256
+  let outShared : ST GpuFloat.BFloat16 64 256 ← allocST .BFloat16 64 256
+  convert out dequantized
   store outShared out
+  storeGlobal dPtr outShared coord
 
--- Verify auto-generated kernel
+/-- Backwards-compatible short name for the canonical B200 compatibility
+surface. -/
+abbrev nvfp4GemmFwd := tkB200NvFp4GemmCompatFwd
 
--- Print generated kernels
+/-- Backwards-compatible short name for the NVFP4 compatibility quantizer. -/
+abbrev quantizeToFp4 := quantizeToFp4Compat
+
+/-- Backwards-compatible short name for the mixed compatibility surface. -/
+abbrev mixedFp4Fp8GemmFwd := mixedFp4Fp8CompatGemmFwd
 
 end Tyr.GPU.Kernels.NvFp4Gemm
