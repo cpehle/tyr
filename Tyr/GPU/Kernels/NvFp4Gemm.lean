@@ -201,14 +201,4 @@ def mixedFp4Fp8CompatGemmFwd
   store outShared out
   storeGlobal dPtr outShared coord
 
-/-- Backwards-compatible short name for the canonical B200 compatibility
-surface. -/
-abbrev nvfp4GemmFwd := tkB200NvFp4GemmCompatFwd
-
-/-- Backwards-compatible short name for the NVFP4 compatibility quantizer. -/
-abbrev quantizeToFp4 := quantizeToFp4Compat
-
-/-- Backwards-compatible short name for the mixed compatibility surface. -/
-abbrev mixedFp4Fp8GemmFwd := mixedFp4Fp8CompatGemmFwd
-
 end Tyr.GPU.Kernels.NvFp4Gemm

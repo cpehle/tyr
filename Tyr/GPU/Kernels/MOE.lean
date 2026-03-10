@@ -141,7 +141,4 @@ def tkMoeDispatchGemm
   tkMoeDispatch pre_tokens_ptr post_tokens_ptr dispatch_meta_ptr num_padded_local_tokens num_devices
   tkMoeGroupedGemm post_tokens_ptr weights_ptr expert_counts_ptr outputs_ptr num_experts_per_device
 
-/-- Compatibility alias for the fused canonical surface. -/
-abbrev moeDispatchGemmFwd := tkMoeDispatchGemm
-
 end Tyr.GPU.Kernels.MOE

@@ -164,9 +164,6 @@ def linearAttnFwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat
   store stateShared state
   storeGlobal state_ptr stateShared coord
 
-/-- Compatibility alias for the old duplicated causal entrypoint. -/
-abbrev causalLinearAttnFwd := linearAttnFwd
-
 /-- Canonical ThunderKittens-aligned name. -/
 abbrev tkLinearAttnFwd := linearAttnFwd
 

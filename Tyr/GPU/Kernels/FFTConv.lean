@@ -243,36 +243,3 @@ def tkFFTConvNonPC64
   storeGlobal o_ptr oStage coord
 
 end Tyr.GPU.Kernels
-
-namespace Tyr.GPU.Kernels.FFTConv
-
-open Tyr.GPU
-open Tyr.GPU.Codegen
-
-/-- Compatibility alias to the canonical ThunderKittens-aligned FFTConv kernel. -/
-@[gpu_kernel .SM90]
-def fftConvFwd
-    (x_ptr : GPtr GpuFloat.BFloat16)
-    (o_ptr : GPtr GpuFloat.BFloat16) : KernelM Unit := do
-  comment "Compatibility alias to Tyr.GPU.Kernels.tkFFTConvPC1024"
-  Tyr.GPU.Kernels.tkFFTConvPC1024 x_ptr o_ptr
-
-/-- Compatibility alias retained for older call sites that referred to the
-persistent-cache name explicitly. -/
-@[gpu_kernel .SM90]
-def fftConvPersistentFwd
-    (x_ptr : GPtr GpuFloat.BFloat16)
-    (o_ptr : GPtr GpuFloat.BFloat16) : KernelM Unit := do
-  comment "Compatibility alias to Tyr.GPU.Kernels.tkFFTConvPC1024"
-  Tyr.GPU.Kernels.tkFFTConvPC1024 x_ptr o_ptr
-
-/-- Compatibility alias to the canonical ThunderKittens non-persistent FFTConv
-kernel. -/
-@[gpu_kernel .SM90]
-def fftConvNonPersistentFwd
-    (x_ptr : GPtr GpuFloat.BFloat16)
-    (o_ptr : GPtr GpuFloat.BFloat16) : KernelM Unit := do
-  comment "Compatibility alias to Tyr.GPU.Kernels.tkFFTConvNonPC64"
-  Tyr.GPU.Kernels.tkFFTConvNonPC64 x_ptr o_ptr
-
-end Tyr.GPU.Kernels.FFTConv

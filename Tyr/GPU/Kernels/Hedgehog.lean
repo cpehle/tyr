@@ -10,9 +10,6 @@
     long-resident feature maps, previous/current sliding-window blocks,
     recurrent `k_state` / `kv_state` accumulation, and final state writeout.
 
-  The legacy `Tyr.GPU.Kernels.Hedgehog.*` names remain as compatibility aliases
-  to the canonical kernel.
-
   Current DSL limitation:
 
   - The vendored CUDA kernel uses a double-buffered Q path, a 3-ring K/V path,
@@ -248,56 +245,4 @@ def tkHedgehogFwd
   broadcastRow kStateTile kState
   store kStateShared kStateTile
   storeGlobal k_state_ptr kStateShared { b := batchIdx, d := headIdx, r := zeroIdx, c := zeroIdx }
-
 end Tyr.GPU.Kernels
-
-namespace Tyr.GPU.Kernels.Hedgehog
-
-open Tyr.GPU
-open Tyr.GPU.Codegen
-
-/-- Compatibility alias to the canonical ThunderKittens-aligned Hedgehog port. -/
-@[gpu_kernel .SM90]
-def hedgehogFwd
-    (Q_ptr : GPtr GpuFloat.BFloat16)
-    (K_ptr : GPtr GpuFloat.BFloat16)
-    (V_ptr : GPtr GpuFloat.BFloat16)
-    (QMap_ptr : GPtr GpuFloat.BFloat16)
-    (KMap_ptr : GPtr GpuFloat.BFloat16)
-    (alpha_ptr : GPtr GpuFloat.Float32)
-    (beta_ptr : GPtr GpuFloat.Float32)
-    (O_ptr : GPtr GpuFloat.BFloat16)
-    (k_state_ptr : GPtr GpuFloat.Float32)
-    (kv_state_ptr : GPtr GpuFloat.Float32)
-    (batch_size : KVal UInt64)
-    (num_heads : KVal UInt64)
-    (seq_len : KVal UInt64) : KernelM Unit := do
-  comment "Compatibility alias to Tyr.GPU.Kernels.tkHedgehogFwd"
-  Tyr.GPU.Kernels.tkHedgehogFwd
-    Q_ptr K_ptr V_ptr QMap_ptr KMap_ptr alpha_ptr beta_ptr
-    O_ptr k_state_ptr kv_state_ptr batch_size num_heads seq_len
-
-/-- Compatibility alias retained for older call sites that used the
-learned-mixing name explicitly. The canonical kernel already models learned
-mixing through `alpha_ptr` and `beta_ptr`. -/
-@[gpu_kernel .SM90]
-def hedgehogLearnedFwd
-    (Q_ptr : GPtr GpuFloat.BFloat16)
-    (K_ptr : GPtr GpuFloat.BFloat16)
-    (V_ptr : GPtr GpuFloat.BFloat16)
-    (QMap_ptr : GPtr GpuFloat.BFloat16)
-    (KMap_ptr : GPtr GpuFloat.BFloat16)
-    (alpha_ptr : GPtr GpuFloat.Float32)
-    (beta_ptr : GPtr GpuFloat.Float32)
-    (O_ptr : GPtr GpuFloat.BFloat16)
-    (k_state_ptr : GPtr GpuFloat.Float32)
-    (kv_state_ptr : GPtr GpuFloat.Float32)
-    (batch_size : KVal UInt64)
-    (num_heads : KVal UInt64)
-    (seq_len : KVal UInt64) : KernelM Unit := do
-  comment "Compatibility alias to Tyr.GPU.Kernels.tkHedgehogFwd"
-  Tyr.GPU.Kernels.tkHedgehogFwd
-    Q_ptr K_ptr V_ptr QMap_ptr KMap_ptr alpha_ptr beta_ptr
-    O_ptr k_state_ptr kv_state_ptr batch_size num_heads seq_len
-
-end Tyr.GPU.Kernels.Hedgehog
