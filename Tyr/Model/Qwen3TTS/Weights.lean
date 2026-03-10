@@ -7,10 +7,13 @@
 -/
 import Tyr.Torch
 import Tyr.TensorStruct
+import Tyr.Log
 import Tyr.Module.RMSNorm
 import Tyr.Model.Qwen3TTS.Model
 
 namespace torch.qwen3tts
+
+open torch.Log
 
 private def reqGradFalse {s : Shape} (t : T s) : T s :=
   autograd.set_requires_grad (toFloat' t) false
@@ -350,9 +353,10 @@ def loadSharded
     (modelDir : String)
     (cfg : Qwen3TTSConfig := {})
     (targetDevice : Device := Device.CPU)
+    (log : Handlers := {})
     : IO (Qwen3TTSForConditionalGeneration cfg) := do
-  IO.println s!"Loading Qwen3TTS weights from {modelDir}..."
-  IO.println s!"Qwen3-TTS target device: {repr targetDevice}"
+  log.onInfo s!"Loading Qwen3TTS weights from {modelDir}..."
+  log.onInfo s!"Qwen3-TTS target device: {repr targetDevice}"
   let talker ← loadTalkerForConditionalGenerationSharded modelDir cfg.talkerConfig
 
   let speakerEncoder ←
@@ -364,7 +368,7 @@ def loadSharded
 
   let talker := TensorStruct.map (fun t => t.to targetDevice) talker
   let speakerEncoder := speakerEncoder.map (TensorStruct.map (fun t => t.to targetDevice))
-  IO.println "Loaded Qwen3TTS weights (real checkpoint tensors)."
+  log.onInfo "Loaded Qwen3TTS weights (real checkpoint tensors)."
   pure { talker, speakerEncoder }
 
 end Qwen3TTSForConditionalGeneration

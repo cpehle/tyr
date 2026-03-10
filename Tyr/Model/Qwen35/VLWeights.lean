@@ -4,10 +4,13 @@
   Pretrained weight loading for Qwen3.5 multimodal wrapper.
 -/
 import Tyr.Torch
+import Tyr.Log
 import Tyr.Model.Qwen35.Weights
 import Tyr.Model.Qwen35.Multimodal
 
 namespace torch.qwen35
+
+open torch.Log
 
 private def reqGradFalse {s : Shape} (t : T s) : T s :=
   autograd.set_requires_grad (toFloat' t) false
@@ -263,28 +266,30 @@ namespace Qwen35ForConditionalGeneration
 
 /-- Load Qwen3.5 multimodal model from sharded HF SafeTensors directory. -/
 def loadSharded (modelDir : String) (cfg : VLConfig := {})
+    (log : Handlers := {})
     : IO (Qwen35ForConditionalGeneration cfg) := do
-  IO.println s!"Loading Qwen35ForConditionalGeneration from {modelDir}..."
+  log.onInfo s!"Loading Qwen35ForConditionalGeneration from {modelDir}..."
   if cfg.vision_config.out_hidden_size != cfg.text_config.hidden_size then
     throw <| IO.userError
       s!"vision out_hidden_size ({cfg.vision_config.out_hidden_size}) must match text hidden_size ({cfg.text_config.hidden_size})"
 
   let visual ← loadVisionModelSharded modelDir cfg.vision_config
-  let languageModel ← Qwen35ForCausalLM.loadSharded modelDir cfg.text_config
-  IO.println "Loaded Qwen35ForConditionalGeneration weights."
+  let languageModel ← Qwen35ForCausalLM.loadSharded modelDir cfg.text_config log
+  log.onInfo "Loaded Qwen35ForConditionalGeneration weights."
   pure { visual := visual, language_model := languageModel }
 
 /-- Load Qwen3.5 multimodal model from a single HF SafeTensors file. -/
 def load (path : String) (cfg : VLConfig := {})
+    (log : Handlers := {})
     : IO (Qwen35ForConditionalGeneration cfg) := do
-  IO.println s!"Loading Qwen35ForConditionalGeneration from {path}..."
+  log.onInfo s!"Loading Qwen35ForConditionalGeneration from {path}..."
   if cfg.vision_config.out_hidden_size != cfg.text_config.hidden_size then
     throw <| IO.userError
       s!"vision out_hidden_size ({cfg.vision_config.out_hidden_size}) must match text hidden_size ({cfg.text_config.hidden_size})"
 
   let visual ← loadVisionModel path cfg.vision_config
-  let languageModel ← Qwen35ForCausalLM.load path cfg.text_config
-  IO.println "Loaded Qwen35ForConditionalGeneration weights."
+  let languageModel ← Qwen35ForCausalLM.load path cfg.text_config log
+  log.onInfo "Loaded Qwen35ForConditionalGeneration weights."
   pure { visual := visual, language_model := languageModel }
 
 end Qwen35ForConditionalGeneration

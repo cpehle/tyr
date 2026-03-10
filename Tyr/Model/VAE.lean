@@ -10,8 +10,11 @@ import Tyr.Model.VAE.AttnBlock
 import Tyr.Model.VAE.Upsample
 import Tyr.Model.VAE.Decoder
 import Tyr.Model.VAE.Weights
+import Tyr.Log
 
 namespace torch.vae
+
+open torch.Log
 
 /-- Full AutoEncoder with BatchNorm statistics for proper normalization.
     The encode/decode pipeline uses BN normalization on packed latents. -/
@@ -71,18 +74,18 @@ def decode (ae : AutoEncoder) (z : T #[1, 128, 16, 16]) : T #[1, 3, 256, 256] :=
 end AutoEncoder
 
 /-- Load full AutoEncoder from SafeTensors including BN stats. -/
-def loadAutoEncoder (path : String) : IO AutoEncoder := do
-  IO.println "Loading AutoEncoder..."
+def loadAutoEncoder (path : String) (log : Handlers := {}) : IO AutoEncoder := do
+  log.onInfo "Loading AutoEncoder..."
 
   -- Load decoder
-  let decoder ← loadDecoder path
+  let decoder ← loadDecoder path log
 
   -- Load BN running stats
   let bn_running_mean ← safetensors.loadTensor path "bn.running_mean" #[128]
   let bn_running_var ← safetensors.loadTensor path "bn.running_var" #[128]
-  IO.println "  Loaded BN running stats"
+  log.onInfo "  Loaded BN running stats"
 
-  IO.println "AutoEncoder loaded successfully!"
+  log.onInfo "AutoEncoder loaded successfully!"
   pure {
     decoder
     bn_running_mean := autograd.set_requires_grad bn_running_mean false

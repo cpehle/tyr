@@ -5,10 +5,13 @@
 -/
 import Tyr.Torch
 import Tyr.TensorStruct
+import Tyr.Log
 import Tyr.Module.RMSNorm
 import Tyr.Model.Qwen3ASR.Model
 
 namespace torch.qwen3asr
+
+open torch.Log
 
 private def reqGradFalse {s : Shape} (t : T s) : T s :=
   autograd.set_requires_grad (toFloat' t) false
@@ -216,7 +219,7 @@ namespace Qwen3ASRForConditionalGeneration
 
 /-- Resolve runtime target device for ASR inference.
     Honors `TYR_DEVICE=cpu|cuda|mps|auto`; defaults to `auto`. -/
-private def resolveAsrDevice : IO Device := do
+private def resolveAsrDevice (log : Handlers := {}) : IO Device := do
   let requested := (← IO.getEnv "TYR_DEVICE").map String.toLower
   match requested with
   | some "cpu" => pure Device.CPU
@@ -224,27 +227,28 @@ private def resolveAsrDevice : IO Device := do
     if ← cuda_is_available then
       pure (Device.CUDA 0)
     else
-      IO.eprintln "TYR_DEVICE=cuda requested but CUDA is unavailable; falling back to auto device selection."
+      log.onWarn "TYR_DEVICE=cuda requested but CUDA is unavailable; falling back to auto device selection."
       getBestDevice
   | some "mps" =>
     if ← mps_is_available then
       pure Device.MPS
     else
-      IO.eprintln "TYR_DEVICE=mps requested but MPS is unavailable; falling back to auto device selection."
+      log.onWarn "TYR_DEVICE=mps requested but MPS is unavailable; falling back to auto device selection."
       getBestDevice
   | some "auto" => getBestDevice
   | some _ => getBestDevice
   | none => getBestDevice
 
 /-- Load Qwen3-ASR model from HuggingFace sharded SafeTensors directory. -/
-def loadSharded (modelDir : String) (cfg : Qwen3ASRConfig := {}) : IO (Qwen3ASRForConditionalGeneration cfg) := do
-  IO.println s!"Loading Qwen3-ASR weights from {modelDir}..."
+def loadSharded (modelDir : String) (cfg : Qwen3ASRConfig := {}) (log : Handlers := {})
+    : IO (Qwen3ASRForConditionalGeneration cfg) := do
+  log.onInfo s!"Loading Qwen3-ASR weights from {modelDir}..."
   let thinker ← loadThinkerSharded modelDir cfg.thinkerConfig
-  let targetDevice ← resolveAsrDevice
+  let targetDevice ← resolveAsrDevice log
   let thinker :=
     TensorStruct.map (fun t => t.to targetDevice) thinker
-  IO.println s!"Qwen3-ASR target device: {repr targetDevice}"
-  IO.println "Loaded Qwen3-ASR weights."
+  log.onInfo s!"Qwen3-ASR target device: {repr targetDevice}"
+  log.onInfo "Loaded Qwen3-ASR weights."
   pure { thinker, supportLanguages := cfg.supportLanguages }
 
 end Qwen3ASRForConditionalGeneration

@@ -5,11 +5,14 @@
   Supports both single-file and sharded SafeTensors layouts.
 -/
 import Tyr.Torch
+import Tyr.Log
 import Tyr.Model.Qwen25Omni.Config
 import Tyr.Model.Qwen3.Model
 import Tyr.Model.Qwen.Model
 
 namespace torch.qwen25omni
+
+open torch.Log
 
 private def reqGradFalse {s : Shape} (t : T s) : T s :=
   autograd.set_requires_grad (toFloat' t) false
@@ -234,9 +237,9 @@ private def loadLayer (path : String) (layerIdx : UInt64) (cfg : Config)
     mlp := mlp
   }
 
-private def loadThinkerModelSharded (modelDir : String) (cfg : Config)
+private def loadThinkerModelSharded (modelDir : String) (cfg : Config) (log : Handlers := {})
     : IO (qwen.Qwen3Model cfg) := do
-  IO.println s!"Loading Qwen2.5-Omni thinker model from {modelDir}..."
+  log.onInfo s!"Loading Qwen2.5-Omni thinker model from {modelDir}..."
   let embed ← loadTensorShardedCandidates modelDir (tensorNameCandidates "model.embed_tokens.weight") #[cfg.vocab_size, cfg.hidden_size]
   let embed := reqGradFalse embed
 
@@ -244,15 +247,15 @@ private def loadThinkerModelSharded (modelDir : String) (cfg : Config)
   for i in [:cfg.num_hidden_layers.toNat] do
     layers := layers.push (← loadLayerSharded modelDir i.toUInt64 cfg)
     if (i + 1) % 8 == 0 || i + 1 == cfg.num_hidden_layers.toNat then
-      IO.println s!"  Loaded {i + 1}/{cfg.num_hidden_layers.toNat} layers"
+      log.onInfo s!"  Loaded {i + 1}/{cfg.num_hidden_layers.toNat} layers"
 
   let norm ← loadRMSNormSharded modelDir "model.norm" cfg.hidden_size
-  IO.println "Loaded Qwen2.5-Omni thinker weights."
+  log.onInfo "Loaded Qwen2.5-Omni thinker weights."
   pure { embed_tokens := embed, layers := layers, norm := norm }
 
-private def loadThinkerModel (path : String) (cfg : Config)
+private def loadThinkerModel (path : String) (cfg : Config) (log : Handlers := {})
     : IO (qwen.Qwen3Model cfg) := do
-  IO.println s!"Loading Qwen2.5-Omni thinker model from {path}..."
+  log.onInfo s!"Loading Qwen2.5-Omni thinker model from {path}..."
   let embed ← loadTensorCandidates path (tensorNameCandidates "model.embed_tokens.weight") #[cfg.vocab_size, cfg.hidden_size]
   let embed := reqGradFalse embed
 
@@ -260,10 +263,10 @@ private def loadThinkerModel (path : String) (cfg : Config)
   for i in [:cfg.num_hidden_layers.toNat] do
     layers := layers.push (← loadLayer path i.toUInt64 cfg)
     if (i + 1) % 8 == 0 || i + 1 == cfg.num_hidden_layers.toNat then
-      IO.println s!"  Loaded {i + 1}/{cfg.num_hidden_layers.toNat} layers"
+      log.onInfo s!"  Loaded {i + 1}/{cfg.num_hidden_layers.toNat} layers"
 
   let norm ← loadRMSNorm path "model.norm" cfg.hidden_size
-  IO.println "Loaded Qwen2.5-Omni thinker weights."
+  log.onInfo "Loaded Qwen2.5-Omni thinker weights."
   pure { embed_tokens := embed, layers := layers, norm := norm }
 
 /-- Qwen2.5-Omni thinker text model (causal LM). -/
@@ -279,27 +282,29 @@ private def lmHeadCandidates : Array String := #[
 
 /-- Load Qwen2.5-Omni thinker text model from sharded SafeTensors directory. -/
 def loadSharded (modelDir : String) (cfg : Config := Config.qwen25omni_3B)
+    (log : Handlers := {})
     : IO (Qwen25OmniForCausalLM cfg) := do
-  let model ← loadThinkerModelSharded modelDir cfg
+  let model ← loadThinkerModelSharded modelDir cfg log
   let lmHeadOpt ← tryLoadTensorShardedCandidates modelDir lmHeadCandidates #[cfg.vocab_size, cfg.hidden_size]
   let (lmHead, tieWordEmbeddings) ←
     match lmHeadOpt with
     | some w => pure (reqGradFalse w, false)
     | none => do
-      IO.println "  lm_head.weight not found; using tied embeddings."
+      log.onInfo "  lm_head.weight not found; using tied embeddings."
       pure (reqGradFalse model.embed_tokens, true)
   pure { model := model, lmHead := lmHead, tieWordEmbeddings := tieWordEmbeddings }
 
 /-- Load Qwen2.5-Omni thinker text model from a single SafeTensors file. -/
 def load (path : String) (cfg : Config := Config.qwen25omni_3B)
+    (log : Handlers := {})
     : IO (Qwen25OmniForCausalLM cfg) := do
-  let model ← loadThinkerModel path cfg
+  let model ← loadThinkerModel path cfg log
   let lmHeadOpt ← tryLoadTensorCandidates path lmHeadCandidates #[cfg.vocab_size, cfg.hidden_size]
   let (lmHead, tieWordEmbeddings) ←
     match lmHeadOpt with
     | some w => pure (reqGradFalse w, false)
     | none => do
-      IO.println "  lm_head.weight not found; using tied embeddings."
+      log.onInfo "  lm_head.weight not found; using tied embeddings."
       pure (reqGradFalse model.embed_tokens, true)
   pure { model := model, lmHead := lmHead, tieWordEmbeddings := tieWordEmbeddings }
 

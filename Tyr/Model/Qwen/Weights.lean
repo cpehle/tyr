@@ -6,11 +6,14 @@
   Supports both single-file and sharded HuggingFace models.
 -/
 import Tyr.Torch
+import Tyr.Log
 import Tyr.Model.Qwen.Config
 import Tyr.Model.Qwen.Model
 import Tyr.Model.Qwen.Embedder
 
 namespace torch.qwen
+
+open torch.Log
 
 /-- Helper to try loading a tensor, returning none on failure.
     Used for optional weights like Q/K norms. -/
@@ -138,13 +141,14 @@ def loadLayerSharded (modelDir : String) (layerIdx : UInt64) (cfg : QwenConfig)
     or model.safetensors for single-file models. -/
 def loadQwen3ModelSharded (modelDir : String) (cfg : QwenConfig := QwenConfig.qwen3_4B)
     (loadQKNorms : Bool := false)
+    (log : Handlers := {})
     : IO (Qwen3Model cfg) := do
-  IO.println s!"Loading Qwen3 model from {modelDir}..."
+  log.onInfo s!"Loading Qwen3 model from {modelDir}..."
 
   -- Token embeddings
   let embed_tokens ← safetensors.loadTensorSharded modelDir "model.embed_tokens.weight" #[cfg.vocab_size, cfg.hidden_size]
   let embed_tokens := autograd.set_requires_grad embed_tokens false
-  IO.println "  Loaded embed_tokens"
+  log.onInfo "  Loaded embed_tokens"
 
   -- Layers
   let mut layers := #[]
@@ -152,13 +156,13 @@ def loadQwen3ModelSharded (modelDir : String) (cfg : QwenConfig := QwenConfig.qw
     let layer ← loadLayerSharded modelDir i.toUInt64 cfg loadQKNorms
     layers := layers.push layer
     if (i + 1) % 7 == 0 then
-      IO.println s!"  Loaded {i + 1}/{cfg.num_hidden_layers.toNat} layers"
+      log.onInfo s!"  Loaded {i + 1}/{cfg.num_hidden_layers.toNat} layers"
 
   -- Final norm
   let norm ← loadRMSNormSharded modelDir "model.norm" cfg.hidden_size
-  IO.println "  Loaded final norm"
+  log.onInfo "  Loaded final norm"
 
-  IO.println "Qwen3 model loaded successfully!"
+  log.onInfo "Qwen3 model loaded successfully!"
   pure { embed_tokens, layers, norm }
 
 -- Legacy functions for backwards compatibility with single-file models
@@ -219,13 +223,14 @@ def loadLayer (path : String) (layerIdx : UInt64) (cfg : QwenConfig)
 
 /-- Load full Qwen3 model from SafeTensors file (single file, legacy) -/
 def loadQwen3Model (path : String) (cfg : QwenConfig := QwenConfig.qwen3_4B)
+    (log : Handlers := {})
     : IO (Qwen3Model cfg) := do
-  IO.println s!"Loading Qwen3 model from {path}..."
+  log.onInfo s!"Loading Qwen3 model from {path}..."
 
   -- Token embeddings
   let embed_tokens ← safetensors.loadTensor path "model.embed_tokens.weight" #[cfg.vocab_size, cfg.hidden_size]
   let embed_tokens := autograd.set_requires_grad embed_tokens false
-  IO.println "  Loaded embed_tokens"
+  log.onInfo "  Loaded embed_tokens"
 
   -- Layers
   let mut layers := #[]
@@ -233,21 +238,22 @@ def loadQwen3Model (path : String) (cfg : QwenConfig := QwenConfig.qwen3_4B)
     let layer ← loadLayer path i.toUInt64 cfg
     layers := layers.push layer
     if (i + 1) % 7 == 0 then
-      IO.println s!"  Loaded {i + 1}/{cfg.num_hidden_layers.toNat} layers"
+      log.onInfo s!"  Loaded {i + 1}/{cfg.num_hidden_layers.toNat} layers"
 
   -- Final norm
   let norm ← loadRMSNorm path "model.norm" cfg.hidden_size
-  IO.println "  Loaded final norm"
+  log.onInfo "  Loaded final norm"
 
-  IO.println "Qwen3 model loaded successfully!"
+  log.onInfo "Qwen3 model loaded successfully!"
   pure { embed_tokens, layers, norm }
 
 /-- Load Qwen model as Flux text embedder (single file, legacy) -/
 def loadQwenFluxEmbedder (path : String) (cfg : QwenConfig := QwenConfig.qwen3_4B)
     (max_seq : UInt64 := 512)
     (outputLayers : Array UInt64 := #[8, 17, 26])
+    (log : Handlers := {})
     : IO (QwenFluxEmbedder cfg max_seq) := do
-  let model ← loadQwen3Model path cfg
+  let model ← loadQwen3Model path cfg log
   QwenFluxEmbedder.fromModel cfg max_seq model outputLayers
 
 /-- Load Qwen model as Flux text embedder from sharded directory.
@@ -255,9 +261,10 @@ def loadQwenFluxEmbedder (path : String) (cfg : QwenConfig := QwenConfig.qwen3_4
 def loadQwenFluxEmbedderSharded (modelDir : String) (cfg : QwenConfig := QwenConfig.fluxKleinTextEncoder)
     (max_seq : UInt64 := 512)
     (outputLayers : Array UInt64 := #[8, 17, 26])  -- Flux2 reference uses [9,18,27] with embedding state
+    (log : Handlers := {})
     : IO (QwenFluxEmbedder cfg max_seq) := do
   -- Flux Klein text encoder has Q/K norms
-  let model ← loadQwen3ModelSharded modelDir cfg true
+  let model ← loadQwen3ModelSharded modelDir cfg true log
   QwenFluxEmbedder.fromModel cfg max_seq model outputLayers
 
 end torch.qwen

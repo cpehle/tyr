@@ -6,9 +6,12 @@
   (single-file and sharded).
 -/
 import Tyr.Torch
+import Tyr.Log
 import Tyr.Model.Qwen35.Model
 
 namespace torch.qwen35
+
+open torch.Log
 
 private def reqGradFalse {s : Shape} (t : T s) : T s :=
   autograd.set_requires_grad (toFloat' t) false
@@ -514,8 +517,9 @@ namespace Qwen35ForCausalLM
 
 /-- Load Qwen3.5 model from sharded HF SafeTensors directory. -/
 def loadSharded (modelDir : String) (cfg : Config := Config.qwen35_9B)
+    (log : Handlers := {})
     : IO (Qwen35ForCausalLM cfg) := do
-  IO.println s!"Loading Qwen35ForCausalLM from {modelDir}..."
+  log.onInfo s!"Loading Qwen35ForCausalLM from {modelDir}..."
 
   let embedTokens ← loadTensorShardedCandidates modelDir (nameCandidates "model.embed_tokens.weight") #[cfg.vocab_size, cfg.hidden_size]
 
@@ -524,7 +528,7 @@ def loadSharded (modelDir : String) (cfg : Config := Config.qwen35_9B)
     let layer ← loadLayerSharded modelDir cfg i.toUInt64
     layers := layers.push layer
     if (i + 1) % 8 == 0 || i + 1 == cfg.num_hidden_layers.toNat then
-      IO.println s!"  loaded layers {i + 1}/{cfg.num_hidden_layers.toNat}"
+      log.onInfo s!"  loaded layers {i + 1}/{cfg.num_hidden_layers.toNat}"
 
   let norm ← loadRMSNormSharded modelDir "model.norm" cfg.hidden_size
 
@@ -546,16 +550,17 @@ def loadSharded (modelDir : String) (cfg : Config := Config.qwen35_9B)
     match lmHeadOpt with
     | some w => pure (reqGradFalse w, false)
     | none => do
-      IO.println "  lm_head.weight not found; tying to embeddings."
+      log.onInfo "  lm_head.weight not found; tying to embeddings."
       pure (reqGradFalse model.embed_tokens, true)
 
-  IO.println "Loaded Qwen35ForCausalLM weights."
+  log.onInfo "Loaded Qwen35ForCausalLM weights."
   pure { model := model, lmHead := lmHead, tieWordEmbeddings := tieWordEmbeddings }
 
 /-- Load Qwen3.5 model from a single HF SafeTensors file. -/
 def load (path : String) (cfg : Config := Config.qwen35_9B)
+    (log : Handlers := {})
     : IO (Qwen35ForCausalLM cfg) := do
-  IO.println s!"Loading Qwen35ForCausalLM from {path}..."
+  log.onInfo s!"Loading Qwen35ForCausalLM from {path}..."
 
   let embedTokens ← loadTensorCandidates path (nameCandidates "model.embed_tokens.weight") #[cfg.vocab_size, cfg.hidden_size]
 
@@ -564,7 +569,7 @@ def load (path : String) (cfg : Config := Config.qwen35_9B)
     let layer ← loadLayer path cfg i.toUInt64
     layers := layers.push layer
     if (i + 1) % 8 == 0 || i + 1 == cfg.num_hidden_layers.toNat then
-      IO.println s!"  loaded layers {i + 1}/{cfg.num_hidden_layers.toNat}"
+      log.onInfo s!"  loaded layers {i + 1}/{cfg.num_hidden_layers.toNat}"
 
   let norm ← loadRMSNorm path "model.norm" cfg.hidden_size
 
@@ -584,10 +589,10 @@ def load (path : String) (cfg : Config := Config.qwen35_9B)
     match lmHeadOpt with
     | some w => pure (reqGradFalse w, false)
     | none => do
-      IO.println "  lm_head.weight not found; tying to embeddings."
+      log.onInfo "  lm_head.weight not found; tying to embeddings."
       pure (reqGradFalse model.embed_tokens, true)
 
-  IO.println "Loaded Qwen35ForCausalLM weights."
+  log.onInfo "Loaded Qwen35ForCausalLM weights."
   pure { model := model, lmHead := lmHead, tieWordEmbeddings := tieWordEmbeddings }
 
 end Qwen35ForCausalLM

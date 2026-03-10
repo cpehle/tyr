@@ -5,10 +5,13 @@
   Maps HuggingFace flux.safetensors weight names to Tyr structure.
 -/
 import Tyr.Torch
+import Tyr.Log
 import Tyr.Model.Flux.Config
 import Tyr.Model.Flux.Model
 
 namespace torch.flux
+
+open torch.Log
 
 /-- Load RMSNorm weights from Flux2 format (uses .scale suffix) -/
 def loadRMSNormFlux2 (path : String) (name : String) (dim : UInt64)
@@ -114,17 +117,18 @@ def loadMLPEmbedder (path : String) (name : String) (in_dim hidden_dim : UInt64)
 
 /-- Load full Flux model from SafeTensors -/
 def loadFluxModel (path : String) (cfg : FluxConfig := FluxConfig.klein4B)
+    (log : Handlers := {})
     : IO (FluxModel cfg) := do
-  IO.println s!"Loading Flux model from {path}..."
+  log.onInfo s!"Loading Flux model from {path}..."
 
   -- Input projections
   let img_in ← safetensors.loadTensor path "img_in.weight" #[cfg.hidden_size, cfg.in_channels]
   let txt_in ← safetensors.loadTensor path "txt_in.weight" #[cfg.hidden_size, cfg.context_in_dim]
-  IO.println "  Loaded input projections"
+  log.onInfo "  Loaded input projections"
 
   -- Time embedder
   let time_in ← loadMLPEmbedder path "time_in" cfg.time_dim cfg.hidden_size
-  IO.println "  Loaded time embedder"
+  log.onInfo "  Loaded time embedder"
 
   -- Model-level modulation (Flux2 style)
   let double_stream_modulation_img ← loadModulationFlux2 path "double_stream_modulation_img" cfg.hidden_size true
@@ -136,22 +140,22 @@ def loadFluxModel (path : String) (cfg : FluxConfig := FluxConfig.klein4B)
   for i in [:cfg.num_double_layers.toNat] do
     let block ← loadDoubleStreamBlockFlux2 path s!"double_blocks.{i}" cfg
     double_blocks := double_blocks.push block
-  IO.println s!"  Loaded {cfg.num_double_layers} double blocks"
+  log.onInfo s!"  Loaded {cfg.num_double_layers} double blocks"
 
   -- Single blocks (using Flux2 loading)
   let mut single_blocks := #[]
   for i in [:cfg.num_single_layers.toNat] do
     let block ← loadSingleStreamBlockFlux2 path s!"single_blocks.{i}" cfg
     single_blocks := single_blocks.push block
-  IO.println s!"  Loaded {cfg.num_single_layers} single blocks"
+  log.onInfo s!"  Loaded {cfg.num_single_layers} single blocks"
 
   -- Final layer (Flux2 uses elementwise_affine=False for norm)
   let final_norm := LayerNorm.initNoAffine cfg.hidden_size 1e-6
   let final_linear ← safetensors.loadTensor path "final_layer.linear.weight" #[cfg.in_channels, cfg.hidden_size]
   let final_mod ← safetensors.loadTensor path "final_layer.adaLN_modulation.1.weight" #[cfg.hidden_size * 2, cfg.hidden_size]
-  IO.println "  Loaded final layer"
+  log.onInfo "  Loaded final layer"
 
-  IO.println "Flux model loaded successfully!"
+  log.onInfo "Flux model loaded successfully!"
   pure {
     img_in := autograd.set_requires_grad img_in false
     txt_in := autograd.set_requires_grad txt_in false

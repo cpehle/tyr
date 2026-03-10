@@ -16,9 +16,12 @@
   - up_blocks numbered 0→3 (low index = low res), opposite of BFL's 3→0
 -/
 import Tyr.Torch
+import Tyr.Log
 import Tyr.Model.VAE.Decoder
 
 namespace torch.vae
+
+open torch.Log
 
 /-- Load GroupNorm parameters -/
 def loadGroupNorm (path : String) (name : String) (num_groups channels : UInt64)
@@ -79,21 +82,21 @@ def loadUpsample (path : String) (name : String) (channels : UInt64)
   pure { conv }
 
 /-- Load full VAE Decoder from SafeTensors (HuggingFace Diffusers format). -/
-def loadDecoder (path : String) : IO Decoder := do
-  IO.println s!"Loading VAE Decoder from {path}..."
+def loadDecoder (path : String) (log : Handlers := {}) : IO Decoder := do
+  log.onInfo s!"Loading VAE Decoder from {path}..."
 
   -- Post-quant conv is at root level in Diffusers format
   let post_quant_conv ← loadConv2d path "post_quant_conv" 32 32 1 0
 
   -- Initial conv
   let conv_in ← loadConv2d path "decoder.conv_in" 32 512 3 1
-  IO.println "  Loaded conv_in"
+  log.onInfo "  Loaded conv_in"
 
   -- Middle block: Diffusers uses mid_block.resnets.N and mid_block.attentions.0
   let mid_block_1 ← loadResnetBlockSame path "decoder.mid_block.resnets.0" 512
   let mid_attn ← loadAttnBlock path "decoder.mid_block.attentions.0" 512
   let mid_block_2 ← loadResnetBlockSame path "decoder.mid_block.resnets.1" 512
-  IO.println "  Loaded mid block"
+  log.onInfo "  Loaded mid block"
 
   -- Diffusers up_blocks are numbered opposite to BFL:
   -- up_blocks.0 = lowest res (our up_3), up_blocks.3 = highest res (our up_0)
@@ -104,7 +107,7 @@ def loadDecoder (path : String) : IO Decoder := do
   let up_3_block_1 ← loadResnetBlockSame path "decoder.up_blocks.0.resnets.1" 512
   let up_3_block_2 ← loadResnetBlockSame path "decoder.up_blocks.0.resnets.2" 512
   let up_3_upsample ← loadUpsample path "decoder.up_blocks.0.upsamplers.0" 512
-  IO.println "  Loaded up block 3 (up_blocks.0)"
+  log.onInfo "  Loaded up block 3 (up_blocks.0)"
 
   -- Up block 2: 512→512, 3 blocks, upsample
   -- = Diffusers up_blocks.1
@@ -112,7 +115,7 @@ def loadDecoder (path : String) : IO Decoder := do
   let up_2_block_1 ← loadResnetBlockSame path "decoder.up_blocks.1.resnets.1" 512
   let up_2_block_2 ← loadResnetBlockSame path "decoder.up_blocks.1.resnets.2" 512
   let up_2_upsample ← loadUpsample path "decoder.up_blocks.1.upsamplers.0" 512
-  IO.println "  Loaded up block 2 (up_blocks.1)"
+  log.onInfo "  Loaded up block 2 (up_blocks.1)"
 
   -- Up block 1: 512→256, 3 blocks, upsample
   -- = Diffusers up_blocks.2
@@ -120,21 +123,21 @@ def loadDecoder (path : String) : IO Decoder := do
   let up_1_block_1 ← loadResnetBlockSame path "decoder.up_blocks.2.resnets.1" 256
   let up_1_block_2 ← loadResnetBlockSame path "decoder.up_blocks.2.resnets.2" 256
   let up_1_upsample ← loadUpsample path "decoder.up_blocks.2.upsamplers.0" 256
-  IO.println "  Loaded up block 1 (up_blocks.2)"
+  log.onInfo "  Loaded up block 1 (up_blocks.2)"
 
   -- Up block 0 (highest res): 256→128, 3 blocks, no upsample
   -- = Diffusers up_blocks.3
   let up_0_block_0 ← loadResnetBlockChange path "decoder.up_blocks.3.resnets.0" 256 128
   let up_0_block_1 ← loadResnetBlockSame path "decoder.up_blocks.3.resnets.1" 128
   let up_0_block_2 ← loadResnetBlockSame path "decoder.up_blocks.3.resnets.2" 128
-  IO.println "  Loaded up block 0 (up_blocks.3)"
+  log.onInfo "  Loaded up block 0 (up_blocks.3)"
 
   -- Final layers: Diffusers uses conv_norm_out instead of norm_out
   let norm_out ← loadGroupNorm path "decoder.conv_norm_out" 32 128
   let conv_out ← loadConv2d path "decoder.conv_out" 128 3 3 1
-  IO.println "  Loaded final layers"
+  log.onInfo "  Loaded final layers"
 
-  IO.println "VAE Decoder loaded successfully!"
+  log.onInfo "VAE Decoder loaded successfully!"
   pure {
     post_quant_conv
     conv_in

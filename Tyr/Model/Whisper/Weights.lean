@@ -5,9 +5,12 @@
 -/
 import Tyr.Torch
 import Tyr.TensorStruct
+import Tyr.Log
 import Tyr.Model.Whisper.Model
 
 namespace torch.whisper
+
+open torch.Log
 
 private def reqGradFalse {s : Shape} (t : T s) : T s :=
   autograd.set_requires_grad (toFloat' t) false
@@ -144,7 +147,7 @@ private def loadModelSharded (modelDir : String) (cfg : WhisperConfig) : IO (Whi
 
 namespace WhisperForConditionalGeneration
 
-private def resolveWhisperDevice : IO Device := do
+private def resolveWhisperDevice (log : Handlers := {}) : IO Device := do
   let requested := (← IO.getEnv "TYR_DEVICE").map String.toLower
   match requested with
   | some "cpu" => pure Device.CPU
@@ -152,31 +155,32 @@ private def resolveWhisperDevice : IO Device := do
     if ← cuda_is_available then
       pure (Device.CUDA 0)
     else
-      IO.eprintln "TYR_DEVICE=cuda requested but CUDA is unavailable; falling back to auto."
+      log.onWarn "TYR_DEVICE=cuda requested but CUDA is unavailable; falling back to auto."
       getBestDevice
   | some "mps" =>
     if ← mps_is_available then
       pure Device.MPS
     else
-      IO.eprintln "TYR_DEVICE=mps requested but MPS is unavailable; falling back to auto."
+      log.onWarn "TYR_DEVICE=mps requested but MPS is unavailable; falling back to auto."
       getBestDevice
   | some "auto" => getBestDevice
   | some _ => getBestDevice
   | none => getBestDevice
 
-def loadSharded (modelDir : String) (cfg : WhisperConfig := {}) : IO (WhisperForConditionalGeneration cfg) := do
-  IO.println s!"Loading Whisper weights from {modelDir}..."
+def loadSharded (modelDir : String) (cfg : WhisperConfig := {}) (log : Handlers := {})
+    : IO (WhisperForConditionalGeneration cfg) := do
+  log.onInfo s!"Loading Whisper weights from {modelDir}..."
   let model ← loadModelSharded modelDir cfg
   let projOut ←
     match (← tryLoadTensorSharded modelDir "proj_out.weight" #[cfg.vocabSize, cfg.dModel]) with
     | some w => pure (reqGradFalse w)
     | none =>
-      IO.println "  proj_out.weight not found; tying output projection to decoder token embeddings."
+      log.onInfo "  proj_out.weight not found; tying output projection to decoder token embeddings."
       pure model.decoderTokenEmbedding
-  let targetDevice ← resolveWhisperDevice
+  let targetDevice ← resolveWhisperDevice log
   let model := TensorStruct.map (fun t => t.to targetDevice) model
   let projOut := projOut.to targetDevice
-  IO.println s!"Whisper target device: {repr targetDevice}"
+  log.onInfo s!"Whisper target device: {repr targetDevice}"
   pure { model, projOut }
 
 end WhisperForConditionalGeneration

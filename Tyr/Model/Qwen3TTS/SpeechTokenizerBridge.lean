@@ -13,8 +13,11 @@ import Tyr.Model.Qwen3TTS.Model
 import Tyr.Model.Qwen3TTS.SpeechTokenizerEncoder
 import Tyr.Model.Qwen3TTS.SpeechTokenizer25HzEncoder
 import Tyr.Model.Qwen3ASR.Frontend
+import Tyr.Log
 
 namespace torch.qwen3tts
+
+open torch.Log
 
 structure SpeechTokenizerBridgeConfig where
   pythonExe : String := "uv"
@@ -46,7 +49,9 @@ private def ensureParentDir (path : String) : IO Unit := do
 private def pythonPrefix (pythonExe : String) : Array String :=
   if pythonExe == "uv" then #["run", "python"] else #[]
 
-private def runBridgeCommand (pythonExe : String) (args : Array String) (errorPrefix : String) : IO Unit := do
+private def runBridgeCommand (pythonExe : String) (args : Array String) (errorPrefix : String)
+    (log : Handlers := {})
+    : IO Unit := do
   let result ← IO.Process.output {
     cmd := pythonExe
     args := args
@@ -55,7 +60,7 @@ private def runBridgeCommand (pythonExe : String) (args : Array String) (errorPr
     throw <| IO.userError s!"{errorPrefix} (exit={result.exitCode}):\n{result.stderr}"
   let stdout := result.stdout.trimAscii.toString
   if !stdout.isEmpty then
-    IO.println stdout
+    log.onInfo stdout
 
 private def resolveSpeechTokenizerDir (bridge : SpeechTokenizerBridgeConfig) (modelDir : String) : IO String := do
   match bridge.speechTokenizerDir with
@@ -246,6 +251,7 @@ def decodeCodesToWav
     (modelDir : String)
     (talkerCfg : TalkerConfig)
     (codesPath wavPath : String)
+    (log : Handlers := {})
     : IO Unit := do
   let decodeScript ← expandHome bridge.decodeScript
   let qwenRepo ← expandHome bridge.qwenRepo
@@ -268,7 +274,7 @@ def decodeCodesToWav
     match bridge.deviceMap with
     | some dm => baseArgs ++ #["--device-map", dm]
     | none => baseArgs
-  runBridgeCommand bridge.pythonExe args "Speech tokenizer decode failed"
+  runBridgeCommand bridge.pythonExe args "Speech tokenizer decode failed" log
 
 /-- Encode an audio input into codec ID rows using the speech tokenizer bridge. -/
 def encodeAudioToCodes

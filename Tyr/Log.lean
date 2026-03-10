@@ -4,8 +4,8 @@
 Silent-by-default logging callbacks for library code.
 
 Library modules can depend on these handlers without embedding direct console I/O.
-Executables and examples remain responsible for wiring handlers to `IO.println`,
-`IO.eprintln`, files, or structured artifact sinks.
+Executables and examples remain responsible for wiring handlers to console sinks,
+files, or structured artifact sinks.
 -/
 
 namespace torch.Log
