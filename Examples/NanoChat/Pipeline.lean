@@ -51,6 +51,29 @@ open tokenizer
 
 /-! ## Pipeline Configuration -/
 
+private def consolePipelineLogHandlers : LogHandlers := {
+  onInfo := fun msg => IO.println msg
+  onError := fun msg => IO.eprintln msg
+}
+
+private def consoleSFTCallbacks : torch.Train.ChatSFT.Callbacks := {
+  onTrainStep := fun step trainLoss lrm numTokens => do
+    IO.println <| torch.Train.ChatSFT.formatTrainUpdate step trainLoss lrm numTokens
+    (← IO.getStdout).flush
+  onValidation := fun step valLoss => do
+    IO.println <| torch.Train.ChatSFT.formatValidationUpdate step valLoss
+    (← IO.getStdout).flush
+}
+
+private def consoleGRPOCallbacks : torch.RL.GRPO.Callbacks := {
+  onTrainStep := fun result state => do
+    IO.println <| torch.RL.GRPO.formatTrainUpdate result state
+    (← IO.getStdout).flush
+  onEval := fun passK step => do
+    IO.println <| torch.RL.GRPO.formatEvalUpdate passK step
+    (← IO.getStdout).flush
+}
+
 /-- Model-related environment state. -/
 structure ModelEnvState where
   depth : UInt64 := 20
@@ -1667,7 +1690,7 @@ def supervisedFineTune (cfg : NanoChatConfig) : PipelineM Unit := do
 
     -- Run SFT training loop
     log "Starting SFT training..."
-    let sftCallbacks := torch.Train.ChatSFT.artifactCallbacks runArtifacts "sft"
+    let sftCallbacks := consoleSFTCallbacks.combine (torch.Train.ChatSFT.artifactCallbacks runArtifacts "sft")
     let (finalParams, finalOptState, finalState) ← trainLoop sftCfg paramsOnDevice optState
       forwardFn lossFn trainDataFn none numTrainExamples sftCallbacks
 
@@ -1862,7 +1885,7 @@ def reinforcementLearning (cfg : NanoChatConfig) : PipelineM Unit := do
     let numEpochs := grpoEpochs  -- Multiple passes over GSM8K
 
     let initAdamState := adamStateOnDevice
-    let grpoCallbacks := torch.RL.GRPO.artifactCallbacks runArtifacts "grpo"
+    let grpoCallbacks := consoleGRPOCallbacks.combine (torch.RL.GRPO.artifactCallbacks runArtifacts "grpo")
     let (finalParams, finalAdamState, result) ← trainOnPromptsWithUpdates 1 256
       gsm8kPrompts
       generateOneFn
@@ -2091,7 +2114,7 @@ def main : IO Unit := do
   IO.println s!"  RL enabled: {cfg.enableRL}"
   IO.println ""
 
-  withDistributed cfg.toPipelineConfig do
+  withDistributedWithHandlers cfg.toPipelineConfig consolePipelineLogHandlers do
     if pipelineEnv.quickMode then
       runQuickPipeline cfg
     else

@@ -298,32 +298,43 @@ def evalValidationLoss
 /-- Logging callback type -/
 def LogCallback := Nat → Float → Float → Nat → IO Unit
 
-/-- Default logging callback -/
-def defaultLogger : LogCallback := fun step trainLoss lrm numTokens => do
-  IO.println s!"Step {step}: loss={trainLoss}, lrm={lrm}, tokens={numTokens}"
-  (← IO.getStdout).flush
+/-- Silent training-step callback. -/
+def silentLogger : LogCallback := fun _ _ _ _ => pure ()
 
 /-- Validation logging callback type. -/
 def ValidationCallback := Nat → Float → IO Unit
 
-/-- Default validation callback. -/
-def defaultValidationLogger : ValidationCallback := fun step valLoss => do
-  IO.println s!"Step {step}: val_loss={valLoss}"
-  (← IO.getStdout).flush
+/-- Silent validation callback. -/
+def silentValidationLogger : ValidationCallback := fun _ _ => pure ()
+
+/-- Render a human-readable training-step update. -/
+def formatTrainUpdate (step : Nat) (trainLoss lrm : Float) (numTokens : Nat) : String :=
+  s!"Step {step}: loss={trainLoss}, lrm={lrm}, tokens={numTokens}"
+
+/-- Render a human-readable validation update. -/
+def formatValidationUpdate (step : Nat) (valLoss : Float) : String :=
+  s!"Step {step}: val_loss={valLoss}"
 
 /-- Hook set for SFT training progress and evaluation. -/
 structure Callbacks where
-  onTrainStep : LogCallback := defaultLogger
-  onValidation : ValidationCallback := defaultValidationLogger
+  onTrainStep : LogCallback := silentLogger
+  onValidation : ValidationCallback := silentValidationLogger
 
-/-- Emit SFT metrics to the run ledger and optionally to stdout. -/
+/-- Compose two callback sets. -/
+def Callbacks.combine (lhs rhs : Callbacks) : Callbacks := {
+  onTrainStep := fun step trainLoss lrm numTokens => do
+    lhs.onTrainStep step trainLoss lrm numTokens
+    rhs.onTrainStep step trainLoss lrm numTokens
+  onValidation := fun step valLoss => do
+    lhs.onValidation step valLoss
+    rhs.onValidation step valLoss
+}
+
+/-- Emit SFT metrics to the run ledger. -/
 def artifactCallbacks
     (artifacts : RunLedger.RunArtifacts)
-    (scopePrefix : String := "sft")
-    (stdout : Bool := true) : Callbacks := {
+    (scopePrefix : String := "sft") : Callbacks := {
   onTrainStep := fun step trainLoss lrm numTokens => do
-    if stdout then
-      defaultLogger step trainLoss lrm numTokens
     RunLedger.appendMetricEvent artifacts {
       scope := s!"{scopePrefix}/train"
       step := some step
@@ -334,8 +345,6 @@ def artifactCallbacks
       ]
     }
   onValidation := fun step valLoss => do
-    if stdout then
-      defaultValidationLogger step valLoss
     RunLedger.appendMetricEvent artifacts {
       scope := s!"{scopePrefix}/eval"
       step := some step
@@ -388,13 +397,6 @@ def trainLoop [TensorStruct P]
 
   let gradAccumSteps := max 1 (cfg.gradAccumSteps worldSize)
 
-  IO.println s!"Starting SFT training for {numIterations} iterations"
-  IO.println s!"  World size: {worldSize}"
-  IO.println s!"  Batch size: {cfg.deviceBatchSize}, Grad accum: {gradAccumSteps}"
-  IO.println s!"  LRs: embed={cfg.embeddingLr}, unembed={cfg.unembeddingLr}, matrix={cfg.matrixLr}"
-  IO.println s!"  Eval every: {cfg.evalEvery}, Log every: {cfg.logInterval}"
-  (← IO.getStdout).flush
-
   let mut currentParams := TensorStruct.makeLeafParams params
   let mut currentOptState := optState
   let mut state : SFTState := {}
@@ -410,8 +412,6 @@ def trainLoop [TensorStruct P]
         callbacks.onValidation step valLoss
         if valLoss < state.bestValLoss then
           state := { state with bestValLoss := valLoss }
-          IO.println "  [new best val_loss!]"
-        (← IO.getStdout).flush
 
     if isLastStep then
       break
@@ -469,11 +469,6 @@ def trainLoop [TensorStruct P]
         then accumLoss / gradAccumSteps.toFloat
         else 0.0
       callbacks.onTrainStep step avgLoss lrm numTokens
-
-  IO.println s!"SFT training complete!"
-  IO.println s!"  Final step: {state.step}"
-  IO.println s!"  Total tokens: {state.totalTokens}"
-  IO.println s!"  Best val_loss: {state.bestValLoss}"
 
   return (currentParams, currentOptState, state)
 

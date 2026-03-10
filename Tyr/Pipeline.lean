@@ -229,7 +229,6 @@ def Report.write (report : Report) (filename : String := "report.md") : IO Unit 
   let content ← report.toMarkdown
   let path := s!"{report.baseDir}/{filename}"
   IO.FS.writeFile ⟨path⟩ content
-  IO.println s!"Report written to {path}"
 
 /-! ## Checkpoint Persistence -/
 
@@ -370,6 +369,22 @@ structure PipelineConfig where
   runId : String := ""
   deriving Repr, Inhabited, Lean.ToJson, Lean.FromJson
 
+/-- Log handlers for pipeline progress. Library code stays silent unless these are supplied. -/
+structure LogHandlers where
+  onInfo : String → IO Unit := fun _ => pure ()
+  onError : String → IO Unit := fun _ => pure ()
+  deriving Inhabited
+
+/-- Combine two logging handler sets. -/
+def LogHandlers.combine (lhs rhs : LogHandlers) : LogHandlers := {
+  onInfo := fun msg => do
+    lhs.onInfo msg
+    rhs.onInfo msg
+  onError := fun msg => do
+    lhs.onError msg
+    rhs.onError msg
+}
+
 /-- Pipeline execution state -/
 structure PipelineState where
   /-- Configuration -/
@@ -384,6 +399,8 @@ structure PipelineState where
   rank : UInt64 := 0
   /-- World size -/
   worldSize : UInt64 := 1
+  /-- Logging handlers -/
+  logHandlers : LogHandlers := {}
   /-- Background tasks -/
   backgroundTasks : Array (BackgroundTask Unit) := #[]
   deriving Inhabited
@@ -395,7 +412,7 @@ def PipelineState.isMaster (state : PipelineState) : Bool :=
 /-- Print only on master rank -/
 def printMaster (state : PipelineState) (msg : String) : IO Unit := do
   if state.isMaster then
-    IO.println msg
+    state.logHandlers.onInfo msg
 
 /-! ## Pipeline Monad -/
 
@@ -414,20 +431,26 @@ def masterOnly (action : PipelineM α) (default : α) : PipelineM α := do
 def log (msg : String) : PipelineM Unit := do
   let state ← get
   if state.isMaster then
-    IO.println msg
+    state.logHandlers.onInfo msg
+
+/-- Log an error message (master only). -/
+def logError (msg : String) : PipelineM Unit := do
+  let state ← get
+  if state.isMaster then
+    state.logHandlers.onError msg
 
 /-- Log a stage start -/
 def logStageStart (name : String) : PipelineM Unit := do
   let state ← get
   let timestamp ← IO.monoMsNow
   if state.isMaster then
-    IO.println s!"[{formatDuration (timestamp - state.report.startTime)}] Starting stage: {name}"
+    state.logHandlers.onInfo s!"[{formatDuration (timestamp - state.report.startTime)}] Starting stage: {name}"
 
 /-- Log a stage end -/
 def logStageEnd (name : String) (durationMs : Nat) : PipelineM Unit := do
   let state ← get
   if state.isMaster then
-    IO.println s!"[+{formatDuration durationMs}] Completed stage: {name}"
+    state.logHandlers.onInfo s!"[+{formatDuration durationMs}] Completed stage: {name}"
 
 /-! ## Stage Execution -/
 
@@ -435,7 +458,7 @@ def logStageEnd (name : String) (durationMs : Nat) : PipelineM Unit := do
 def logStageFailed (name : String) (error : String) : PipelineM Unit := do
   let state ← get
   if state.isMaster then
-    IO.eprintln s!"[FAILED] Stage '{name}': {error}"
+    state.logHandlers.onError s!"[FAILED] Stage '{name}': {error}"
 
 /-- Define and execute a pipeline stage with error handling. -/
 private def runStage (name : String) (action : PipelineM Unit) (propagateFailure : Bool)
@@ -533,7 +556,7 @@ def stageWithRetry (name : String) (policy : RetryPolicy) (action : PipelineM Un
 
       -- Log retry attempt
       if state.isMaster then
-        IO.eprintln s!"[WARN] Stage '{name}' failed (attempt {attempt + 1}/{policy.maxAttempts}): {lastError}"
+        state.logHandlers.onError s!"[WARN] Stage '{name}' failed (attempt {attempt + 1}/{policy.maxAttempts}): {lastError}"
 
       -- Update retry count in stage info
       let stages := state.stages.map fun info =>
@@ -545,7 +568,7 @@ def stageWithRetry (name : String) (policy : RetryPolicy) (action : PipelineM Un
       if attempt + 1 < policy.maxAttempts then
         let delayMs := policy.delayForAttempt attempt
         if state.isMaster then
-          IO.println s!"[RETRY] Waiting {delayMs}ms before retry..."
+          state.logHandlers.onInfo s!"[RETRY] Waiting {delayMs}ms before retry..."
         IO.sleep delayMs.toUInt32
       else
         -- Final failure
@@ -630,7 +653,7 @@ def checkAllRanksHealthy : PipelineM Bool := do
   -- Check local failure status
   let failed ← hasLocalFailure
   if failed && state.isMaster then
-    IO.eprintln "[DISTRIBUTED] This rank has failures"
+    state.logHandlers.onError "[DISTRIBUTED] This rank has failures"
   return !failed
 
 /-- Record metrics for the current stage -/
@@ -653,8 +676,8 @@ def recordMetrics (metrics : List (String × String)) : PipelineM Unit := do
 
 /-! ## Pipeline Initialization and Cleanup -/
 
-/-- Initialize pipeline state -/
-def initPipeline (config : PipelineConfig) : IO PipelineState := do
+/-- Initialize pipeline state with explicit log handlers. -/
+def initPipelineWithHandlers (config : PipelineConfig) (logHandlers : LogHandlers := {}) : IO PipelineState := do
   -- Check distributed status
   let isDistributed ← dist.isInitialized
   let (rank, worldSize) ← if isDistributed then
@@ -687,8 +710,8 @@ def initPipeline (config : PipelineConfig) : IO PipelineState := do
       let currentConfigRepr := s!"{repr config}"
       if checkpoint.configRepr.isEmpty || checkpoint.configRepr == currentConfigRepr then
         if rank == 0 then
-          IO.println s!"[RESUME] Loading checkpoint from {checkpointPath baseDir}"
-          IO.println s!"[RESUME] Found {checkpoint.stages.size} stages"
+          logHandlers.onInfo s!"[RESUME] Loading checkpoint from {checkpointPath baseDir}"
+          logHandlers.onInfo s!"[RESUME] Found {checkpoint.stages.size} stages"
         pure checkpoint.stages
       else
         throw <| IO.userError
@@ -699,25 +722,30 @@ def initPipeline (config : PipelineConfig) : IO PipelineState := do
     pure #[]
 
   if rank == 0 then
-    IO.println "╔════════════════════════════════════════╗"
-    IO.println "║         Tyr Training Pipeline          ║"
-    IO.println "╚════════════════════════════════════════╝"
-    IO.println s!"Base directory: {baseDir}"
-    IO.println s!"World size: {worldSize}"
-    IO.println s!"Run ID: {runId}"
+    logHandlers.onInfo "╔════════════════════════════════════════╗"
+    logHandlers.onInfo "║         Tyr Training Pipeline          ║"
+    logHandlers.onInfo "╚════════════════════════════════════════╝"
+    logHandlers.onInfo s!"Base directory: {baseDir}"
+    logHandlers.onInfo s!"World size: {worldSize}"
+    logHandlers.onInfo s!"Run ID: {runId}"
     if resumedStages.size > 0 then
       let completed := resumedStages.filter (·.status == .completed)
-      IO.println s!"[RESUME] {completed.size}/{resumedStages.size} stages already completed"
+      logHandlers.onInfo s!"[RESUME] {completed.size}/{resumedStages.size} stages already completed"
 
   return {
     config := { config with runId := runId }
     report := report
     rank := rank
     worldSize := worldSize
+    logHandlers := logHandlers
     stages := resumedStages
   }
 
-/-- Finalize pipeline and generate report -/
+/-- Initialize pipeline state with silent logging. -/
+def initPipeline (config : PipelineConfig) : IO PipelineState :=
+  initPipelineWithHandlers config
+
+/-- Finalize pipeline and generate report. -/
 def finalizePipeline (state : PipelineState) : IO Unit := do
   if state.isMaster then
     -- Wait for any remaining background tasks
@@ -731,24 +759,24 @@ def finalizePipeline (state : PipelineState) : IO Unit := do
     let totalDuration := completedStages.foldl (fun acc info =>
       acc + info.durationMs.getD 0) 0
 
-    IO.println ""
+    state.logHandlers.onInfo ""
     if failedStages.size > 0 then
-      IO.println "╔════════════════════════════════════════╗"
-      IO.println "║         Pipeline Failed                ║"
-      IO.println "╚════════════════════════════════════════╝"
+      state.logHandlers.onInfo "╔════════════════════════════════════════╗"
+      state.logHandlers.onInfo "║         Pipeline Failed                ║"
+      state.logHandlers.onInfo "╚════════════════════════════════════════╝"
       for s in failedStages do
         match s.status with
-        | .failed err => IO.eprintln s!"  - {s.name}: {err}"
+        | .failed err => state.logHandlers.onError s!"  - {s.name}: {err}"
         | _ => pure ()
     else
-      IO.println "╔════════════════════════════════════════╗"
-      IO.println "║           Pipeline Complete            ║"
-      IO.println "╚════════════════════════════════════════╝"
+      state.logHandlers.onInfo "╔════════════════════════════════════════╗"
+      state.logHandlers.onInfo "║           Pipeline Complete            ║"
+      state.logHandlers.onInfo "╚════════════════════════════════════════╝"
 
-    IO.println s!"Completed stages: {completedStages.size}/{state.stages.size}"
+    state.logHandlers.onInfo s!"Completed stages: {completedStages.size}/{state.stages.size}"
     if failedStages.size > 0 then
-      IO.println s!"Failed stages: {failedStages.size}"
-    IO.println s!"Total duration: {formatDuration totalDuration}"
+      state.logHandlers.onInfo s!"Failed stages: {failedStages.size}"
+    state.logHandlers.onInfo s!"Total duration: {formatDuration totalDuration}"
 
     -- Write report
     state.report.write
@@ -758,17 +786,23 @@ def finalizePipeline (state : PipelineState) : IO Unit := do
       let baseDir := state.config.baseDir.replace "~" (← IO.getEnv "HOME" |>.map (·.getD ""))
       clearCheckpoint baseDir
 
-/-- Run a pipeline action -/
-def runPipeline (config : PipelineConfig) (action : PipelineM α) : IO α := do
-  let initialState ← initPipeline config
+/-- Run a pipeline action with explicit log handlers. -/
+def runPipelineWithHandlers (config : PipelineConfig) (logHandlers : LogHandlers := {})
+    (action : PipelineM α) : IO α := do
+  let initialState ← initPipelineWithHandlers config logHandlers
   let (result, finalState) ← action.run initialState
   finalizePipeline finalState
   return result
 
+/-- Run a pipeline action with silent logging. -/
+def runPipeline (config : PipelineConfig) (action : PipelineM α) : IO α :=
+  runPipelineWithHandlers config {} action
+
 /-! ## Distributed Execution Helpers -/
 
-/-- Run with torchrun-style distributed setup -/
-def withDistributed (config : PipelineConfig) (action : PipelineM α) : IO α := do
+/-- Run with torchrun-style distributed setup and explicit log handlers. -/
+def withDistributedWithHandlers (config : PipelineConfig) (logHandlers : LogHandlers := {})
+    (action : PipelineM α) : IO α := do
   -- Initialize distributed if env vars are set
   let worldSize := (← IO.getEnv "WORLD_SIZE").bind (·.toNat?) |>.getD 1
   let rank := (← IO.getEnv "RANK").bind (·.toNat?) |>.getD 0
@@ -781,12 +815,16 @@ def withDistributed (config : PipelineConfig) (action : PipelineM α) : IO α :=
       dist.setCudaDevice localRank.toUInt64
     dist.initProcessGroup "nccl" masterAddr masterPort.toUInt64 rank.toUInt64 worldSize.toUInt64
 
-  let result ← runPipeline config action
+  let result ← runPipelineWithHandlers config logHandlers action
 
   if worldSize > 1 then
     dist.destroyProcessGroup
 
   return result
+
+/-- Run with torchrun-style distributed setup and silent library logging. -/
+def withDistributed (config : PipelineConfig) (action : PipelineM α) : IO α :=
+  withDistributedWithHandlers config {} action
 
 /-! ## Pre-built Pipeline Stages -/
 

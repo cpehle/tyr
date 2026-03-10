@@ -524,36 +524,41 @@ def computePassK (rollouts : Array RolloutBatch) (k : Nat) : PassKResult := Id.r
 
 /-! ## Logging -/
 
-/-- Log training progress -/
-def logProgress (result : StepResult) (state : GRPOState) : IO Unit := do
-  let msg := s!"Step {state.step}/{state.totalSteps}: " ++
-    s!"reward={result.meanReward} " ++
-    s!"loss={result.pgLoss} " ++
-    s!"valid={result.numValidSamples} " ++
-    s!"gen_len={result.meanGenLen} " ++
-    s!"running_reward={state.runningMeanReward}"
-  IO.println msg
+/-- Render a human-readable GRPO training update. -/
+def formatTrainUpdate (result : StepResult) (state : GRPOState) : String :=
+  s!"Step {state.step}/{state.totalSteps}: " ++
+  s!"reward={result.meanReward} " ++
+  s!"loss={result.pgLoss} " ++
+  s!"valid={result.numValidSamples} " ++
+  s!"gen_len={result.meanGenLen} " ++
+  s!"running_reward={state.runningMeanReward}"
 
-/-- Log evaluation results -/
-def logEval (passK : PassKResult) (step : Nat) : IO Unit := do
-  let msg := s!"Eval @ step {step}: " ++
-    s!"pass@1={passK.pass1} " ++
-    s!"pass@{passK.k}={passK.passK}"
-  IO.println msg
+/-- Render a human-readable GRPO evaluation update. -/
+def formatEvalUpdate (passK : PassKResult) (step : Nat) : String :=
+  s!"Eval @ step {step}: " ++
+  s!"pass@1={passK.pass1} " ++
+  s!"pass@{passK.k}={passK.passK}"
 
 /-- Hook set for GRPO training progress and evaluation. -/
 structure Callbacks where
-  onTrainStep : StepResult → GRPOState → IO Unit := logProgress
-  onEval : PassKResult → Nat → IO Unit := logEval
+  onTrainStep : StepResult → GRPOState → IO Unit := fun _ _ => pure ()
+  onEval : PassKResult → Nat → IO Unit := fun _ _ => pure ()
 
-/-- Emit GRPO metrics to the run ledger and optionally to stdout. -/
+/-- Compose two callback sets. -/
+def Callbacks.combine (lhs rhs : Callbacks) : Callbacks := {
+  onTrainStep := fun result state => do
+    lhs.onTrainStep result state
+    rhs.onTrainStep result state
+  onEval := fun passK step => do
+    lhs.onEval passK step
+    rhs.onEval passK step
+}
+
+/-- Emit GRPO metrics to the run ledger. -/
 def artifactCallbacks
     (artifacts : RunArtifacts)
-    (scopePrefix : String := "grpo")
-    (stdout : Bool := true) : Callbacks := {
+    (scopePrefix : String := "grpo") : Callbacks := {
   onTrainStep := fun result state => do
-    if stdout then
-      logProgress result state
     appendMetricEvent artifacts {
       scope := s!"{scopePrefix}/train"
       step := some state.step
@@ -566,8 +571,6 @@ def artifactCallbacks
       ]
     }
   onEval := fun passK step => do
-    if stdout then
-      logEval passK step
     appendMetricEvent artifacts {
       scope := s!"{scopePrefix}/eval"
       step := some step
@@ -748,7 +751,6 @@ def trainLoop (b t : UInt64)
       callbacks.onEval passK step
       if passK.pass1 > bestPass1 then
         bestPass1 := passK.pass1
-        IO.println s!"New best pass@1: {bestPass1}"
 
   return {
     finalState := state
@@ -935,7 +937,6 @@ def trainLoopWithUpdates (b t : UInt64) [TensorStruct P]
       callbacks.onEval passK step
       if passK.pass1 > bestPass1 then
         bestPass1 := passK.pass1
-        IO.println s!"New best pass@1: {bestPass1}"
 
   let trainResult : TrainResult := {
     finalState := state
