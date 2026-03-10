@@ -1,14 +1,10 @@
 /-
   Tyr/GPU/Kernels/UlyssesAttn.lean
 
-  Ulysses Attention kernel implementation for sequence parallelism.
-  Based on ThunderKittens patterns.
-
-  Key features:
-  - All-to-all communication pattern
-  - Flexible axis specification (12 combinations)
-  - Efficient for multi-head attention parallelism
-  - Head-parallel → sequence-parallel → head-parallel transformation
+  Ulysses is modeled here as transport/orchestration around all-to-all, matching
+  the vendored ThunderKittens `ulysses_attn.cu`. The actual local attention math
+  belongs to a separate FlashAttention launch; this module owns the movement
+  between head-parallel and sequence-parallel layouts.
 -/
 
 import Tyr.GPU.Kernels.Prelude
@@ -18,248 +14,93 @@ namespace Tyr.GPU.Kernels.UlyssesAttn
 open Tyr.GPU
 open Tyr.GPU.Codegen
 
-/-! ## Ulysses Attention
+private def asyncTileLoad {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
+    (dst : ST dtype rows cols layout) (src : GPtr dtype) (coord : RTileCoord)
+    (bytes : Nat) : KernelM Unit := do
+  let sem ← allocSemaphore
+  initSemaphore sem 1
+  expectBytes sem bytes
+  loadGlobalAsync dst src coord sem.id
+  waitSemaphore sem
 
-Ulysses attention uses all-to-all communication instead of ring:
+private def barrierAllDevices (label : String) (barrierId : Nat) : KernelM Unit := do
+  comment s!"Cross-device barrier: {label}"
+  arriveAndWait barrierId
 
-1. **Input**: Q, K, V sharded by heads across GPUs
-   - Each GPU has full sequence but subset of heads
+private def allToAllTile (label : String) (output_ptr : GPtr GpuFloat.BFloat16)
+    (input_ptr : GPtr GpuFloat.BFloat16) (coord : RTileCoord) : KernelM Unit := do
+  let tileRows : Nat := 16
+  let tileCols : Nat := 128
+  let shard : RT GpuFloat.BFloat16 tileRows tileCols ← allocRT .BFloat16 tileRows tileCols
+  let inputShared : ST GpuFloat.BFloat16 tileRows tileCols ← allocST .BFloat16 tileRows tileCols
+  let exchangeShared : ST GpuFloat.BFloat16 tileRows tileCols ← allocST .BFloat16 tileRows tileCols
 
-2. **All-to-all on Q**: Redistribute so each GPU has full heads but subset of sequence
-   - Transforms from head-parallel to sequence-parallel
-
-3. **Local attention**: Each GPU computes attention on its sequence slice
-   - Standard attention on local sequence chunk
-
-4. **All-to-all on O**: Redistribute output back to head-parallel
-   - Transforms back from sequence-parallel to head-parallel
-
-This is more communication-efficient than ring attention for moderate sequence lengths.
--/
-
-/-- Ulysses Attention forward pass -/
-@[gpu_kernel .SM90]
-def ulyssesAttnFwd : KernelM Unit := do
-  comment "=== Ulysses Attention Forward ==="
-  comment "All-to-all based sequence parallel attention"
-
-  -- Input Q, K, V (head-parallel: full sequence, subset of heads)
-  let qIn : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-  let kIn : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-  let vIn : RT GpuFloat.BFloat16 64 64 .Col ← allocRT .BFloat16 64 64 .Col
-
-  -- After all-to-all (sequence-parallel: subset of sequence, full heads)
-  let qSeq : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-  let kSeq : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-  let vSeq : RT GpuFloat.BFloat16 64 64 .Col ← allocRT .BFloat16 64 64 .Col
-
-  -- Attention computation
-  let att : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
-  let oSeq : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
-
-  -- Softmax tracking
-  let maxVec : RV GpuFloat.Float32 64 ← negInftyRV .Float32 64
-  let sumVec : RV GpuFloat.Float32 64 ← zeroRV .Float32 64
-
-  -- Output (head-parallel)
-  let oOut : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
-  let out : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-
-  -- Shared memory
-  let qInShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
-  let kInShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
-  let vInShared : ST GpuFloat.BFloat16 64 64 .Col ← allocST .BFloat16 64 64 .Col
-  let _qSeqShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
-  let _kSeqShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
-  let _vSeqShared : ST GpuFloat.BFloat16 64 64 .Col ← allocST .BFloat16 64 64 .Col
-  let outShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
-
-  comment "Load head-parallel inputs"
-  load qIn qInShared
-  load kIn kInShared
-  load vIn vInShared
-
-  comment "=== Phase 1: All-to-all on Q (heads → sequence) ==="
-  comment "Redistribute Q from head-parallel to sequence-parallel"
-  -- In actual implementation: NCCL all-to-all
-  -- Each GPU sends its head slice to all GPUs, receives sequence slice from all
-  copy qSeq qIn  -- Simulated
-
-  comment "=== Phase 2: All-to-all on K, V (heads → sequence) ==="
-  copy kSeq kIn
-  copy vSeq vIn  -- Simulated
-
-  comment "Synchronize after all-to-all"
+  comment s!"All-to-all transport for {label}"
+  asyncTileLoad inputShared input_ptr coord (tileRows * tileCols * 2)
+  load shard inputShared
+  multimemStore exchangeShared shard
+  barrierAllDevices s!"{label} exchange complete" 0
+  storeGlobalAsync output_ptr exchangeShared coord
   sync
 
-  comment "=== Phase 3: Local attention on sequence slice ==="
-  comment "Each GPU has full heads but subset of sequence"
-
-  comment "Compute attention scores"
-  let qF : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
-  let kF : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
-  convert qF qSeq
-  convert kF kSeq
-  mmaT att qF kF (← zeroRT .Float32 64 64)
-
-  comment "Scale by 1/sqrt(d)"
-  scalarMul att att 0.125  -- 1/sqrt(64)
-
-  comment "Apply causal mask for this sequence block"
-  -- Note: causal mask depends on global position, not just local
-  makeCausal att att (some (-1.0e10))
-
-  comment "Softmax"
-  rowMax maxVec att
-  subCol att att maxVec
-  exp att att
-  rowSum sumVec att
-  divCol att att sumVec
-
-  comment "Compute output: O = softmax(QK^T) @ V"
-  let attBf : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-  convert attBf att
-  mma oSeq attBf vSeq oSeq
-
-  comment "=== Phase 4: All-to-all on O (sequence → heads) ==="
-  comment "Redistribute O from sequence-parallel back to head-parallel"
-  copy oOut oSeq  -- Simulated all-to-all
-
-  comment "Store final output"
-  convert out oOut
-  store outShared out
-  sync
-
--- Verify auto-generated kernel
-
-/-! ## Ulysses with Fused All-to-all
-
-Variant that fuses all-to-all with attention computation.
--/
-
-/-- Ulysses Attention with fused communication -/
+/-- Standalone ThunderKittens-shaped all-to-all transport kernel.
+The caller supplies already-partitioned views and chooses the axis mapping by
+which input/output pointers it passes in. -/
 @[gpu_kernel .SM90]
-def ulyssesAttnFusedFwd : KernelM Unit := do
-  comment "=== Ulysses Attention (Fused All-to-all) ==="
+def allToAllFwd (output_ptr : GPtr GpuFloat.BFloat16) (input_ptr : GPtr GpuFloat.BFloat16)
+    (dev_idx : KVal UInt32) (world_size : KVal UInt32)
+    (scatter_axis : KVal UInt32) (gather_axis : KVal UInt32) : KernelM Unit := do
+  let _ := (dev_idx, world_size, scatter_axis, gather_axis)
+  let coord ← blockCoord2D
+  comment "Ulysses all_to_all transport surface; axis selection is an orchestration concern"
+  allToAllTile "generic shard" output_ptr input_ptr coord
+  barrierAllDevices "all_to_all epilogue" 1
 
-  let q : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-  let k : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-  let v : RT GpuFloat.BFloat16 64 64 .Col ← allocRT .BFloat16 64 64 .Col
-
-  -- Double buffering for overlap
-  let qNext : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-  let kNext : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-  let vNext : RT GpuFloat.BFloat16 64 64 .Col ← allocRT .BFloat16 64 64 .Col
-
-  let att : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
-  let o : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
-  let out : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-
-  let maxVec : RV GpuFloat.Float32 64 ← negInftyRV .Float32 64
-  let sumVec : RV GpuFloat.Float32 64 ← zeroRV .Float32 64
-  let prevMax : RV GpuFloat.Float32 64 ← allocRV .Float32 64
-  let scale : RV GpuFloat.Float32 64 ← allocRV .Float32 64
-
-  let qShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
-  let kShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
-  let vShared : ST GpuFloat.BFloat16 64 64 .Col ← allocST .BFloat16 64 64 .Col
-  let qNextShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
-  let kNextShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
-  let vNextShared : ST GpuFloat.BFloat16 64 64 .Col ← allocST .BFloat16 64 64 .Col
-  let outShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
-
-  comment "Initial load"
-  load q qShared
-  load k kShared
-  load v vShared
-
-  comment "Fused all-to-all + attention loop"
-  for _gpuIdx in krange 0 8 do  -- world_size iterations
-    comment "Prefetch next chunk (overlapped all-to-all)"
-    load qNext qNextShared
-    load kNext kNextShared
-    load vNext vNextShared
-
-    comment "Compute attention with current chunk"
-    let qF ← allocRT .Float32 64 64
-    let kF ← allocRT .Float32 64 64
-    convert qF q
-    convert kF k
-    mmaT att qF kF (← zeroRT .Float32 64 64)
-    scalarMul att att 0.125
-
-    comment "Online softmax with rescaling"
-    copyVec prevMax maxVec
-    rowMaxAccum maxVec att maxVec
-    subCol att att maxVec
-    exp att att
-
-    -- Rescale previous
-    subVec scale prevMax maxVec
-    expVec scale scale
-    mulVec sumVec sumVec scale
-    mulCol o o scale
-
-    let rowS ← allocRV .Float32 64
-    rowSum rowS att
-    addVec sumVec sumVec rowS
-
-    comment "Accumulate output"
-    let attBf ← allocRT .BFloat16 64 64
-    convert attBf att
-    mma o attBf v o
-
-    comment "Swap buffers"
-    copy q qNext
-    copy k kNext
-    copy v vNext
-
-    sync
-
-  comment "Final normalization"
-  divCol o o sumVec
-
-  comment "All-to-all back to head-parallel and store"
-  convert out o
-  store outShared out
-
--- Verify auto-generated kernel
-
-/-! ## All-to-all Kernel
-
-Standalone all-to-all for flexible use.
--/
-
-/-- All-to-all communication kernel -/
+/-- Phase 1/2 of Ulysses forward: redistribute Q/K/V from head-parallel shards
+into the sequence-parallel views consumed by a local FlashAttention launch. -/
 @[gpu_kernel .SM90]
-def allToAllFwd : KernelM Unit := do
-  comment "=== All-to-all Communication ==="
-  comment "Each GPU sends one chunk to each other GPU, receives one from each"
+def ulyssesQkvAllToAll (q_seq_ptr : GPtr GpuFloat.BFloat16) (k_seq_ptr : GPtr GpuFloat.BFloat16)
+    (v_seq_ptr : GPtr GpuFloat.BFloat16)
+    (q_heads_ptr : GPtr GpuFloat.BFloat16) (k_heads_ptr : GPtr GpuFloat.BFloat16)
+    (v_heads_ptr : GPtr GpuFloat.BFloat16)
+    (dev_idx : KVal UInt32) (world_size : KVal UInt32) : KernelM Unit := do
+  let _ := (dev_idx, world_size)
+  let coord ← blockCoord2D
 
-  -- Input (sharded by one dimension)
-  let input : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
+  comment "Ulysses QKV transport: head-parallel -> sequence-parallel"
+  allToAllTile "Q heads->seq" q_seq_ptr q_heads_ptr coord
+  allToAllTile "K heads->seq" k_seq_ptr k_heads_ptr coord
+  allToAllTile "V heads->seq" v_seq_ptr v_heads_ptr coord
+  barrierAllDevices "QKV transport complete" 1
 
-  -- Output (sharded by different dimension)
-  let output : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
+/-- Phase 4 of Ulysses forward: return the local attention output from the
+sequence-parallel layout back to the head-parallel view. -/
+@[gpu_kernel .SM90]
+def ulyssesAttnFwd (o_heads_ptr : GPtr GpuFloat.BFloat16) (o_seq_ptr : GPtr GpuFloat.BFloat16)
+    (q_seq_ptr : GPtr GpuFloat.BFloat16) (k_seq_ptr : GPtr GpuFloat.BFloat16)
+    (v_seq_ptr : GPtr GpuFloat.BFloat16)
+    (dev_idx : KVal UInt32) (world_size : KVal UInt32) : KernelM Unit := do
+  let _ := (q_seq_ptr, k_seq_ptr, v_seq_ptr, dev_idx, world_size)
+  let coord ← blockCoord2D
 
-  -- Shared memory for staging
-  let inputShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
-  let outputShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
+  comment "Ulysses orchestration shell:"
+  comment "1. `ulyssesQkvAllToAll` runs before local attention."
+  comment "2. A separate FlashAttention launch consumes q_seq/k_seq/v_seq."
+  comment "3. This kernel returns the local attention output back to head shards."
+  allToAllTile "O seq->heads" o_heads_ptr o_seq_ptr coord
+  barrierAllDevices "output return complete" 1
 
-  comment "Load input"
-  load input inputShared
+/-- Legacy compatibility surface: no fused attention body remains here.
+This now aliases the output-return transport stage so the module stays focused
+on all-to-all orchestration. -/
+@[gpu_kernel .SM90]
+def ulyssesAttnFusedFwd (o_heads_ptr : GPtr GpuFloat.BFloat16) (o_seq_ptr : GPtr GpuFloat.BFloat16)
+    (dev_idx : KVal UInt32) (world_size : KVal UInt32) : KernelM Unit := do
+  let _ := (dev_idx, world_size)
+  let coord ← blockCoord2D
 
-  comment "All-to-all exchange"
-  comment "(In actual implementation: NCCL all-to-all or custom)"
-  -- Each GPU i sends chunk j to GPU j, receives chunk i from GPU j
-  copy output input  -- Simulated
-
-  comment "Store output"
-  store outputShared output
-  sync
-
--- Verify auto-generated kernel
-
--- Print generated kernels
+  comment "Legacy fused entrypoint retained as transport-only return path"
+  allToAllTile "legacy O seq->heads" o_heads_ptr o_seq_ptr coord
+  barrierAllDevices "legacy fused epilogue" 1
 
 end Tyr.GPU.Kernels.UlyssesAttn

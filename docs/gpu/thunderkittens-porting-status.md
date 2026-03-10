@@ -41,5 +41,5 @@ prototypes.
 
 1. `LinearAttnBwd.lean` once the decayed forward contract is settled and shared derivative helpers exist.
 2. `Mamba2.lean` to finish the lcsf / warp-specialized structure from `thirdparty/ThunderKittens/kernels/mamba2/mamba2.cu`.
-3. Finish exact peer arithmetic and launch boundaries for `RingAttn*.lean` and `UlyssesAttn*.lean` now that the collective/transport substrate is concrete.
+3. Finish exact peer arithmetic and launch boundaries for `RingAttn*.lean`, `UlyssesAttn*.lean`, and `Distributed.lean` now that the collective/transport substrate is concrete.
 4. `FFTConv.lean`, `Hedgehog.lean`, and the quantized GEMM family once the common pipeline abstractions are tightened.

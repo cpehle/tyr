@@ -1,14 +1,16 @@
 /-
   Tyr/GPU/Kernels/RingAttn.lean
 
-  Ring Attention kernel implementation for sequence parallelism.
-  Based on ThunderKittens patterns.
+  Ring attention surfaces split into the same coarse phases the vendored
+  ThunderKittens kernel exposes:
 
-  Key features:
-  - Three-phase kernel: partial attention, communication, reduction
-  - Log-sum-exp trick for numerically stable reduction
-  - Ring-shift KV blocks between GPUs
-  - Overlapped communication and computation
+  1. partial attention against the current KV ring buffer,
+  2. communication to advance K/V into the next ping-pong buffer,
+  3. numerically stable reduction of running O/L statistics.
+
+  The Lean DSL still cannot encode the exact multi-launch schedule or peer index
+  arithmetic from `ring_attn_h100.cu`, so the kernels below treat the caller's
+  pointers as already-partitioned current/next views.
 -/
 
 import Tyr.GPU.Kernels.Prelude
@@ -18,339 +20,202 @@ namespace Tyr.GPU.Kernels.RingAttn
 open Tyr.GPU
 open Tyr.GPU.Codegen
 
-/-! ## Ring Attention
+private def asyncTileLoad {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
+    (dst : ST dtype rows cols layout) (src : GPtr dtype) (coord : RTileCoord)
+    (bytes : Nat) : KernelM Unit := do
+  let sem ← allocSemaphore
+  initSemaphore sem 1
+  expectBytes sem bytes
+  loadGlobalAsync dst src coord sem.id
+  waitSemaphore sem
 
-Ring attention enables long sequence processing by:
-1. Splitting sequence across GPUs
-2. Each GPU holds its Q block, KV blocks are ring-shifted
-3. Partial attention computed with each KV block
-4. Results combined using log-sum-exp trick
+private def barrierAllDevices (label : String) (barrierId : Nat) : KernelM Unit := do
+  comment s!"Cross-device barrier: {label}"
+  arriveAndWait barrierId
 
-Three phases:
-- Phase 1: Compute partial attention with local KV
-- Phase 2: Ring-shift KV to next GPU, compute with new KV
-- Phase 3: Combine partial outputs using stable reduction
--/
+private def maxVec {dtype : GpuFloat} {len : Nat}
+    (dst a b : RV dtype len) : KernelM Unit := do
+  emit (.binary .Max dst.id a.id b.id)
 
-/-- Ring Attention - Phase 1: Partial attention computation -/
+/-- Ring phase 1: compute attention for the current K/V shard and emit a partial
+output tile plus its per-row log-sum-exp summary. -/
 @[gpu_kernel .SM90]
-def ringAttnPartial (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat16)
-    (V_ptr : GPtr GpuFloat.BFloat16) (O_partial_ptr : GPtr GpuFloat.BFloat16)
-    (lse_ptr : GPtr GpuFloat.Float32)
-    (_batch_size : KVal UInt64) (_num_heads : KVal UInt64)
-    (_seq_len : KVal UInt64) (_head_dim : KVal UInt64)
-    (rank : KVal UInt64) (kv_block_idx : KVal UInt64) : KernelM Unit := do
-  let _ := (rank, kv_block_idx)
-  comment "=== Ring Attention - Partial Computation ==="
-  comment "Compute attention with one KV block, output partial O and log-sum-exp"
-
-  let coord ← blockCoord2D
-
-  -- Q block (stays on this GPU)
-  let q : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-
-  -- KV blocks (ring-shifted between GPUs)
-  let k : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-  let v : RT GpuFloat.BFloat16 64 64 .Col ← allocRT .BFloat16 64 64 .Col
-
-  -- Attention scores
-  let att : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
-
-  -- Softmax tracking
-  let maxVec : RV GpuFloat.Float32 64 ← negInftyRV .Float32 64
-  let sumVec : RV GpuFloat.Float32 64 ← zeroRV .Float32 64
-
-  -- Partial output
-  let oPartial : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
-  let out : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-
-  -- Log-sum-exp for stable reduction
-  let lse : RV GpuFloat.Float32 64 ← allocRV .Float32 64
-
-  -- Shared memory
-  let qShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
-  let kShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
-  let vShared : ST GpuFloat.BFloat16 64 64 .Col ← allocST .BFloat16 64 64 .Col
-  let outShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
-  let lseShared : SV GpuFloat.Float32 64 ← allocSV .Float32 64
-
-  comment "Load Q (stays resident on this GPU)"
-  loadGlobal qShared Q_ptr coord
-  sync
-  load q qShared
-
-  comment "Process KV block"
-  loadGlobal kShared K_ptr coord
-  loadGlobal vShared V_ptr coord
-  sync
-  load k kShared
-  load v vShared
-
-  comment "Compute attention scores: att = Q @ K^T"
-  let qF : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
-  let kF : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
-  convert qF q
-  convert kF k
-  mmaT att qF kF (← zeroRT .Float32 64 64)
-
-  comment "Scale by 1/sqrt(d)"
-  scalarMul att att 0.125  -- 1/sqrt(64)
-
-  comment "Apply causal mask if needed"
-  makeCausal att att (some (-1.0e10))
-
-  comment "Online softmax"
-  rowMax maxVec att
-  subCol att att maxVec
-  exp att att
-  rowSum sumVec att
-  divCol att att sumVec
-
-  comment "Compute partial output: O_partial = softmax(QK^T) @ V"
-  let attBf : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-  convert attBf att
-  mma oPartial attBf v oPartial
-
-  comment "Compute log-sum-exp for stable reduction"
-  -- lse = max + log(sum)
-  copyVec lse maxVec
-  logVec sumVec sumVec
-  addVec lse lse sumVec
-
-  comment "Store partial output and LSE"
-  convert out oPartial
-  store outShared out
-  storeGlobal O_partial_ptr outShared coord
-  storeVec lseShared lse
-  storeVecGlobalCoord lse_ptr lseShared coord.c
-  sync
-
--- Verify auto-generated kernel
-
-/-- Ring Attention - Phase 2: Full ring processing -/
-@[gpu_kernel .SM90]
-def ringAttnFull (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat16)
-    (V_ptr : GPtr GpuFloat.BFloat16) (O_ptr : GPtr GpuFloat.BFloat16)
-    (lse_ptr : GPtr GpuFloat.Float32)
-    (_batch_size : KVal UInt64) (_num_heads : KVal UInt64)
-    (seq_len : KVal UInt64) (_head_dim : KVal UInt64)
-    (rank : KVal UInt64) (world_size : KVal UInt64) : KernelM Unit := do
-  let _ := (seq_len, rank, world_size)
-  comment "=== Ring Attention - Full Ring Processing ==="
-  comment "Process all KV blocks around the ring, accumulate with LSE"
-
-  let numGpus : Nat := 8
-
-  let coord ← blockCoord2D
-
-  -- Q block (stays on this GPU)
-  let q : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-
-  -- KV blocks (ring-shifted)
-  let k : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-  let v : RT GpuFloat.BFloat16 64 64 .Col ← allocRT .BFloat16 64 64 .Col
-
-  -- Double buffering for KV (overlap compute and communication)
-  let kNext : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-  let vNext : RT GpuFloat.BFloat16 64 64 .Col ← allocRT .BFloat16 64 64 .Col
-
-  -- Attention scores
-  let att : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
-
-  -- Running output and LSE
-  let o : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
-  let lseRunning : RV GpuFloat.Float32 64 ← negInftyRV .Float32 64
-  let out : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-
-  -- Per-block softmax tracking
-  let maxVec : RV GpuFloat.Float32 64 ← allocRV .Float32 64
-  let sumVec : RV GpuFloat.Float32 64 ← allocRV .Float32 64
-  let lseNew : RV GpuFloat.Float32 64 ← allocRV .Float32 64
-  let scale : RV GpuFloat.Float32 64 ← allocRV .Float32 64
-
-  -- Shared memory
-  let qShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
-  let kShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
-  let vShared : ST GpuFloat.BFloat16 64 64 .Col ← allocST .BFloat16 64 64 .Col
-  let kNextShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
-  let vNextShared : ST GpuFloat.BFloat16 64 64 .Col ← allocST .BFloat16 64 64 .Col
-  let outShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
-
-  comment "Load Q (stays resident)"
-  loadGlobal qShared Q_ptr coord
-  sync
-  load q qShared
-
-  comment "Load initial KV block"
-  loadGlobal kShared K_ptr coord
-  loadGlobal vShared V_ptr coord
-  sync
-  load k kShared
-  load v vShared
-
-  comment "Ring loop over all GPUs"
-  for _gpuIdx in krange 0 numGpus do
-    comment "Prefetch next KV block (async from next GPU)"
-    -- In actual implementation: async ring communication
-    load kNext kNextShared
-    load vNext vNextShared
-
-    comment "Compute attention with current KV block"
-    let qF : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
-    let kF : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
-    convert qF q
-    convert kF k
-    mmaT att qF kF (← zeroRT .Float32 64 64)
-    scalarMul att att 0.125
-
-    comment "Online softmax for this block"
-    rowMax maxVec att
-    subCol att att maxVec
-    exp att att
-    rowSum sumVec att
-    divCol att att sumVec
-
-    comment "Compute new LSE: lse_new = max + log(sum)"
-    copyVec lseNew maxVec
-    logVec sumVec sumVec
-    addVec lseNew lseNew sumVec
-
-    comment "Combine with running output using LSE trick"
-    -- scale_old = exp(lse_running - max(lse_running, lse_new))
-    -- scale_new = exp(lse_new - max(lse_running, lse_new))
-    let maxLse : RV GpuFloat.Float32 64 ← allocRV .Float32 64
-    -- max of two vectors (element-wise)
-    copyVec maxLse lseRunning
-    -- Simplified: assuming lseNew is always larger for new blocks
-
-    comment "Scale old output"
-    subVec scale lseRunning lseNew
-    expVec scale scale
-    mulCol o o scale
-
-    comment "Add new contribution"
-    let oNew : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
-    let attBf : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-    convert attBf att
-    mma oNew attBf v oNew
-    add o o oNew
-
-    comment "Update running LSE"
-    -- lse_running = log(exp(lse_running) + exp(lse_new))
-    -- ≈ max(lse_running, lse_new) + log(exp(lse_running - max) + exp(lse_new - max))
-    copyVec lseRunning lseNew  -- Simplified
-
-    comment "Swap KV buffers"
-    copy k kNext
-    copy v vNext
-
-    sync
-
-  comment "Store final output"
-  convert out o
-  store outShared out
-  storeGlobal O_ptr outShared coord
-
-  comment "Store final LSE to global memory"
-  let lseShared : SV GpuFloat.Float32 64 ← allocSV .Float32 64
-  storeVec lseShared lseRunning
-  storeVecGlobalCoord lse_ptr lseShared coord.c
-
--- Verify auto-generated kernel
-
-/-- Ring Attention - Phase 3: Reduction combining partial outputs -/
-@[gpu_kernel .SM90]
-def ringAttnReduce (O1_ptr : GPtr GpuFloat.Float32) (O2_ptr : GPtr GpuFloat.Float32)
-    (lse1_ptr : GPtr GpuFloat.Float32) (lse2_ptr : GPtr GpuFloat.Float32)
-    (O_combined_ptr : GPtr GpuFloat.BFloat16) (lse_combined_ptr : GPtr GpuFloat.Float32)
-    (_batch_size : KVal UInt64) (_num_heads : KVal UInt64)
-    (_seq_len : KVal UInt64) (_head_dim : KVal UInt64)
+def ringAttnPartial (Q_ptr : GPtr GpuFloat.BFloat16) (K_curr_ptr : GPtr GpuFloat.BFloat16)
+    (V_curr_ptr : GPtr GpuFloat.BFloat16) (O_partial_ptr : GPtr GpuFloat.Float32)
+    (L_partial_ptr : GPtr GpuFloat.Float32)
+    (seq_len : KVal UInt64) (head_dim : KVal UInt64)
+    (ring_stage : KVal UInt32) (dev_idx : KVal UInt32) (world_size : KVal UInt32)
     : KernelM Unit := do
-  comment "=== Ring Attention - Reduction ==="
-  comment "Combine partial outputs using log-sum-exp trick"
-
+  let _ := (seq_len, head_dim, ring_stage, dev_idx, world_size)
+  let qoBlock : Nat := 64
+  let kvBlock : Nat := 128
+  let d : Nat := 128
   let coord ← blockCoord2D
 
-  -- Partial outputs from different KV blocks
-  let o1 : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
-  let o2 : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
+  let q : RT GpuFloat.BFloat16 qoBlock d ← allocRT .BFloat16 qoBlock d
+  let k : RT GpuFloat.BFloat16 kvBlock d ← allocRT .BFloat16 kvBlock d
+  let v : RT GpuFloat.BFloat16 kvBlock d .Col ← allocRT .BFloat16 kvBlock d .Col
+  let scores : RT GpuFloat.Float32 qoBlock kvBlock ← allocRT .Float32 qoBlock kvBlock
+  let probBf : RT GpuFloat.BFloat16 qoBlock kvBlock ← allocRT .BFloat16 qoBlock kvBlock
+  let oPartial : RT GpuFloat.Float32 qoBlock d ← zeroRT .Float32 qoBlock d
 
-  -- Corresponding LSE values
-  let lse1 : RV GpuFloat.Float32 64 ← allocRV .Float32 64
-  let lse2 : RV GpuFloat.Float32 64 ← allocRV .Float32 64
+  let rowMaxVec : RV GpuFloat.Float32 qoBlock ← allocRV .Float32 qoBlock
+  let rowSumVec : RV GpuFloat.Float32 qoBlock ← allocRV .Float32 qoBlock
+  let lseVec : RV GpuFloat.Float32 qoBlock ← allocRV .Float32 qoBlock
 
-  -- Combined output
-  let oCombined : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
-  let lseCombined : RV GpuFloat.Float32 64 ← allocRV .Float32 64
-  let out : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
+  let qShared : ST GpuFloat.BFloat16 qoBlock d ← allocST .BFloat16 qoBlock d
+  let kShared : ST GpuFloat.BFloat16 kvBlock d ← allocST .BFloat16 kvBlock d
+  let vShared : ST GpuFloat.BFloat16 kvBlock d .Col ← allocST .BFloat16 kvBlock d .Col
+  let outShared : ST GpuFloat.Float32 qoBlock d ← allocST .Float32 qoBlock d
+  let lseShared : SV GpuFloat.Float32 qoBlock ← allocSV .Float32 qoBlock
 
-  -- Scaling factors
-  let scale1 : RV GpuFloat.Float32 64 ← allocRV .Float32 64
-  let scale2 : RV GpuFloat.Float32 64 ← allocRV .Float32 64
-  let maxLse : RV GpuFloat.Float32 64 ← allocRV .Float32 64
-
-  -- Shared memory
-  let o1Shared : ST GpuFloat.Float32 64 64 ← allocST .Float32 64 64
-  let o2Shared : ST GpuFloat.Float32 64 64 ← allocST .Float32 64 64
-  let lse1Shared : SV GpuFloat.Float32 64 ← allocSV .Float32 64
-  let lse2Shared : SV GpuFloat.Float32 64 ← allocSV .Float32 64
-  let outShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
-
-  comment "Load partial outputs and LSE values from global memory"
-  loadGlobal o1Shared O1_ptr coord
-  loadGlobal o2Shared O2_ptr coord
-  loadVecGlobalCoord lse1Shared lse1_ptr coord.c
-  loadVecGlobalCoord lse2Shared lse2_ptr coord.c
+  comment "Ring partial phase: stationary Q, current-ring K/V"
+  asyncTileLoad qShared Q_ptr coord (qoBlock * d * 2)
+  asyncTileLoad kShared K_curr_ptr coord (kvBlock * d * 2)
+  asyncTileLoad vShared V_curr_ptr coord (kvBlock * d * 2)
   sync
-  load o1 o1Shared
-  load o2 o2Shared
-  loadVec lse1 lse1Shared
-  loadVec lse2 lse2Shared
+  load q qShared
+  load k kShared
+  load v vShared
 
-  comment "Compute max LSE for numerical stability"
-  -- maxLse = max(lse1, lse2) element-wise
-  copyVec maxLse lse1
-  -- In practice: need element-wise max
+  let zeros : RT GpuFloat.Float32 qoBlock kvBlock ← zeroRT .Float32 qoBlock kvBlock
+  mmaT scores q k zeros
+  scalarMul scores scores 0.08838834764
+  makeCausal scores scores (some (-1.0e10))
 
-  comment "Compute scaling factors"
-  -- scale1 = exp(lse1 - maxLse)
-  subVec scale1 lse1 maxLse
-  expVec scale1 scale1
-  -- scale2 = exp(lse2 - maxLse)
-  subVec scale2 lse2 maxLse
-  expVec scale2 scale2
+  rowMax rowMaxVec scores
+  subCol scores scores rowMaxVec
+  exp scores scores
+  rowSum rowSumVec scores
+  divCol scores scores rowSumVec
 
-  comment "Scale partial outputs"
-  mulCol o1 o1 scale1
-  mulCol o2 o2 scale2
+  convert probBf scores
+  mma oPartial probBf v oPartial
 
-  comment "Sum scaled outputs"
-  add oCombined o1 o2
+  copyVec lseVec rowMaxVec
+  logVec rowSumVec rowSumVec
+  addVec lseVec lseVec rowSumVec
 
-  comment "Normalize by total scale"
-  let totalScale : RV GpuFloat.Float32 64 ← allocRV .Float32 64
-  addVec totalScale scale1 scale2
-  divCol oCombined oCombined totalScale
+  store outShared oPartial
+  storeGlobal O_partial_ptr outShared coord
+  storeVec lseShared lseVec
+  storeVecGlobalRow L_partial_ptr lseShared coord
 
-  comment "Compute combined LSE"
-  -- lseCombined = maxLse + log(scale1 + scale2)
-  logVec totalScale totalScale
-  addVec lseCombined maxLse totalScale
+/-- Ring phase 2: move the current K/V shard into the caller-provided "next"
+buffers. This is the explicit communication stage the old monolithic kernel hid. -/
+@[gpu_kernel .SM90]
+def ringAttnComm (K_next_ptr : GPtr GpuFloat.BFloat16) (V_next_ptr : GPtr GpuFloat.BFloat16)
+    (K_curr_ptr : GPtr GpuFloat.BFloat16) (V_curr_ptr : GPtr GpuFloat.BFloat16)
+    (ring_stage : KVal UInt32) (dev_idx : KVal UInt32) (world_size : KVal UInt32)
+    : KernelM Unit := do
+  let _ := (ring_stage, dev_idx, world_size)
+  let kvBlock : Nat := 128
+  let d : Nat := 128
+  let coord ← blockCoord2D
 
-  comment "Store combined output"
-  convert out oCombined
-  store outShared out
-  storeGlobal O_combined_ptr outShared coord
+  let kCurr : RT GpuFloat.BFloat16 kvBlock d ← allocRT .BFloat16 kvBlock d
+  let vCurr : RT GpuFloat.BFloat16 kvBlock d ← allocRT .BFloat16 kvBlock d
+  let kShared : ST GpuFloat.BFloat16 kvBlock d ← allocST .BFloat16 kvBlock d
+  let vShared : ST GpuFloat.BFloat16 kvBlock d ← allocST .BFloat16 kvBlock d
+  let kExchange : ST GpuFloat.BFloat16 kvBlock d ← allocST .BFloat16 kvBlock d
+  let vExchange : ST GpuFloat.BFloat16 kvBlock d ← allocST .BFloat16 kvBlock d
 
-  comment "Store combined LSE to global memory"
-  let lseCombinedShared : SV GpuFloat.Float32 64 ← allocSV .Float32 64
-  storeVec lseCombinedShared lseCombined
-  storeVecGlobalCoord lse_combined_ptr lseCombinedShared coord.c
-
+  comment "Ring communication phase: current K/V -> next ping-pong buffer"
+  asyncTileLoad kShared K_curr_ptr coord (kvBlock * d * 2)
+  asyncTileLoad vShared V_curr_ptr coord (kvBlock * d * 2)
+  load kCurr kShared
+  load vCurr vShared
+  multimemStore kExchange kCurr
+  multimemStore vExchange vCurr
+  barrierAllDevices "ring K/V transfer complete" 0
+  storeGlobalAsync K_next_ptr kExchange coord
+  storeGlobalAsync V_next_ptr vExchange coord
   sync
+  barrierAllDevices "ring K/V epilogue" 1
 
--- Verify auto-generated kernels
+/-- Ring phase 3: merge the running `(O, L)` state with the current partial
+contribution using the standard log-sum-exp reduction. -/
+@[gpu_kernel .SM90]
+def ringAttnReduce (O_running_ptr : GPtr GpuFloat.Float32) (O_block_ptr : GPtr GpuFloat.Float32)
+    (L_running_ptr : GPtr GpuFloat.Float32) (L_block_ptr : GPtr GpuFloat.Float32)
+    (O_out_ptr : GPtr GpuFloat.BFloat16) (L_out_ptr : GPtr GpuFloat.Float32)
+    (seq_len : KVal UInt64) (head_dim : KVal UInt64)
+    : KernelM Unit := do
+  let _ := (seq_len, head_dim)
+  let qoBlock : Nat := 64
+  let d : Nat := 128
+  let coord ← blockCoord2D
 
--- Print generated kernels
+  let oRunning : RT GpuFloat.Float32 qoBlock d ← allocRT .Float32 qoBlock d
+  let oBlock : RT GpuFloat.Float32 qoBlock d ← allocRT .Float32 qoBlock d
+  let oOut : RT GpuFloat.Float32 qoBlock d ← allocRT .Float32 qoBlock d
+  let outBf : RT GpuFloat.BFloat16 qoBlock d ← allocRT .BFloat16 qoBlock d
+
+  let lRunning : RV GpuFloat.Float32 qoBlock ← allocRV .Float32 qoBlock
+  let lBlock : RV GpuFloat.Float32 qoBlock ← allocRV .Float32 qoBlock
+  let lMax : RV GpuFloat.Float32 qoBlock ← allocRV .Float32 qoBlock
+  let lScaleRunning : RV GpuFloat.Float32 qoBlock ← allocRV .Float32 qoBlock
+  let lScaleBlock : RV GpuFloat.Float32 qoBlock ← allocRV .Float32 qoBlock
+  let lDenom : RV GpuFloat.Float32 qoBlock ← allocRV .Float32 qoBlock
+  let lOut : RV GpuFloat.Float32 qoBlock ← allocRV .Float32 qoBlock
+
+  let oRunningShared : ST GpuFloat.Float32 qoBlock d ← allocST .Float32 qoBlock d
+  let oBlockShared : ST GpuFloat.Float32 qoBlock d ← allocST .Float32 qoBlock d
+  let oOutShared : ST GpuFloat.BFloat16 qoBlock d ← allocST .BFloat16 qoBlock d
+  let lRunningShared : SV GpuFloat.Float32 qoBlock ← allocSV .Float32 qoBlock
+  let lBlockShared : SV GpuFloat.Float32 qoBlock ← allocSV .Float32 qoBlock
+  let lOutShared : SV GpuFloat.Float32 qoBlock ← allocSV .Float32 qoBlock
+
+  comment "Ring reduction phase: stable merge of running and current partial tiles"
+  loadGlobal oRunningShared O_running_ptr coord
+  loadGlobal oBlockShared O_block_ptr coord
+  loadVecGlobalRow lRunningShared L_running_ptr coord
+  loadVecGlobalRow lBlockShared L_block_ptr coord
+  sync
+  load oRunning oRunningShared
+  load oBlock oBlockShared
+  loadVec lRunning lRunningShared
+  loadVec lBlock lBlockShared
+
+  maxVec lMax lRunning lBlock
+  subVec lScaleRunning lRunning lMax
+  expVec lScaleRunning lScaleRunning
+  subVec lScaleBlock lBlock lMax
+  expVec lScaleBlock lScaleBlock
+
+  mulCol oRunning oRunning lScaleRunning
+  mulCol oBlock oBlock lScaleBlock
+  add oOut oRunning oBlock
+
+  addVec lDenom lScaleRunning lScaleBlock
+  divCol oOut oOut lDenom
+  logVec lDenom lDenom
+  addVec lOut lMax lDenom
+
+  convert outBf oOut
+  store oOutShared outBf
+  storeGlobal O_out_ptr oOutShared coord
+  storeVec lOutShared lOut
+  storeVecGlobalRow L_out_ptr lOutShared coord
+
+/-- Compatibility shell for the previous monolithic forward entrypoint.
+Callers should prefer the explicit `ringAttnPartial`, `ringAttnComm`, and
+`ringAttnReduce` kernels above. -/
+@[gpu_kernel .SM90]
+def ringAttnFull (Q_ptr : GPtr GpuFloat.BFloat16) (K_curr_ptr : GPtr GpuFloat.BFloat16)
+    (V_curr_ptr : GPtr GpuFloat.BFloat16) (O_ptr : GPtr GpuFloat.BFloat16)
+    (L_ptr : GPtr GpuFloat.Float32)
+    (batch_size : KVal UInt64) (num_heads : KVal UInt64)
+    (seq_len : KVal UInt64) (head_dim : KVal UInt64)
+    (ring_stage : KVal UInt32) (dev_idx : KVal UInt32) (world_size : KVal UInt32)
+    : KernelM Unit := do
+  let _ := (Q_ptr, K_curr_ptr, V_curr_ptr, O_ptr, L_ptr, batch_size, num_heads,
+    seq_len, head_dim, ring_stage, dev_idx, world_size)
+  comment "ringAttnFull is now an orchestration shell."
+  comment "Launch order per stage:"
+  comment "  1. ringAttnPartial on the current K/V shard"
+  comment "  2. ringAttnComm to advance K/V around the ring"
+  comment "  3. ringAttnReduce once a running O/L state already exists"
+  barrierAllDevices "ring orchestration handoff" 0
 
 end Tyr.GPU.Kernels.RingAttn

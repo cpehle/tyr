@@ -1,10 +1,12 @@
 /-
   Tyr/GPU/Kernels/UlyssesAttnBwd.lean
 
-  Ulysses Attention backward kernel implementation.
-  Wraps FlashAttention backward with All-to-All communication.
+  Ulysses backward is kept as a transport/orchestration shell. The real local
+  attention backward math belongs to `FlashAttnBwd`; this module owns the
+  all-to-all reshapes around that launch boundary. That means the backward
+  surface is still partially speculative even though its communication phases
+  are now concrete.
 -/
-import Tyr.GPU.Kernels.FlashAttnBwd
 
 import Tyr.GPU.Kernels.Prelude
 
@@ -12,161 +14,116 @@ namespace Tyr.GPU.Kernels.UlyssesAttn
 
 open Tyr.GPU
 open Tyr.GPU.Codegen
-open Tyr.GPU.Kernels.FlashAttnBwd (flashAttnBwd flashAttnBwdPrep)
 
-/-! ## Ulysses Attention Backward
+private def asyncTileLoad {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
+    (dst : ST dtype rows cols layout) (src : GPtr dtype) (coord : RTileCoord)
+    (bytes : Nat) : KernelM Unit := do
+  let sem ← allocSemaphore
+  initSemaphore sem 1
+  expectBytes sem bytes
+  loadGlobalAsync dst src coord sem.id
+  waitSemaphore sem
 
-Reverse of the forward pass:
-1. All-to-all on dO (heads → sequence)
-2. Local FlashAttention Backward
-3. All-to-all on dQ, dK, dV (sequence → heads)
--/
+private def barrierAllDevices (label : String) (barrierId : Nat) : KernelM Unit := do
+  comment s!"Cross-device barrier: {label}"
+  arriveAndWait barrierId
 
-/-- Ulysses Attention Backward Kernel -/
+private def allToAllTile (label : String) (output_ptr : GPtr GpuFloat.BFloat16)
+    (input_ptr : GPtr GpuFloat.BFloat16) (coord : RTileCoord)
+    (storeAdd : Bool := false) : KernelM Unit := do
+  let tileRows : Nat := 16
+  let tileCols : Nat := 128
+  let shard : RT GpuFloat.BFloat16 tileRows tileCols ← allocRT .BFloat16 tileRows tileCols
+  let inputShared : ST GpuFloat.BFloat16 tileRows tileCols ← allocST .BFloat16 tileRows tileCols
+  let exchangeShared : ST GpuFloat.BFloat16 tileRows tileCols ← allocST .BFloat16 tileRows tileCols
+
+  comment s!"All-to-all transport for {label}"
+  asyncTileLoad inputShared input_ptr coord (tileRows * tileCols * 2)
+  load shard inputShared
+  multimemStore exchangeShared shard
+  barrierAllDevices s!"{label} exchange complete" 0
+  if storeAdd then
+    storeGlobalAdd output_ptr exchangeShared coord
+  else
+    storeGlobalAsync output_ptr exchangeShared coord
+  sync
+
+/-- Phase 1 of Ulysses backward: redistribute `dO` from head-parallel shards to
+sequence-parallel shards before the local backward launch. -/
 @[gpu_kernel .SM90]
-def ulyssesAttnBwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat16)
-    (V_ptr : GPtr GpuFloat.BFloat16) (O_ptr : GPtr GpuFloat.BFloat16)
-    (dO_ptr : GPtr GpuFloat.BFloat16)
-    (L_ptr : GPtr GpuFloat.Float32) (D_ptr : GPtr GpuFloat.Float32)
-    (dQ_ptr : GPtr GpuFloat.Float32) (dK_ptr : GPtr GpuFloat.Float32)
-    (dV_ptr : GPtr GpuFloat.Float32)
-    (seq_len : KVal UInt64) (head_dim : KVal UInt64)
-    : KernelM Unit := do
-  let _ := (Q_ptr, K_ptr, V_ptr, O_ptr, dO_ptr, L_ptr, D_ptr, seq_len, head_dim)
-  let tileSize : Nat := 64
-  let numKvBlocks : Nat := 4
-  
-  comment "=== Ulysses Attention Backward ==="
-
-  -- 1. All-to-all on dO: Head-parallel -> Sequence-parallel
-  comment "Phase 1: Redistribute dO (Heads -> Sequence)"
-  
-  let dO : RT GpuFloat.BFloat16 tileSize tileSize ← allocRT .BFloat16 tileSize tileSize
-  let dOShared : ST GpuFloat.BFloat16 tileSize tileSize ← allocST .BFloat16 tileSize tileSize
-  
-  -- Simulate A2A: Load local dO part, then 'transmit' to peers
-  -- In reality, this is a collective op.
-  load dO dOShared 
-  
-  -- For simulation of A2A, we'd store to a multimem buffer.
-  multimemStore dOShared dO
-  sync
-  
-  -- After A2A, we have dO for the *sequence* slice.
-  -- We assume dO now contains the correct slice.
-  
-  comment "Phase 2: Local FlashAttention Backward"
-  
-  -- Local Q, K, V are assumed to be available in Sequence Parallel layout 
-  -- (e.g. from saved activation or re-A2A).
-  let q : RT GpuFloat.BFloat16 tileSize tileSize ← allocRT .BFloat16 tileSize tileSize
-  let k : RT GpuFloat.BFloat16 tileSize tileSize ← allocRT .BFloat16 tileSize tileSize
-  let v : RT GpuFloat.BFloat16 tileSize tileSize .Col ← allocRT .BFloat16 tileSize tileSize .Col
-  
-  -- Gradient Accumulators
-  let dQ : RT GpuFloat.Float32 tileSize tileSize ← zeroRT .Float32 tileSize tileSize
-  let dK : RT GpuFloat.Float32 tileSize tileSize ← zeroRT .Float32 tileSize tileSize
-  let dV : RT GpuFloat.Float32 tileSize tileSize ← zeroRT .Float32 tileSize tileSize
-  
-  let qShared : ST GpuFloat.BFloat16 tileSize tileSize ← allocST .BFloat16 tileSize tileSize
-  let kShared : ST GpuFloat.BFloat16 tileSize tileSize ← allocST .BFloat16 tileSize tileSize
-  let vShared : ST GpuFloat.BFloat16 tileSize tileSize .Col ← allocST .BFloat16 tileSize tileSize .Col
-  
-  -- LSE and D vectors
-  let lseVec : RV GpuFloat.Float32 tileSize ← allocRV .Float32 tileSize
-  let dVec : RV GpuFloat.Float32 tileSize ← allocRV .Float32 tileSize
-  let lseShared : SV GpuFloat.Float32 tileSize ← allocSV .Float32 tileSize
-  let dVecShared : SV GpuFloat.Float32 tileSize ← allocSV .Float32 tileSize
-  
-  loadVec lseVec lseShared
-  loadVec dVec dVecShared
-  
-  -- Load Q (long resident)
-  load q qShared
-
-  -- Intermediate vars
-  let s : RT GpuFloat.Float32 tileSize tileSize ← allocRT .Float32 tileSize tileSize
-  let p : RT GpuFloat.Float32 tileSize tileSize ← allocRT .Float32 tileSize tileSize
-  let dP : RT GpuFloat.Float32 tileSize tileSize ← allocRT .Float32 tileSize tileSize
-  let dS : RT GpuFloat.Float32 tileSize tileSize ← allocRT .Float32 tileSize tileSize
-  let dSBf16 : RT GpuFloat.BFloat16 tileSize tileSize ← allocRT .BFloat16 tileSize tileSize
-  let rowMaxVec : RV GpuFloat.Float32 tileSize ← allocRV .Float32 tileSize
-
-  for _blkIdx in krange 0 numKvBlocks do
-    load k kShared
-    load v vShared
-    
-    -- S = Q @ K^T
-    mmaT s q k s
-    makeCausal s s (some (-1e10))
-    
-    -- P = exp(S - L)
-    rowMax rowMaxVec s -- Actually LSE is preloaded
-    subCol s s lseVec
-    exp p s
-    
-    -- dP = dO @ V^T
-    let vRow : RT GpuFloat.BFloat16 tileSize tileSize ← allocRT .BFloat16 tileSize tileSize
-    swapLayout vRow v
-    mmaT dP dO vRow dP
-    
-    -- dS = P * (dP - D)
-    subCol dP dP dVec
-    mul dS p dP
-    makeCausal dS dS (some 0.0)
-    convert dSBf16 dS
-    
-    -- dQ += dS @ K
-    let kCol : RT GpuFloat.BFloat16 tileSize tileSize .Col ← allocRT .BFloat16 tileSize tileSize .Col
-    swapLayout kCol k
-    mma dQ dSBf16 kCol dQ
-    
-    -- dK += dS^T @ Q
-    let dST : RT GpuFloat.BFloat16 tileSize tileSize ← allocRT .BFloat16 tileSize tileSize
-    transpose dST dSBf16
-    let qCol : RT GpuFloat.BFloat16 tileSize tileSize .Col ← allocRT .BFloat16 tileSize tileSize .Col
-    swapLayout qCol q
-    mma dK dST qCol dK
-    
-    -- dV += P^T @ dO
-    let pT : RT GpuFloat.BFloat16 tileSize tileSize ← allocRT .BFloat16 tileSize tileSize
-    let pBf16 : RT GpuFloat.BFloat16 tileSize tileSize ← allocRT .BFloat16 tileSize tileSize
-    convert pBf16 p
-    transpose pT pBf16
-    let dOCol : RT GpuFloat.BFloat16 tileSize tileSize .Col ← allocRT .BFloat16 tileSize tileSize .Col
-    swapLayout dOCol dO
-    mma dV pT dOCol dV
-    
-    sync
-
-  comment "Phase 3: Redistribute Gradients (All-to-All: Seq -> Heads)"
+def ulyssesDoAllToAllBwd (dO_seq_ptr : GPtr GpuFloat.BFloat16)
+    (dO_heads_ptr : GPtr GpuFloat.BFloat16)
+    (dev_idx : KVal UInt32) (world_size : KVal UInt32) : KernelM Unit := do
+  let _ := (dev_idx, world_size)
   let coord ← blockCoord2D
-  
-  -- dQ, dK, dV are currently Sequence Parallel.
-  -- A2A them back to Head Parallel.
-  
-  let dQShared : ST GpuFloat.Float32 tileSize tileSize ← allocST .Float32 tileSize tileSize
-  let dKShared : ST GpuFloat.Float32 tileSize tileSize ← allocST .Float32 tileSize tileSize
-  let dVShared : ST GpuFloat.Float32 tileSize tileSize ← allocST .Float32 tileSize tileSize
-  
-  store dQShared dQ
-  store dKShared dK
-  store dVShared dV
-  
-  multimemStore dQShared dQ -- Simulate A2A
-  multimemStore dKShared dK
-  multimemStore dVShared dV
-  
-  sync
-  
-  -- Final store to global (Head Parallel pointers)
-  -- storeGlobalAdd used for atomic accumulation if necessary
-  storeGlobalAdd dQ_ptr dQShared coord
-  storeGlobalAdd dK_ptr dKShared coord
-  storeGlobalAdd dV_ptr dVShared coord
 
--- Verify
+  comment "Ulysses backward phase 1: head-parallel dO -> sequence-parallel dO"
+  allToAllTile "dO heads->seq" dO_seq_ptr dO_heads_ptr coord
+  barrierAllDevices "backward dO transport complete" 1
 
--- Generate
+/-- Phase 3 of Ulysses backward: return `dQ/dK/dV` from sequence-parallel views
+to head-parallel views. `storeGlobalAdd` is used to make the reduction boundary
+explicit in the current DSL. -/
+@[gpu_kernel .SM90]
+def ulyssesGradReturnAllToAll (dQ_heads_ptr : GPtr GpuFloat.BFloat16)
+    (dK_heads_ptr : GPtr GpuFloat.BFloat16) (dV_heads_ptr : GPtr GpuFloat.BFloat16)
+    (dQ_seq_ptr : GPtr GpuFloat.BFloat16) (dK_seq_ptr : GPtr GpuFloat.BFloat16)
+    (dV_seq_ptr : GPtr GpuFloat.BFloat16)
+    (dev_idx : KVal UInt32) (world_size : KVal UInt32) : KernelM Unit := do
+  let _ := (dev_idx, world_size)
+  let coord ← blockCoord2D
+
+  comment "Ulysses backward phase 3: sequence-parallel grads -> head-parallel grads"
+  allToAllTile "dQ seq->heads" dQ_heads_ptr dQ_seq_ptr coord true
+  allToAllTile "dK seq->heads" dK_heads_ptr dK_seq_ptr coord true
+  allToAllTile "dV seq->heads" dV_heads_ptr dV_seq_ptr coord true
+  barrierAllDevices "backward gradient return complete" 1
+
+/-- Speculative orchestration shell for Ulysses backward.
+This kernel documents the intended launch boundary:
+1. `ulyssesDoAllToAllBwd`
+2. local `FlashAttnBwd` launch on sequence-parallel Q/K/V/dO
+3. `ulyssesGradReturnAllToAll`
+
+The communication choreography is concrete; the single-kernel representation of
+the local backward launch is intentionally not faked here. -/
+@[gpu_kernel .SM90]
+def ulyssesAttnBwd (q_seq_ptr : GPtr GpuFloat.BFloat16) (k_seq_ptr : GPtr GpuFloat.BFloat16)
+    (v_seq_ptr : GPtr GpuFloat.BFloat16) (o_seq_ptr : GPtr GpuFloat.BFloat16)
+    (dO_seq_ptr : GPtr GpuFloat.BFloat16)
+    (l_seq_ptr : GPtr GpuFloat.Float32) (d_seq_ptr : GPtr GpuFloat.Float32)
+    (dQ_heads_ptr : GPtr GpuFloat.BFloat16) (dK_heads_ptr : GPtr GpuFloat.BFloat16)
+    (dV_heads_ptr : GPtr GpuFloat.BFloat16)
+    (dQ_seq_ptr : GPtr GpuFloat.BFloat16) (dK_seq_ptr : GPtr GpuFloat.BFloat16)
+    (dV_seq_ptr : GPtr GpuFloat.BFloat16)
+    (seq_len : KVal UInt64) (head_dim : KVal UInt64)
+    (dev_idx : KVal UInt32) (world_size : KVal UInt32)
+    : KernelM Unit := do
+  let _ := (q_seq_ptr, k_seq_ptr, v_seq_ptr, o_seq_ptr, dO_seq_ptr, l_seq_ptr, d_seq_ptr,
+    dQ_seq_ptr, dK_seq_ptr, dV_seq_ptr, seq_len, head_dim, dev_idx, world_size)
+  let coord ← blockCoord2D
+
+  comment "=== Ulysses Attention Backward (transport shell) ==="
+  comment "This is intentionally not a bespoke fused backward kernel."
+  comment "Local sequence-parallel FlashAttention backward is delegated to a separate launch."
+
+  comment "Mark the sequence-parallel backward window as ready"
+  let marker : RT GpuFloat.BFloat16 16 128 ← allocRT .BFloat16 16 128
+  let markerShared : ST GpuFloat.BFloat16 16 128 ← allocST .BFloat16 16 128
+  asyncTileLoad markerShared dQ_seq_ptr coord (16 * 128 * 2)
+  load marker markerShared
+  multimemStore markerShared marker
+  barrierAllDevices "local backward window opened" 0
+
+  comment "Return dQ/dK/dV after the local backward launch completes"
+  let _markerOut : RT GpuFloat.BFloat16 16 128 ← allocRT .BFloat16 16 128
+  let gradShared : ST GpuFloat.BFloat16 16 128 ← allocST .BFloat16 16 128
+  asyncTileLoad gradShared dQ_seq_ptr coord (16 * 128 * 2)
+  storeGlobalAdd dQ_heads_ptr gradShared coord
+  asyncTileLoad gradShared dK_seq_ptr coord (16 * 128 * 2)
+  storeGlobalAdd dK_heads_ptr gradShared coord
+  asyncTileLoad gradShared dV_seq_ptr coord (16 * 128 * 2)
+  storeGlobalAdd dV_heads_ptr gradShared coord
+  barrierAllDevices "local backward window closed" 1
 
 end Tyr.GPU.Kernels.UlyssesAttn
