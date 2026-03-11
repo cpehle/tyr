@@ -141,6 +141,15 @@ inductive ScalarUnaryOp where
   | Exp
   deriving Repr, BEq, Hashable, Inhabited, Lean.ToExpr
 
+/-- Scalar comparison operations on runtime indices/parameters. -/
+inductive ScalarCompareOp where
+  | Eq
+  | Lt
+  | Le
+  | Gt
+  | Ge
+  deriving Repr, BEq, Hashable, Inhabited, Lean.ToExpr
+
 /-- Scalar binary operations on runtime indices/parameters. -/
 inductive ScalarBinaryOp where
   | Add
@@ -150,6 +159,14 @@ inductive ScalarBinaryOp where
   | Mod
   | Min
   | Max
+  deriving Repr, BEq, Hashable, Inhabited, Lean.ToExpr
+
+/-- Dynamic global-layout dimensions available from a kernel parameter. -/
+inductive LayoutDimAxis where
+  | Batch
+  | Depth
+  | Rows
+  | Cols
   deriving Repr, BEq, Hashable, Inhabited, Lean.ToExpr
 
 /-- Broadcast axis -/

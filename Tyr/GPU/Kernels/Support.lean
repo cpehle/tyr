@@ -15,8 +15,39 @@ namespace Tyr.GPU.Kernels.Support
 open Tyr.GPU
 open Tyr.GPU.Codegen
 
-private def rawLines (lines : Array String) : KernelM Unit :=
-  emitRaw (String.intercalate "\n" lines.toList)
+private def axisSelectUInt32
+    (axis : KVal UInt32)
+    (axis0 axis1 axis2 axis3 : KVal UInt32)
+    (name : String) : KernelM (KVal UInt32) := do
+  let zero ← constIntVal 0 s!"{name}_axis0"
+  let one ← constIntVal 1 s!"{name}_axis1"
+  let two ← constIntVal 2 s!"{name}_axis2"
+  let is0 ← scalarEq axis zero s!"{name}_is0"
+  let is1 ← scalarEq axis one s!"{name}_is1"
+  let is2 ← scalarEq axis two s!"{name}_is2"
+  let tail23 ← scalarSelect is2 axis2 axis3 s!"{name}_tail23"
+  let tail123 ← scalarSelect is1 axis1 tail23 s!"{name}_tail123"
+  scalarSelect is0 axis0 tail123 s!"{name}_selected"
+
+private def axisPredicate012
+    (axis : KVal UInt32)
+    (name : String) : KernelM (KVal Bool × KVal Bool × KVal Bool) := do
+  let zero ← constIntVal 0 s!"{name}_axis0"
+  let one ← constIntVal 1 s!"{name}_axis1"
+  let two ← constIntVal 2 s!"{name}_axis2"
+  let is0 ← scalarEq axis zero s!"{name}_is0"
+  let is1 ← scalarEq axis one s!"{name}_is1"
+  let is2 ← scalarEq axis two s!"{name}_is2"
+  pure (is0, is1, is2)
+
+private def keepUnlessAxis3
+    (is0 is1 is2 : KVal Bool)
+    (keep : KVal UInt32)
+    (replace : KVal UInt32)
+    (name : String) : KernelM (KVal UInt32) := do
+  let after2 ← scalarSelect is2 keep replace s!"{name}_after2"
+  let after1 ← scalarSelect is1 keep after2 s!"{name}_after1"
+  scalarSelect is0 keep after1 s!"{name}_after0"
 
 /-- Async global-to-shared tile load with an explicit byte-count contract. -/
 def asyncTileLoad {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
@@ -105,41 +136,73 @@ distributed transport surfaces. `scatter_axis` and `gather_axis` follow the
 ThunderKittens numbering over `(batch, depth, row_blocks, col_blocks)`. -/
 def allToAllTile (label : String) (output_ptr : GPtr GpuFloat.BFloat16)
     (input_ptr : GPtr GpuFloat.BFloat16)
-    (dev_idx : KVal UInt32) (_world_size : KVal UInt32)
+    (dev_idx : KVal UInt32) (world_size : KVal UInt32)
     (scatter_axis : KVal UInt32) (gather_axis : KVal UInt32) : KernelM Unit := do
+  let _ := world_size
   comment s!"All-to-all transport for {label}"
-  rawLines #[
-    "using shared_tile = st_bf<16, 128>;",
-    s!"auto &output = {output_ptr.id.toIdent};",
-    s!"auto &input = {input_ptr.id.toIdent};",
-    s!"const int dev_idx = {dev_idx.id.toIdent};",
-    s!"const int scatter_axis = {scatter_axis.id.toIdent};",
-    s!"const int gather_axis = {gather_axis.id.toIdent};",
-    "extern __shared__ int __shm[];",
-    "tma_swizzle_allocator allocator((int*)&__shm[0]);",
-    "shared_tile &tile = allocator.allocate<shared_tile>();",
-    "__shared__ semaphore arrived;",
-    "init_semaphore(arrived, 0, 1);",
-    "int task_idx = blockIdx.x;",
-    "int batch_idx = task_idx / (input.depth() * (input.rows() / 16) * (input.cols() / 128));",
-    "task_idx %= (input.depth() * (input.rows() / 16) * (input.cols() / 128));",
-    "int depth_idx = task_idx / ((input.rows() / 16) * (input.cols() / 128));",
-    "task_idx %= ((input.rows() / 16) * (input.cols() / 128));",
-    "int row_block_idx = task_idx / (input.cols() / 128);",
-    "int col_block_idx = task_idx % (input.cols() / 128);",
-    "tma::expect_bytes(arrived, sizeof(tile));",
-    "tma::load_async(tile, input, {batch_idx, depth_idx, row_block_idx, col_block_idx}, arrived);",
-    "int dst_dev_idx = 0;",
-    "if (scatter_axis == 0) { dst_dev_idx = batch_idx / output.batch(); batch_idx %= output.batch(); }",
-    "else if (scatter_axis == 1) { dst_dev_idx = depth_idx / output.depth(); depth_idx %= output.depth(); }",
-    "else if (scatter_axis == 2) { dst_dev_idx = row_block_idx / (output.rows() / 16); row_block_idx %= (output.rows() / 16); }",
-    "else { dst_dev_idx = col_block_idx / (output.cols() / 128); col_block_idx %= (output.cols() / 128); }",
-    "if (gather_axis == 0) batch_idx += input.batch() * dev_idx;",
-    "else if (gather_axis == 1) depth_idx += input.depth() * dev_idx;",
-    "else if (gather_axis == 2) row_block_idx += (input.rows() / 16) * dev_idx;",
-    "else col_block_idx += (input.cols() / 128) * dev_idx;",
-    "wait(arrived, 0);",
-    "tma::store_async(output, tile, {batch_idx, depth_idx, row_block_idx, col_block_idx});"
-  ]
+  let rowTile ← constIntVal 16 "all_to_all_row_tile"
+  let colTile ← constIntVal 128 "all_to_all_col_tile"
+  let taskIdx : KVal UInt32 := ⟨← getBlockIdxX, "task_idx"⟩
+
+  let inputBatch ← layoutBatch input_ptr "input_batch"
+  let inputDepth ← layoutDepth input_ptr "input_depth"
+  let inputRows ← layoutRows input_ptr "input_rows"
+  let inputCols ← layoutCols input_ptr "input_cols"
+  let inputRowBlocks ← scalarDivVal inputRows rowTile "input_row_blocks"
+  let inputColBlocks ← scalarDivVal inputCols colTile "input_col_blocks"
+  let tilesPerDepth ← scalarMulVal inputRowBlocks inputColBlocks "input_tiles_per_depth"
+  let tilesPerBatch ← scalarMulVal inputDepth tilesPerDepth "input_tiles_per_batch"
+
+  let batchIdx ← scalarDivVal taskIdx tilesPerBatch "batch_idx"
+  let taskAfterBatch ← scalarMod taskIdx tilesPerBatch "task_after_batch"
+  let depthIdx ← scalarDivVal taskAfterBatch tilesPerDepth "depth_idx"
+  let taskAfterDepth ← scalarMod taskAfterBatch tilesPerDepth "task_after_depth"
+  let rowBlockIdx ← scalarDivVal taskAfterDepth inputColBlocks "row_block_idx"
+  let colBlockIdx ← scalarMod taskAfterDepth inputColBlocks "col_block_idx"
+
+  let inputCoord := makeRTileCoord batchIdx.id depthIdx.id rowBlockIdx.id colBlockIdx.id
+  let tile : ST GpuFloat.BFloat16 16 128 ← allocST .BFloat16 16 128
+  asyncTileLoad tile input_ptr inputCoord (16 * 128 * GpuFloat.bytes .BFloat16)
+
+  let outputBatch ← layoutBatch output_ptr "output_batch"
+  let outputDepth ← layoutDepth output_ptr "output_depth"
+  let outputRows ← layoutRows output_ptr "output_rows"
+  let outputCols ← layoutCols output_ptr "output_cols"
+  let outputRowBlocks ← scalarDivVal outputRows rowTile "output_row_blocks"
+  let outputColBlocks ← scalarDivVal outputCols colTile "output_col_blocks"
+
+  let scatterDim ← axisSelectUInt32
+    scatter_axis batchIdx depthIdx rowBlockIdx colBlockIdx "scatter_dim"
+  let scatterChunk ← axisSelectUInt32
+    scatter_axis outputBatch outputDepth outputRowBlocks outputColBlocks "scatter_chunk"
+  let localScatterDim ← scalarMod scatterDim scatterChunk "local_scatter_dim"
+
+  let (scatterIs0, scatterIs1, scatterIs2) ← axisPredicate012 scatter_axis "scatter"
+  let localBatch ← scalarSelect scatterIs0 localScatterDim batchIdx "local_batch"
+  let localDepth ← scalarSelect scatterIs1 localScatterDim depthIdx "local_depth"
+  let localRow ← scalarSelect scatterIs2 localScatterDim rowBlockIdx "local_row_block"
+  let localCol ← keepUnlessAxis3
+    scatterIs0 scatterIs1 scatterIs2 colBlockIdx localScatterDim "local_col_block"
+
+  let batchOffset ← scalarMulVal inputBatch dev_idx "batch_gather_offset"
+  let depthOffset ← scalarMulVal inputDepth dev_idx "depth_gather_offset"
+  let rowOffset ← scalarMulVal inputRowBlocks dev_idx "row_gather_offset"
+  let colOffset ← scalarMulVal inputColBlocks dev_idx "col_gather_offset"
+
+  let batchGathered ← scalarAddVal localBatch batchOffset "batch_gathered"
+  let depthGathered ← scalarAddVal localDepth depthOffset "depth_gathered"
+  let rowGathered ← scalarAddVal localRow rowOffset "row_gathered"
+  let colGathered ← scalarAddVal localCol colOffset "col_gathered"
+
+  let (gatherIs0, gatherIs1, gatherIs2) ← axisPredicate012 gather_axis "gather"
+  let outputBatchIdx ← scalarSelect gatherIs0 batchGathered localBatch "output_batch_idx"
+  let outputDepthIdx ← scalarSelect gatherIs1 depthGathered localDepth "output_depth_idx"
+  let outputRowIdx ← scalarSelect gatherIs2 rowGathered localRow "output_row_idx"
+  let outputColIdx ← keepUnlessAxis3
+    gatherIs0 gatherIs1 gatherIs2 localCol colGathered "output_col_idx"
+
+  let outputCoord := makeRTileCoord
+    outputBatchIdx.id outputDepthIdx.id outputRowIdx.id outputColIdx.id
+  storeGlobalAsync output_ptr tile outputCoord
 
 end Tyr.GPU.Kernels.Support

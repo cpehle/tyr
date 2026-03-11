@@ -22,7 +22,7 @@ The important distinction now is not coverage vs missing families. It is:
 
 - source-backed kernels that are fully represented in the Lean DSL today, and
 - source-backed kernels that still use raw backend blocks for TMEM, cluster,
-  or distributed PGL-style constructs that the DSL does not yet model as
+  or the remaining distributed PGL-style constructs that the DSL does not yet model as
   first-class operations.
 
 The working exhaustive source-to-Lean matrix lives in
@@ -46,7 +46,7 @@ The working exhaustive source-to-Lean matrix lives in
 | `Tyr/GPU/Kernels/NvFp4Gemm.lean` (`tkB200NvFp4GemmFwd`) | `thirdparty/ThunderKittens/kernels/gemm/nvfp4_b200/nvfp4_b200_gemm.cu` | Dedicated NVFP4 Blackwell GEMM counterpart. |
 | `Tyr/GPU/Kernels/Distributed.lean` (`allGatherFwd`, `allReduceFwd`, `allReduceEducationalFwd`, `reduceScatterFwd`, `agGemmFwd`, `agGemmB200Fwd`, `agGemmFp8B200Fwd`, `gemmArFwd`, `gemmArH100LcscFwd`, `gemmRsFwd`, `gemmRsB200Fwd`, `gemmRsFp8B200Fwd`) | `thirdparty/ThunderKittens/kernels/parallel/*` | Collective and communication+compute counterparts for the distributed family. |
 | `Tyr/GPU/Kernels/RingAttn.lean` (`ringAttnPartial`, `ringAttnComm`, `ringAttnReduce`) | `thirdparty/ThunderKittens/kernels/parallel/ring_attn/ring_attn_h100.cu` | Forward ring-attention phases are represented directly. |
-| `Tyr/GPU/Kernels/UlyssesAttn.lean` (`allToAllFwd`, `ulyssesQkvAllToAll`, `ulyssesAttnFwd`) | `thirdparty/ThunderKittens/kernels/parallel/ulysses_attn/ulysses_attn.cu` | Ulysses transport/orchestration family built on the shared all-to-all surface. |
+| `Tyr/GPU/Kernels/UlyssesAttn.lean` (`allToAllFwd`, `ulyssesQkvAllToAll`, `ulyssesAttnFwd`) | `thirdparty/ThunderKittens/kernels/parallel/ulysses_attn/ulysses_attn.cu` | Ulysses transport/orchestration family built on the typed shared all-to-all surface. |
 | `Tyr/GPU/Kernels/MOE.lean` (`tkMoeDispatchGemm`) | `thirdparty/ThunderKittens/kernels/parallel/moe_dispatch_gemm/moe_dispatch_gemm_h100.cu` | Canonical fused dispatch/grouped-GEMM surface. |
 | `Tyr/GPU/Kernels/Rotary.lean` | `thirdparty/ThunderKittens/kernels/rotary/rotary.cu` | Canonical rotary position kernel. |
 
@@ -65,8 +65,9 @@ The remaining work is now mostly DSL expressiveness work:
 
 1. Add first-class TMEM, cluster, and packed-scale constructs so the Blackwell
    GEMM family can move out of raw backend blocks.
-2. Add first-class distributed PGL/topology primitives so the distributed,
-   Ring, and Ulysses families no longer need raw peer-arithmetic scaffolding.
+2. Add first-class distributed PGL/topology primitives so the remaining
+   distributed, Ring, and communication+GEMM families no longer need raw
+   peer-arithmetic scaffolding.
 3. Tighten exact CTA worker packing for some attention/state-space families
    where the source structure is represented, but the runtime packing is still
    compressed.

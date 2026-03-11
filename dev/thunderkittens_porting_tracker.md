@@ -85,7 +85,7 @@ Status meanings:
 | `parallel/all_gather/all_gather.cu` | `Tyr/GPU/Kernels/Distributed.lean` (`allGatherFwd`) | `implemented+raw` | Collective phase is encoded directly. |
 | `parallel/all_reduce/all_reduce.cu` | `Tyr/GPU/Kernels/Distributed.lean` (`allReduceFwd`) | `implemented+raw` | Collective phase is encoded directly. |
 | `parallel/all_reduce_educational/all_reduce_educational.cu` | `Tyr/GPU/Kernels/Distributed.lean` (`allReduceEducationalFwd`) | `implemented` | Educational in-place all-reduce counterpart exists. |
-| `parallel/all_to_all/all_to_all.cu` | `Tyr/GPU/Kernels/Distributed.lean`, `Tyr/GPU/Kernels/UlyssesAttn.lean` | `implemented+raw` | The raw all-to-all transport/indexing surface is shared across distributed and Ulysses kernels. |
+| `parallel/all_to_all/all_to_all.cu` | `Tyr/GPU/Kernels/Distributed.lean`, `Tyr/GPU/Kernels/UlyssesAttn.lean` | `implemented` | The shared all-to-all transport/indexing surface is now encoded through typed layout-dimension and scalar-control DSL primitives. |
 | `parallel/gemm_ar/gemm_ar_h100.cu` | `Tyr/GPU/Kernels/Distributed.lean` (`gemmArFwd`) | `implemented+raw` | Dedicated H100 GEMM+all-reduce counterpart exists. |
 | `parallel/gemm_ar/gemm_ar_h100_lcsc.cu` | `Tyr/GPU/Kernels/Distributed.lean` (`gemmArH100LcscFwd`) | `implemented+raw` | Dedicated LCSC GEMM+all-reduce counterpart exists. |
 | `parallel/gemm_rs/gemm_rs_b200.cu` | `Tyr/GPU/Kernels/Distributed.lean` (`gemmRsB200Fwd`) | `implemented+raw` | Dedicated Blackwell GEMM+reduce-scatter counterpart exists. |
@@ -94,7 +94,7 @@ Status meanings:
 | `parallel/moe_dispatch_gemm/moe_dispatch_gemm_h100.cu` | `Tyr/GPU/Kernels/MOE.lean` (`tkMoeDispatchGemm`) | `implemented+raw` | Canonical fused dispatch/grouped-GEMM surface exists. |
 | `parallel/reduce_scatter/reduce_scatter.cu` | `Tyr/GPU/Kernels/Distributed.lean` (`reduceScatterFwd`) | `implemented+raw` | Collective phase is encoded directly. |
 | `parallel/ring_attn/ring_attn_h100.cu` | `Tyr/GPU/Kernels/RingAttn.lean` (`ringAttnPartial`, `ringAttnComm`, `ringAttnReduce`) | `implemented+raw` | Forward ring attention is split into the same coarse phases as the vendored kernel. |
-| `parallel/ulysses_attn/ulysses_attn.cu` | `Tyr/GPU/Kernels/UlyssesAttn.lean` (`allToAllFwd`, `ulyssesQkvAllToAll`, `ulyssesAttnFwd`) | `implemented+raw` | Ulysses transport/orchestration is represented directly around the shared all-to-all surface. |
+| `parallel/ulysses_attn/ulysses_attn.cu` | `Tyr/GPU/Kernels/UlyssesAttn.lean` (`allToAllFwd`, `ulyssesQkvAllToAll`, `ulyssesAttnFwd`) | `implemented` | Ulysses transport/orchestration now rides on the typed shared all-to-all surface instead of a raw backend block. |
 | `rotary/rotary.cu` | `Tyr/GPU/Kernels/Rotary.lean` | `implemented` | Reasonably faithful tile split / rotate / concat structure. |
 
 ## Tyr-Only Derived Kernels
@@ -116,9 +116,9 @@ arithmetic, not missing kernel families:
 
 1. Promote TMEM / cluster-specialized storage / scale-tile concepts so the
    Blackwell GEMM family no longer needs raw backend blocks.
-2. Add first-class distributed PGL / peer arithmetic so `Distributed.lean`,
-   `RingAttn.lean`, and `UlyssesAttn.lean` can encode the full topology logic
-   without caller-provided layout assumptions.
+2. Add first-class distributed PGL / peer arithmetic for the remaining
+   collective/GEMM and ring-attention kernels. The shared all-to-all transport
+   path is now typed, but the broader multi-peer topology DSL is still thin.
 3. Tighten exact CTA worker packing for `MhaH100LCF.lean`, `Based.lean`,
    `LinearAttn.lean`, `Hedgehog.lean`, and `Mamba2.lean`.
 

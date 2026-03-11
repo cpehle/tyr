@@ -81,6 +81,7 @@ inductive KStmt where
   | loadGlobalAsync (dst src : VarId) (coordB coordD coordR coordC sem : VarId)
   | storeGlobalAsync (dst src : VarId) (coordB coordD coordR coordC : VarId)
   | storeGlobalAdd (dst src : VarId) (coordB coordD coordR coordC : VarId)  -- Atomic add
+  | layoutDim (dst src : VarId) (axis : LayoutDimAxis)
 
   -- Vector global memory operations
   | loadVecGlobal (dst src : VarId) (offset : VarId)
@@ -181,7 +182,9 @@ inductive KStmt where
   | constInt (dst : VarId) (value : Int)     -- Integer constant
   | constFloat (dst : VarId) (value : Float)
   | scalarUnary (op : ScalarUnaryOp) (dst src : VarId)
+  | scalarCompare (op : ScalarCompareOp) (dst a b : VarId)
   | scalarBinary (op : ScalarBinaryOp) (dst a b : VarId)
+  | scalarSelect (dst cond ifTrue ifFalse : VarId)
   | vecIota (dst : VarId) (start step : Float)
   | vecFillScalar (dst scalar : VarId)
   | raw (code : String)                      -- Exact backend code escape hatch

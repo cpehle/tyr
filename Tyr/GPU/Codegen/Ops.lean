@@ -147,11 +147,25 @@ def scalarUnary {T : Type} (op : ScalarUnaryOp)
   emit (.scalarUnary op v src.id)
   pure ⟨v, name⟩
 
+/-- Compare two runtime scalars and return a boolean scalar. -/
+def scalarCompare {T : Type} (op : ScalarCompareOp)
+    (a b : KVal T) (name : String := "scalar_cmp") : KernelM (KVal Bool) := do
+  let v ← freshVar
+  emit (.scalarCompare op v a.id b.id)
+  pure ⟨v, name⟩
+
 /-- Apply a scalar binary operation to two runtime scalars. -/
 def scalarBinary {T : Type} (op : ScalarBinaryOp)
     (a b : KVal T) (name : String := "scalar_binary") : KernelM (KVal T) := do
   let v ← freshVar
   emit (.scalarBinary op v a.id b.id)
+  pure ⟨v, name⟩
+
+/-- Select between two runtime scalar values. -/
+def scalarSelect {T : Type} (cond : KVal Bool)
+    (ifTrue ifFalse : KVal T) (name : String := "scalar_select") : KernelM (KVal T) := do
+  let v ← freshVar
+  emit (.scalarSelect v cond.id ifTrue.id ifFalse.id)
   pure ⟨v, name⟩
 
 /-- Negate a runtime scalar. -/
@@ -165,6 +179,26 @@ def scalarExp (src : KVal Float32) (name : String := "exp") : KernelM (KVal Floa
 /-- Add two runtime scalars. -/
 def scalarAddVal {T : Type} (a b : KVal T) (name : String := "add") : KernelM (KVal T) :=
   scalarBinary .Add a b name
+
+/-- Test two runtime scalars for equality. -/
+def scalarEq {T : Type} (a b : KVal T) (name : String := "eq") : KernelM (KVal Bool) :=
+  scalarCompare .Eq a b name
+
+/-- Test whether one runtime scalar is less than another. -/
+def scalarLt {T : Type} (a b : KVal T) (name : String := "lt") : KernelM (KVal Bool) :=
+  scalarCompare .Lt a b name
+
+/-- Test whether one runtime scalar is less than or equal to another. -/
+def scalarLe {T : Type} (a b : KVal T) (name : String := "le") : KernelM (KVal Bool) :=
+  scalarCompare .Le a b name
+
+/-- Test whether one runtime scalar is greater than another. -/
+def scalarGt {T : Type} (a b : KVal T) (name : String := "gt") : KernelM (KVal Bool) :=
+  scalarCompare .Gt a b name
+
+/-- Test whether one runtime scalar is greater than or equal to another. -/
+def scalarGe {T : Type} (a b : KVal T) (name : String := "ge") : KernelM (KVal Bool) :=
+  scalarCompare .Ge a b name
 
 /-- Subtract two runtime scalars. -/
 def scalarSub {T : Type} (a b : KVal T) (name : String := "sub") : KernelM (KVal T) :=
@@ -854,6 +888,34 @@ def storeGlobalAddCoord {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayou
     (coordB coordD coordR coordC : VarId)
     : KernelM Unit := do
   emit (.storeGlobalAdd dst.id src.id coordB coordD coordR coordC)
+
+/-- Query a dynamic dimension from a global-layout kernel parameter. -/
+def layoutDim {dtype : GpuFloat}
+    (src : GPtr dtype) (axis : LayoutDimAxis)
+    (name : String := "layout_dim") : KernelM (KVal UInt32) := do
+  let v ← freshVar
+  emit (.layoutDim v src.id axis)
+  pure ⟨v, name⟩
+
+/-- Query the batch dimension from a global-layout kernel parameter. -/
+def layoutBatch {dtype : GpuFloat} (src : GPtr dtype)
+    (name : String := "batch") : KernelM (KVal UInt32) :=
+  layoutDim src .Batch name
+
+/-- Query the depth dimension from a global-layout kernel parameter. -/
+def layoutDepth {dtype : GpuFloat} (src : GPtr dtype)
+    (name : String := "depth") : KernelM (KVal UInt32) :=
+  layoutDim src .Depth name
+
+/-- Query the row dimension from a global-layout kernel parameter. -/
+def layoutRows {dtype : GpuFloat} (src : GPtr dtype)
+    (name : String := "rows") : KernelM (KVal UInt32) :=
+  layoutDim src .Rows name
+
+/-- Query the column dimension from a global-layout kernel parameter. -/
+def layoutCols {dtype : GpuFloat} (src : GPtr dtype)
+    (name : String := "cols") : KernelM (KVal UInt32) :=
+  layoutDim src .Cols name
 
 /-- Load vector from global memory.
     Emits: kittens::load(dst, src, offset) -/

@@ -267,6 +267,14 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout)
       | some info => (info.rows, info.cols)
       | none => (1, 1)
     s!"{indent}warp::tma::store_add_async({dst.toIdent}, {src.toIdent}, kittens::coord<>({coordB.toIdent}, {coordD.toIdent}, ({coordR.toIdent} * {rowScale}), ({coordC.toIdent} * {colScale})));\n"
+  | .layoutDim dst src .Batch =>
+    s!"{indent}auto {dst.toIdent} = {src.toIdent}.batch();\n"
+  | .layoutDim dst src .Depth =>
+    s!"{indent}auto {dst.toIdent} = {src.toIdent}.depth();\n"
+  | .layoutDim dst src .Rows =>
+    s!"{indent}auto {dst.toIdent} = {src.toIdent}.rows();\n"
+  | .layoutDim dst src .Cols =>
+    s!"{indent}auto {dst.toIdent} = {src.toIdent}.cols();\n"
 
   -- Vector global memory operations
   | .loadVecGlobal dst src offset =>
@@ -627,6 +635,16 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout)
     s!"{indent}auto {dst.toIdent} = -{src.toIdent};\n"
   | .scalarUnary .Exp dst src =>
     s!"{indent}auto {dst.toIdent} = ::expf(static_cast<float>({src.toIdent}));\n"
+  | .scalarCompare .Eq dst a b =>
+    s!"{indent}auto {dst.toIdent} = ({a.toIdent} == {b.toIdent});\n"
+  | .scalarCompare .Lt dst a b =>
+    s!"{indent}auto {dst.toIdent} = ({a.toIdent} < {b.toIdent});\n"
+  | .scalarCompare .Le dst a b =>
+    s!"{indent}auto {dst.toIdent} = ({a.toIdent} <= {b.toIdent});\n"
+  | .scalarCompare .Gt dst a b =>
+    s!"{indent}auto {dst.toIdent} = ({a.toIdent} > {b.toIdent});\n"
+  | .scalarCompare .Ge dst a b =>
+    s!"{indent}auto {dst.toIdent} = ({a.toIdent} >= {b.toIdent});\n"
   | .scalarBinary .Add dst a b =>
     s!"{indent}auto {dst.toIdent} = {a.toIdent} + {b.toIdent};\n"
   | .scalarBinary .Sub dst a b =>
@@ -641,6 +659,8 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout)
     s!"{indent}auto {dst.toIdent} = ({a.toIdent} < {b.toIdent}) ? {a.toIdent} : {b.toIdent};\n"
   | .scalarBinary .Max dst a b =>
     s!"{indent}auto {dst.toIdent} = ({a.toIdent} > {b.toIdent}) ? {a.toIdent} : {b.toIdent};\n"
+  | .scalarSelect dst cond ifTrue ifFalse =>
+    s!"{indent}auto {dst.toIdent} = {cond.toIdent} ? {ifTrue.toIdent} : {ifFalse.toIdent};\n"
   | .vecIota dst start step =>
     s!"{indent}warp::apply({dst.toIdent}, {dst.toIdent}, [] __device__ (int _i, auto _x) \{\n" ++
     s!"{indent}  return static_cast<decltype(_x)>({start}f + {step}f * static_cast<float>(_i));\n" ++
