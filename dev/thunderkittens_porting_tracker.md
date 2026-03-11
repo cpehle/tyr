@@ -82,7 +82,7 @@ Status meanings:
 | `parallel/ag_gemm/ag_gemm_b200.cu` | `Tyr/GPU/Kernels/Distributed.lean` (`agGemmB200Fwd`) | `implemented+raw` | Dedicated Blackwell AG+GEMM counterpart exists. |
 | `parallel/ag_gemm/ag_gemm_h100.cu` | `Tyr/GPU/Kernels/Distributed.lean` (`agGemmFwd`) | `implemented+raw` | Dedicated H100 AG+GEMM counterpart exists. |
 | `parallel/ag_gemm_fp8/ag_gemm_fp8_b200.cu` | `Tyr/GPU/Kernels/Distributed.lean` (`agGemmFp8B200Fwd`) | `implemented+raw` | Dedicated Blackwell FP8 AG+GEMM counterpart exists. |
-| `parallel/all_gather/all_gather.cu` | `Tyr/GPU/Kernels/Distributed.lean` (`allGatherFwd`) | `implemented+raw` | Collective phase is encoded directly. |
+| `parallel/all_gather/all_gather.cu` | `Tyr/GPU/Kernels/Distributed.lean` (`allGatherFwd`) | `implemented` | The transport path is now encoded through typed layout-dimension and scalar-control DSL primitives. |
 | `parallel/all_reduce/all_reduce.cu` | `Tyr/GPU/Kernels/Distributed.lean` (`allReduceFwd`) | `implemented+raw` | Collective phase is encoded directly. |
 | `parallel/all_reduce_educational/all_reduce_educational.cu` | `Tyr/GPU/Kernels/Distributed.lean` (`allReduceEducationalFwd`) | `implemented` | Educational in-place all-reduce counterpart exists. |
 | `parallel/all_to_all/all_to_all.cu` | `Tyr/GPU/Kernels/Distributed.lean`, `Tyr/GPU/Kernels/UlyssesAttn.lean` | `implemented` | The shared all-to-all transport/indexing surface is now encoded through typed layout-dimension and scalar-control DSL primitives. |
@@ -117,8 +117,9 @@ arithmetic, not missing kernel families:
 1. Promote TMEM / cluster-specialized storage / scale-tile concepts so the
    Blackwell GEMM family no longer needs raw backend blocks.
 2. Add first-class distributed PGL / peer arithmetic for the remaining
-   collective/GEMM and ring-attention kernels. The shared all-to-all transport
-   path is now typed, but the broader multi-peer topology DSL is still thin.
+   all-reduce/reduce-scatter, communication+GEMM, and ring-attention kernels.
+   The shared all-to-all and all-gather transport paths are now typed, but the
+   broader multi-peer topology DSL is still thin.
 3. Tighten exact CTA worker packing for `MhaH100LCF.lean`, `Based.lean`,
    `LinearAttn.lean`, `Hedgehog.lean`, and `Mamba2.lean`.
 

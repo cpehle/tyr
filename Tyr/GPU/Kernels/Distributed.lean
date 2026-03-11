@@ -272,26 +272,21 @@ then write the gathered view through the caller-provided output layout. -/
 @[gpu_kernel .SM90]
 def allGatherFwd (output_ptr : GPtr GpuFloat.BFloat16) (input_ptr : GPtr GpuFloat.BFloat16)
     (dev_idx : KVal UInt32) (world_size : KVal UInt32) : KernelM Unit := do
-  let _ := world_size
   comment "ThunderKittens all_gather: single-tile TMA load from the local shard, then store into the gathered column range"
-  rawLines #[
-    "using shared_tile = st_bf<128, 128>;",
-    s!"auto &output = {output_ptr.id.toIdent};",
-    s!"auto &input = {input_ptr.id.toIdent};",
-    s!"const int dev_idx = {dev_idx.id.toIdent};",
-    "extern __shared__ int __shm[];",
-    "tma_swizzle_allocator allocator((int*)&__shm[0]);",
-    "shared_tile &tile = allocator.allocate<shared_tile>();",
-    "const int row_block_idx = blockIdx.y;",
-    "const int col_block_idx = blockIdx.x;",
-    "const int col_blocks_per_dev = output.cols() / 128 / 8;",
-    "__shared__ semaphore arrived;",
-    "init_semaphore(arrived, 0, 1);",
-    "tma::expect_bytes(arrived, sizeof(tile));",
-    "tma::load_async(tile, input, {row_block_idx, col_block_idx}, arrived);",
-    "wait(arrived, 0);",
-    "tma::store_async(output, tile, {row_block_idx, col_blocks_per_dev * dev_idx + col_block_idx});"
-  ]
+  let tileCols ← constIntVal 128 "all_gather_tile_cols"
+  let baseCoord ← blockCoord2D
+  let rowBlockIdx : KVal UInt32 := ⟨baseCoord.r, "all_gather_row_block"⟩
+  let colBlockIdx : KVal UInt32 := ⟨baseCoord.c, "all_gather_col_block"⟩
+  let tile : ST GpuFloat.BFloat16 128 128 ← allocST .BFloat16 128 128
+  Support.asyncTileLoad tile input_ptr baseCoord (128 * 128 * GpuFloat.bytes .BFloat16)
+
+  let outputCols ← layoutCols output_ptr "all_gather_output_cols"
+  let outputColBlocks ← scalarDivVal outputCols tileCols "all_gather_output_col_blocks"
+  let colBlocksPerDev ← scalarDivVal outputColBlocks world_size "all_gather_col_blocks_per_dev"
+  let outputColBase ← scalarMulVal colBlocksPerDev dev_idx "all_gather_output_col_base"
+  let outputColIdx ← scalarAddVal outputColBase colBlockIdx "all_gather_output_col_idx"
+  let outputCoord := makeRTileCoord baseCoord.b baseCoord.d rowBlockIdx.id outputColIdx.id
+  storeGlobalAsync output_ptr tile outputCoord
   Support.barrierAllDevices "all_gather epilogue" 1
 
 /-- ThunderKittens-style all-reduce: multimem reduce, republish the reduced tile,
