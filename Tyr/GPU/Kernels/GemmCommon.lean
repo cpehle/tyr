@@ -96,6 +96,29 @@ def loadRowColScaleVectors {tileM tileN : Nat}
   loadVec scaleCol scaleColShared
   pure (scaleRow, scaleCol)
 
+/-- Load row and column scale vectors from arbitrary floating dtypes and convert
+them to Float32 for epilogue math. -/
+def loadRowColScaleVectorsAsFloat32
+    {tileM tileN : Nat}
+    {scaleRowDtype scaleColDtype : GpuFloat}
+    (scaleRowPtr : GPtr scaleRowDtype)
+    (scaleColPtr : GPtr scaleColDtype)
+    (coord : RTileCoord)
+    : KernelM (RV GpuFloat.Float32 tileM × RV GpuFloat.Float32 tileN) := do
+  let scaleRowShared : SV scaleRowDtype tileM ← allocSV scaleRowDtype tileM
+  let scaleColShared : SV scaleColDtype tileN ← allocSV scaleColDtype tileN
+  let scaleRowNative : RV scaleRowDtype tileM ← allocRV scaleRowDtype tileM
+  let scaleColNative : RV scaleColDtype tileN ← allocRV scaleColDtype tileN
+  let scaleRow : RV GpuFloat.Float32 tileM ← allocRV .Float32 tileM
+  let scaleCol : RV GpuFloat.Float32 tileN ← allocRV .Float32 tileN
+  loadVecGlobalRow scaleRowShared scaleRowPtr coord
+  loadVecGlobalCol scaleColShared scaleColPtr coord
+  loadVec scaleRowNative scaleRowShared
+  loadVec scaleColNative scaleColShared
+  convertVec scaleRow scaleRowNative
+  convertVec scaleCol scaleColNative
+  pure (scaleRow, scaleCol)
+
 /-- Apply per-row and per-column scales to an FP32 accumulator tile. -/
 def applyRowColScales {tileM tileN : Nat}
     (accum : RT GpuFloat.Float32 tileM tileN)
@@ -106,5 +129,18 @@ def applyRowColScales {tileM tileN : Nat}
   mulCol scaled accum scaleRow
   mulRow scaled scaled scaleCol
   pure scaled
+
+/-- Apply one runtime Float32 scalar to an FP32 accumulator tile by splatting it
+across the output columns. -/
+def applyGlobalScalar {tileM tileN : Nat}
+    (accum : RT GpuFloat.Float32 tileM tileN)
+    (scalar : KVal Float32)
+    : KernelM (RT GpuFloat.Float32 tileM tileN) := do
+  let onesScalar ← constFloatVal 1.0 "one"
+  let scaleRow : RV GpuFloat.Float32 tileM ← allocRV .Float32 tileM
+  let scaleCol : RV GpuFloat.Float32 tileN ← allocRV .Float32 tileN
+  fillVecScalar scaleRow onesScalar
+  fillVecScalar scaleCol scalar
+  applyRowColScales accum scaleRow scaleCol
 
 end Tyr.GPU.Kernels.GemmCommon

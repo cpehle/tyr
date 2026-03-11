@@ -141,6 +141,24 @@ def constFloatVal (value : Float) (name : String := "const_f") : KernelM (KVal F
   emit (.constFloat v value)
   pure ⟨v, name⟩
 
+/-- Load one Float32 scalar from global memory at a runtime offset. -/
+def loadFloat32Scalar
+    (src : GPtr GpuFloat.Float32)
+    (offset : KVal UInt32)
+    (name : String := "load_f32")
+    : KernelM (KVal Float32) := do
+  let v ← freshVar
+  emit (.loadScalarGlobal v src.id offset.id)
+  pure ⟨v, name⟩
+
+/-- Store one Float32 scalar to global memory at a runtime offset. -/
+def storeFloat32Scalar
+    (dst : GPtr GpuFloat.Float32)
+    (offset : KVal UInt32)
+    (src : KVal Float32)
+    : KernelM Unit := do
+  emit (.storeScalarGlobal dst.id src.id offset.id)
+
 /-- Apply a scalar unary operation to a runtime scalar. -/
 def scalarUnary {T : Type} (op : ScalarUnaryOp)
     (src : KVal T) (name : String := "scalar_unary") : KernelM (KVal T) := do

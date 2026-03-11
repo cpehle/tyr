@@ -296,6 +296,10 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout)
     s!"{indent}warp::store({dst.toIdent}, {src.toIdent}, kittens::coord<>({coordB.toIdent}, {coordD.toIdent}, {coordR.toIdent}, {coordC.toIdent}));\n"
   | .storeVecGlobalAddCoord dst src coordB coordD coordR coordC =>
     s!"{indent}store_add({dst.toIdent}, {src.toIdent}, kittens::coord<>({coordB.toIdent}, {coordD.toIdent}, {coordR.toIdent}, {coordC.toIdent}));\n"
+  | .loadScalarGlobal dst src offset =>
+    s!"{indent}auto {dst.toIdent} = {src.toIdent}[{offset.toIdent}];\n"
+  | .storeScalarGlobal dst src offset =>
+    s!"{indent}{dst.toIdent}[{offset.toIdent}] = {src.toIdent};\n"
 
   -- Distributed / Multimem operations
   | .multimemLoadReduce op dst src =>

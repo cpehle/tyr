@@ -90,6 +90,8 @@ inductive KStmt where
   | loadVecGlobalCoord (dst src : VarId) (coordB coordD coordR coordC : VarId)
   | storeVecGlobalCoord (dst src : VarId) (coordB coordD coordR coordC : VarId)
   | storeVecGlobalAddCoord (dst src : VarId) (coordB coordD coordR coordC : VarId)
+  | loadScalarGlobal (dst src offset : VarId)
+  | storeScalarGlobal (dst src offset : VarId)
 
   -- Distributed / Multimem operations
   | multimemLoadReduce (op : ReduceOp) (dst src : VarId)
