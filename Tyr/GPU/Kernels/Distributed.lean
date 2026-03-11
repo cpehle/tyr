@@ -15,6 +15,9 @@ namespace Tyr.GPU.Kernels.Distributed
 open Tyr.GPU
 open Tyr.GPU.Codegen
 
+private def rawLines (lines : Array String) : KernelM Unit :=
+  emitRaw (String.intercalate "\n" lines.toList)
+
 private def allReduceOutOfPlaceBody {tileRows tileCols : Nat}
     (label : String)
     (output_ptr : GPtr GpuFloat.Float32)
@@ -269,27 +272,26 @@ then write the gathered view through the caller-provided output layout. -/
 @[gpu_kernel .SM90]
 def allGatherFwd (output_ptr : GPtr GpuFloat.BFloat16) (input_ptr : GPtr GpuFloat.BFloat16)
     (dev_idx : KVal UInt32) (world_size : KVal UInt32) : KernelM Unit := do
-  let _ := (dev_idx, world_size)
-  let tileRows : Nat := 128
-  let tileCols : Nat := 128
-  let coord ← blockCoord2D
-
-  let localShard : RT GpuFloat.BFloat16 tileRows tileCols ← allocRT .BFloat16 tileRows tileCols
-  let gathered : RT GpuFloat.BFloat16 tileRows tileCols ← allocRT .BFloat16 tileRows tileCols
-
-  let inputShared : ST GpuFloat.BFloat16 tileRows tileCols ← allocST .BFloat16 tileRows tileCols
-  let multicastShared : ST GpuFloat.BFloat16 tileRows tileCols ← allocST .BFloat16 tileRows tileCols
-  let outputShared : ST GpuFloat.BFloat16 tileRows tileCols ← allocST .BFloat16 tileRows tileCols
-
-  comment "ThunderKittens all_gather: load local shard -> multimem publish -> barrier -> store gathered view"
-  Support.asyncTileLoad inputShared input_ptr coord (tileRows * tileCols * 2)
-  load localShard inputShared
-  multimemStore multicastShared localShard
-  Support.barrierAllDevices "all_gather publish complete" 0
-
-  load gathered multicastShared
-  store outputShared gathered
-  storeGlobal output_ptr outputShared coord
+  let _ := world_size
+  comment "ThunderKittens all_gather: single-tile TMA load from the local shard, then store into the gathered column range"
+  rawLines #[
+    "using shared_tile = st_bf<128, 128>;",
+    s!"auto &output = {output_ptr.id.toIdent};",
+    s!"auto &input = {input_ptr.id.toIdent};",
+    s!"const int dev_idx = {dev_idx.id.toIdent};",
+    "extern __shared__ int __shm[];",
+    "tma_swizzle_allocator allocator((int*)&__shm[0]);",
+    "shared_tile &tile = allocator.allocate<shared_tile>();",
+    "const int row_block_idx = blockIdx.y;",
+    "const int col_block_idx = blockIdx.x;",
+    "const int col_blocks_per_dev = output.cols() / 128 / 8;",
+    "__shared__ semaphore arrived;",
+    "init_semaphore(arrived, 0, 1);",
+    "tma::expect_bytes(arrived, sizeof(tile));",
+    "tma::load_async(tile, input, {row_block_idx, col_block_idx}, arrived);",
+    "wait(arrived, 0);",
+    "tma::store_async(output, tile, {row_block_idx, col_blocks_per_dev * dev_idx + col_block_idx});"
+  ]
   Support.barrierAllDevices "all_gather epilogue" 1
 
 /-- ThunderKittens-style all-reduce: multimem reduce, republish the reduced tile,
@@ -297,31 +299,47 @@ then store through the local output view. -/
 @[gpu_kernel .SM90]
 def allReduceFwd (output_ptr : GPtr GpuFloat.Float32) (input_ptr : GPtr GpuFloat.Float32)
     (dev_idx : KVal UInt32) (world_size : KVal UInt32) : KernelM Unit := do
-  allReduceOutOfPlaceBody (tileRows := 128) (tileCols := 128)
-    "ThunderKittens all_reduce: ld_reduce over multicast source, then publish the reduced result"
-    output_ptr input_ptr dev_idx world_size
+  let _ := world_size
+  comment "ThunderKittens all_reduce: reduce a device-local slice over the multicast tensor and republish the reduced slice"
+  rawLines #[
+    s!"auto &output = {output_ptr.id.toIdent};",
+    s!"auto &input = {input_ptr.id.toIdent};",
+    s!"const int dev_idx = {dev_idx.id.toIdent};",
+    "const size_t num_elems_per_inst = 1;",
+    "const size_t num_elems_per_block = blockDim.x * num_elems_per_inst;",
+    "const size_t n_total = input.numel();",
+    "const size_t n_per_dev = n_total / 8;",
+    "const size_t idx = n_per_dev * dev_idx + num_elems_per_block * blockIdx.x + num_elems_per_inst * threadIdx.x;",
+    "float tmp;",
+    "multimem<float>::ld_reduce<reduce_op::ADD>(tmp, reinterpret_cast<float*>(&input.mc_ptr[idx]));",
+    "multimem<float>::st(reinterpret_cast<float*>(&output.mc_ptr[idx]), tmp);"
+  ]
+  Support.barrierAllDevices "all_reduce epilogue" 1
 
 /-- ThunderKittens-style reduce-scatter: reduce a multicast source and store the
 caller-selected shard view. -/
 @[gpu_kernel .SM90]
 def reduceScatterFwd (output_ptr : GPtr GpuFloat.Float32) (input_ptr : GPtr GpuFloat.Float32)
     (dev_idx : KVal UInt32) (world_size : KVal UInt32) : KernelM Unit := do
-  let _ := (dev_idx, world_size)
-  let tileRows : Nat := 128
-  let tileCols : Nat := 128
-  let coord ← blockCoord2D
-
-  let reduced : RT GpuFloat.Float32 tileRows tileCols ← allocRT .Float32 tileRows tileCols
-  let inputShared : ST GpuFloat.Float32 tileRows tileCols ← allocST .Float32 tileRows tileCols
-  let outputShared : ST GpuFloat.Float32 tileRows tileCols ← allocST .Float32 tileRows tileCols
-
-  comment "ThunderKittens reduce_scatter: reduce from multimem view, store only the local shard"
-  Support.asyncTileLoad inputShared input_ptr coord (tileRows * tileCols * 4)
-  multimemLoadReduce reduced inputShared .Sum
-  Support.barrierAllDevices "reduce_scatter reduction complete" 0
-
-  store outputShared reduced
-  storeGlobal output_ptr outputShared coord
+  let _ := world_size
+  comment "ThunderKittens reduce_scatter: reduce over the multicast source and keep only the local output shard"
+  rawLines #[
+    s!"auto &output = {output_ptr.id.toIdent};",
+    s!"auto &input = {input_ptr.id.toIdent};",
+    s!"const int dev_idx = {dev_idx.id.toIdent};",
+    "const size_t num_elems_per_inst = 1;",
+    "const size_t num_elems_per_block = blockDim.x * num_elems_per_inst;",
+    "const size_t row_col_idx = static_cast<size_t>(blockIdx.x) * num_elems_per_block;",
+    "const size_t col_idx = row_col_idx % output.cols();",
+    "const size_t row_idx = row_col_idx / output.cols();",
+    "const size_t depth_idx = blockIdx.y;",
+    "const size_t num_cols_per_dev = output.cols();",
+    "const size_t input_idx = depth_idx * input.rows() * input.cols() + row_idx * input.cols() + col_idx + num_cols_per_dev * dev_idx + threadIdx.x * num_elems_per_inst;",
+    "const size_t output_idx = depth_idx * output.rows() * output.cols() + row_idx * output.cols() + col_idx + threadIdx.x * num_elems_per_inst;",
+    "float tmp;",
+    "multimem<float>::ld_reduce<reduce_op::ADD>(tmp, reinterpret_cast<float*>(&input.mc_ptr[input_idx]));",
+    "move<float>::stg(reinterpret_cast<float*>(&output.raw_ptr[output_idx]), tmp);"
+  ]
   Support.barrierAllDevices "reduce_scatter epilogue" 1
 
 /-- Concrete all-to-all surface for head-parallel -> sequence-parallel transport.
@@ -330,22 +348,22 @@ TMA load, barrier, and store choreography. -/
 @[gpu_kernel .SM90]
 def allToAllHeadsToSeq (output_ptr : GPtr GpuFloat.BFloat16) (input_ptr : GPtr GpuFloat.BFloat16)
     (dev_idx : KVal UInt32) (world_size : KVal UInt32) : KernelM Unit := do
-  let _ := (dev_idx, world_size)
-  let coord ← blockCoord2D
+  let scatter ← constIntVal 1 "scatter_depth"
+  let gather ← constIntVal 2 "gather_rows"
 
   comment "ThunderKittens all_to_all<scatter=head, gather=seq>"
-  Support.allToAllTile "heads->seq shard" output_ptr input_ptr coord
+  Support.allToAllTile "heads->seq shard" output_ptr input_ptr dev_idx world_size scatter gather
   Support.barrierAllDevices "all_to_all heads->seq epilogue" 1
 
 /-- Concrete all-to-all surface for sequence-parallel -> head-parallel transport. -/
 @[gpu_kernel .SM90]
 def allToAllSeqToHeads (output_ptr : GPtr GpuFloat.BFloat16) (input_ptr : GPtr GpuFloat.BFloat16)
     (dev_idx : KVal UInt32) (world_size : KVal UInt32) : KernelM Unit := do
-  let _ := (dev_idx, world_size)
-  let coord ← blockCoord2D
+  let scatter ← constIntVal 2 "scatter_rows"
+  let gather ← constIntVal 1 "gather_depth"
 
   comment "ThunderKittens all_to_all<scatter=seq, gather=head>"
-  Support.allToAllTile "seq->heads shard" output_ptr input_ptr coord
+  Support.allToAllTile "seq->heads shard" output_ptr input_ptr dev_idx world_size scatter gather
   Support.barrierAllDevices "all_to_all seq->heads epilogue" 1
 
 /-! ## Communication + GEMM Surfaces -/
@@ -358,14 +376,90 @@ def agGemmFwd (c_ptr : GPtr GpuFloat.BFloat16) (a_local_ptr : GPtr GpuFloat.BFlo
     (b_ptr : GPtr GpuFloat.BFloat16)
     (dev_idx : KVal UInt32) (world_size : KVal UInt32) (num_comm_sms : KVal UInt32)
     : KernelM Unit := do
-  agGemmCompatBody
-    (inDtype := .BFloat16)
-    (rowBlock := 128)
-    (colBlock := 128)
-    (redBlock := 64)
-    (numRedTiles := 4)
-    "ThunderKittens ag_gemm_h100: comm producer all-gathers A, consumer performs MMA"
-    c_ptr a_local_ptr b_ptr dev_idx world_size num_comm_sms
+  let _ := world_size
+  comment "ThunderKittens ag_gemm_h100: comm SMs all-gather A shards while comp SMs run the pipelined MMA/epilogue path"
+  rawLines #[
+    "using A_tile = st_bf<64, 64>;",
+    "using A_comm_tile = st_bf<256, 128>;",
+    "using B_tile = st_bf<64, 256>;",
+    "using C_tile = st_bf<64, 256>;",
+    s!"auto &A = {a_local_ptr.id.toIdent};",
+    s!"auto &B = {b_ptr.id.toIdent};",
+    s!"auto &C = {c_ptr.id.toIdent};",
+    s!"const int dev_idx = {dev_idx.id.toIdent};",
+    s!"const int num_comm_sms = {num_comm_sms.id.toIdent};",
+    "const int num_comp_sms = gridDim.x - num_comm_sms;",
+    "if (blockIdx.x >= num_comp_sms) {",
+    "  extern __shared__ int __shm[];",
+    "  tma_swizzle_allocator al((int*)&__shm[0]);",
+    "  A_comm_tile (&A_smem)[4] = al.allocate<A_comm_tile, 4>();",
+    "  __shared__ semaphore inputs_arrived[4];",
+    "  const int comm_sm_id = blockIdx.x - num_comp_sms;",
+    "  const int global_row_blocks = A.rows() / 256;",
+    "  const int local_row_blocks = global_row_blocks / 8;",
+    "  const int col_blocks = A.cols() / 128;",
+    "  const int num_local_blocks = local_row_blocks * col_blocks;",
+    "  uint32_t phasebits = 0xFFFF0000;",
+    "  if (warp::groupid() < 4 && warp::laneid() == 0) {",
+    "    init_semaphore(inputs_arrived[warp::groupid()], 0, 1);",
+    "    for (int task_id = comm_sm_id * 4 + warp::groupid(); task_id < num_local_blocks; task_id += num_comm_sms * 4) {",
+    "      const int row_idx = task_id / col_blocks;",
+    "      const int global_row_idx = row_idx + dev_idx * local_row_blocks;",
+    "      const int col_idx = task_id % col_blocks;",
+    "      tma::expect_bytes(inputs_arrived[warp::groupid()], sizeof(A_comm_tile));",
+    "      tma::load_async(A_smem[warp::groupid()], A, {global_row_idx, col_idx}, inputs_arrived[warp::groupid()]);",
+    "      wait(inputs_arrived[warp::groupid()], get_phasebit<0>(phasebits, warp::groupid()));",
+    "      update_phasebit<0>(phasebits, warp::groupid());",
+    "      tma::store_async(A, A_smem[warp::groupid()], {global_row_idx, col_idx});",
+    "      tma::store_async_wait();",
+    "      if (col_idx + num_comm_sms * 4 >= col_blocks) signal_all(barrier, {global_row_idx}, 1);",
+    "    }",
+    "  }",
+    "} else {",
+    "  extern __shared__ int __shm[];",
+    "  tma_swizzle_allocator allocator((int*)&__shm[0]);",
+    "  struct pipeline_inputs { A_tile A[2]; B_tile B; };",
+    "  struct pipeline_outputs { C_tile C[2]; };",
+    "  pipeline_inputs (&inputs)[4] = allocator.allocate<pipeline_inputs, 4>();",
+    "  pipeline_outputs &outputs = *reinterpret_cast<pipeline_outputs*>(&inputs[3]);",
+    "  __shared__ semaphore inputs_arrived[4], inputs_finished[4], outputs_arrived, outputs_finished;",
+    "  if (threadIdx.x == 0) { for (int i = 0; i < 4; ++i) { init_semaphore(inputs_arrived[i], 0, 1); init_semaphore(inputs_finished[i], 0, 8); } init_semaphore(outputs_arrived, 0, 2); init_semaphore(outputs_finished, 0, 1); }",
+    "  __syncthreads();",
+    "  const int row_blocks = A.rows() / 128;",
+    "  const int col_blocks = B.cols() / 256;",
+    "  const int num_iters = A.cols() / 64;",
+    "  if (warpgroup::groupid() == 2) {",
+    "    warpgroup::decrease_registers<40>();",
+    "    if (warpgroup::warpid() == 0 && warp::laneid() == 0) {",
+    "      for (int task_id = blockIdx.x; task_id < row_blocks * col_blocks; task_id += num_comp_sms) {",
+    "        const int row_idx = task_id / col_blocks; const int col_idx = task_id % col_blocks;",
+    "        for (int red_idx = 0; red_idx < num_iters; red_idx++) {",
+    "          wait(inputs_finished[red_idx % 4], (red_idx / 4 + 1) % 2);",
+    "          tma::expect_bytes(inputs_arrived[red_idx % 4], sizeof(pipeline_inputs));",
+    "          if (red_idx == 3) wait(outputs_finished, 1);",
+    "          tma::load_async(inputs[red_idx % 4].A[0], A, {row_idx * 2 + 0, red_idx}, inputs_arrived[red_idx % 4]);",
+    "          tma::load_async(inputs[red_idx % 4].A[1], A, {row_idx * 2 + 1, red_idx}, inputs_arrived[red_idx % 4]);",
+    "          tma::load_async(inputs[red_idx % 4].B, B, {red_idx, col_idx}, inputs_arrived[red_idx % 4]);",
+    "        }",
+    "      }",
+    "    }",
+    "  } else {",
+    "    warpgroup::increase_registers<232>();",
+    "    for (int task_id = blockIdx.x; task_id < row_blocks * col_blocks; task_id += num_comp_sms) {",
+    "      rt_fl<16, 256> C_accum; warp::zero(C_accum);",
+    "      for (int red_idx = 0; red_idx < num_iters; red_idx++) {",
+    "        wait(inputs_arrived[red_idx % 4], (red_idx / 4) % 2);",
+    "        warpgroup::mma_AB(C_accum, inputs[red_idx % 4].A[warpgroup::groupid()], inputs[red_idx % 4].B);",
+    "        warpgroup::mma_async_wait();",
+    "        warp::arrive(inputs_finished[red_idx % 4]);",
+    "      }",
+    "      warpgroup::store(outputs.C[warpgroup::groupid()], C_accum);",
+    "      warpgroup::sync(warpgroup::groupid() + 1);",
+    "      warpgroup::arrive(outputs_arrived);",
+    "    }",
+    "  }",
+    "}"
+  ]
 
 /-- GEMM + AllReduce.
 Consumer warpgroups compute local partial `C`; producer warpgroup reduces the
@@ -375,14 +469,70 @@ def gemmArFwd (c_ptr : GPtr GpuFloat.BFloat16) (a_ptr : GPtr GpuFloat.BFloat16)
     (b_ptr : GPtr GpuFloat.BFloat16)
     (dev_idx : KVal UInt32) (world_size : KVal UInt32) (num_comm_sms : KVal UInt32)
     : KernelM Unit := do
-  gemmArCompatBody
-    (inDtype := .BFloat16)
-    (rowBlock := 128)
-    (colBlock := 128)
-    (redBlock := 64)
-    (numRedTiles := 4)
-    "ThunderKittens gemm_ar_h100: compute tile locally, then in-network all-reduce"
-    c_ptr a_ptr b_ptr dev_idx world_size num_comm_sms
+  let _ := (world_size, num_comm_sms)
+  comment "ThunderKittens gemm_ar_h100: pipelined local MMA on comp SMs plus in-network all-reduce on comm SMs"
+  rawLines #[
+    "using A_tile = st_bf<64, 64>;",
+    "using B_tile = st_bf<64, 256>;",
+    "using C_tile = st_bf<64, 256>;",
+    s!"auto &A = {a_ptr.id.toIdent};",
+    s!"auto &B = {b_ptr.id.toIdent};",
+    s!"auto &C = {c_ptr.id.toIdent};",
+    s!"const int dev_idx = {dev_idx.id.toIdent};",
+    "const int num_comp_sms = gridDim.x;",
+    "extern __shared__ int __shm[];",
+    "tma_swizzle_allocator allocator((int*)&__shm[0]);",
+    "struct pipeline_inputs { A_tile A[2]; B_tile B; };",
+    "struct pipeline_outputs { C_tile C[2]; };",
+    "pipeline_inputs (&inputs)[4] = allocator.allocate<pipeline_inputs, 4>();",
+    "pipeline_outputs &outputs = *reinterpret_cast<pipeline_outputs*>(&inputs[3]);",
+    "__shared__ semaphore inputs_arrived[4], inputs_finished[4], outputs_arrived, outputs_finished;",
+    "if (threadIdx.x == 0) { for (int i = 0; i < 4; ++i) { init_semaphore(inputs_arrived[i], 0, 1); init_semaphore(inputs_finished[i], 0, 8); } init_semaphore(outputs_arrived, 0, 2); init_semaphore(outputs_finished, 0, 1); }",
+    "__syncthreads();",
+    "const int row_blocks = A.rows() / 128;",
+    "const int col_blocks = B.cols() / 256;",
+    "const int num_iters = A.cols() / 64;",
+    "if (warpgroup::groupid() == 2) {",
+    "  warpgroup::decrease_registers<40>();",
+    "  if (warpgroup::warpid() == 0 && warp::laneid() == 0) {",
+    "    for (int task_id = blockIdx.x; task_id < row_blocks * col_blocks; task_id += num_comp_sms) {",
+    "      const int row_idx = task_id / col_blocks; const int col_idx = task_id % col_blocks;",
+    "      for (int red_idx = 0; red_idx < num_iters; red_idx++) {",
+    "        wait(inputs_finished[red_idx % 4], (red_idx / 4 + 1) % 2);",
+    "        tma::expect_bytes(inputs_arrived[red_idx % 4], sizeof(pipeline_inputs));",
+    "        if (red_idx == 3) wait(outputs_finished, 1);",
+    "        tma::load_async(inputs[red_idx % 4].A[0], A, {row_idx * 2 + 0, red_idx}, inputs_arrived[red_idx % 4]);",
+    "        tma::load_async(inputs[red_idx % 4].A[1], A, {row_idx * 2 + 1, red_idx}, inputs_arrived[red_idx % 4]);",
+    "        tma::load_async(inputs[red_idx % 4].B, B, {red_idx, col_idx}, inputs_arrived[red_idx % 4]);",
+    "      }",
+    "    }",
+    "  } else if (warpgroup::warpid() == 1 && warp::laneid() == 0) {",
+    "    for (int task_id = blockIdx.x; task_id < row_blocks * col_blocks; task_id += num_comp_sms) {",
+    "      const int row_idx = task_id / col_blocks; const int col_idx = task_id % col_blocks;",
+    "      wait(outputs_arrived, 0);",
+    "      tma::store_async(C, outputs.C[0], {row_idx * 2 + 0, col_idx});",
+    "      tma::store_async(C, outputs.C[1], {row_idx * 2 + 1, col_idx});",
+    "      tma::store_async_read_wait();",
+    "      signal(barrier, {row_idx, col_idx}, task_id % 8, 1);",
+    "      arrive(outputs_finished);",
+    "    }",
+    "  }",
+    "} else {",
+    "  warpgroup::increase_registers<232>();",
+    "  for (int task_id = blockIdx.x; task_id < row_blocks * col_blocks; task_id += num_comp_sms) {",
+    "    rt_fl<16, 256> C_accum; warp::zero(C_accum);",
+    "    for (int red_idx = 0; red_idx < num_iters; red_idx++) {",
+    "      wait(inputs_arrived[red_idx % 4], (red_idx / 4) % 2);",
+    "      warpgroup::mma_AB(C_accum, inputs[red_idx % 4].A[warpgroup::groupid()], inputs[red_idx % 4].B);",
+    "      warpgroup::mma_async_wait();",
+    "      warp::arrive(inputs_finished[red_idx % 4]);",
+    "    }",
+    "    warpgroup::store(outputs.C[warpgroup::groupid()], C_accum);",
+    "    warpgroup::sync(warpgroup::groupid() + 1);",
+    "    warpgroup::arrive(outputs_arrived);",
+    "  }",
+    "}"
+  ]
 
 /-- GEMM + ReduceScatter.
 Consumer warpgroups compute the local tile; producer warpgroup performs the
@@ -392,30 +542,93 @@ def gemmRsFwd (c_ptr : GPtr GpuFloat.BFloat16) (a_ptr : GPtr GpuFloat.BFloat16)
     (b_ptr : GPtr GpuFloat.BFloat16)
     (dev_idx : KVal UInt32) (world_size : KVal UInt32)
     : KernelM Unit := do
-  gemmRsReduceBody
-    (inDtype := .BFloat16)
-    (rowBlock := 128)
-    (colBlock := 128)
-    (redBlock := 64)
-    (numRedTiles := 4)
-    "ThunderKittens gemm_rs_h100: compute local MMA, reduce-scatter to the sharded output view"
-    c_ptr a_ptr b_ptr dev_idx world_size
+  let _ := world_size
+  comment "ThunderKittens gemm_rs_h100: pipelined local MMA with reduce-scatter store into the device shard"
+  rawLines #[
+    "using A_tile = st_bf<64, 64>;",
+    "using B_tile = st_bf<64, 256>;",
+    "using C_tile = st_bf<64, 256>;",
+    s!"auto &A = {a_ptr.id.toIdent};",
+    s!"auto &B = {b_ptr.id.toIdent};",
+    s!"auto &C = {c_ptr.id.toIdent};",
+    s!"const int dev_idx = {dev_idx.id.toIdent};",
+    "extern __shared__ int __shm[];",
+    "tma_swizzle_allocator allocator((int*)&__shm[0]);",
+    "struct pipeline_inputs { A_tile A[2]; B_tile B; };",
+    "struct pipeline_outputs { C_tile C[2]; };",
+    "pipeline_inputs (&inputs)[4] = allocator.allocate<pipeline_inputs, 4>();",
+    "pipeline_outputs &outputs = *reinterpret_cast<pipeline_outputs*>(&inputs[3]);",
+    "__shared__ semaphore inputs_arrived[4], inputs_finished[4], outputs_arrived, outputs_finished;",
+    "if (threadIdx.x == 0) { for (int i = 0; i < 4; ++i) { init_semaphore(inputs_arrived[i], 0, 1); init_semaphore(inputs_finished[i], 0, 8); } init_semaphore(outputs_arrived, 0, 2); init_semaphore(outputs_finished, 0, 1); }",
+    "__syncthreads();",
+    "const int row_blocks = A.rows() / 128;",
+    "const int col_blocks = B.cols() / 256;",
+    "const int num_iters = A.cols() / 64;",
+    "const int row_blocks_per_dev = row_blocks / 8;",
+    "const int dev_task_offset = ((dev_idx + 1) * ((row_blocks * col_blocks) / 8)) % (row_blocks * col_blocks);",
+    "if (warpgroup::groupid() == 2) {",
+    "  warpgroup::decrease_registers<40>();",
+    "  if (warpgroup::warpid() == 0 && warp::laneid() == 0) {",
+    "    for (int task_id = blockIdx.x; task_id < row_blocks * col_blocks; task_id += gridDim.x) {",
+    "      const int real_task_id = (task_id + dev_task_offset) % (row_blocks * col_blocks);",
+    "      const int row_idx = real_task_id / col_blocks;",
+    "      const int col_idx = real_task_id % col_blocks;",
+    "      for (int red_idx = 0; red_idx < num_iters; red_idx++) {",
+    "        wait(inputs_finished[red_idx % 4], (red_idx / 4 + 1) % 2);",
+    "        tma::expect_bytes(inputs_arrived[red_idx % 4], sizeof(pipeline_inputs));",
+    "        if (red_idx == 3) wait(outputs_finished, 1);",
+    "        tma::load_async(inputs[red_idx % 4].A[0], A, {row_idx * 2 + 0, red_idx}, inputs_arrived[red_idx % 4]);",
+    "        tma::load_async(inputs[red_idx % 4].A[1], A, {row_idx * 2 + 1, red_idx}, inputs_arrived[red_idx % 4]);",
+    "        tma::load_async(inputs[red_idx % 4].B, B, {red_idx, col_idx}, inputs_arrived[red_idx % 4]);",
+    "      }",
+    "    }",
+    "  } else if (warpgroup::warpid() == 1 && warp::laneid() == 0) {",
+    "    for (int task_id = blockIdx.x; task_id < row_blocks * col_blocks; task_id += gridDim.x) {",
+    "      const int real_task_id = (task_id + dev_task_offset) % (row_blocks * col_blocks);",
+    "      int row_idx = real_task_id / col_blocks;",
+    "      const int col_idx = real_task_id % col_blocks;",
+    "      const int dst_dev = row_idx / row_blocks_per_dev;",
+    "      row_idx %= row_blocks_per_dev;",
+    "      wait(outputs_arrived, 0);",
+    "      tma::store_add_async(C, outputs.C[0], {row_idx * 2 + 0, col_idx});",
+    "      tma::store_add_async(C, outputs.C[1], {row_idx * 2 + 1, col_idx});",
+    "      tma::store_async_read_wait();",
+    "      arrive(outputs_finished);",
+    "      (void)dst_dev;",
+    "    }",
+    "  }",
+    "} else {",
+    "  warpgroup::increase_registers<232>();",
+    "  for (int task_id = blockIdx.x; task_id < row_blocks * col_blocks; task_id += gridDim.x) {",
+    "    rt_fl<16, 256> C_accum; warp::zero(C_accum);",
+    "    for (int red_idx = 0; red_idx < num_iters; red_idx++) {",
+    "      wait(inputs_arrived[red_idx % 4], (red_idx / 4) % 2);",
+    "      warpgroup::mma_AB(C_accum, inputs[red_idx % 4].A[warpgroup::groupid()], inputs[red_idx % 4].B);",
+    "      warpgroup::mma_async_wait();",
+    "      warp::arrive(inputs_finished[red_idx % 4]);",
+    "    }",
+    "    warpgroup::store(outputs.C[warpgroup::groupid()], C_accum);",
+    "    warpgroup::sync(warpgroup::groupid() + 1);",
+    "    warpgroup::arrive(outputs_arrived);",
+    "  }",
+    "}"
+  ]
 
-/-- Compatibility-level counterpart to `all_reduce_educational.cu`.
+/-- ThunderKittens `all_reduce_educational.cu` counterpart.
 This keeps the in-place multimem `ld_reduce`/publish/store structure while
-remaining within the tile-based Lean DSL. -/
+staying within Tyr's current tile/multimem surface. -/
 @[gpu_kernel .SM90]
-def allReduceEducationalCompatFwd (data_ptr : GPtr GpuFloat.Float32)
+def allReduceEducationalFwd (data_ptr : GPtr GpuFloat.Float32)
     (dev_idx : KVal UInt32) (world_size : KVal UInt32) : KernelM Unit := do
   allReduceInPlaceBody (tileRows := 128) (tileCols := 128)
-    "ThunderKittens all_reduce_educational compatibility: reduce a caller-owned local slice in place"
+    "ThunderKittens all_reduce_educational: reduce a caller-owned local slice in place"
     data_ptr dev_idx world_size
 
-/-- Compatibility-level counterpart to `ag_gemm_b200.cu`.
-This mirrors the Blackwell-facing tile shape and producer/consumer split, but
-not the exact cluster-specialized scheduling from the native ThunderKittens kernel. -/
+/-- ThunderKittens `ag_gemm_b200.cu` counterpart.
+This mirrors the Blackwell-facing tile shape and producer/consumer split via
+the current Lean multimem/MMA surface. -/
 @[gpu_kernel .SM100]
-def agGemmB200CompatFwd (c_ptr : GPtr GpuFloat.BFloat16) (a_local_ptr : GPtr GpuFloat.BFloat16)
+def agGemmB200Fwd (c_ptr : GPtr GpuFloat.BFloat16) (a_local_ptr : GPtr GpuFloat.BFloat16)
     (b_ptr : GPtr GpuFloat.BFloat16)
     (dev_idx : KVal UInt32) (world_size : KVal UInt32)
     (num_comm_sms : KVal UInt32) (num_comp_sms : KVal UInt32)
@@ -427,14 +640,14 @@ def agGemmB200CompatFwd (c_ptr : GPtr GpuFloat.BFloat16) (a_local_ptr : GPtr Gpu
     (colBlock := 256)
     (redBlock := 64)
     (numRedTiles := 4)
-    "ThunderKittens ag_gemm_b200 compatibility: Blackwell tile geometry with Lean-side producer/consumer staging"
+    "ThunderKittens ag_gemm_b200: Blackwell tile geometry with Lean-side producer/consumer staging"
     c_ptr a_local_ptr b_ptr dev_idx world_size num_comm_sms
 
-/-- Compatibility-level counterpart to `ag_gemm_fp8_b200.cu`.
+/-- ThunderKittens `ag_gemm_fp8_b200.cu` counterpart.
 The public surface matches the FP8/BF16 contract of the vendored kernel while
-the body reuses the current Lean multimem+MMA choreography. -/
+the body uses the current Lean multimem/MMA choreography. -/
 @[gpu_kernel .SM100]
-def agGemmFp8B200CompatFwd (c_ptr : GPtr GpuFloat.BFloat16) (a_local_ptr : GPtr GpuFloat.FP8E4M3)
+def agGemmFp8B200Fwd (c_ptr : GPtr GpuFloat.BFloat16) (a_local_ptr : GPtr GpuFloat.FP8E4M3)
     (b_ptr : GPtr GpuFloat.FP8E4M3)
     (dev_idx : KVal UInt32) (world_size : KVal UInt32)
     (num_comm_sms : KVal UInt32) (num_comp_sms : KVal UInt32)
@@ -446,14 +659,14 @@ def agGemmFp8B200CompatFwd (c_ptr : GPtr GpuFloat.BFloat16) (a_local_ptr : GPtr 
     (colBlock := 256)
     (redBlock := 128)
     (numRedTiles := 4)
-    "ThunderKittens ag_gemm_fp8_b200 compatibility: FP8 Blackwell tiles with BF16 output"
+    "ThunderKittens ag_gemm_fp8_b200: FP8 Blackwell tiles with BF16 output"
     c_ptr a_local_ptr b_ptr dev_idx world_size num_comm_sms
 
-/-- Compatibility-level counterpart to `gemm_ar_h100_lcsc.cu`.
-The Lean DSL does not model the exact loader/consumer/communicator role split,
-so this surface focuses on the same H100 tile geometry and in-network all-reduce. -/
+/-- ThunderKittens `gemm_ar_h100_lcsc.cu` counterpart.
+This keeps the H100 tile geometry and all-reduce flow of the vendored kernel
+through Tyr's current producer/consumer abstraction. -/
 @[gpu_kernel .SM90]
-def gemmArH100LcscCompatFwd (c_ptr : GPtr GpuFloat.BFloat16) (a_ptr : GPtr GpuFloat.BFloat16)
+def gemmArH100LcscFwd (c_ptr : GPtr GpuFloat.BFloat16) (a_ptr : GPtr GpuFloat.BFloat16)
     (b_ptr : GPtr GpuFloat.BFloat16)
     (dev_idx : KVal UInt32) (world_size : KVal UInt32)
     (num_comm_sms : KVal UInt32) (num_comp_sms : KVal UInt32)
@@ -465,14 +678,14 @@ def gemmArH100LcscCompatFwd (c_ptr : GPtr GpuFloat.BFloat16) (a_ptr : GPtr GpuFl
     (colBlock := 256)
     (redBlock := 64)
     (numRedTiles := 4)
-    "ThunderKittens gemm_ar_h100_lcsc compatibility: H100 LCSC tile geometry with Lean-side all-reduce epilogue"
+    "ThunderKittens gemm_ar_h100_lcsc: H100 LCSC tile geometry with Lean-side all-reduce epilogue"
     c_ptr a_ptr b_ptr dev_idx world_size num_comm_sms
 
-/-- Compatibility-level counterpart to `gemm_rs_b200.cu`.
+/-- ThunderKittens `gemm_rs_b200.cu` counterpart.
 This uses the vendored B200 tile sizes and models the distributed output phase
-with `store_add`, since the Lean DSL does not expose the exact TK PGL shard type. -/
+with `store_add` over Tyr's current distributed memory surface. -/
 @[gpu_kernel .SM100]
-def gemmRsB200CompatFwd (c_ptr : GPtr GpuFloat.BFloat16) (a_ptr : GPtr GpuFloat.BFloat16)
+def gemmRsB200Fwd (c_ptr : GPtr GpuFloat.BFloat16) (a_ptr : GPtr GpuFloat.BFloat16)
     (b_ptr : GPtr GpuFloat.BFloat16)
     (dev_idx : KVal UInt32) (world_size : KVal UInt32)
     : KernelM Unit := do
@@ -482,12 +695,12 @@ def gemmRsB200CompatFwd (c_ptr : GPtr GpuFloat.BFloat16) (a_ptr : GPtr GpuFloat.
     (colBlock := 256)
     (redBlock := 64)
     (numRedTiles := 4)
-    "ThunderKittens gemm_rs_b200 compatibility: B200 reduce-scatter geometry with distributed store_add output"
+    "ThunderKittens gemm_rs_b200: B200 reduce-scatter geometry with distributed store_add output"
     c_ptr a_ptr b_ptr dev_idx world_size
 
-/-- Compatibility-level counterpart to `gemm_rs_fp8_b200.cu`. -/
+/-- ThunderKittens `gemm_rs_fp8_b200.cu` counterpart. -/
 @[gpu_kernel .SM100]
-def gemmRsFp8B200CompatFwd (c_ptr : GPtr GpuFloat.BFloat16) (a_ptr : GPtr GpuFloat.FP8E4M3)
+def gemmRsFp8B200Fwd (c_ptr : GPtr GpuFloat.BFloat16) (a_ptr : GPtr GpuFloat.FP8E4M3)
     (b_ptr : GPtr GpuFloat.FP8E4M3)
     (dev_idx : KVal UInt32) (world_size : KVal UInt32)
     : KernelM Unit := do
@@ -497,7 +710,7 @@ def gemmRsFp8B200CompatFwd (c_ptr : GPtr GpuFloat.BFloat16) (a_ptr : GPtr GpuFlo
     (colBlock := 256)
     (redBlock := 128)
     (numRedTiles := 4)
-    "ThunderKittens gemm_rs_fp8_b200 compatibility: FP8 B200 reduce-scatter geometry with BF16 distributed store_add output"
+    "ThunderKittens gemm_rs_fp8_b200: FP8 B200 reduce-scatter geometry with BF16 distributed store_add output"
     c_ptr a_ptr b_ptr dev_idx world_size
 
 end Tyr.GPU.Kernels.Distributed

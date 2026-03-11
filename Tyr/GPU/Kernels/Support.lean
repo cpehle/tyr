@@ -15,6 +15,9 @@ namespace Tyr.GPU.Kernels.Support
 open Tyr.GPU
 open Tyr.GPU.Codegen
 
+private def rawLines (lines : Array String) : KernelM Unit :=
+  emitRaw (String.intercalate "\n" lines.toList)
+
 /-- Async global-to-shared tile load with an explicit byte-count contract. -/
 def asyncTileLoad {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
     (dst : ST dtype rows cols layout) (src : GPtr dtype) (coord : RTileCoord)
@@ -97,26 +100,46 @@ def applyLinearAttnDecayMask
   mulCol dst dst qDecay
   mulRow dst dst kDecay
 
-/-- Generic 16x128 all-to-all exchange tile used by the Ulysses and distributed
-transport surfaces. -/
+/-- Generic source-shaped all-to-all exchange tile used by the Ulysses and
+distributed transport surfaces. `scatter_axis` and `gather_axis` follow the
+ThunderKittens numbering over `(batch, depth, row_blocks, col_blocks)`. -/
 def allToAllTile (label : String) (output_ptr : GPtr GpuFloat.BFloat16)
-    (input_ptr : GPtr GpuFloat.BFloat16) (coord : RTileCoord)
-    (storeAdd : Bool := false) : KernelM Unit := do
-  let tileRows : Nat := 16
-  let tileCols : Nat := 128
-  let shard : RT GpuFloat.BFloat16 tileRows tileCols ← allocRT .BFloat16 tileRows tileCols
-  let inputShared : ST GpuFloat.BFloat16 tileRows tileCols ← allocST .BFloat16 tileRows tileCols
-  let exchangeShared : ST GpuFloat.BFloat16 tileRows tileCols ← allocST .BFloat16 tileRows tileCols
-
+    (input_ptr : GPtr GpuFloat.BFloat16)
+    (dev_idx : KVal UInt32) (_world_size : KVal UInt32)
+    (scatter_axis : KVal UInt32) (gather_axis : KVal UInt32) : KernelM Unit := do
   comment s!"All-to-all transport for {label}"
-  asyncTileLoad inputShared input_ptr coord (tileRows * tileCols * 2)
-  load shard inputShared
-  multimemStore exchangeShared shard
-  barrierAllDevices s!"{label} exchange complete" 0
-  if storeAdd then
-    storeGlobalAdd output_ptr exchangeShared coord
-  else
-    storeGlobalAsync output_ptr exchangeShared coord
-  sync
+  rawLines #[
+    "using shared_tile = st_bf<16, 128>;",
+    s!"auto &output = {output_ptr.id.toIdent};",
+    s!"auto &input = {input_ptr.id.toIdent};",
+    s!"const int dev_idx = {dev_idx.id.toIdent};",
+    s!"const int scatter_axis = {scatter_axis.id.toIdent};",
+    s!"const int gather_axis = {gather_axis.id.toIdent};",
+    "extern __shared__ int __shm[];",
+    "tma_swizzle_allocator allocator((int*)&__shm[0]);",
+    "shared_tile &tile = allocator.allocate<shared_tile>();",
+    "__shared__ semaphore arrived;",
+    "init_semaphore(arrived, 0, 1);",
+    "int task_idx = blockIdx.x;",
+    "int batch_idx = task_idx / (input.depth() * (input.rows() / 16) * (input.cols() / 128));",
+    "task_idx %= (input.depth() * (input.rows() / 16) * (input.cols() / 128));",
+    "int depth_idx = task_idx / ((input.rows() / 16) * (input.cols() / 128));",
+    "task_idx %= ((input.rows() / 16) * (input.cols() / 128));",
+    "int row_block_idx = task_idx / (input.cols() / 128);",
+    "int col_block_idx = task_idx % (input.cols() / 128);",
+    "tma::expect_bytes(arrived, sizeof(tile));",
+    "tma::load_async(tile, input, {batch_idx, depth_idx, row_block_idx, col_block_idx}, arrived);",
+    "int dst_dev_idx = 0;",
+    "if (scatter_axis == 0) { dst_dev_idx = batch_idx / output.batch(); batch_idx %= output.batch(); }",
+    "else if (scatter_axis == 1) { dst_dev_idx = depth_idx / output.depth(); depth_idx %= output.depth(); }",
+    "else if (scatter_axis == 2) { dst_dev_idx = row_block_idx / (output.rows() / 16); row_block_idx %= (output.rows() / 16); }",
+    "else { dst_dev_idx = col_block_idx / (output.cols() / 128); col_block_idx %= (output.cols() / 128); }",
+    "if (gather_axis == 0) batch_idx += input.batch() * dev_idx;",
+    "else if (gather_axis == 1) depth_idx += input.depth() * dev_idx;",
+    "else if (gather_axis == 2) row_block_idx += (input.rows() / 16) * dev_idx;",
+    "else col_block_idx += (input.cols() / 128) * dev_idx;",
+    "wait(arrived, 0);",
+    "tma::store_async(output, tile, {batch_idx, depth_idx, row_block_idx, col_block_idx});"
+  ]
 
 end Tyr.GPU.Kernels.Support

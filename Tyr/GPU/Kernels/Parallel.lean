@@ -20,18 +20,18 @@ namespace Tyr.GPU.Kernels
 
 abbrev tkAllGatherFwd := Distributed.allGatherFwd
 abbrev tkAllReduceFwd := Distributed.allReduceFwd
-abbrev tkAllReduceEducationalCompatFwd := Distributed.allReduceEducationalCompatFwd
+abbrev tkAllReduceEducationalFwd := Distributed.allReduceEducationalFwd
 abbrev tkReduceScatterFwd := Distributed.reduceScatterFwd
 abbrev tkAllToAllHeadsToSeq := Distributed.allToAllHeadsToSeq
 abbrev tkAllToAllSeqToHeads := Distributed.allToAllSeqToHeads
 abbrev tkAgGemmFwd := Distributed.agGemmFwd
-abbrev tkAgGemmB200CompatFwd := Distributed.agGemmB200CompatFwd
-abbrev tkAgGemmFp8B200CompatFwd := Distributed.agGemmFp8B200CompatFwd
+abbrev tkAgGemmB200Fwd := Distributed.agGemmB200Fwd
+abbrev tkAgGemmFp8B200Fwd := Distributed.agGemmFp8B200Fwd
 abbrev tkGemmArFwd := Distributed.gemmArFwd
-abbrev tkGemmArH100LcscCompatFwd := Distributed.gemmArH100LcscCompatFwd
+abbrev tkGemmArH100LcscFwd := Distributed.gemmArH100LcscFwd
 abbrev tkGemmRsFwd := Distributed.gemmRsFwd
-abbrev tkGemmRsB200CompatFwd := Distributed.gemmRsB200CompatFwd
-abbrev tkGemmRsFp8B200CompatFwd := Distributed.gemmRsFp8B200CompatFwd
+abbrev tkGemmRsB200Fwd := Distributed.gemmRsB200Fwd
+abbrev tkGemmRsFp8B200Fwd := Distributed.gemmRsFp8B200Fwd
 abbrev tkMoeDispatch := MOE.tkMoeDispatch
 abbrev tkMoeGroupedGemm := MOE.tkMoeGroupedGemm
 abbrev tkMoeDispatchGemm := MOE.tkMoeDispatchGemm

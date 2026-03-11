@@ -23,9 +23,8 @@ def allToAllFwd (output_ptr : GPtr GpuFloat.BFloat16) (input_ptr : GPtr GpuFloat
     (dev_idx : KVal UInt32) (world_size : KVal UInt32)
     (scatter_axis : KVal UInt32) (gather_axis : KVal UInt32) : KernelM Unit := do
   let _ := (dev_idx, world_size, scatter_axis, gather_axis)
-  let coord ← blockCoord2D
   comment "Ulysses all_to_all transport surface; axis selection is an orchestration concern"
-  Support.allToAllTile "generic shard" output_ptr input_ptr coord
+  Support.allToAllTile "generic shard" output_ptr input_ptr dev_idx world_size scatter_axis gather_axis
   Support.barrierAllDevices "all_to_all epilogue" 1
 
 /-- Phase 1/2 of Ulysses forward: redistribute Q/K/V from head-parallel shards
@@ -36,13 +35,13 @@ def ulyssesQkvAllToAll (q_seq_ptr : GPtr GpuFloat.BFloat16) (k_seq_ptr : GPtr Gp
     (q_heads_ptr : GPtr GpuFloat.BFloat16) (k_heads_ptr : GPtr GpuFloat.BFloat16)
     (v_heads_ptr : GPtr GpuFloat.BFloat16)
     (dev_idx : KVal UInt32) (world_size : KVal UInt32) : KernelM Unit := do
-  let _ := (dev_idx, world_size)
-  let coord ← blockCoord2D
+  let scatter ← constIntVal 1 "scatter_depth"
+  let gather ← constIntVal 2 "gather_rows"
 
   comment "Ulysses QKV transport: head-parallel -> sequence-parallel"
-  Support.allToAllTile "Q heads->seq" q_seq_ptr q_heads_ptr coord
-  Support.allToAllTile "K heads->seq" k_seq_ptr k_heads_ptr coord
-  Support.allToAllTile "V heads->seq" v_seq_ptr v_heads_ptr coord
+  Support.allToAllTile "Q heads->seq" q_seq_ptr q_heads_ptr dev_idx world_size scatter gather
+  Support.allToAllTile "K heads->seq" k_seq_ptr k_heads_ptr dev_idx world_size scatter gather
+  Support.allToAllTile "V heads->seq" v_seq_ptr v_heads_ptr dev_idx world_size scatter gather
   Support.barrierAllDevices "QKV transport complete" 1
 
 /-- Phase 4 of Ulysses forward: return the local attention output from the
@@ -53,26 +52,14 @@ def ulyssesAttnFwd (o_heads_ptr : GPtr GpuFloat.BFloat16) (o_seq_ptr : GPtr GpuF
     (v_seq_ptr : GPtr GpuFloat.BFloat16)
     (dev_idx : KVal UInt32) (world_size : KVal UInt32) : KernelM Unit := do
   let _ := (q_seq_ptr, k_seq_ptr, v_seq_ptr, dev_idx, world_size)
-  let coord ← blockCoord2D
+  let scatter ← constIntVal 2 "scatter_rows"
+  let gather ← constIntVal 1 "gather_depth"
 
   comment "Ulysses orchestration shell:"
   comment "1. `ulyssesQkvAllToAll` runs before local attention."
   comment "2. A separate FlashAttention launch consumes q_seq/k_seq/v_seq."
   comment "3. This kernel returns the local attention output back to head shards."
-  Support.allToAllTile "O seq->heads" o_heads_ptr o_seq_ptr coord
+  Support.allToAllTile "O seq->heads" o_heads_ptr o_seq_ptr dev_idx world_size scatter gather
   Support.barrierAllDevices "output return complete" 1
-
-/-- Legacy compatibility surface: no fused attention body remains here.
-This now aliases the output-return transport stage so the module stays focused
-on all-to-all orchestration. -/
-@[gpu_kernel .SM90]
-def ulyssesAttnFusedFwd (o_heads_ptr : GPtr GpuFloat.BFloat16) (o_seq_ptr : GPtr GpuFloat.BFloat16)
-    (dev_idx : KVal UInt32) (world_size : KVal UInt32) : KernelM Unit := do
-  let _ := (dev_idx, world_size)
-  let coord ← blockCoord2D
-
-  comment "Legacy fused entrypoint retained as transport-only return path"
-  Support.allToAllTile "legacy O seq->heads" o_heads_ptr o_seq_ptr coord
-  Support.barrierAllDevices "legacy fused epilogue" 1
 
 end Tyr.GPU.Kernels.UlyssesAttn
