@@ -294,22 +294,9 @@ then store through the local output view. -/
 @[gpu_kernel .SM90]
 def allReduceFwd (output_ptr : GPtr GpuFloat.Float32) (input_ptr : GPtr GpuFloat.Float32)
     (dev_idx : KVal UInt32) (world_size : KVal UInt32) : KernelM Unit := do
-  let _ := world_size
-  comment "ThunderKittens all_reduce: reduce a device-local slice over the multicast tensor and republish the reduced slice"
-  rawLines #[
-    s!"auto &output = {output_ptr.id.toIdent};",
-    s!"auto &input = {input_ptr.id.toIdent};",
-    s!"const int dev_idx = {dev_idx.id.toIdent};",
-    "const size_t num_elems_per_inst = 1;",
-    "const size_t num_elems_per_block = blockDim.x * num_elems_per_inst;",
-    "const size_t n_total = input.numel();",
-    "const size_t n_per_dev = n_total / 8;",
-    "const size_t idx = n_per_dev * dev_idx + num_elems_per_block * blockIdx.x + num_elems_per_inst * threadIdx.x;",
-    "float tmp;",
-    "multimem<float>::ld_reduce<reduce_op::ADD>(tmp, reinterpret_cast<float*>(&input.mc_ptr[idx]));",
-    "multimem<float>::st(reinterpret_cast<float*>(&output.mc_ptr[idx]), tmp);"
-  ]
-  Support.barrierAllDevices "all_reduce epilogue" 1
+  allReduceOutOfPlaceBody (tileRows := 128) (tileCols := 128)
+    "ThunderKittens all_reduce: reduce a device-local slice over the multicast tensor and republish the reduced slice"
+    output_ptr input_ptr dev_idx world_size
 
 /-- ThunderKittens-style reduce-scatter: reduce a multicast source and store the
 caller-selected shard view. -/
@@ -318,23 +305,27 @@ def reduceScatterFwd (output_ptr : GPtr GpuFloat.Float32) (input_ptr : GPtr GpuF
     (dev_idx : KVal UInt32) (world_size : KVal UInt32) : KernelM Unit := do
   let _ := world_size
   comment "ThunderKittens reduce_scatter: reduce over the multicast source and keep only the local output shard"
-  rawLines #[
-    s!"auto &output = {output_ptr.id.toIdent};",
-    s!"auto &input = {input_ptr.id.toIdent};",
-    s!"const int dev_idx = {dev_idx.id.toIdent};",
-    "const size_t num_elems_per_inst = 1;",
-    "const size_t num_elems_per_block = blockDim.x * num_elems_per_inst;",
-    "const size_t row_col_idx = static_cast<size_t>(blockIdx.x) * num_elems_per_block;",
-    "const size_t col_idx = row_col_idx % output.cols();",
-    "const size_t row_idx = row_col_idx / output.cols();",
-    "const size_t depth_idx = blockIdx.y;",
-    "const size_t num_cols_per_dev = output.cols();",
-    "const size_t input_idx = depth_idx * input.rows() * input.cols() + row_idx * input.cols() + col_idx + num_cols_per_dev * dev_idx + threadIdx.x * num_elems_per_inst;",
-    "const size_t output_idx = depth_idx * output.rows() * output.cols() + row_idx * output.cols() + col_idx + threadIdx.x * num_elems_per_inst;",
-    "float tmp;",
-    "multimem<float>::ld_reduce<reduce_op::ADD>(tmp, reinterpret_cast<float*>(&input.mc_ptr[input_idx]));",
-    "move<float>::stg(reinterpret_cast<float*>(&output.raw_ptr[output_idx]), tmp);"
-  ]
+  let tileCols ← constIntVal 128 "reduce_scatter_tile_cols"
+  let outputCoord ← blockCoord2D
+  let outputColBlock : KVal UInt32 := ⟨outputCoord.c, "reduce_scatter_output_col_block"⟩
+  let outputCols ← layoutCols output_ptr "reduce_scatter_output_cols"
+  let outputColBlocks ← scalarDivVal outputCols tileCols "reduce_scatter_output_col_blocks"
+  let inputColBase ← scalarMulVal outputColBlocks dev_idx "reduce_scatter_input_col_base"
+  let inputColIdx ← scalarAddVal inputColBase outputColBlock "reduce_scatter_input_col_idx"
+  let inputCoord := makeRTileCoord outputCoord.b outputCoord.d outputCoord.r inputColIdx.id
+
+  let inputShared : ST GpuFloat.Float32 128 128 ← allocST .Float32 128 128
+  let publishShared : ST GpuFloat.Float32 128 128 ← allocST .Float32 128 128
+  let outputShared : ST GpuFloat.Float32 128 128 ← allocST .Float32 128 128
+  let reduced : RT GpuFloat.Float32 128 128 ← allocRT .Float32 128 128
+
+  Support.asyncTileLoad inputShared input_ptr inputCoord (128 * 128 * GpuFloat.bytes .Float32)
+  multimemLoadReduce reduced inputShared .Sum
+  multimemStore publishShared reduced
+  Support.barrierAllDevices "reduce_scatter reduction complete" 0
+
+  store outputShared reduced
+  storeGlobal output_ptr outputShared outputCoord
   Support.barrierAllDevices "reduce_scatter epilogue" 1
 
 /-- Concrete all-to-all surface for head-parallel -> sequence-parallel transport.

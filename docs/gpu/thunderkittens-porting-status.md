@@ -65,9 +65,9 @@ The remaining work is now mostly DSL expressiveness work:
 
 1. Add first-class TMEM, cluster, and packed-scale constructs so the Blackwell
    GEMM family can move out of raw backend blocks.
-2. Add first-class distributed PGL/topology primitives so the remaining
-   all-reduce/reduce-scatter, Ring, and communication+GEMM families no longer
-   need raw peer-arithmetic scaffolding.
+2. Add first-class distributed PGL/topology primitives so the remaining Ring
+   and communication+GEMM families no longer need raw peer-arithmetic
+   scaffolding.
 3. Tighten exact CTA worker packing for some attention/state-space families
    where the source structure is represented, but the runtime packing is still
    compressed.
