@@ -87,6 +87,9 @@ inductive KStmt where
   | loadVecGlobal (dst src : VarId) (offset : VarId)
   | storeVecGlobal (dst src : VarId) (offset : VarId)
   | storeVecGlobalAdd (dst src : VarId) (offset : VarId)  -- Atomic add for vectors
+  | loadVecGlobalCoord (dst src : VarId) (coordB coordD coordR coordC : VarId)
+  | storeVecGlobalCoord (dst src : VarId) (coordB coordD coordR coordC : VarId)
+  | storeVecGlobalAddCoord (dst src : VarId) (coordB coordD coordR coordC : VarId)
 
   -- Distributed / Multimem operations
   | multimemLoadReduce (op : ReduceOp) (dst src : VarId)
@@ -170,6 +173,7 @@ inductive KStmt where
 
   -- Control flow
   | forLoop (v : VarId) (lo hi : Nat) (body : Array KStmt)
+  | forLoopVal (v : VarId) (lo : Nat) (hi : VarId) (body : Array KStmt)
   | ifStmt (cond : VarId) (thenBody elseBody : Array KStmt)  -- Conditional
   | ifWarpGroup (wgIdx : Nat) (body : Array KStmt)           -- Execute only in specific warp group
   | comment (text : String)

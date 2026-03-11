@@ -18,8 +18,58 @@ namespace Tyr.GPU.Kernels.Mamba2
 open Tyr.GPU
 open Tyr.GPU.Codegen
 
-private def rawLines (lines : Array String) : KernelM Unit :=
-  emitRaw (String.intercalate "\n" lines.toList)
+private abbrev chunkSize : Nat := 64
+private abbrev featDim : Nat := 64
+
+private def toBf16Col {rows cols : Nat}
+    (src : RT GpuFloat.Float32 rows cols .Row) : KernelM (RT GpuFloat.BFloat16 rows cols .Col) := do
+  let rowTile : RT GpuFloat.BFloat16 rows cols ← allocRT .BFloat16 rows cols
+  let colTile : RT GpuFloat.BFloat16 rows cols .Col ← allocRT .BFloat16 rows cols .Col
+  convert rowTile src
+  swapLayout colTile rowTile
+  pure colTile
+
+private def buildMambaDecay
+    (a : RV GpuFloat.Float32 chunkSize)
+    : KernelM
+        (RT GpuFloat.Float32 chunkSize chunkSize .Row ×
+         RV GpuFloat.Float32 chunkSize ×
+         RV GpuFloat.Float32 chunkSize ×
+         RV GpuFloat.Float32 chunkSize) := do
+  let aRows : RT GpuFloat.Float32 chunkSize chunkSize ← allocRT .Float32 chunkSize chunkSize
+  let aCols : RT GpuFloat.Float32 chunkSize chunkSize ← allocRT .Float32 chunkSize chunkSize
+  let aCumsumRows : RT GpuFloat.Float32 chunkSize chunkSize ← allocRT .Float32 chunkSize chunkSize
+  let aCumsumCols : RT GpuFloat.Float32 chunkSize chunkSize ← allocRT .Float32 chunkSize chunkSize
+  let localDecay : RT GpuFloat.Float32 chunkSize chunkSize ← allocRT .Float32 chunkSize chunkSize
+
+  let firstCol : RT GpuFloat.Float32 chunkSize 1 ← allocRT .Float32 chunkSize 1
+  let lastCol : RT GpuFloat.Float32 chunkSize 1 ← allocRT .Float32 chunkSize 1
+  let prefixVec : RV GpuFloat.Float32 chunkSize ← allocRV .Float32 chunkSize
+  let totalDecay : RV GpuFloat.Float32 chunkSize ← allocRV .Float32 chunkSize
+  let qDecay : RV GpuFloat.Float32 chunkSize ← allocRV .Float32 chunkSize
+  let kDecay : RV GpuFloat.Float32 chunkSize ← allocRV .Float32 chunkSize
+
+  broadcastCol aRows a
+  broadcastRow aCols a
+  cumsumCol aCumsumRows aRows
+  cumsumRow aCumsumCols aCols
+
+  sub localDecay aCumsumRows aCumsumCols
+  exp localDecay localDecay
+  makeCausal localDecay localDecay (some 0.0)
+
+  sliceCols firstCol aCumsumRows 0 1
+  rowSum prefixVec firstCol
+  copyVec qDecay prefixVec
+  expVec qDecay qDecay
+
+  sliceCols lastCol aCumsumCols 63 1
+  rowSum totalDecay lastCol
+  subVec kDecay totalDecay prefixVec
+  expVec kDecay kDecay
+  expVec totalDecay totalDecay
+
+  pure (localDecay, qDecay, kDecay, totalDecay)
 
 /-! ## Mamba2 Forward Kernel
 
@@ -45,135 +95,83 @@ def mamba2Fwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat16)
     (seq_len : KVal UInt64) (head_dim : KVal UInt64) : KernelM Unit := do
   let _ := (seq_len, head_dim)
   comment "=== Mamba2 Forward Pass ==="
-  comment "ThunderKittens lcsf pipeline: producer load, consumer compute, producer store, consumer finish"
-  rawLines #[
-    "using q_tile = st_bf<64, 64>;",
-    "using k_tile = st_bf<64, 64>;",
-    "using v_tile = st_bf<64, 64>;",
-    "using o_tile = st_bf<64, 64>;",
-    "using a_vec = sv_fl<64>;",
-    s!"auto &Q = {Q_ptr.id.toIdent};",
-    s!"auto &K = {K_ptr.id.toIdent};",
-    s!"auto &V = {V_ptr.id.toIdent};",
-    s!"auto &A = {A_ptr.id.toIdent};",
-    s!"auto &O = {O_ptr.id.toIdent};",
-    "constexpr int NUM_CONSUMER_WARPS = 8;",
-    "constexpr int OUTPUT_PIPE_STAGES = 2;",
-    "constexpr int INPUT_PIPE_STAGES = 2;",
-    "constexpr int NUM_WORKERS = NUM_CONSUMER_WARPS / 4;",
-    "struct input_block { q_tile q; k_tile k; v_tile v[2]; a_vec a[2]; a_vec padding[6]; };",
-    "struct output_block { o_tile o[2]; };",
-    "struct scratch_block { st_bf<64, 64> kv[2], k[2]; a_vec a_cumsum[2]; };",
-    "extern __shared__ int __shm[];",
-    "tma_swizzle_allocator al((int*)&__shm[0]);",
-    "input_block (&inputs)[INPUT_PIPE_STAGES] = al.allocate<input_block, INPUT_PIPE_STAGES>();",
-    "output_block (&outputs)[OUTPUT_PIPE_STAGES] = al.allocate<output_block, OUTPUT_PIPE_STAGES>();",
-    "scratch_block &scratch = al.allocate<scratch_block>();",
-    "__shared__ semaphore inputs_arrived[INPUT_PIPE_STAGES], inputs_finished[INPUT_PIPE_STAGES], outputs_arrived[OUTPUT_PIPE_STAGES], outputs_finished[OUTPUT_PIPE_STAGES], finish_finished;",
-    "if (threadIdx.x == 0) {",
-    "  Q.template prefetch_tma<q_tile>();",
-    "  K.template prefetch_tma<k_tile>();",
-    "  V.template prefetch_tma<v_tile>();",
-    "  A.template prefetch_tma<a_vec>();",
-    "  O.template prefetch_tma<o_tile>();",
-    "  for (int i = 0; i < INPUT_PIPE_STAGES; i++) { init_semaphore(inputs_arrived[i], 0, 1); init_semaphore(inputs_finished[i], 0, NUM_CONSUMER_WARPS / 4); }",
-    "  for (int i = 0; i < OUTPUT_PIPE_STAGES; i++) { init_semaphore(outputs_arrived[i], 0, 1); init_semaphore(outputs_finished[i], 0, 1); }",
-    "  init_semaphore(finish_finished, 0, 1);",
-    "}",
-    "__syncthreads();",
-    "int task_id = blockIdx.x;",
-    "int batch = task_id / (V.depth() / (NUM_CONSUMER_WARPS / 4));",
-    "task_id -= batch * (V.depth() / (NUM_CONSUMER_WARPS / 4));",
-    "int head = task_id * 2;",
-    "int num_iters = batch < Q.batch() ? K.rows() / q_tile::rows : -1;",
-    "if (warpgroup::groupid() == NUM_WORKERS) {",
-    "  warpgroup::producer_registers();",
-    "  if (warpgroup::warpid() == 0 || warpgroup::warpid() == 1 || warpgroup::warpid() == 2 || warpgroup::warpid() == 3) {",
-    "    for (int iter = 0; iter < num_iters; iter++) {",
-    "      if (warpgroup::warpid() == iter % 4) {",
-    "        warp::tma::expect(inputs_arrived[iter % INPUT_PIPE_STAGES], inputs[iter % INPUT_PIPE_STAGES].q, inputs[iter % INPUT_PIPE_STAGES].k, inputs[iter % INPUT_PIPE_STAGES].v[0], inputs[iter % INPUT_PIPE_STAGES].a[0], inputs[iter % INPUT_PIPE_STAGES].v[1], inputs[iter % INPUT_PIPE_STAGES].a[1]);",
-    "        warp::tma::load_async(inputs[iter % INPUT_PIPE_STAGES].q, Q, {batch, 0, iter, 0}, inputs_arrived[iter % INPUT_PIPE_STAGES]);",
-    "        warp::tma::load_async(inputs[iter % INPUT_PIPE_STAGES].k, K, {batch, 0, iter, 0}, inputs_arrived[iter % INPUT_PIPE_STAGES]);",
-    "        for (int i = 0; i < NUM_WORKERS; i++) {",
-    "          warp::tma::load_async(inputs[iter % INPUT_PIPE_STAGES].v[i], V, {batch, head + i, iter, 0}, inputs_arrived[iter % INPUT_PIPE_STAGES]);",
-    "          warp::tma::load_async(inputs[iter % INPUT_PIPE_STAGES].a[i], A, {batch, head + i, 0, iter}, inputs_arrived[iter % INPUT_PIPE_STAGES]);",
-    "        }",
-    "      }",
-    "    }",
-    "  }",
-    "  if (warpgroup::warpid() == 0) {",
-    "    for (int iter = 0; iter < num_iters; iter++) {",
-    "      for (int i = 0; i < NUM_WORKERS; i++) warp::tma::store_async(O, outputs[iter % OUTPUT_PIPE_STAGES].o[i], {batch, head + i, iter, 0});",
-    "      warp::tma::store_async_read_wait();",
-    "      arrive(outputs_finished[iter % OUTPUT_PIPE_STAGES]);",
-    "    }",
-    "  }",
-    "} else if (warpgroup::groupid() < NUM_WORKERS) {",
-    "  warpgroup::consumer_registers<NUM_WORKERS>();",
-    "  rt_fl<16, 64> o_reg;",
-    "  rt_fl<16, 64> att_block;",
-    "  rt_bf<16, 64> att_block_mma;",
-    "  rt_fl<16, 64> local_decay;",
-    "  rt_bf<16, 64> q_reg, k_reg;",
-    "  rt_fl<16, 64> kv;",
-    "  warp::zero(kv);",
-    "  for (int iter = 0; iter < num_iters; iter++) {",
-    "    wait(inputs_arrived[iter % INPUT_PIPE_STAGES], 0);",
-    "    warpgroup::copy(scratch.a_cumsum[warpgroup::groupid()], inputs[iter % INPUT_PIPE_STAGES].a[warpgroup::groupid()]);",
-    "    warpgroup::sync(warpgroup::groupid());",
-    "    if (warpgroup::warpid() <= 1) {",
-    "      int tid = warpgroup::laneid();",
-    "      for (int offset = 1; offset < 64; offset *= 2) {",
-    "        float temp = (tid >= offset) ? scratch.a_cumsum[warpgroup::groupid()][tid - offset] : 0.0f;",
-    "        group<2>::sync(warpgroup::groupid() + 2);",
-    "        scratch.a_cumsum[warpgroup::groupid()][tid] += temp;",
-    "        group<2>::sync(warpgroup::groupid() + 2);",
-    "      }",
-    "    }",
-    "    warpgroup::sync(warpgroup::groupid());",
-    "    for (int i = 0; i < 4; i++) {",
-    "      int base_row = warpgroup::warpid() * 16 + laneid() / 4;",
-    "      int base_col = i * 16 + (laneid() % 4) * 2;",
-    "      local_decay.tiles[0][i].data[0].x = scratch.a_cumsum[warpgroup::groupid()][base_row + 0] - scratch.a_cumsum[warpgroup::groupid()][base_col + 0];",
-    "      local_decay.tiles[0][i].data[0].y = scratch.a_cumsum[warpgroup::groupid()][base_row + 0] - scratch.a_cumsum[warpgroup::groupid()][base_col + 1];",
-    "      local_decay.tiles[0][i].data[1].x = scratch.a_cumsum[warpgroup::groupid()][base_row + 8] - scratch.a_cumsum[warpgroup::groupid()][base_col + 0];",
-    "      local_decay.tiles[0][i].data[1].y = scratch.a_cumsum[warpgroup::groupid()][base_row + 8] - scratch.a_cumsum[warpgroup::groupid()][base_col + 1];",
-    "      local_decay.tiles[0][i].data[2].x = scratch.a_cumsum[warpgroup::groupid()][base_row + 0] - scratch.a_cumsum[warpgroup::groupid()][base_col + 8];",
-    "      local_decay.tiles[0][i].data[2].y = scratch.a_cumsum[warpgroup::groupid()][base_row + 0] - scratch.a_cumsum[warpgroup::groupid()][base_col + 9];",
-    "      local_decay.tiles[0][i].data[3].x = scratch.a_cumsum[warpgroup::groupid()][base_row + 8] - scratch.a_cumsum[warpgroup::groupid()][base_col + 8];",
-    "      local_decay.tiles[0][i].data[3].y = scratch.a_cumsum[warpgroup::groupid()][base_row + 8] - scratch.a_cumsum[warpgroup::groupid()][base_col + 9];",
-    "    }",
-    "    warp::exp(local_decay, local_decay);",
-    "    for (int i = 0; i < 4; i++) {",
-    "      auto &decay_subtile = reinterpret_cast<rt_fl<16,16>&>(local_decay.tiles[0][i]);",
-    "      if (i > warpgroup::warpid()) warp::zero(decay_subtile);",
-    "      else if (i == warpgroup::warpid()) warp::make_causal(decay_subtile, decay_subtile, kittens::base_types::constants<float>::zero());",
-    "    }",
-    "    warpgroup::load(q_reg, inputs[iter % INPUT_PIPE_STAGES].q);",
-    "    warpgroup::mm_ABt(att_block, q_reg, inputs[iter % INPUT_PIPE_STAGES].k);",
-    "    warpgroup::mma_async_wait();",
-    "    warp::mul(att_block, att_block, local_decay);",
-    "    warp::copy(att_block_mma, att_block);",
-    "    warpgroup::mm_AB(o_reg, att_block_mma, inputs[iter % INPUT_PIPE_STAGES].v[warpgroup::groupid()]);",
-    "    warpgroup::mma_async_wait();",
-    "    warpgroup::store(scratch.kv[warpgroup::groupid()], kv);",
-    "    warpgroup::sync(warpgroup::groupid());",
-    "    warpgroup::mma_AB(o_reg, q_reg, scratch.kv[warpgroup::groupid()]);",
-    "    warpgroup::mma_async_wait();",
-    "    warpgroup::store(outputs[iter % OUTPUT_PIPE_STAGES].o[warpgroup::groupid()], o_reg);",
-    "    warpgroup::sync(warpgroup::groupid());",
-    "    float last_decay = scratch.a_cumsum[warpgroup::groupid()][scratch.a_cumsum[warpgroup::groupid()].length - 1];",
-    "    float total_decay = expf(last_decay);",
-    "    warp::mul(kv, kv, total_decay);",
-    "    warpgroup::load(k_reg, inputs[iter % INPUT_PIPE_STAGES].k);",
-    "    warpgroup::store(scratch.k[warpgroup::groupid()], k_reg);",
-    "    warpgroup::sync(warpgroup::groupid());",
-    "    warpgroup::mma_AtB(kv, scratch.k[warpgroup::groupid()], inputs[iter % INPUT_PIPE_STAGES].v[warpgroup::groupid()]);",
-    "    warpgroup::mma_async_wait();",
-    "    if (warpgroup::laneid() == 0) { arrive(outputs_arrived[iter % OUTPUT_PIPE_STAGES]); arrive(inputs_finished[iter % INPUT_PIPE_STAGES]); }",
-    "  }",
-    "  if (warpgroup::laneid() == 0) arrive(finish_finished);",
-    "}"
-  ]
+  comment "ThunderKittens lcsf pipeline compressed into a typed chunk/state shell"
+  comment "The exact producer/consumer CTA choreography is flattened to one logical (batch, head) recurrence per kernel instance."
+
+  let zero ← constIntVal 0 "mamba2_zero"
+  let headIdx : KVal UInt32 := ⟨← getBlockIdxX, "mamba2_head_idx"⟩
+  let batchIdx : KVal UInt32 := ⟨← getBlockIdxY, "mamba2_batch_idx"⟩
+  let totalRows ← layoutRows K_ptr "mamba2_total_rows"
+  let tileRows ← constIntVal 64 "mamba2_tile_rows"
+  let numChunks ← scalarDivVal totalRows tileRows "mamba2_num_chunks"
+
+  let qShared : ST GpuFloat.BFloat16 chunkSize featDim ← allocST .BFloat16 chunkSize featDim
+  let kShared : ST GpuFloat.BFloat16 chunkSize featDim ← allocST .BFloat16 chunkSize featDim
+  let vShared : ST GpuFloat.BFloat16 chunkSize featDim .Col ← allocST .BFloat16 chunkSize featDim .Col
+  let oShared : ST GpuFloat.BFloat16 chunkSize featDim ← allocST .BFloat16 chunkSize featDim
+  let aShared : SV GpuFloat.Float32 chunkSize ← allocSV .Float32 chunkSize
+
+  let q : RT GpuFloat.BFloat16 chunkSize featDim ← allocRT .BFloat16 chunkSize featDim
+  let k : RT GpuFloat.BFloat16 chunkSize featDim ← allocRT .BFloat16 chunkSize featDim
+  let v : RT GpuFloat.BFloat16 chunkSize featDim .Col ← allocRT .BFloat16 chunkSize featDim .Col
+  let qF : RT GpuFloat.Float32 chunkSize featDim ← allocRT .Float32 chunkSize featDim
+  let kF : RT GpuFloat.Float32 chunkSize featDim ← allocRT .Float32 chunkSize featDim
+  let a : RV GpuFloat.Float32 chunkSize ← allocRV .Float32 chunkSize
+  let state : RT GpuFloat.Float32 featDim featDim ← zeroRT .Float32 featDim featDim
+
+  for chunkIdx in kvrange 0 numChunks do
+    let qkCoord := makeRTileCoord batchIdx.id zero.id chunkIdx.id zero.id
+    let vCoord := makeRTileCoord batchIdx.id headIdx.id chunkIdx.id zero.id
+    let aCoord := makeRTileCoord batchIdx.id headIdx.id zero.id chunkIdx.id
+    let out : RT GpuFloat.Float32 chunkSize featDim ← zeroRT .Float32 chunkSize featDim
+    let outBf16 : RT GpuFloat.BFloat16 chunkSize featDim ← allocRT .BFloat16 chunkSize featDim
+
+    loadGlobal qShared Q_ptr qkCoord
+    loadGlobal kShared K_ptr qkCoord
+    loadGlobal vShared V_ptr vCoord
+    loadVecGlobal aShared A_ptr aCoord
+    sync
+
+    load q qShared
+    load k kShared
+    load v vShared
+    loadVec a aShared
+    convert qF q
+    convert kF k
+
+    let (localDecay, qDecay, kDecay, totalDecay) ← buildMambaDecay a
+
+    comment "Local decayed causal chunk contribution"
+    let localScores : RT GpuFloat.Float32 chunkSize featDim ← zeroRT .Float32 chunkSize featDim
+    let localScoresBf16 : RT GpuFloat.BFloat16 chunkSize featDim ← allocRT .BFloat16 chunkSize featDim
+    mmaT localScores q k localScores
+    mul localScores localScores localDecay
+    convert localScoresBf16 localScores
+    mma out localScoresBf16 v out
+
+    comment "Recurrent state contribution Q @ KV_prev with per-row decay"
+    let qDecayed : RT GpuFloat.Float32 chunkSize featDim ← allocRT .Float32 chunkSize featDim
+    let qDecayedBf16 : RT GpuFloat.BFloat16 chunkSize featDim ← allocRT .BFloat16 chunkSize featDim
+    let stateBf16Col ← toBf16Col state
+    mulCol qDecayed qF qDecay
+    convert qDecayedBf16 qDecayed
+    mma out qDecayedBf16 stateBf16Col out
+
+    convert outBf16 out
+    store oShared outBf16
+    storeGlobal O_ptr oShared vCoord
+
+    comment "Recurrent K^T V state update with final-decay carry"
+    let kDecayed : RT GpuFloat.Float32 chunkSize featDim ← allocRT .Float32 chunkSize featDim
+    let kDecayedBf16 : RT GpuFloat.BFloat16 chunkSize featDim ← allocRT .BFloat16 chunkSize featDim
+    let kDecayedCol : RT GpuFloat.BFloat16 chunkSize featDim .Col ← allocRT .BFloat16 chunkSize featDim .Col
+    let updatedState : RT GpuFloat.Float32 featDim featDim ← allocRT .Float32 featDim featDim
+    mulCol state state totalDecay
+    mulCol kDecayed kF kDecay
+    convert kDecayedBf16 kDecayed
+    swapLayout kDecayedCol kDecayedBf16
+    mmaAtB updatedState kDecayedCol v state
+    copy state updatedState
+    sync
 
 end Tyr.GPU.Kernels.Mamba2

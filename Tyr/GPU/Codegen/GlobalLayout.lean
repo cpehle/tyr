@@ -379,6 +379,30 @@ def storeVecGlobalAddCol {dtype : GpuFloat} {len : Nat}
     : KernelM Unit := do
   emit (.storeVecGlobalAdd dst.id src.id coord.colOffset)
 
+/-- Load vector from global memory using the full runtime coordinate. -/
+def loadVecGlobal {dtype : GpuFloat} {len : Nat}
+    (dst : SV dtype len)
+    (src : GPtr dtype)
+    (coord : RTileCoord)
+    : KernelM Unit := do
+  emit (.loadVecGlobalCoord dst.id src.id coord.b coord.d coord.r coord.c)
+
+/-- Store vector to global memory using the full runtime coordinate. -/
+def storeVecGlobal {dtype : GpuFloat} {len : Nat}
+    (dst : GPtr dtype)
+    (src : SV dtype len)
+    (coord : RTileCoord)
+    : KernelM Unit := do
+  emit (.storeVecGlobalCoord dst.id src.id coord.b coord.d coord.r coord.c)
+
+/-- Atomic-add store vector to global memory using the full runtime coordinate. -/
+def storeVecGlobalAdd {dtype : GpuFloat} {len : Nat}
+    (dst : GPtr dtype)
+    (src : SV dtype len)
+    (coord : RTileCoord)
+    : KernelM Unit := do
+  emit (.storeVecGlobalAddCoord dst.id src.id coord.b coord.d coord.r coord.c)
+
 /-- Create an RTileCoord with a modified row index (for loop iteration).
     Common pattern: `coord.withRow loopIdx.id` -/
 def RTileCoord.withRow (coord : RTileCoord) (newR : VarId) : RTileCoord :=

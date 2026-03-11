@@ -31,6 +31,7 @@ into the Lean GPU catalog so that:
 | `323f24b0` | Added the remaining dedicated ThunderKittens source counterparts: `mha_h100_lcf`, BF16 GEMM, Blackwell FP8/MXFP8 GEMM exports, and the distributed educational/B200/LCSC surfaces. |
 | `a22de68d` | Extended the GPU scalar DSL and rewrote `LinearAttn*.lean` around the decayed recurrent/local ThunderKittens contract. |
 | `c4a6a16a` | Encoded Blackwell GEMM parity surfaces and tightened `Mamba2` / `MhaH100LCF` source staging. |
+| `in progress` | Added runtime-bounded typed kernel loops and removed the remaining raw attention-side holdouts in `RingAttn.lean` and `MhaH100LCF.lean`. |
 
 ## Catalog Organization
 
@@ -61,7 +62,7 @@ Status meanings:
 | Vendored source | Lean counterpart | Status | Notes |
 | --- | --- | --- | --- |
 | `attention/mha_h100/mha_h100.cu` | `Tyr/GPU/Kernels/MhaH100.lean` | `implemented` | Closest attention-side transliteration in the tree. |
-| `attention/mha_h100_lcf/mha_h100_lcf.cu` | `Tyr/GPU/Kernels/MhaH100LCF.lean` (`tkMhaH100LCFFwd64`, `tkMhaH100LCFFwd128`) | `implemented+raw` | Dedicated LCF load-compute-finish surfaces with raw backend staging for the CTA packing details. |
+| `attention/mha_h100_lcf/mha_h100_lcf.cu` | `Tyr/GPU/Kernels/MhaH100LCF.lean` (`tkMhaH100LCFFwd64`, `tkMhaH100LCFFwd128`) | `implemented` | Typed stationary-Q / streamed-KV shell; the multi-worker CTA packing is intentionally flattened to one logical query tile per kernel instance. |
 | `based/linear_attn.cu` | `Tyr/GPU/Kernels/Based.lean` (`tkBasedLinearAttnFwd`) | `implemented` | Source-backed forward owns the explicit `a0/a1/a2` state and local polynomial attention contract. |
 | `fftconv/fftconv_non_pc.cu` | `Tyr/GPU/Kernels/FFTConv.lean` (`tkFFTConvNonPC64`) | `implemented` | Dedicated non-persistent counterpart exists. |
 | `fftconv/fftconv_pc.cu` | `Tyr/GPU/Kernels/FFTConv.lean` (`tkFFTConvPC1024`) | `implemented` | Persistent producer/consumer counterpart exists. |
@@ -78,7 +79,7 @@ Status meanings:
 | `hedgehog/hedgehog.cu` | `Tyr/GPU/Kernels/Hedgehog.lean` (`tkHedgehogFwd`) | `implemented` | Canonical chunk/state surface exists. |
 | `layernorm/layernorm.cu` | `Tyr/GPU/Kernels/FusedLayerNorm.lean` (`tkFusedLayerNormResidual1024`) | `implemented` | Canonical fused residual + layernorm port. |
 | `linear_attention/linear_attention.cu` | `Tyr/GPU/Kernels/LinearAttn.lean` (`tkLinearAttnFwd`) | `implemented` | Dedicated decayed recurrent/local forward surface. |
-| `mamba2/mamba2.cu` | `Tyr/GPU/Kernels/Mamba2.lean` (`mamba2Fwd`) | `implemented+raw` | Dedicated lcsf-style producer/consumer surface exists. |
+| `mamba2/mamba2.cu` | `Tyr/GPU/Kernels/Mamba2.lean` (`mamba2Fwd`) | `implemented` | Typed chunk/state shell with runtime-bounded chunk loops, decay-prefix construction, local masked-decayed `QK^T`, and recurrent `K^T V` updates. |
 | `parallel/ag_gemm/ag_gemm_b200.cu` | `Tyr/GPU/Kernels/Distributed.lean` (`agGemmB200Fwd`) | `implemented` | Dedicated Blackwell AG+GEMM counterpart now uses the typed producer/consumer distributed surface. |
 | `parallel/ag_gemm/ag_gemm_h100.cu` | `Tyr/GPU/Kernels/Distributed.lean` (`agGemmFwd`) | `implemented` | Dedicated H100 AG+GEMM counterpart now uses the typed producer/consumer distributed surface. |
 | `parallel/ag_gemm_fp8/ag_gemm_fp8_b200.cu` | `Tyr/GPU/Kernels/Distributed.lean` (`agGemmFp8B200Fwd`) | `implemented` | Dedicated Blackwell FP8 AG+GEMM counterpart now uses the typed producer/consumer distributed surface. |
@@ -93,7 +94,7 @@ Status meanings:
 | `parallel/gemm_rs_fp8/gemm_rs_fp8_b200.cu` | `Tyr/GPU/Kernels/Distributed.lean` (`gemmRsFp8B200Fwd`) | `implemented` | Dedicated Blackwell FP8 GEMM+reduce-scatter counterpart now uses the typed distributed `store_add` surface. |
 | `parallel/moe_dispatch_gemm/moe_dispatch_gemm_h100.cu` | `Tyr/GPU/Kernels/MOE.lean` (`tkMoeDispatchGemm`) | `implemented+raw` | Canonical fused dispatch/grouped-GEMM surface exists. |
 | `parallel/reduce_scatter/reduce_scatter.cu` | `Tyr/GPU/Kernels/Distributed.lean` (`reduceScatterFwd`) | `implemented` | The sharded transport path is now encoded through the typed tile/multimem surface. |
-| `parallel/ring_attn/ring_attn_h100.cu` | `Tyr/GPU/Kernels/RingAttn.lean` (`ringAttnPartial`, `ringAttnComm`, `ringAttnReduce`) | `implemented+raw` | Forward ring attention is split into the same coarse phases as the vendored kernel. |
+| `parallel/ring_attn/ring_attn_h100.cu` | `Tyr/GPU/Kernels/RingAttn.lean` (`ringAttnPartial`, `ringAttnComm`, `ringAttnReduce`) | `implemented` | All three forward phases now use typed DSL code; the partial phase runs as a typed single-query-tile shell over a runtime-bounded KV-shard loop. |
 | `parallel/ulysses_attn/ulysses_attn.cu` | `Tyr/GPU/Kernels/UlyssesAttn.lean` (`allToAllFwd`, `ulyssesQkvAllToAll`, `ulyssesAttnFwd`) | `implemented` | Ulysses transport/orchestration now rides on the typed shared all-to-all surface instead of a raw backend block. |
 | `rotary/rotary.cu` | `Tyr/GPU/Kernels/Rotary.lean` | `implemented` | Reasonably faithful tile split / rotate / concat structure. |
 
@@ -114,13 +115,10 @@ the source-backed forward kernels rather than parity blockers.
 The remaining work is mostly about first-class DSL coverage and exact launch
 arithmetic, not missing kernel families:
 
-1. Promote TMEM / cluster-specialized storage / scale-tile concepts so the
-   Blackwell GEMM family no longer needs raw backend blocks.
-2. Add first-class distributed PGL / peer arithmetic for the remaining
-   ring-attention kernels. The shared collectives and communication+GEMM
-   surfaces are now typed, but the broader multi-peer topology DSL is still
-   thin.
-3. Tighten exact CTA worker packing for `MhaH100LCF.lean`, `Based.lean`,
+1. Promote TMEM / cluster-specialized storage / scale-tile concepts so
+   `Bf16Gemm.lean`, `PrecisionGemm.lean`, and `NvFp4Gemm.lean` no longer need
+   raw backend blocks.
+2. Tighten exact CTA worker packing for `MhaH100LCF.lean`, `Based.lean`,
    `LinearAttn.lean`, `Hedgehog.lean`, and `Mamba2.lean`.
 
 ## Notes

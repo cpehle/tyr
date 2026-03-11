@@ -74,6 +74,7 @@ private def addRvLayout (st : RVLayoutState) (v : VarId) (layout : RVLayout) : R
 private def collectRtLayoutsStmt (acc : Std.HashMap VarId TileLayout) : KStmt → Std.HashMap VarId TileLayout
   | .declRT v _ _ _ layout => acc.insert v layout
   | .forLoop _ _ _ body => body.foldl collectRtLayoutsStmt acc
+  | .forLoopVal _ _ _ body => body.foldl collectRtLayoutsStmt acc
   | .ifStmt _ thenBody elseBody =>
       let acc' := thenBody.foldl collectRtLayoutsStmt acc
       elseBody.foldl collectRtLayoutsStmt acc'
@@ -84,6 +85,7 @@ private def collectTileInfoStmt (acc : Std.HashMap VarId TileInfo) : KStmt → S
   | .declRT v _ rows cols _ => acc.insert v { kind := .RT, rows := rows, cols := cols }
   | .declST v _ rows cols _ => acc.insert v { kind := .ST, rows := rows, cols := cols }
   | .forLoop _ _ _ body => body.foldl collectTileInfoStmt acc
+  | .forLoopVal _ _ _ body => body.foldl collectTileInfoStmt acc
   | .ifStmt _ thenBody elseBody =>
       let acc' := thenBody.foldl collectTileInfoStmt acc
       elseBody.foldl collectTileInfoStmt acc'
@@ -93,6 +95,7 @@ private def collectTileInfoStmt (acc : Std.HashMap VarId TileInfo) : KStmt → S
 private def collectRvDeclsStmt (acc : Std.HashSet VarId) : KStmt → Std.HashSet VarId
   | .declRV v _ _ => acc.insert v
   | .forLoop _ _ _ body => body.foldl collectRvDeclsStmt acc
+  | .forLoopVal _ _ _ body => body.foldl collectRvDeclsStmt acc
   | .ifStmt _ thenBody elseBody =>
       let acc' := thenBody.foldl collectRvDeclsStmt acc
       elseBody.foldl collectRvDeclsStmt acc'
@@ -168,6 +171,7 @@ private def collectRvLayoutsStmt
   | .scalarAdd dst src _ =>
       unifyRvVars rvVars st dst src
   | .forLoop _ _ _ body => body.foldl (collectRvLayoutsStmt rtLayouts rvVars) st
+  | .forLoopVal _ _ _ body => body.foldl (collectRvLayoutsStmt rtLayouts rvVars) st
   | .ifStmt _ thenBody elseBody =>
       let st' := thenBody.foldl (collectRvLayoutsStmt rtLayouts rvVars) st
       elseBody.foldl (collectRvLayoutsStmt rtLayouts rvVars) st'
@@ -286,6 +290,12 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout)
   | .storeVecGlobalAdd dst src offset =>
     s!"{indent}store_add({dst.toIdent}, {src.toIdent}, " ++
     "{" ++ s!"{offset.toIdent}" ++ "});\n"
+  | .loadVecGlobalCoord dst src coordB coordD coordR coordC =>
+    s!"{indent}warp::load({dst.toIdent}, {src.toIdent}, kittens::coord<>({coordB.toIdent}, {coordD.toIdent}, {coordR.toIdent}, {coordC.toIdent}));\n"
+  | .storeVecGlobalCoord dst src coordB coordD coordR coordC =>
+    s!"{indent}warp::store({dst.toIdent}, {src.toIdent}, kittens::coord<>({coordB.toIdent}, {coordD.toIdent}, {coordR.toIdent}, {coordC.toIdent}));\n"
+  | .storeVecGlobalAddCoord dst src coordB coordD coordR coordC =>
+    s!"{indent}store_add({dst.toIdent}, {src.toIdent}, kittens::coord<>({coordB.toIdent}, {coordD.toIdent}, {coordR.toIdent}, {coordC.toIdent}));\n"
 
   -- Distributed / Multimem operations
   | .multimemLoadReduce op dst src =>
@@ -606,6 +616,9 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout)
   | .forLoop v lo hi body =>
     let bodyStr := body.toList.map (generateStmt rvLayouts rvVars tileInfo (indent ++ "  ")) |>.foldl (· ++ ·) ""
     s!"{indent}for (int {v.toIdent} = {lo}; {v.toIdent} < {hi}; {v.toIdent}++) \{\n{bodyStr}{indent}}\n"
+  | .forLoopVal v lo hi body =>
+    let bodyStr := body.toList.map (generateStmt rvLayouts rvVars tileInfo (indent ++ "  ")) |>.foldl (· ++ ·) ""
+    s!"{indent}for (int {v.toIdent} = {lo}; {v.toIdent} < {hi.toIdent}; {v.toIdent}++) \{\n{bodyStr}{indent}}\n"
   | .ifStmt cond thenBody elseBody =>
     let thenStr := thenBody.toList.map (generateStmt rvLayouts rvVars tileInfo (indent ++ "  ")) |>.foldl (· ++ ·) ""
     let elseStr := elseBody.toList.map (generateStmt rvLayouts rvVars tileInfo (indent ++ "  ")) |>.foldl (· ++ ·) ""
@@ -692,6 +705,7 @@ private partial def stmtUses (p : KStmt → Bool) : KStmt → Bool
     if p stmt then true else
       match stmt with
       | .forLoop _ _ _ body => body.any (stmtUses p)
+      | .forLoopVal _ _ _ body => body.any (stmtUses p)
       | .ifStmt _ thenBody elseBody =>
         thenBody.any (stmtUses p) || elseBody.any (stmtUses p)
       | .ifWarpGroup _ body => body.any (stmtUses p)

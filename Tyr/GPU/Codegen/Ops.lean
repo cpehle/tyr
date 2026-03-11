@@ -4,6 +4,7 @@ import Tyr.GPU.Codegen.TileTypes
 import Tyr.GPU.Codegen.IR
 import Tyr.GPU.Codegen.Monad
 import Tyr.GPU.Codegen.AST
+import Tyr.GPU.Codegen.GlobalLayout
 
 /-!
 # Tyr.GPU.Codegen.Ops
@@ -943,6 +944,30 @@ def storeVecGlobalAddCoord {dtype : GpuFloat} {len : Nat}
     (offset : VarId)
     : KernelM Unit := do
   emit (.storeVecGlobalAdd dst.id src.id offset)
+
+/-- Load vector from global memory using a full 4D runtime coordinate. -/
+def loadVecGlobalAt {dtype : GpuFloat} {len : Nat}
+    (dst : SV dtype len)
+    (src : GPtr dtype)
+    (coord : RTileCoord)
+    : KernelM Unit := do
+  emit (.loadVecGlobalCoord dst.id src.id coord.b coord.d coord.r coord.c)
+
+/-- Store vector to global memory using a full 4D runtime coordinate. -/
+def storeVecGlobalAt {dtype : GpuFloat} {len : Nat}
+    (dst : GPtr dtype)
+    (src : SV dtype len)
+    (coord : RTileCoord)
+    : KernelM Unit := do
+  emit (.storeVecGlobalCoord dst.id src.id coord.b coord.d coord.r coord.c)
+
+/-- Atomic-add store vector to global memory using a full 4D runtime coordinate. -/
+def storeVecGlobalAddAt {dtype : GpuFloat} {len : Nat}
+    (dst : GPtr dtype)
+    (src : SV dtype len)
+    (coord : RTileCoord)
+    : KernelM Unit := do
+  emit (.storeVecGlobalAddCoord dst.id src.id coord.b coord.d coord.r coord.c)
 
 /-! ## Distributed / Multimem Operations -/
 

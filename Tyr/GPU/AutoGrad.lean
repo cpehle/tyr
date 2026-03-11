@@ -23,6 +23,7 @@ inductive LinearInst where
   | sum (axis : ReduceAxis) (dout din : VarId)
   | mma (trans : MMATranspose) (dout da db dc : VarId) (primalA primalB : VarId)
   | loop (v : VarId) (lo hi : Nat) (body : Array LinearInst)
+  | loopVal (v : VarId) (lo : Nat) (hi : VarId) (body : Array LinearInst)
   | custom (name : String) (dout : VarId) (dins : Array VarId) (ctx : Array VarId)
   deriving Repr, Inhabited
 
@@ -167,6 +168,15 @@ partial def linearizeStmt (s : KStmt) : TraceM Unit := do
           primalStmts := savedState.primalStmts.push (.forLoop v lo hi innerState.primalStmts)
           linearTrace := savedState.linearTrace.push (.loop v lo hi innerState.linearTrace) }
 
+  | .forLoopVal v lo hi body =>
+    let savedState ← get
+    set { savedState with primalStmts := #[], linearTrace := #[] }
+    body.forM linearizeStmt
+    let innerState ← get
+    set { savedState with
+          primalStmts := savedState.primalStmts.push (.forLoopVal v lo hi innerState.primalStmts)
+          linearTrace := savedState.linearTrace.push (.loopVal v lo hi innerState.linearTrace) }
+
   | other => emitPrimal other
 
 /-- Transpose a Linear Trace to produce VJP statements -/
@@ -299,6 +309,10 @@ partial def transposeTrace (trace : Array LinearInst) : ADM (Array KStmt) := do
     | .loop v lo hi body =>
       let transBody ← transposeTrace body
       stmts := stmts.push (.forLoop v lo hi transBody)
+
+    | .loopVal v lo hi body =>
+      let transBody ← transposeTrace body
+      stmts := stmts.push (.forLoopVal v lo hi transBody)
 
     | .custom name dout dins ctx =>
       let rule? ← liftM $ getGpuVJPRule name

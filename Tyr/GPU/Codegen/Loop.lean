@@ -1,6 +1,7 @@
 import Tyr.GPU.Codegen.Var
 import Tyr.GPU.Codegen.IR
 import Tyr.GPU.Codegen.Monad
+import Tyr.GPU.Codegen.TileTypes
 
 /-!
 # Tyr.GPU.Codegen.Loop
@@ -52,9 +53,19 @@ structure KRange where
   hi : Nat
   deriving Repr, Inhabited
 
+/-- Range for GPU loops with a runtime upper bound. -/
+structure KValRange where
+  lo : Nat
+  hi : VarId
+  deriving Repr, Inhabited
+
 /-- Create a kernel range.
     Usage: `for i in krange 0 numBlocks do ...` -/
 def krange (lo hi : Nat) : KRange := ⟨lo, hi⟩
+
+/-- Create a kernel range with a runtime upper bound.
+    Usage: `for i in kvrange 0 numBlocks do ...` where `numBlocks : KVal UInt32`. -/
+def kvrange (lo : Nat) (hi : KVal UInt32) : KValRange := ⟨lo, hi.id⟩
 
 /-- Notation for kernel ranges: gpu[lo:hi]
     Alternative syntax using brackets -/
@@ -104,6 +115,17 @@ instance : ForIn KernelM KRange KIdx where
     emit (.forLoop loopVar range.lo range.hi capturedBody)
     pure init
 
+/-- ForIn instance for KernelM with a runtime upper bound, yielding KIdx. -/
+instance : ForIn KernelM KValRange KIdx where
+  forIn range init f := do
+    let loopVar ← freshVar
+    let idx : KIdx := ⟨loopVar⟩
+    let capturedBody ← captureBody do
+      let _ ← f idx init
+      pure ()
+    emit (.forLoopVal loopVar range.lo range.hi capturedBody)
+    pure init
+
 /-! ## Legacy Loop Functions
 
 These are kept for backward compatibility. New code should prefer the `for` syntax.
@@ -115,6 +137,12 @@ def forLoop (lo hi : Nat) (body : KernelM Unit) : KernelM Unit := do
   let loopVar ← freshVar
   let capturedBody ← captureBody body
   emit (.forLoop loopVar lo hi capturedBody)
+
+/-- For loop with a runtime upper bound (legacy helper). -/
+def forLoopVal (lo : Nat) (hi : KVal UInt32) (body : VarId → KernelM Unit) : KernelM Unit := do
+  let loopVar ← freshVar
+  let capturedBody ← captureBody (body loopVar)
+  emit (.forLoopVal loopVar lo hi.id capturedBody)
 
 /-- For loop with VarId exposed (legacy).
     Prefer: `for i in krange lo hi do ... i.id ...` -/
