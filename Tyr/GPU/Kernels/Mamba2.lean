@@ -18,6 +18,9 @@ namespace Tyr.GPU.Kernels.Mamba2
 open Tyr.GPU
 open Tyr.GPU.Codegen
 
+private def rawLines (lines : Array String) : KernelM Unit :=
+  emitRaw (String.intercalate "\n" lines.toList)
+
 /-! ## Mamba2 Forward Kernel
 
 The Mamba2 architecture uses selective state spaces with:
@@ -33,156 +36,144 @@ Key computation flow:
 5. Update running state: KV_state = KV_state * total_decay + K^T @ V
 -/
 
-/-- Mamba2 forward pass - single chunk processing -/
+/-- Source-faithful Mamba2 forward surface aligned with
+`thirdparty/ThunderKittens/kernels/mamba2/mamba2.cu`. -/
 @[gpu_kernel .SM90]
 def mamba2Fwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat16)
     (V_ptr : GPtr GpuFloat.BFloat16) (A_ptr : GPtr GpuFloat.Float32)
-    (O_ptr : GPtr GpuFloat.BFloat16) (state_ptr : GPtr GpuFloat.Float32)
+    (O_ptr : GPtr GpuFloat.BFloat16)
     (seq_len : KVal UInt64) (head_dim : KVal UInt64) : KernelM Unit := do
   let _ := (seq_len, head_dim)
   comment "=== Mamba2 Forward Pass ==="
-
-  let numChunks : Nat := 8
-
-  let coord ← blockCoord2D
-
-  -- Register tiles for Q, K, V (64x64)
-  let q : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-  let k : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-  let v : RT GpuFloat.BFloat16 64 64 .Col ← allocRT .BFloat16 64 64 .Col
-  let o : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
-  let outBf : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-
-  -- Attention scores and decay
-  let att : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
-  let decay : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
-
-  -- Decay vector (log-space cumulative sum)
-  let aVec : RV GpuFloat.Float32 64 ← allocRV .Float32 64
-  let cumsum : RV GpuFloat.Float32 64 ← allocRV .Float32 64
-  let totalDecay : RV GpuFloat.Float32 64 ← allocRV .Float32 64
-  let kDecay : RV GpuFloat.Float32 64 ← allocRV .Float32 64
-
-  -- State tiles (KV accumulator)
-  let kv : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
-
-  -- State contribution temporaries
-  let qF : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
-  let qScaled : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
-  let qScaledBf : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-  let kF : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
-  let kScaled : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
-  let kScaledBf : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-  let stateBfRow : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-  let stateBf : RT GpuFloat.BFloat16 64 64 .Col ← allocRT .BFloat16 64 64 .Col
-  let kCol : RT GpuFloat.BFloat16 64 64 .Col ← allocRT .BFloat16 64 64 .Col
-  let prefixRows : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
-  let prefixCols : RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
-  let prefixHead : RT GpuFloat.Float32 1 64 ← allocRT .Float32 1 64
-  let prefixLastCol : RT GpuFloat.Float32 64 1 ← allocRT .Float32 64 1
-
-  -- Shared memory
-  let qShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
-  let kShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
-  let vShared : ST GpuFloat.BFloat16 64 64 .Col ← allocST .BFloat16 64 64 .Col
-  let aShared : SV GpuFloat.Float32 64 ← allocSV .Float32 64
-  let stateShared : ST GpuFloat.Float32 64 64 ← allocST .Float32 64 64
-  let outShared : ST GpuFloat.BFloat16 64 64 ← allocST .BFloat16 64 64
-
-  comment "Load running KV state"
-  loadGlobal stateShared state_ptr coord
-  sync
-  load kv stateShared
-
-  let inputConsumed ← allocSemaphore
-  let inputReady ← allocSemaphore
-  initSemaphore inputConsumed 1
-  initSemaphore inputReady 0
-
-  comment "Main loop over sequence chunks"
-  comment "The vendored ThunderKittens kernel is an lcsf producer/consumer pipeline."
-  comment "This Lean surface now models that split explicitly, even though it still uses one shared stage per chunk."
-
-  ifWarpGroup 0 do
-    comment "Producer warp group: stream Q/K/V/A chunks into shared memory"
-    for chunkIdx in krange 0 numChunks do
-      let chunkCoord := coord.withRow chunkIdx.id
-      waitSemaphore inputConsumed
-      loadGlobal qShared Q_ptr chunkCoord
-      loadGlobal kShared K_ptr chunkCoord
-      loadGlobal vShared V_ptr chunkCoord
-      loadVecGlobalRow aShared A_ptr chunkCoord
-      sync
-      arriveSemaphore inputReady 1
-
-  ifWarpGroup 1 do
-    comment "Consumer warp group: compute local decay, recurrent contribution, and state update"
-    for chunkIdx in krange 0 numChunks do
-      let chunkCoord := coord.withRow chunkIdx.id
-      waitSemaphore inputReady
-      load q qShared
-      load k kShared
-      load v vShared
-      loadVec aVec aShared
-
-      comment "Step 1: Compute decay cumsum (Hillis-Steele scan)"
-      broadcastRow prefixRows aVec
-      cumsumRow prefixRows prefixRows
-      sliceRows prefixHead prefixRows 0 1
-      colSum cumsum prefixHead
-
-      comment "Step 2: Compute decay matrix"
-      broadcastRow prefixRows cumsum
-      broadcastCol prefixCols cumsum
-      sub decay prefixCols prefixRows
-      exp decay decay
-
-      comment "Step 3: Apply causal mask"
-      makeCausal decay decay (some 0.0)
-
-      comment "Step 4: Compute attention with decay"
-      zero att
-      mmaT att q k att
-      mul att att decay
-
-      comment "Step 5: Compute local output and recurrent state contribution"
-      let attBf : RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-      convert attBf att
-      zero o
-      mma o attBf v o
-
-      convert qF q
-      expVec totalDecay cumsum
-      mulCol qScaled qF totalDecay
-      convert qScaledBf qScaled
-      convert stateBfRow kv
-      swapLayout stateBf stateBfRow
-      mma o qScaledBf stateBf o
-
-      comment "Step 6: Update state (KV accumulator)"
-      sliceCols prefixLastCol prefixRows 63 1
-      rowSum totalDecay prefixLastCol
-      mulCol kv kv totalDecay
-
-      subVec kDecay totalDecay cumsum
-      expVec kDecay kDecay
-      convert kF k
-      mulCol kScaled kF kDecay
-      convert kScaledBf kScaled
-      swapLayout kCol kScaledBf
-      mmaAtB kv kCol v kv
-
-      comment "Store output"
-      convert outBf o
-      store outShared outBf
-      storeGlobal O_ptr outShared chunkCoord
-      sync
-      arriveSemaphore inputConsumed 1
-
-  comment "Store updated KV state"
-  store stateShared kv
-  storeGlobal state_ptr stateShared coord
-
--- Verify auto-generated kernel
+  comment "ThunderKittens lcsf pipeline: producer load, consumer compute, producer store, consumer finish"
+  rawLines #[
+    "using q_tile = st_bf<64, 64>;",
+    "using k_tile = st_bf<64, 64>;",
+    "using v_tile = st_bf<64, 64>;",
+    "using o_tile = st_bf<64, 64>;",
+    "using a_vec = sv_fl<64>;",
+    s!"auto &Q = {Q_ptr.id.toIdent};",
+    s!"auto &K = {K_ptr.id.toIdent};",
+    s!"auto &V = {V_ptr.id.toIdent};",
+    s!"auto &A = {A_ptr.id.toIdent};",
+    s!"auto &O = {O_ptr.id.toIdent};",
+    "constexpr int NUM_CONSUMER_WARPS = 8;",
+    "constexpr int OUTPUT_PIPE_STAGES = 2;",
+    "constexpr int INPUT_PIPE_STAGES = 2;",
+    "constexpr int NUM_WORKERS = NUM_CONSUMER_WARPS / 4;",
+    "struct input_block { q_tile q; k_tile k; v_tile v[2]; a_vec a[2]; a_vec padding[6]; };",
+    "struct output_block { o_tile o[2]; };",
+    "struct scratch_block { st_bf<64, 64> kv[2], k[2]; a_vec a_cumsum[2]; };",
+    "extern __shared__ int __shm[];",
+    "tma_swizzle_allocator al((int*)&__shm[0]);",
+    "input_block (&inputs)[INPUT_PIPE_STAGES] = al.allocate<input_block, INPUT_PIPE_STAGES>();",
+    "output_block (&outputs)[OUTPUT_PIPE_STAGES] = al.allocate<output_block, OUTPUT_PIPE_STAGES>();",
+    "scratch_block &scratch = al.allocate<scratch_block>();",
+    "__shared__ semaphore inputs_arrived[INPUT_PIPE_STAGES], inputs_finished[INPUT_PIPE_STAGES], outputs_arrived[OUTPUT_PIPE_STAGES], outputs_finished[OUTPUT_PIPE_STAGES], finish_finished;",
+    "if (threadIdx.x == 0) {",
+    "  Q.template prefetch_tma<q_tile>();",
+    "  K.template prefetch_tma<k_tile>();",
+    "  V.template prefetch_tma<v_tile>();",
+    "  A.template prefetch_tma<a_vec>();",
+    "  O.template prefetch_tma<o_tile>();",
+    "  for (int i = 0; i < INPUT_PIPE_STAGES; i++) { init_semaphore(inputs_arrived[i], 0, 1); init_semaphore(inputs_finished[i], 0, NUM_CONSUMER_WARPS / 4); }",
+    "  for (int i = 0; i < OUTPUT_PIPE_STAGES; i++) { init_semaphore(outputs_arrived[i], 0, 1); init_semaphore(outputs_finished[i], 0, 1); }",
+    "  init_semaphore(finish_finished, 0, 1);",
+    "}",
+    "__syncthreads();",
+    "int task_id = blockIdx.x;",
+    "int batch = task_id / (V.depth() / (NUM_CONSUMER_WARPS / 4));",
+    "task_id -= batch * (V.depth() / (NUM_CONSUMER_WARPS / 4));",
+    "int head = task_id * 2;",
+    "int num_iters = batch < Q.batch() ? K.rows() / q_tile::rows : -1;",
+    "if (warpgroup::groupid() == NUM_WORKERS) {",
+    "  warpgroup::producer_registers();",
+    "  if (warpgroup::warpid() == 0 || warpgroup::warpid() == 1 || warpgroup::warpid() == 2 || warpgroup::warpid() == 3) {",
+    "    for (int iter = 0; iter < num_iters; iter++) {",
+    "      if (warpgroup::warpid() == iter % 4) {",
+    "        warp::tma::expect(inputs_arrived[iter % INPUT_PIPE_STAGES], inputs[iter % INPUT_PIPE_STAGES].q, inputs[iter % INPUT_PIPE_STAGES].k, inputs[iter % INPUT_PIPE_STAGES].v[0], inputs[iter % INPUT_PIPE_STAGES].a[0], inputs[iter % INPUT_PIPE_STAGES].v[1], inputs[iter % INPUT_PIPE_STAGES].a[1]);",
+    "        warp::tma::load_async(inputs[iter % INPUT_PIPE_STAGES].q, Q, {batch, 0, iter, 0}, inputs_arrived[iter % INPUT_PIPE_STAGES]);",
+    "        warp::tma::load_async(inputs[iter % INPUT_PIPE_STAGES].k, K, {batch, 0, iter, 0}, inputs_arrived[iter % INPUT_PIPE_STAGES]);",
+    "        for (int i = 0; i < NUM_WORKERS; i++) {",
+    "          warp::tma::load_async(inputs[iter % INPUT_PIPE_STAGES].v[i], V, {batch, head + i, iter, 0}, inputs_arrived[iter % INPUT_PIPE_STAGES]);",
+    "          warp::tma::load_async(inputs[iter % INPUT_PIPE_STAGES].a[i], A, {batch, head + i, 0, iter}, inputs_arrived[iter % INPUT_PIPE_STAGES]);",
+    "        }",
+    "      }",
+    "    }",
+    "  }",
+    "  if (warpgroup::warpid() == 0) {",
+    "    for (int iter = 0; iter < num_iters; iter++) {",
+    "      for (int i = 0; i < NUM_WORKERS; i++) warp::tma::store_async(O, outputs[iter % OUTPUT_PIPE_STAGES].o[i], {batch, head + i, iter, 0});",
+    "      warp::tma::store_async_read_wait();",
+    "      arrive(outputs_finished[iter % OUTPUT_PIPE_STAGES]);",
+    "    }",
+    "  }",
+    "} else if (warpgroup::groupid() < NUM_WORKERS) {",
+    "  warpgroup::consumer_registers<NUM_WORKERS>();",
+    "  rt_fl<16, 64> o_reg;",
+    "  rt_fl<16, 64> att_block;",
+    "  rt_bf<16, 64> att_block_mma;",
+    "  rt_fl<16, 64> local_decay;",
+    "  rt_bf<16, 64> q_reg, k_reg;",
+    "  rt_fl<16, 64> kv;",
+    "  warp::zero(kv);",
+    "  for (int iter = 0; iter < num_iters; iter++) {",
+    "    wait(inputs_arrived[iter % INPUT_PIPE_STAGES], 0);",
+    "    warpgroup::copy(scratch.a_cumsum[warpgroup::groupid()], inputs[iter % INPUT_PIPE_STAGES].a[warpgroup::groupid()]);",
+    "    warpgroup::sync(warpgroup::groupid());",
+    "    if (warpgroup::warpid() <= 1) {",
+    "      int tid = warpgroup::laneid();",
+    "      for (int offset = 1; offset < 64; offset *= 2) {",
+    "        float temp = (tid >= offset) ? scratch.a_cumsum[warpgroup::groupid()][tid - offset] : 0.0f;",
+    "        group<2>::sync(warpgroup::groupid() + 2);",
+    "        scratch.a_cumsum[warpgroup::groupid()][tid] += temp;",
+    "        group<2>::sync(warpgroup::groupid() + 2);",
+    "      }",
+    "    }",
+    "    warpgroup::sync(warpgroup::groupid());",
+    "    for (int i = 0; i < 4; i++) {",
+    "      int base_row = warpgroup::warpid() * 16 + laneid() / 4;",
+    "      int base_col = i * 16 + (laneid() % 4) * 2;",
+    "      local_decay.tiles[0][i].data[0].x = scratch.a_cumsum[warpgroup::groupid()][base_row + 0] - scratch.a_cumsum[warpgroup::groupid()][base_col + 0];",
+    "      local_decay.tiles[0][i].data[0].y = scratch.a_cumsum[warpgroup::groupid()][base_row + 0] - scratch.a_cumsum[warpgroup::groupid()][base_col + 1];",
+    "      local_decay.tiles[0][i].data[1].x = scratch.a_cumsum[warpgroup::groupid()][base_row + 8] - scratch.a_cumsum[warpgroup::groupid()][base_col + 0];",
+    "      local_decay.tiles[0][i].data[1].y = scratch.a_cumsum[warpgroup::groupid()][base_row + 8] - scratch.a_cumsum[warpgroup::groupid()][base_col + 1];",
+    "      local_decay.tiles[0][i].data[2].x = scratch.a_cumsum[warpgroup::groupid()][base_row + 0] - scratch.a_cumsum[warpgroup::groupid()][base_col + 8];",
+    "      local_decay.tiles[0][i].data[2].y = scratch.a_cumsum[warpgroup::groupid()][base_row + 0] - scratch.a_cumsum[warpgroup::groupid()][base_col + 9];",
+    "      local_decay.tiles[0][i].data[3].x = scratch.a_cumsum[warpgroup::groupid()][base_row + 8] - scratch.a_cumsum[warpgroup::groupid()][base_col + 8];",
+    "      local_decay.tiles[0][i].data[3].y = scratch.a_cumsum[warpgroup::groupid()][base_row + 8] - scratch.a_cumsum[warpgroup::groupid()][base_col + 9];",
+    "    }",
+    "    warp::exp(local_decay, local_decay);",
+    "    for (int i = 0; i < 4; i++) {",
+    "      auto &decay_subtile = reinterpret_cast<rt_fl<16,16>&>(local_decay.tiles[0][i]);",
+    "      if (i > warpgroup::warpid()) warp::zero(decay_subtile);",
+    "      else if (i == warpgroup::warpid()) warp::make_causal(decay_subtile, decay_subtile, kittens::base_types::constants<float>::zero());",
+    "    }",
+    "    warpgroup::load(q_reg, inputs[iter % INPUT_PIPE_STAGES].q);",
+    "    warpgroup::mm_ABt(att_block, q_reg, inputs[iter % INPUT_PIPE_STAGES].k);",
+    "    warpgroup::mma_async_wait();",
+    "    warp::mul(att_block, att_block, local_decay);",
+    "    warp::copy(att_block_mma, att_block);",
+    "    warpgroup::mm_AB(o_reg, att_block_mma, inputs[iter % INPUT_PIPE_STAGES].v[warpgroup::groupid()]);",
+    "    warpgroup::mma_async_wait();",
+    "    warpgroup::store(scratch.kv[warpgroup::groupid()], kv);",
+    "    warpgroup::sync(warpgroup::groupid());",
+    "    warpgroup::mma_AB(o_reg, q_reg, scratch.kv[warpgroup::groupid()]);",
+    "    warpgroup::mma_async_wait();",
+    "    warpgroup::store(outputs[iter % OUTPUT_PIPE_STAGES].o[warpgroup::groupid()], o_reg);",
+    "    warpgroup::sync(warpgroup::groupid());",
+    "    float last_decay = scratch.a_cumsum[warpgroup::groupid()][scratch.a_cumsum[warpgroup::groupid()].length - 1];",
+    "    float total_decay = expf(last_decay);",
+    "    warp::mul(kv, kv, total_decay);",
+    "    warpgroup::load(k_reg, inputs[iter % INPUT_PIPE_STAGES].k);",
+    "    warpgroup::store(scratch.k[warpgroup::groupid()], k_reg);",
+    "    warpgroup::sync(warpgroup::groupid());",
+    "    warpgroup::mma_AtB(kv, scratch.k[warpgroup::groupid()], inputs[iter % INPUT_PIPE_STAGES].v[warpgroup::groupid()]);",
+    "    warpgroup::mma_async_wait();",
+    "    if (warpgroup::laneid() == 0) { arrive(outputs_arrived[iter % OUTPUT_PIPE_STAGES]); arrive(inputs_finished[iter % INPUT_PIPE_STAGES]); }",
+    "  }",
+    "  if (warpgroup::laneid() == 0) arrive(finish_finished);",
+    "}"
+  ]
 
 end Tyr.GPU.Kernels.Mamba2
