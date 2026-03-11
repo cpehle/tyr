@@ -17,10 +17,6 @@ __attribute__((weak)) lean_object* lean_launch_Tyr_GPU_Kernels_Rotary_rotaryFwd(
   return gpuKernelUnavailable("lean_launch_Tyr_GPU_Kernels_Rotary_rotaryFwd");
 }
 
-__attribute__((weak)) lean_object* lean_launch_Tyr_GPU_Kernels_tkLayerNorm(...) {
-  return gpuKernelUnavailable("lean_launch_Tyr_GPU_Kernels_tkLayerNorm");
-}
-
 __attribute__((weak)) lean_object* lean_launch_Tyr_GPU_Kernels_tkFlashAttnFwd2Block(...) {
   return gpuKernelUnavailable("lean_launch_Tyr_GPU_Kernels_tkFlashAttnFwd2Block");
 }

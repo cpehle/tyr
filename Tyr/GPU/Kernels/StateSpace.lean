@@ -1,8 +1,6 @@
 import Tyr.GPU.Kernels.FFTConv
 import Tyr.GPU.Kernels.Hedgehog
-import Tyr.GPU.Kernels.Mamba
 import Tyr.GPU.Kernels.Mamba2
-import Tyr.GPU.Kernels.MambaBwd
 
 /-!
 # Tyr.GPU.Kernels.StateSpace
@@ -14,7 +12,7 @@ catalog has a clear home for:
 
 - FFT-style sequence convolution,
 - Hedgehog chunk/state kernels,
-- Mamba/Mamba2 kernels and their educational sketches.
+- the source-backed Mamba2 forward surface.
 -/
 
 namespace Tyr.GPU.Kernels

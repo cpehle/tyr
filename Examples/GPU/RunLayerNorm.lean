@@ -1,6 +1,6 @@
 /- End-to-end ThunderKittens-style layernorm validation. -/
 import Tyr.Torch
-import Tyr.GPU.Kernels.LayerNormResidual
+import Tyr.GPU.Kernels.FusedLayerNorm
 import Examples.GPU.FixtureRunner
 
 namespace Examples.GPU
@@ -64,7 +64,7 @@ def runOnce : IO Bool := do
   let stream ← torch.cuda_current_stream
 
   -- Single-warp launch keeps numerical behavior deterministic for this kernel.
-  tkLayerNorm.launch x residual weight bias out outResid 1 1 1 32 1 1 0 stream
+  tkFusedLayerNormResidual1024.launch x residual weight bias out outResid 1 1 1 32 1 1 0 stream
   let _ ← torch.cuda_synchronize
 
   let outOk := torch.allclose expectedOut out 5e-3 5e-3

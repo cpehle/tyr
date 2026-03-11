@@ -8,7 +8,7 @@
   - Attention with decay masking
   - State accumulation across chunks
 
-  Backward ownership lives in `Tyr.GPU.Kernels.MambaBwd`.
+  This module owns the source-backed Mamba2 forward surface.
 -/
 
 import Tyr.GPU.Kernels.Prelude
