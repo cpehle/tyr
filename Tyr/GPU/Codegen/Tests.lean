@@ -450,6 +450,8 @@ __global__ void mini_flash_attn(gl<bf16, 1, 1, -1, -1> v0, gl<bf16, 1, 1, -1, -1
 #guard GpuArch.SM80.supportsDtype .FP8E4M3 = false
 #guard GpuArch.SM90.supportsDtype .FP8E4M3 = true
 #guard GpuArch.SM100.supportsDtype .FP8E5M2 = true
+#guard GpuArch.SM100.supportsDtype .FP8E8M0 = true
+#guard GpuArch.SM100.supportsDtype .FP4E2M1X2 = true
 
 -- Test default config generation
 #guard (ArchKernelConfig.default .SM80).pipelineStages = 2

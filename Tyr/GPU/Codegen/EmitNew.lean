@@ -44,6 +44,10 @@ private def colVecLayout : TileLayout → RVLayout
   | .Row => .Ortho
   | .Col => .Align
 
+private def indentRaw (indent code : String) : String :=
+  let lines := code.splitOn "\n"
+  lines.map (fun line => if line.isEmpty then "" else indent ++ line) |> String.intercalate "\n"
+
 structure RVLayoutState where
   layouts : Std.HashMap VarId RVLayout := {}
   conflicts : Std.HashSet VarId := {}
@@ -617,6 +621,36 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout)
   -- Constants
   | .constInt dst value =>
     s!"{indent}int {dst.toIdent} = {value};\n"
+  | .constFloat dst value =>
+    s!"{indent}float {dst.toIdent} = {value}f;\n"
+  | .scalarUnary .Neg dst src =>
+    s!"{indent}auto {dst.toIdent} = -{src.toIdent};\n"
+  | .scalarUnary .Exp dst src =>
+    s!"{indent}auto {dst.toIdent} = ::expf(static_cast<float>({src.toIdent}));\n"
+  | .scalarBinary .Add dst a b =>
+    s!"{indent}auto {dst.toIdent} = {a.toIdent} + {b.toIdent};\n"
+  | .scalarBinary .Sub dst a b =>
+    s!"{indent}auto {dst.toIdent} = {a.toIdent} - {b.toIdent};\n"
+  | .scalarBinary .Mul dst a b =>
+    s!"{indent}auto {dst.toIdent} = {a.toIdent} * {b.toIdent};\n"
+  | .scalarBinary .Div dst a b =>
+    s!"{indent}auto {dst.toIdent} = {a.toIdent} / {b.toIdent};\n"
+  | .scalarBinary .Mod dst a b =>
+    s!"{indent}auto {dst.toIdent} = {a.toIdent} % {b.toIdent};\n"
+  | .scalarBinary .Min dst a b =>
+    s!"{indent}auto {dst.toIdent} = ({a.toIdent} < {b.toIdent}) ? {a.toIdent} : {b.toIdent};\n"
+  | .scalarBinary .Max dst a b =>
+    s!"{indent}auto {dst.toIdent} = ({a.toIdent} > {b.toIdent}) ? {a.toIdent} : {b.toIdent};\n"
+  | .vecIota dst start step =>
+    s!"{indent}warp::apply({dst.toIdent}, {dst.toIdent}, [] __device__ (int _i, auto _x) \{\n" ++
+    s!"{indent}  return static_cast<decltype(_x)>({start}f + {step}f * static_cast<float>(_i));\n" ++
+    s!"{indent}" ++ "});\n"
+  | .vecFillScalar dst scalar =>
+    s!"{indent}warp::apply({dst.toIdent}, {dst.toIdent}, [&] __device__ (int _i, auto _x) \{\n" ++
+    s!"{indent}  return static_cast<decltype(_x)>({scalar.toIdent});\n" ++
+    s!"{indent}" ++ "});\n"
+  | .raw code =>
+    indentRaw indent code ++ "\n"
 
 /-- Generate kernel parameter list -/
 def generateParams (params : Array KParam) : String :=
@@ -778,6 +812,8 @@ private def generateHelpers (k : Kernel) : String := Id.run do
     helpers := helpers ++ storeAddHelpers
   if usesLegacyTma k then
     helpers := helpers ++ legacyTmaHelpers
+  if usesSlice k then
+    helpers := helpers ++ sliceHelpers
   if usesOuter k then
     helpers := helpers ++ outerHelpers
   return helpers
@@ -785,12 +821,15 @@ private def generateHelpers (k : Kernel) : String := Id.run do
 private def generateHelpersForKernels (kernels : Array Kernel) : String := Id.run do
   let mut needStoreAdd := false
   let mut needLegacyTma := false
+  let mut needSlice := false
   let mut needOuter := false
   for k in kernels do
     if usesStoreAdd k then
       needStoreAdd := true
     if usesLegacyTma k then
       needLegacyTma := true
+    if usesSlice k then
+      needSlice := true
     if usesOuter k then
       needOuter := true
   let mut helpers := ""
@@ -798,6 +837,8 @@ private def generateHelpersForKernels (kernels : Array Kernel) : String := Id.ru
     helpers := helpers ++ storeAddHelpers
   if needLegacyTma then
     helpers := helpers ++ legacyTmaHelpers
+  if needSlice then
+    helpers := helpers ++ sliceHelpers
   if needOuter then
     helpers := helpers ++ outerHelpers
   return helpers
@@ -818,12 +859,13 @@ structure KernelEmitInfo where
 
 /-- Generate helper template block from precomputed helper flags. -/
 def generateHelpersFromFlags (needStoreAdd needLegacyTma needSlice needOuter : Bool) : String := Id.run do
-  let _ := needSlice
   let mut helpers := ""
   if needStoreAdd then
     helpers := helpers ++ storeAddHelpers
   if needLegacyTma then
     helpers := helpers ++ legacyTmaHelpers
+  if needSlice then
+    helpers := helpers ++ sliceHelpers
   if needOuter then
     helpers := helpers ++ outerHelpers
   return helpers

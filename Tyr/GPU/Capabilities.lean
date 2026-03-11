@@ -29,6 +29,12 @@ class GpuCapabilities (arch : GpuArch) where
   hasTMA : Bool
   /-- Has Warpgroup Matrix Multiply Accumulate (WGMMA) -/
   hasWGMMA : Bool
+  /-- Has Blackwell tensor memory support -/
+  hasTMEM : Bool
+  /-- Has the `fp8e8m0` dtype used for MXFP8 scales -/
+  hasFP8E8M0 : Bool
+  /-- Has packed `fp4e2m1_2` storage used by NVFP4 kernels -/
+  hasFP4 : Bool
   /-- Supports async copy -/
   hasAsyncCopy : Bool
   /-- Maximum registers per thread -/
@@ -41,6 +47,9 @@ instance : GpuCapabilities .SM80 where
   supportedTypes := [.Float32, .Float16, .BFloat16]
   hasTMA := false
   hasWGMMA := false
+  hasTMEM := false
+  hasFP8E8M0 := false
+  hasFP4 := false
   hasAsyncCopy := true
   maxRegistersPerThread := 255
   mmaTileSize := (16, 8, 16)  -- mma.sync shape
@@ -50,15 +59,24 @@ instance : GpuCapabilities .SM90 where
   supportedTypes := [.Float32, .Float16, .BFloat16, .FP8E4M3, .FP8E5M2]
   hasTMA := true
   hasWGMMA := true
+  hasTMEM := false
+  hasFP8E8M0 := false
+  hasFP4 := false
   hasAsyncCopy := true
   maxRegistersPerThread := 255
   mmaTileSize := (64, 256, 16)  -- WGMMA shape
 
 instance : GpuCapabilities .SM100 where
   maxSharedMem := 256 * 1024  -- 256 KB (estimated)
-  supportedTypes := [.Float32, .Float16, .BFloat16, .FP8E4M3, .FP8E5M2]
+  supportedTypes := [
+    .Float32, .Float16, .BFloat16,
+    .FP8E4M3, .FP8E5M2, .FP8E8M0, .FP4E2M1X2
+  ]
   hasTMA := true
   hasWGMMA := true
+  hasTMEM := true
+  hasFP8E8M0 := true
+  hasFP4 := true
   hasAsyncCopy := true
   maxRegistersPerThread := 255
   mmaTileSize := (64, 256, 16)  -- tcgen05 shape
@@ -82,6 +100,13 @@ instance : RequiresWGMMA .SM90 where
 
 instance : RequiresWGMMA .SM100 where
   h_wgmma := rfl
+
+/-- Require tensor-memory support for Blackwell tensor-core pipelines. -/
+class RequiresTMEM (arch : GpuArch) [GpuCapabilities arch] where
+  h_tmem : GpuCapabilities.hasTMEM arch = true
+
+instance : RequiresTMEM .SM100 where
+  h_tmem := rfl
 
 /-- Check if a dtype is supported on an architecture -/
 def GpuCapabilities.supportsType [caps : GpuCapabilities arch] (dtype : GpuFloat) : Bool :=

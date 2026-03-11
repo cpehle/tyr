@@ -179,6 +179,12 @@ inductive KStmt where
 
   -- Constants
   | constInt (dst : VarId) (value : Int)     -- Integer constant
+  | constFloat (dst : VarId) (value : Float)
+  | scalarUnary (op : ScalarUnaryOp) (dst src : VarId)
+  | scalarBinary (op : ScalarBinaryOp) (dst a b : VarId)
+  | vecIota (dst : VarId) (start step : Float)
+  | vecFillScalar (dst scalar : VarId)
+  | raw (code : String)                      -- Exact backend code escape hatch
 
   deriving Repr, Inhabited, BEq
 

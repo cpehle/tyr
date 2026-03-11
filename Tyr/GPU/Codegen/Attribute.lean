@@ -166,6 +166,8 @@ def extractGpuFloat? (type : Expr) : MetaM (Option GpuFloat) := do
   else if type.isConstOf ``GpuFloat.BFloat16 then return some .BFloat16
   else if type.isConstOf ``GpuFloat.FP8E4M3 then return some .FP8E4M3
   else if type.isConstOf ``GpuFloat.FP8E5M2 then return some .FP8E5M2
+  else if type.isConstOf ``GpuFloat.FP8E8M0 then return some .FP8E8M0
+  else if type.isConstOf ``GpuFloat.FP4E2M1X2 then return some .FP4E2M1X2
   else return none
 
 /-- Try to extract a supported scalar type from a type expression. -/
@@ -278,6 +280,8 @@ def generateKernelCompanion (declName : Name) (arch : GpuArch)
       | .BFloat16 => mkIdent ``GpuFloat.BFloat16
       | .FP8E4M3 => mkIdent ``GpuFloat.FP8E4M3
       | .FP8E5M2 => mkIdent ``GpuFloat.FP8E5M2
+      | .FP8E8M0 => mkIdent ``GpuFloat.FP8E8M0
+      | .FP4E2M1X2 => mkIdent ``GpuFloat.FP4E2M1X2
     let nameStr := Syntax.mkStrLit p.name.toString
     let isPtr := if p.isPointer then mkIdent ``true else mkIdent ``false
     let scalarTyStx := scalarTypeToStx p.scalarTy
@@ -475,6 +479,8 @@ def generatePolyKernelCompanion (declName : Name) (arch : GpuArch) (archLevel : 
       | .BFloat16 => mkIdent ``GpuFloat.BFloat16
       | .FP8E4M3 => mkIdent ``GpuFloat.FP8E4M3
       | .FP8E5M2 => mkIdent ``GpuFloat.FP8E5M2
+      | .FP8E8M0 => mkIdent ``GpuFloat.FP8E8M0
+      | .FP4E2M1X2 => mkIdent ``GpuFloat.FP4E2M1X2
     let nameStr := Syntax.mkStrLit p.name.toString
     let isPtr := if p.isPointer then mkIdent ``true else mkIdent ``false
     let scalarTyStx := scalarTypeToStx p.scalarTy

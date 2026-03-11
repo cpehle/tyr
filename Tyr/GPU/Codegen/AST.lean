@@ -135,6 +135,23 @@ def BinaryOp.toCpp : BinaryOp → String
   | .Max => "max"
   | .Min => "min"
 
+/-- Scalar unary operations on runtime indices/parameters. -/
+inductive ScalarUnaryOp where
+  | Neg
+  | Exp
+  deriving Repr, BEq, Hashable, Inhabited, Lean.ToExpr
+
+/-- Scalar binary operations on runtime indices/parameters. -/
+inductive ScalarBinaryOp where
+  | Add
+  | Sub
+  | Mul
+  | Div
+  | Mod
+  | Min
+  | Max
+  deriving Repr, BEq, Hashable, Inhabited, Lean.ToExpr
+
 /-- Broadcast axis -/
 inductive BroadcastAxis where
   | Row | Col

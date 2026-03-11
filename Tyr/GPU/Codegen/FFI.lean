@@ -79,6 +79,8 @@ def gpuFloatToCudaPtr (dtype : GpuFloat) : String :=
   | .BFloat16 => "__nv_bfloat16*"
   | .FP8E4M3 => "__nv_fp8_e4m3*"
   | .FP8E5M2 => "__nv_fp8_e5m2*"
+  | .FP8E8M0 => "__nv_fp8_e8m0*"
+  | .FP4E2M1X2 => "__nv_fp4x2_e2m1*"
 
 /-- Generate C++ extern parameter declaration -/
 def paramToCppExternParam (p : KParam) : String :=
@@ -114,7 +116,9 @@ def generateCppHeader : String :=
   "#include <torch/torch.h>\n" ++
   "#include <cuda_runtime.h>\n" ++
   "#include <cuda_fp16.h>\n" ++
-  "#include <cuda_bf16.h>\n\n" ++
+  "#include <cuda_bf16.h>\n" ++
+  "#include <cuda_fp8.h>\n" ++
+  "#include <cuda_fp4.h>\n\n" ++
   "using namespace kittens;\n\n" ++
   "// Forward declarations\n" ++
   "extern torch::Tensor borrowTensor(b_lean_obj_arg o);\n" ++

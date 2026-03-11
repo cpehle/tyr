@@ -26,6 +26,14 @@ namespace Tyr.GPU.Codegen
 
 open Tyr.GPU
 
+/-- Emit exact backend code when the typed DSL does not yet expose a primitive.
+
+This is intentionally narrow and should be used to isolate backend-specific
+constructs such as Blackwell tensor-memory plumbing until they are promoted to
+first-class statements. -/
+def emitRaw (code : String) : KernelM Unit := do
+  emit (.raw code)
+
 /-! ## Tile Allocation -/
 
 /-- Allocate a register tile -/
@@ -117,6 +125,72 @@ def storeVec {dtype : GpuFloat} {len : Nat}
     (dst : SV dtype len)
     (src : RV dtype len) : KernelM Unit := do
   emit (.store dst.id src.id)
+
+/-! ## Scalar / Vector Runtime Helpers -/
+
+/-- Materialize an integer constant as a runtime scalar. -/
+def constIntVal (value : Int) (name : String := "const") : KernelM (KVal UInt32) := do
+  let v ← freshVar
+  emit (.constInt v value)
+  pure ⟨v, name⟩
+
+/-- Materialize a Float32 constant as a runtime scalar. -/
+def constFloatVal (value : Float) (name : String := "const_f") : KernelM (KVal Float32) := do
+  let v ← freshVar
+  emit (.constFloat v value)
+  pure ⟨v, name⟩
+
+/-- Apply a scalar unary operation to a runtime scalar. -/
+def scalarUnary {T : Type} (op : ScalarUnaryOp)
+    (src : KVal T) (name : String := "scalar_unary") : KernelM (KVal T) := do
+  let v ← freshVar
+  emit (.scalarUnary op v src.id)
+  pure ⟨v, name⟩
+
+/-- Apply a scalar binary operation to two runtime scalars. -/
+def scalarBinary {T : Type} (op : ScalarBinaryOp)
+    (a b : KVal T) (name : String := "scalar_binary") : KernelM (KVal T) := do
+  let v ← freshVar
+  emit (.scalarBinary op v a.id b.id)
+  pure ⟨v, name⟩
+
+/-- Negate a runtime scalar. -/
+def scalarNeg (src : KVal Float32) (name : String := "neg") : KernelM (KVal Float32) :=
+  scalarUnary .Neg src name
+
+/-- Exponentiate a runtime scalar. -/
+def scalarExp (src : KVal Float32) (name : String := "exp") : KernelM (KVal Float32) :=
+  scalarUnary .Exp src name
+
+/-- Add two runtime scalars. -/
+def scalarAddVal {T : Type} (a b : KVal T) (name : String := "add") : KernelM (KVal T) :=
+  scalarBinary .Add a b name
+
+/-- Subtract two runtime scalars. -/
+def scalarSub {T : Type} (a b : KVal T) (name : String := "sub") : KernelM (KVal T) :=
+  scalarBinary .Sub a b name
+
+/-- Multiply two runtime scalars. -/
+def scalarMulVal {T : Type} (a b : KVal T) (name : String := "mul") : KernelM (KVal T) :=
+  scalarBinary .Mul a b name
+
+/-- Divide two runtime scalars. -/
+def scalarDivVal {T : Type} (a b : KVal T) (name : String := "div") : KernelM (KVal T) :=
+  scalarBinary .Div a b name
+
+/-- Compute the remainder of two runtime scalars. -/
+def scalarMod {T : Type} (a b : KVal T) (name : String := "mod") : KernelM (KVal T) :=
+  scalarBinary .Mod a b name
+
+/-- Fill a vector with an arithmetic progression. -/
+def iotaVec {dtype : GpuFloat} {len : Nat}
+    (dst : RV dtype len) (start : Float := 0.0) (step : Float := 1.0) : KernelM Unit := do
+  emit (.vecIota dst.id start step)
+
+/-- Fill a vector with one runtime scalar value. -/
+def fillVecScalar {dtype : GpuFloat} {len : Nat} {T : Type}
+    (dst : RV dtype len) (scalar : KVal T) : KernelM Unit := do
+  emit (.vecFillScalar dst.id scalar.id)
 
 /-! ## Vector Unary/Binary Operations -/
 

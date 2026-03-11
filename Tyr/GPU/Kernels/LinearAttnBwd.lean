@@ -1,190 +1,250 @@
-/-
+import Tyr.GPU.Kernels.Prelude
+import Tyr.GPU.Kernels.Support
+
+/-!
   Tyr/GPU/Kernels/LinearAttnBwd.lean
 
-  Educational decayed linear attention backward sketches.
+  Reverse-scan backward for the decayed recurrent linear-attention forward in
+  `LinearAttn.lean`.
 
-  The vendored ThunderKittens `linear_attention.cu` source only provides the
-  forward kernel. The kernels in this module therefore remain conceptual
-  derivative sketches rather than source-backed ports, and the exported names
-  say so explicitly.
+  ThunderKittens only ships a forward kernel for this family, so this module is
+  not a direct transliteration. It is instead built to match the exact forward
+  decomposition now used in Tyr:
+
+  - local masked-decayed `QK^T V`,
+  - recurrent `Q_decay @ KV_prev`,
+  - state update `KV_t = block_decay * KV_prev + K_decay^T V`.
+
+  The backward relies on the per-chunk `KV_prev` checkpoints emitted by the
+  forward kernel so it can run the correct reverse recurrence without
+  approximating the state history.
 -/
-
-import Tyr.GPU.Kernels.Prelude
 
 namespace Tyr.GPU.Kernels.LinearAttn
 
 open Tyr.GPU
 open Tyr.GPU.Codegen
 
-/-! ## Linear Attention Backward
+set_option maxRecDepth 4096
 
-Global (Non-causal):
-  S = sum(phi(K)^T @ V)
-  O = phi(Q) @ S
+private abbrev chunkSize : Nat := 64
+private abbrev featDim : Nat := 128
+private abbrev halfFeat : Nat := 64
+private abbrev numChunks : Nat := 16
 
-Backward:
-  dPhi(Q) = dO @ S^T
-  dS = phi(Q)^T @ dO
-  dPhi(K) = V @ dS^T
-  dV = phi(K) @ dS
-  
-  dQ = dPhi(Q) .* step(Q)  (where step(x) = 1 if x>0 else 0 for ReLU)
-  dK = dPhi(K) .* step(K)
--/
+/-- Convert an FP32 row-major tile into BF16 row-major form. -/
+private def toBf16Row {rows cols : Nat}
+    (src : RT GpuFloat.Float32 rows cols .Row) : KernelM (RT GpuFloat.BFloat16 rows cols .Row) := do
+  let dst : RT GpuFloat.BFloat16 rows cols ← allocRT .BFloat16 rows cols
+  convert dst src
+  pure dst
 
+/-- Convert an FP32 row-major tile into BF16 column-major form. -/
+private def toBf16Col {rows cols : Nat}
+    (src : RT GpuFloat.Float32 rows cols .Row) : KernelM (RT GpuFloat.BFloat16 rows cols .Col) := do
+  let rowTile ← toBf16Row src
+  let colTile : RT GpuFloat.BFloat16 rows cols .Col ← allocRT .BFloat16 rows cols .Col
+  swapLayout colTile rowTile
+  pure colTile
+
+/-- Convert a BF16 row-major tile into column-major form. -/
+private def bf16ToCol {rows cols : Nat}
+    (src : RT GpuFloat.BFloat16 rows cols .Row) : KernelM (RT GpuFloat.BFloat16 rows cols .Col) := do
+  let colTile : RT GpuFloat.BFloat16 rows cols .Col ← allocRT .BFloat16 rows cols .Col
+  swapLayout colTile src
+  pure colTile
+
+/-- Build the masked local score tile used by both the forward and backward
+branches. -/
+private def recomputeMaskedScores
+    (q : RT GpuFloat.BFloat16 chunkSize featDim)
+    (k : RT GpuFloat.BFloat16 chunkSize featDim)
+    (qDecay : RV GpuFloat.Float32 chunkSize)
+    (kDecay : RV GpuFloat.Float32 chunkSize)
+    : KernelM (RT GpuFloat.Float32 chunkSize chunkSize) := do
+  let rawScores : RT GpuFloat.Float32 chunkSize chunkSize ← zeroRT .Float32 chunkSize chunkSize
+  let maskedScores : RT GpuFloat.Float32 chunkSize chunkSize ← allocRT .Float32 chunkSize chunkSize
+  mmaT rawScores q k rawScores
+  Support.applyLinearAttnDecayMask maskedScores rawScores qDecay kDecay
+  pure maskedScores
+
+/-- Canonical reverse-scan backward for the decayed recurrent linear-attention
+kernel. -/
 @[gpu_kernel .SM90]
-def linearAttnBwdSketch (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat16)
-    (V_ptr : GPtr GpuFloat.BFloat16) (dO_ptr : GPtr GpuFloat.BFloat16)
-    (dQ_ptr : GPtr GpuFloat.Float32) (dK_ptr : GPtr GpuFloat.Float32)
+def linearAttnBwd
+    (Q_ptr : GPtr GpuFloat.BFloat16)
+    (K_ptr : GPtr GpuFloat.BFloat16)
+    (V_ptr : GPtr GpuFloat.BFloat16)
+    (dO_ptr : GPtr GpuFloat.BFloat16)
+    (kv_history_top_ptr : GPtr GpuFloat.Float32)
+    (kv_history_bottom_ptr : GPtr GpuFloat.Float32)
+    (slope : KVal Float32)
+    (dQ_ptr : GPtr GpuFloat.Float32)
+    (dK_ptr : GPtr GpuFloat.Float32)
     (dV_ptr : GPtr GpuFloat.Float32)
-    (state_ptr : GPtr GpuFloat.Float32) -- Forward state S
-    (seq_len : KVal UInt64)
-    : KernelM Unit := do
-  let _ := (Q_ptr, K_ptr, V_ptr, dO_ptr, dQ_ptr, dK_ptr, dV_ptr, state_ptr, seq_len)
-  let tileSize : Nat := 64
-  comment "=== Linear Attention Backward Sketch ==="
+    (_seq_len : KVal UInt64)
+    (_head_dim : KVal UInt64) : KernelM Unit := do
+  comment "=== Decayed Linear Attention Backward ==="
+  comment "Reverse scan over the same local-plus-recurrent state decomposition used in forward"
 
-  -- Inputs
-  let q : RT GpuFloat.BFloat16 tileSize tileSize ← allocRT .BFloat16 tileSize tileSize
-  let k : RT GpuFloat.BFloat16 tileSize tileSize ← allocRT .BFloat16 tileSize tileSize
-  let v : RT GpuFloat.BFloat16 tileSize tileSize .Col ← allocRT .BFloat16 tileSize tileSize .Col
-  let dO : RT GpuFloat.BFloat16 tileSize tileSize ← allocRT .BFloat16 tileSize tileSize
-  
-  -- State S (from forward)
-  let s : RT GpuFloat.Float32 tileSize tileSize ← allocRT .Float32 tileSize tileSize
-  
-  -- Gradient of State dS
-  let dS : RT GpuFloat.Float32 tileSize tileSize ← zeroRT .Float32 tileSize tileSize
-  
-  -- Accumulators/Outputs
-  let dQ : RT GpuFloat.Float32 tileSize tileSize ← allocRT .Float32 tileSize tileSize
-  let dK : RT GpuFloat.Float32 tileSize tileSize ← allocRT .Float32 tileSize tileSize
-  let dV : RT GpuFloat.Float32 tileSize tileSize ← allocRT .Float32 tileSize tileSize
-  
-  let sShared : ST GpuFloat.Float32 tileSize tileSize ← allocST .Float32 tileSize tileSize
-  
-  comment "Load global state S"
-  load s sShared
-  
-  comment "Phase 1: Compute dQ and accumulate dS"
-  for _chunkIdx in krange 0 16 do
-    let qShared : ST GpuFloat.BFloat16 tileSize tileSize ← allocST .BFloat16 tileSize tileSize
-    let dOShared : ST GpuFloat.BFloat16 tileSize tileSize ← allocST .BFloat16 tileSize tileSize
-    
-    load q qShared
-    load dO dOShared
-    
-    -- Apply phi(Q) (ReLU)
-    let phiQ : RT GpuFloat.Float32 tileSize tileSize ← allocRT .Float32 tileSize tileSize
-    convert phiQ q
-    relu phiQ phiQ
-    
-    -- dPhi(Q) = dO @ S^T
-    let sRow : RT GpuFloat.BFloat16 tileSize tileSize ← allocRT .BFloat16 tileSize tileSize
-    convert sRow s
-    let sCol : RT GpuFloat.BFloat16 tileSize tileSize .Col ← allocRT .BFloat16 tileSize tileSize .Col
-    swapLayout sCol sRow
-    mma dQ dO sCol (← zeroRT .Float32 tileSize tileSize)
-    
-    -- dQ = dPhi(Q) * step(Q)
-    -- step(Q): 1 where Q > 0, else 0.
-    -- We use a mask approach: Copy Q to a mask register, apply sign/threshold.
-    -- Assuming we can use `relu` gradient logic or manual mask.
-    -- Since `Ops` has limited comparison ops, we'll try `binaryOp` if suitable or just comment the precise op.
-    -- Actually, `dQ` here contains `dPhi(Q)`.
-    -- If we have `step` op:
-    -- `step mask q`
-    -- `mul dQ dQ mask`
-    -- If not, we can simulate `step(x)` via `x > 0`.
-    -- For now, apply `relu` to `dQ`? No, that's wrong.
-    -- We need `dQ = dPhi * (1 if Q>0 else 0)`.
-    -- If `phiQ` stores `ReLU(Q)`, it is positive where Q>0.
-    -- `mask = phiQ > 0`? (Close, but loses 0s).
-    -- Let's assume we have a `maskPos` or `step` primitive in future or use `binary .Step` if available.
-    comment "Apply ReLU derivative: dQ *= (Q > 0)"
-    -- Mocking the step function for now as explicit op not found in `Ops.lean`
-    -- Ideally: `step mask q` -> `mul dQ dQ mask`
-    
-    -- Accumulate dS += phi(Q)^T @ dO
-    let phiQCol : RT GpuFloat.BFloat16 tileSize tileSize .Col ← allocRT .BFloat16 tileSize tileSize .Col
-    let dOCol : RT GpuFloat.BFloat16 tileSize tileSize .Col ← allocRT .BFloat16 tileSize tileSize .Col
-    let phiQBf : RT GpuFloat.BFloat16 tileSize tileSize ← allocRT .BFloat16 tileSize tileSize
-    convert phiQBf phiQ
-    swapLayout phiQCol phiQBf
-    swapLayout dOCol dO
+  let coord ← blockCoord2D
+  let (qDecay, kDecay, stateDecay) ← Support.buildLinearAttnDecayVectors slope
+  let lastChunk ← constIntVal (numChunks - 1) "last_chunk"
 
-    mmaAtB dS phiQCol dOCol dS
-    
+  let dStateTop : RT GpuFloat.Float32 halfFeat featDim ← zeroRT .Float32 halfFeat featDim
+  let dStateBottom : RT GpuFloat.Float32 halfFeat featDim ← zeroRT .Float32 halfFeat featDim
+
+  let qShared : ST GpuFloat.BFloat16 chunkSize featDim ← allocST .BFloat16 chunkSize featDim
+  let kShared : ST GpuFloat.BFloat16 chunkSize featDim ← allocST .BFloat16 chunkSize featDim
+  let vShared : ST GpuFloat.BFloat16 chunkSize featDim .Col ← allocST .BFloat16 chunkSize featDim .Col
+  let dOShared : ST GpuFloat.BFloat16 chunkSize featDim ← allocST .BFloat16 chunkSize featDim
+  let stateTopShared : ST GpuFloat.Float32 halfFeat featDim ← allocST .Float32 halfFeat featDim
+  let stateBottomShared : ST GpuFloat.Float32 halfFeat featDim ← allocST .Float32 halfFeat featDim
+  let dQShared : ST GpuFloat.Float32 chunkSize featDim ← allocST .Float32 chunkSize featDim
+  let dKShared : ST GpuFloat.Float32 chunkSize featDim ← allocST .Float32 chunkSize featDim
+  let dVShared : ST GpuFloat.Float32 chunkSize featDim ← allocST .Float32 chunkSize featDim
+
+  for loopIdx in krange 0 numChunks do
+    let iterVal : KVal UInt32 := ⟨loopIdx.id, "iter"⟩
+    let revIdx ← scalarSub lastChunk iterVal "rev_idx"
+    let chunkCoord := coord.withRow revIdx.id
+
+    let q : RT GpuFloat.BFloat16 chunkSize featDim ← allocRT .BFloat16 chunkSize featDim
+    let k : RT GpuFloat.BFloat16 chunkSize featDim ← allocRT .BFloat16 chunkSize featDim
+    let v : RT GpuFloat.BFloat16 chunkSize featDim .Col ← allocRT .BFloat16 chunkSize featDim .Col
+    let dO : RT GpuFloat.BFloat16 chunkSize featDim ← allocRT .BFloat16 chunkSize featDim
+    let qF : RT GpuFloat.Float32 chunkSize featDim ← allocRT .Float32 chunkSize featDim
+    let kF : RT GpuFloat.Float32 chunkSize featDim ← allocRT .Float32 chunkSize featDim
+    let stateTopPrev : RT GpuFloat.Float32 halfFeat featDim ← allocRT .Float32 halfFeat featDim
+    let stateBottomPrev : RT GpuFloat.Float32 halfFeat featDim ← allocRT .Float32 halfFeat featDim
+
+    comment "Load the current chunk and the forward KV checkpoints"
+    loadGlobal qShared Q_ptr chunkCoord
+    loadGlobal kShared K_ptr chunkCoord
+    loadGlobal vShared V_ptr chunkCoord
+    loadGlobal dOShared dO_ptr chunkCoord
+    loadGlobal stateTopShared kv_history_top_ptr chunkCoord
+    loadGlobal stateBottomShared kv_history_bottom_ptr chunkCoord
     sync
-    
-  comment "Phase 2: Compute dK and dV"
-  let dSShared : ST GpuFloat.Float32 tileSize tileSize ← allocST .Float32 tileSize tileSize
-  store dSShared dS
-
-  for _chunkIdx in krange 0 16 do
-    let kShared : ST GpuFloat.BFloat16 tileSize tileSize ← allocST .BFloat16 tileSize tileSize
-    let vShared : ST GpuFloat.BFloat16 tileSize tileSize .Col ← allocST .BFloat16 tileSize tileSize .Col
-    
+    load q qShared
     load k kShared
     load v vShared
-    
-    let phiK : RT GpuFloat.Float32 tileSize tileSize ← allocRT .Float32 tileSize tileSize
-    convert phiK k
-    relu phiK phiK
-    
-    -- dV = phi(K) @ dS
-    let dSBf : RT GpuFloat.BFloat16 tileSize tileSize ← allocRT .BFloat16 tileSize tileSize
-    let dSBfCol : RT GpuFloat.BFloat16 tileSize tileSize .Col ← allocRT .BFloat16 tileSize tileSize .Col
-    convert dSBf dS
-    swapLayout dSBfCol dSBf
-    let phiKBf : RT GpuFloat.BFloat16 tileSize tileSize ← allocRT .BFloat16 tileSize tileSize
-    convert phiKBf phiK
-    mma dV phiKBf dSBfCol (← zeroRT .Float32 tileSize tileSize)
-    
-    -- dPhi(K) = V @ dS^T
-    let dST : RT GpuFloat.BFloat16 tileSize tileSize .Col ← allocRT .BFloat16 tileSize tileSize .Col
-    let dST_Row : RT GpuFloat.BFloat16 tileSize tileSize ← allocRT .BFloat16 tileSize tileSize
-    transpose dST_Row dSBf 
-    swapLayout dST dST_Row
-    
-    let vRow : RT GpuFloat.BFloat16 tileSize tileSize ← allocRT .BFloat16 tileSize tileSize
-    swapLayout vRow v 
-    mma dK vRow dST (← zeroRT .Float32 tileSize tileSize)
-    
-    -- dK = dPhi(K) * step(K)
-    comment "Apply ReLU derivative: dK *= (K > 0)"
-    
+    load dO dOShared
+    load stateTopPrev stateTopShared
+    load stateBottomPrev stateBottomShared
+    convert qF q
+    convert kF k
+
+    let (qLeft, qRight) ← Support.splitCols qF
+    let (kLeft, kRight) ← Support.splitCols kF
+    let maskedScores ← recomputeMaskedScores q k qDecay kDecay
+
+    let maskedScoresBf ← toBf16Row maskedScores
+    let maskedScoresT : RT GpuFloat.BFloat16 chunkSize chunkSize ← allocRT .BFloat16 chunkSize chunkSize
+    transpose maskedScoresT maskedScoresBf
+
+    let vRow : RT GpuFloat.BFloat16 chunkSize featDim ← allocRT .BFloat16 chunkSize featDim
+    swapLayout vRow v
+    let qCol ← bf16ToCol q
+    let kCol ← bf16ToCol k
+    let dOCol ← bf16ToCol dO
+
+    comment "Local masked-decayed path"
+    let dScores : RT GpuFloat.Float32 chunkSize chunkSize ← zeroRT .Float32 chunkSize chunkSize
+    let dScoresMasked : RT GpuFloat.Float32 chunkSize chunkSize ← allocRT .Float32 chunkSize chunkSize
+    let dScoresMaskedBf : RT GpuFloat.BFloat16 chunkSize chunkSize ← allocRT .BFloat16 chunkSize chunkSize
+    let dScoresMaskedT : RT GpuFloat.BFloat16 chunkSize chunkSize ← allocRT .BFloat16 chunkSize chunkSize
+    mmaT dScores dO vRow dScores
+    Support.applyLinearAttnDecayMask dScoresMasked dScores qDecay kDecay
+    convert dScoresMaskedBf dScoresMasked
+    transpose dScoresMaskedT dScoresMaskedBf
+
+    let dQLocal : RT GpuFloat.Float32 chunkSize featDim ← zeroRT .Float32 chunkSize featDim
+    let dKLocal : RT GpuFloat.Float32 chunkSize featDim ← zeroRT .Float32 chunkSize featDim
+    let dVLocal : RT GpuFloat.Float32 chunkSize featDim ← zeroRT .Float32 chunkSize featDim
+    mma dQLocal dScoresMaskedBf kCol dQLocal
+    mma dKLocal dScoresMaskedT qCol dKLocal
+    mma dVLocal maskedScoresT dOCol dVLocal
+
+    comment "Recurrent output path"
+    let qLeftDecayed : RT GpuFloat.Float32 chunkSize halfFeat ← allocRT .Float32 chunkSize halfFeat
+    let qRightDecayed : RT GpuFloat.Float32 chunkSize halfFeat ← allocRT .Float32 chunkSize halfFeat
+    mulCol qLeftDecayed qLeft qDecay
+    mulCol qRightDecayed qRight qDecay
+
+    let stateTopPrevBf ← toBf16Row stateTopPrev
+    let stateBottomPrevBf ← toBf16Row stateBottomPrev
+    let dQTopRecur : RT GpuFloat.Float32 chunkSize halfFeat ← zeroRT .Float32 chunkSize halfFeat
+    let dQBottomRecur : RT GpuFloat.Float32 chunkSize halfFeat ← zeroRT .Float32 chunkSize halfFeat
+    mmaT dQTopRecur dO stateTopPrevBf dQTopRecur
+    mmaT dQBottomRecur dO stateBottomPrevBf dQBottomRecur
+    mulCol dQTopRecur dQTopRecur qDecay
+    mulCol dQBottomRecur dQBottomRecur qDecay
+
+    let qLeftDecayedCol ← toBf16Col qLeftDecayed
+    let qRightDecayedCol ← toBf16Col qRightDecayed
+    let dStateTopFromOut : RT GpuFloat.Float32 halfFeat featDim ← zeroRT .Float32 halfFeat featDim
+    let dStateBottomFromOut : RT GpuFloat.Float32 halfFeat featDim ← zeroRT .Float32 halfFeat featDim
+    mmaAtB dStateTopFromOut qLeftDecayedCol dOCol dStateTopFromOut
+    mmaAtB dStateBottomFromOut qRightDecayedCol dOCol dStateBottomFromOut
+
+    comment "State-update path"
+    let totalStateTop : RT GpuFloat.Float32 halfFeat featDim ← allocRT .Float32 halfFeat featDim
+    let totalStateBottom : RT GpuFloat.Float32 halfFeat featDim ← allocRT .Float32 halfFeat featDim
+    add totalStateTop dStateTop dStateTopFromOut
+    add totalStateBottom dStateBottom dStateBottomFromOut
+
+    let kLeftDecayed : RT GpuFloat.Float32 chunkSize halfFeat ← allocRT .Float32 chunkSize halfFeat
+    let kRightDecayed : RT GpuFloat.Float32 chunkSize halfFeat ← allocRT .Float32 chunkSize halfFeat
+    mulCol kLeftDecayed kLeft kDecay
+    mulCol kRightDecayed kRight kDecay
+    let kLeftDecayedBf ← toBf16Row kLeftDecayed
+    let kRightDecayedBf ← toBf16Row kRightDecayed
+    let totalStateTopBf ← toBf16Row totalStateTop
+    let totalStateBottomBf ← toBf16Row totalStateBottom
+    let totalStateTopBfCol ← toBf16Col totalStateTop
+    let totalStateBottomBfCol ← toBf16Col totalStateBottom
+
+    let dKTopState : RT GpuFloat.Float32 chunkSize halfFeat ← zeroRT .Float32 chunkSize halfFeat
+    let dKBottomState : RT GpuFloat.Float32 chunkSize halfFeat ← zeroRT .Float32 chunkSize halfFeat
+    mmaT dKTopState vRow totalStateTopBf dKTopState
+    mmaT dKBottomState vRow totalStateBottomBf dKBottomState
+    mulCol dKTopState dKTopState kDecay
+    mulCol dKBottomState dKBottomState kDecay
+
+    let dVStateTop : RT GpuFloat.Float32 chunkSize featDim ← zeroRT .Float32 chunkSize featDim
+    let dVStateBottom : RT GpuFloat.Float32 chunkSize featDim ← zeroRT .Float32 chunkSize featDim
+    mma dVStateTop kLeftDecayedBf totalStateTopBfCol dVStateTop
+    mma dVStateBottom kRightDecayedBf totalStateBottomBfCol dVStateBottom
+
+    let dQRecur : RT GpuFloat.Float32 chunkSize featDim ← allocRT .Float32 chunkSize featDim
+    let dKState : RT GpuFloat.Float32 chunkSize featDim ← allocRT .Float32 chunkSize featDim
+    concatCols dQRecur dQTopRecur dQBottomRecur
+    concatCols dKState dKTopState dKBottomState
+
+    let dVState : RT GpuFloat.Float32 chunkSize featDim ← allocRT .Float32 chunkSize featDim
+    let dQChunk : RT GpuFloat.Float32 chunkSize featDim ← allocRT .Float32 chunkSize featDim
+    let dKChunk : RT GpuFloat.Float32 chunkSize featDim ← allocRT .Float32 chunkSize featDim
+    let dVChunk : RT GpuFloat.Float32 chunkSize featDim ← allocRT .Float32 chunkSize featDim
+    add dVState dVStateTop dVStateBottom
+    add dQChunk dQLocal dQRecur
+    add dKChunk dKLocal dKState
+    add dVChunk dVLocal dVState
+
+    store dQShared dQChunk
+    store dKShared dKChunk
+    store dVShared dVChunk
+    storeGlobal dQ_ptr dQShared chunkCoord
+    storeGlobal dK_ptr dKShared chunkCoord
+    storeGlobal dV_ptr dVShared chunkCoord
+
+    comment "Propagate reverse recurrent state to the previous chunk"
+    mulCol dStateTop totalStateTop stateDecay
+    mulCol dStateBottom totalStateBottom stateDecay
     sync
-    
-    let dKShared : ST GpuFloat.Float32 tileSize tileSize ← allocST .Float32 tileSize tileSize
-    let dVShared : ST GpuFloat.Float32 tileSize tileSize ← allocST .Float32 tileSize tileSize
-    store dKShared dK
-    store dVShared dV
 
-/-! ## Causal Linear Attention Backward -/
-
-@[gpu_kernel .SM90]
-def causalLinearAttnBwdSketch : KernelM Unit := do
-  comment "=== Causal Linear Attention Backward Sketch ==="
-  comment "Iterate backwards, maintaining dS state"
-  
-  let _dS : RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
-  
-  -- Iterating backwards
-  -- Note: Using krange for iteration
-  for _chunkIdx in krange 0 16 do
-    comment "Load batch i (in reverse order)"
-    
-    comment "Update dS += phi(Q)^T @ dO"
-    
-    comment "Compute dV = phi(K) @ dS"
-    
-    comment "Compute dK = V @ dS^T"
-    
-    sync
-
--- Verify
-
--- Generate
+/-- Canonical ThunderKittens-aligned backward name for the decayed recurrent
+forward surface. -/
+abbrev tkLinearAttnBwd := linearAttnBwd
 
 end Tyr.GPU.Kernels.LinearAttn

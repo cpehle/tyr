@@ -34,10 +34,16 @@ class ArchConfig (arch : ArchLevel) where
   hasWGMMA : Bool
   /-- Whether FP8 datatypes are available -/
   hasFP8 : Bool
+  /-- Whether `fp8e8m0` scale tiles are available -/
+  hasFP8E8M0 : Bool
+  /-- Whether packed `fp4e2m1_2` storage is available -/
+  hasFP4 : Bool
   /-- Whether distributed shared memory is available -/
   hasDSM : Bool
   /-- Whether cluster barriers are available -/
   hasClusterBarrier : Bool
+  /-- Whether tensor memory is available -/
+  hasTMEM : Bool
   /-- Number of threads in a warp -/
   warpSize : Nat := 32
   /-- Number of warps in a warpgroup -/
@@ -58,8 +64,11 @@ instance : ArchConfig .Ampere where
   hasTMA := false
   hasWGMMA := false
   hasFP8 := false
+  hasFP8E8M0 := false
+  hasFP4 := false
   hasDSM := false
   hasClusterBarrier := false
+  hasTMEM := false
   defaultBlockSize := 256
   defaultPipelineStages := 2
   tensorCoreTFLOPS := 312  -- A100 bf16
@@ -72,8 +81,11 @@ instance : ArchConfig .Hopper where
   hasTMA := true
   hasWGMMA := true
   hasFP8 := true
+  hasFP8E8M0 := false
+  hasFP4 := false
   hasDSM := true
   hasClusterBarrier := true
+  hasTMEM := false
   defaultBlockSize := 128
   defaultPipelineStages := 4
   tensorCoreTFLOPS := 989  -- H100 bf16 (with sparsity: 1979)
@@ -86,8 +98,11 @@ instance : ArchConfig .Blackwell where
   hasTMA := true
   hasWGMMA := true
   hasFP8 := true
+  hasFP8E8M0 := true
+  hasFP4 := true
   hasDSM := true
   hasClusterBarrier := true
+  hasTMEM := true
   defaultBlockSize := 128
   defaultPipelineStages := 4
   tensorCoreTFLOPS := 2250  -- B200 bf16 (estimated)
@@ -108,8 +123,11 @@ structure ArchCapabilitiesRecord where
   hasTMA : Bool
   hasWGMMA : Bool
   hasFP8 : Bool
+  hasFP8E8M0 : Bool
+  hasFP4 : Bool
   hasDSM : Bool
   hasClusterBarrier : Bool
+  hasTMEM : Bool
   warpSize : Nat
   warpsPerWarpgroup : Nat
   defaultBlockSize : Nat
@@ -125,8 +143,11 @@ def ArchConfig.toRecord [cfg : ArchConfig arch] : ArchCapabilitiesRecord where
   hasTMA := cfg.hasTMA
   hasWGMMA := cfg.hasWGMMA
   hasFP8 := cfg.hasFP8
+  hasFP8E8M0 := cfg.hasFP8E8M0
+  hasFP4 := cfg.hasFP4
   hasDSM := cfg.hasDSM
   hasClusterBarrier := cfg.hasClusterBarrier
+  hasTMEM := cfg.hasTMEM
   warpSize := cfg.warpSize
   warpsPerWarpgroup := cfg.warpsPerWarpgroup
   defaultBlockSize := cfg.defaultBlockSize
@@ -162,6 +183,18 @@ class HasFP8Capability (arch : ArchLevel) where
 instance : HasFP8Capability .Hopper := ⟨rfl⟩
 instance : HasFP8Capability .Blackwell := ⟨rfl⟩
 
+/-- Type-level boolean for MX-scale fp8e8m0 support. -/
+class HasFP8E8M0Capability (arch : ArchLevel) where
+  proof : arch.capabilities.hasFP8E8M0 = true
+
+instance : HasFP8E8M0Capability .Blackwell := ⟨rfl⟩
+
+/-- Type-level boolean for packed FP4 support. -/
+class HasFP4Capability (arch : ArchLevel) where
+  proof : arch.capabilities.hasFP4 = true
+
+instance : HasFP4Capability .Blackwell := ⟨rfl⟩
+
 /-- Type-level boolean for DSM support -/
 class HasDSMCapability (arch : ArchLevel) where
   proof : arch.capabilities.hasDSM = true
@@ -174,5 +207,7 @@ def ArchLevel.supportsDtype (arch : ArchLevel) (dtype : GpuFloat) : Bool :=
   match dtype with
   | .Float32 | .Float16 | .BFloat16 => true
   | .FP8E4M3 | .FP8E5M2 => arch.capabilities.hasFP8
+  | .FP8E8M0 => arch.capabilities.hasFP8E8M0
+  | .FP4E2M1X2 => arch.capabilities.hasFP4
 
 end Tyr.GPU.Codegen.Arch

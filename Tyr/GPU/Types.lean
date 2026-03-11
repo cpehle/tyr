@@ -24,6 +24,8 @@ inductive GpuFloat where
   | BFloat16  -- bf16
   | FP8E4M3   -- fp8e4m3 (Hopper/Blackwell)
   | FP8E5M2   -- fp8e5m2 (Hopper/Blackwell)
+  | FP8E8M0   -- fp8e8m0 (Blackwell MX scale tiles)
+  | FP4E2M1X2 -- packed fp4e2m1_2 (Blackwell NVFP4 storage)
   deriving Repr, BEq, Hashable, Inhabited, DecidableEq, Lean.ToExpr
 
 instance : ToString GpuFloat where
@@ -33,6 +35,8 @@ instance : ToString GpuFloat where
     | .BFloat16 => "BFloat16"
     | .FP8E4M3 => "FP8E4M3"
     | .FP8E5M2 => "FP8E5M2"
+    | .FP8E8M0 => "FP8E8M0"
+    | .FP4E2M1X2 => "FP4E2M1X2"
 
 /-- Convert GpuFloat to C++ type string -/
 def GpuFloat.toCpp : GpuFloat → String
@@ -41,6 +45,8 @@ def GpuFloat.toCpp : GpuFloat → String
   | .BFloat16 => "bf16"
   | .FP8E4M3 => "fp8e4m3"
   | .FP8E5M2 => "fp8e5m2"
+  | .FP8E8M0 => "fp8e8m0"
+  | .FP4E2M1X2 => "fp4e2m1_2"
 
 /-- Bytes per element for each dtype -/
 def GpuFloat.bytes : GpuFloat → Nat
@@ -49,6 +55,8 @@ def GpuFloat.bytes : GpuFloat → Nat
   | .BFloat16 => 2
   | .FP8E4M3 => 1
   | .FP8E5M2 => 1
+  | .FP8E8M0 => 1
+  | .FP4E2M1X2 => 1
 
 /-- Tile memory location -/
 inductive TileLoc where

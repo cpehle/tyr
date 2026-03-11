@@ -36,10 +36,16 @@ structure ArchCapabilities where
   hasWGMMA : Bool
   /-- Supports FP8 datatypes -/
   hasFP8 : Bool
+  /-- Supports fp8e8m0 scale tiles -/
+  hasFP8E8M0 : Bool
+  /-- Supports packed fp4e2m1_2 storage -/
+  hasFP4 : Bool
   /-- Supports asynchronous MMA -/
   hasAsyncMMA : Bool
   /-- Supports distributed shared memory -/
   hasDSM : Bool
+  /-- Supports tensor memory -/
+  hasTMEM : Bool
   /-- Maximum shared memory per SM (bytes) -/
   maxSharedMem : Nat
   /-- Number of SMs (varies by SKU, using common values) -/
@@ -58,8 +64,11 @@ def GpuArch.capabilities : GpuArch → ArchCapabilities
       hasTMA := false
       hasWGMMA := false
       hasFP8 := false
+      hasFP8E8M0 := false
+      hasFP4 := false
       hasAsyncMMA := true
       hasDSM := false
+      hasTMEM := false
       maxSharedMem := 164 * 1024  -- 164 KB
       typicalSMs := 108           -- A100
       tensorCoreTFLOPS := 312     -- A100 bf16
@@ -70,8 +79,11 @@ def GpuArch.capabilities : GpuArch → ArchCapabilities
       hasTMA := true
       hasWGMMA := true
       hasFP8 := true
+      hasFP8E8M0 := false
+      hasFP4 := false
       hasAsyncMMA := true
       hasDSM := true
+      hasTMEM := false
       maxSharedMem := 228 * 1024  -- 228 KB
       typicalSMs := 132           -- H100 SXM
       tensorCoreTFLOPS := 989     -- H100 bf16 (with sparsity: 1979)
@@ -82,8 +94,11 @@ def GpuArch.capabilities : GpuArch → ArchCapabilities
       hasTMA := true
       hasWGMMA := true
       hasFP8 := true
+      hasFP8E8M0 := true
+      hasFP4 := true
       hasAsyncMMA := true
       hasDSM := true
+      hasTMEM := true
       maxSharedMem := 256 * 1024  -- 256 KB (estimated)
       typicalSMs := 160           -- B200 (estimated)
       tensorCoreTFLOPS := 2250    -- B200 bf16 (estimated)
@@ -96,6 +111,8 @@ def GpuArch.supportsDtype (arch : GpuArch) (dtype : GpuFloat) : Bool :=
   match dtype with
   | .Float32 | .Float16 | .BFloat16 => true
   | .FP8E4M3 | .FP8E5M2 => arch.capabilities.hasFP8
+  | .FP8E8M0 => arch.capabilities.hasFP8E8M0
+  | .FP4E2M1X2 => arch.capabilities.hasFP4
 
 end Tyr.GPU
 

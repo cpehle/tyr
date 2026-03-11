@@ -277,6 +277,8 @@ def fromKStmts (stmts : Array KStmt) : Except (Array String) LeanJaxpr := Id.run
         varMeta := registerDeclaredVarMeta varMeta v { participation := .static }
     | .comment _ =>
         pure ()
+    | .raw _ =>
+        pure ()
     | .unary op dst src =>
         let srcMeta := varMeta.getD src.idx {}
         varMeta := upsertVarMeta varMeta dst {
