@@ -21,9 +21,9 @@ now has a built Lean counterpart in the catalog.
 The important distinction now is not coverage vs missing families. It is:
 
 - source-backed kernels that are fully represented in the Lean DSL today, and
-- source-backed kernels that still use raw backend blocks for TMEM, cluster,
-  and packed-scale constructs that the DSL does not yet model as first-class
-  operations.
+- source-backed kernels whose source structure is still compressed into typed
+  tiled shells because the DSL does not yet model every TMEM / cluster /
+  packed-scale construct as a first-class operation.
 
 The working exhaustive source-to-Lean matrix lives in
 [dev/thunderkittens_porting_tracker.md](/Users/pehle/dev/tyr/dev/thunderkittens_porting_tracker.md).
@@ -64,8 +64,8 @@ than vendored ThunderKittens parity surfaces:
 The remaining work is now mostly DSL expressiveness work:
 
 1. Add first-class TMEM, cluster, and packed-scale constructs so the Blackwell
-   GEMM family and the BF16 Blackwell surface can move out of raw backend
-   blocks.
+   GEMM family can model the source structure directly rather than through typed
+   compressed shells.
 2. Tighten exact CTA worker packing for some attention/state-space families
    where the source structure is represented, but the runtime packing is still
    compressed.

@@ -1,4 +1,6 @@
-/-
+import Tyr.GPU.Kernels.GemmCommon
+
+/-!
   Tyr/GPU/Kernels/NvFp4Gemm.lean
 
   Blackwell-oriented NVFP4 GEMM surfaces.
@@ -6,24 +8,66 @@
   The ThunderKittens source for `kernels/gemm/nvfp4_b200/nvfp4_b200_gemm.cu`
   depends on packed `fp4e2m1` storage, local half-scale tiles, global scale
   scalars, tensor-memory fragments, and cluster/TMA choreography. The Lean
-  surface below follows that source contract directly.
+  surfaces below keep the same public contracts while expressing the math
+  through typed tiled mainloops and explicit scale epilogues.
 -/
-
-import Tyr.GPU.Kernels.Prelude
 
 namespace Tyr.GPU.Kernels.NvFp4Gemm
 
 open Tyr.GPU
 open Tyr.GPU.Codegen
 
-private def rawLines (lines : Array String) : KernelM Unit :=
-  emitRaw (String.intercalate "\n" lines.toList)
-
 private abbrev ctaTileM : Nat := 128
 private abbrev quantTileK : Nat := 256
 private abbrev ctaTileN : Nat := 256
 private abbrev quantScaleRows : Nat := 4
 private abbrev quantKBlocks : Nat := 4
+
+private def nvfp4Accumulator
+    (aPtr : GPtr GpuFloat.FP4E2M1X2)
+    (bPtr : GPtr GpuFloat.FP4E2M1X2)
+    (m : KVal UInt64)
+    (n : KVal UInt64)
+    (k : KVal UInt64)
+    : KernelM (RT GpuFloat.Float32 ctaTileM ctaTileN × RTileCoord) :=
+  GemmCommon.tiledAccumulator
+    (tileM := ctaTileM)
+    (tileK := quantTileK)
+    (tileN := ctaTileN)
+    (kBlocks := quantKBlocks)
+    "=== B200 NVFP4 GEMM ==="
+    "ThunderKittens nvfp4_b200 represented as a typed packed-fp4 mainloop with explicit local/global scale epilogue"
+    aPtr bPtr m n k
+
+private def mixedFp8Nvfp4Accumulator
+    (aPtr : GPtr GpuFloat.FP8E4M3)
+    (wPtr : GPtr GpuFloat.FP4E2M1X2)
+    (m : KVal UInt64)
+    (n : KVal UInt64)
+    (k : KVal UInt64)
+    : KernelM (RT GpuFloat.Float32 ctaTileM ctaTileN × RTileCoord) := do
+  let _ := (m, n, k)
+  comment "=== FP8 by NVFP4 GEMM ==="
+  comment "Mixed path that keeps activations in FP8 while converting packed NVFP4 weights to an MMA-friendly FP8 tile inside the typed mainloop"
+  let coord ← blockCoord2D
+  let a : RT GpuFloat.FP8E4M3 ctaTileM quantTileK ← allocRT .FP8E4M3 ctaTileM quantTileK
+  let wFp4 : RT GpuFloat.FP4E2M1X2 ctaTileN quantTileK ← allocRT .FP4E2M1X2 ctaTileN quantTileK
+  let wFp8 : RT GpuFloat.FP8E4M3 ctaTileN quantTileK ← allocRT .FP8E4M3 ctaTileN quantTileK
+  let accum : RT GpuFloat.Float32 ctaTileM ctaTileN ← zeroRT .Float32 ctaTileM ctaTileN
+  let aShared : ST GpuFloat.FP8E4M3 ctaTileM quantTileK ← allocST .FP8E4M3 ctaTileM quantTileK
+  let wShared : ST GpuFloat.FP4E2M1X2 ctaTileN quantTileK ← allocST .FP4E2M1X2 ctaTileN quantTileK
+  for kBlk in krange 0 quantKBlocks do
+    let aCoord := coord.withCol kBlk.id
+    let wCoord := (coord.withRow coord.c).withCol kBlk.id
+    loadGlobal aShared aPtr aCoord
+    loadGlobal wShared wPtr wCoord
+    sync
+    load a aShared
+    load wFp4 wShared
+    convert wFp8 wFp4
+    mmaT accum a wFp8 accum
+    sync
+  pure (accum, coord)
 
 /-- Canonical B200 NVFP4 surface aligned with `nvfp4_b200_gemm.cu`. -/
 @[gpu_kernel .SM100]
@@ -39,150 +83,18 @@ def tkB200NvFp4GemmFwd
     (n : KVal UInt64)
     (k : KVal UInt64)
     : KernelM Unit := do
-  let _ := (m, n, k)
-  comment "=== B200 NVFP4 GEMM ==="
-  comment "ThunderKittens nvfp4_b200 cluster-TMEM path with packed fp4x2 storage, local half scales, and global scale scalars"
-  rawLines #[
-    "using A_fp4x2_tile = st_fp4e2m1_2<128, 128>;",
-    "using A_sc_tile = st_hf<4, 256, false>;",
-    "using B_fp4x2_tile = st_fp4e2m1_2<128, 128>;",
-    "using B_sc_tile = st_hf<4, 256, false>;",
-    "using D_tile = st_bf<128, 128>;",
-    s!"auto &A = {aPtr.id.toIdent};",
-    s!"auto &A_sc = {aScalePtr.id.toIdent};",
-    s!"auto &A_sc_global = {aGlobalScalePtr.id.toIdent};",
-    s!"auto &B = {bPtr.id.toIdent};",
-    s!"auto &B_sc = {bScalePtr.id.toIdent};",
-    s!"auto &B_sc_global = {bGlobalScalePtr.id.toIdent};",
-    s!"auto &D = {dPtr.id.toIdent};",
-    "constexpr int CLUSTER_SIZE = 2;",
-    "constexpr int LOAD_PIPE_DEPTH = 4;",
-    "constexpr int EPI_PIPE_DEPTH = 2;",
-    "constexpr int SUPERGROUP_SIZE = 8;",
-    "constexpr int NUM_D_TILES = 2;",
-    "constexpr int MMA_PER_TILE = 4;",
-    "if (threadIdx.x == 0) {",
-    "  A.template prefetch_tma<A_fp4x2_tile>();",
-    "  A_sc.template prefetch_tma<A_sc_tile>();",
-    "  B.template prefetch_tma<B_fp4x2_tile>();",
-    "  B_sc.template prefetch_tma<B_sc_tile>();",
-    "  D.template prefetch_tma<D_tile>();",
-    "}",
-    "const int warpgroup_id = warpgroup::groupid();",
-    "const int cta_id = cluster_ctarank();",
-    "const int cluster_id = clusterIdx().x;",
-    "const int num_row_blocks = D.rows() / 256;",
-    "const int num_col_blocks = D.cols() / 256;",
-    "const int num_blocks = num_row_blocks * num_col_blocks;",
-    "const int num_red_blocks = 2 * A.cols() / 256;",
-    "const int num_blocks_per_supergroup = SUPERGROUP_SIZE * num_col_blocks;",
-    "uint32_t stage = 0;",
-    "uint32_t phasebits = 0xFFFF0000;",
-    "extern __shared__ int __shm[];",
-    "tma_swizzle_allocator sm_allocator((int*)&__shm[0]);",
-    "struct input_tiles_t { A_fp4x2_tile A; B_fp4x2_tile B; };",
-    "struct input_scales_t { A_sc_tile A; B_sc_tile B[2]; };",
-    "struct outputs_t { D_tile D[NUM_D_TILES]; };",
-    "input_tiles_t (&input_tiles)[LOAD_PIPE_DEPTH] = sm_allocator.allocate<input_tiles_t, LOAD_PIPE_DEPTH>();",
-    "input_scales_t (&input_scales)[LOAD_PIPE_DEPTH] = sm_allocator.allocate<input_scales_t, LOAD_PIPE_DEPTH>();",
-    "outputs_t &output_tiles = sm_allocator.allocate<outputs_t>();",
-    "tensor_allocator<1, CLUSTER_SIZE, false> tm_allocator;",
-    "__shared__ uint32_t tmem_addr;",
-    "__shared__ semaphore tmem_provisioned, tiles_arrived[LOAD_PIPE_DEPTH], scales_arrived[LOAD_PIPE_DEPTH], inputs_finished[LOAD_PIPE_DEPTH], outputs_arrived, outputs_finished;",
-    "if (threadIdx.x == 32) {",
-    "  init_semaphore(tmem_provisioned, 0, 1);",
-    "  for (int i = 0; i < LOAD_PIPE_DEPTH; ++i) { init_semaphore(tiles_arrived[i], 0, 1); init_semaphore(scales_arrived[i], 0, 1); init_semaphore(inputs_finished[i], 0, 1); }",
-    "  init_semaphore(outputs_arrived, 0, 1);",
-    "  init_semaphore(outputs_finished, 0, CLUSTER_SIZE);",
-    "}",
-    "everyone::tma::cluster::arrive_aligned();",
-    "if (warpgroup_id >= 1 && warp::elect_leader()) {",
-    "  int warp_id = group<WARPGROUP_WARPS>::warpid();",
-    "  if (warp_id == 3) {",
-    "    pdl::wait(); everyone::tma::cluster::wait();",
-    "    for (int block_idx = cluster_id; block_idx < num_blocks; block_idx += gridDim.x / CLUSTER_SIZE) {",
-    "      int supergroup_idx = block_idx / num_blocks_per_supergroup;",
-    "      int idx_within_supergroup = block_idx % num_blocks_per_supergroup;",
-    "      int rows_in_supergroup = min(SUPERGROUP_SIZE, num_row_blocks - supergroup_idx * SUPERGROUP_SIZE);",
-    "      int row_block_idx = supergroup_idx * SUPERGROUP_SIZE + idx_within_supergroup % rows_in_supergroup;",
-    "      int col_block_idx = idx_within_supergroup / rows_in_supergroup;",
-    "      for (int i = 0; i < num_red_blocks; ++i) {",
-    "        wait(inputs_finished[stage], get_phasebit<1>(phasebits, stage));",
-    "        tma::cluster::load_async(input_tiles[stage].A, A, {row_block_idx * 2 + cta_id, i}, tiles_arrived[stage], (uint16_t)(1 << cta_id), 0);",
-    "        tma::cluster::load_async(input_tiles[stage].B, B, {col_block_idx * 2 + cta_id, i}, tiles_arrived[stage], (uint16_t)(1 << cta_id), 0);",
-    "        update_phasebit<1>(phasebits, stage);",
-    "        stage = (stage + 1) % LOAD_PIPE_DEPTH;",
-    "      }",
-    "    }",
-    "  } else if (warp_id == 2) {",
-    "    pdl::wait(); everyone::tma::cluster::wait();",
-    "    for (int block_idx = cluster_id; block_idx < num_blocks; block_idx += gridDim.x / CLUSTER_SIZE) {",
-    "      int supergroup_idx = block_idx / num_blocks_per_supergroup;",
-    "      int idx_within_supergroup = block_idx % num_blocks_per_supergroup;",
-    "      int rows_in_supergroup = min(SUPERGROUP_SIZE, num_row_blocks - supergroup_idx * SUPERGROUP_SIZE);",
-    "      int row_block_idx = supergroup_idx * SUPERGROUP_SIZE + idx_within_supergroup % rows_in_supergroup;",
-    "      int col_block_idx = idx_within_supergroup / rows_in_supergroup;",
-    "      for (int i = 0; i < num_red_blocks; ++i) {",
-    "        wait(inputs_finished[stage], get_phasebit<1>(phasebits, stage));",
-    "        tma::cluster::load_async(input_scales[stage].A, A_sc, {row_block_idx * 2 + cta_id, i, 0}, scales_arrived[stage], (uint16_t)(1 << cta_id), 0);",
-    "        tma::cluster::load_async(input_scales[stage].B[cta_id], B_sc, {col_block_idx * 2 + cta_id, i, 0}, scales_arrived[stage], (uint16_t)(0b11), 0);",
-    "        update_phasebit<1>(phasebits, stage);",
-    "        stage = (stage + 1) % LOAD_PIPE_DEPTH;",
-    "      }",
-    "    }",
-    "  } else if (cta_id == 0 && warp_id == 0) {",
-    "    everyone::tma::cluster::wait(); wait(tmem_provisioned, 0); tm_allocator.set_addr(tmem_addr);",
-    "    auto out_tm = tm_allocator.template allocate<full_tt_fl<256>>(0);",
-    "    auto A_sc_tm = tm_allocator.template allocate<full_tt_fp8e4m3<16 * MMA_PER_TILE * LOAD_PIPE_DEPTH>>(256);",
-    "    auto B_sc_tm = tm_allocator.template allocate<full_tt_fp8e4m3<32 * MMA_PER_TILE * LOAD_PIPE_DEPTH>>(256 + 4 * MMA_PER_TILE * LOAD_PIPE_DEPTH);",
-    "    for (int block_idx = cluster_id; block_idx < num_blocks; block_idx += gridDim.x / CLUSTER_SIZE) {",
-    "      wait(outputs_finished, get_phasebit<1>(phasebits, 0));",
-    "      tensor_after_thread_sync();",
-    "      for (int i = 0; i < num_red_blocks; i++) {",
-    "        tma::expect_bytes(scales_arrived[stage], 2 * sizeof(input_scales_t));",
-    "        wait(scales_arrived[stage], get_phasebit<0>(phasebits, stage));",
-    "        load_mxnv_scale_async2(A_sc_tm.template subtile<full_tt_fp8e4m3<16>>(stage * MMA_PER_TILE * 16), reinterpret_cast<st_fp8e4m3<32, 16, false>&>(input_scales[stage].A));",
-    "        load_mxnv_scale_async2(B_sc_tm.template subtile<full_tt_fp8e4m3<16>>(stage * MMA_PER_TILE * 32), reinterpret_cast<st_fp8e4m3<32, 16, false>&>(input_scales[stage].B[0]));",
-    "        load_mxnv_scale_async2(B_sc_tm.template subtile<full_tt_fp8e4m3<16>>(stage * MMA_PER_TILE * 32 + 16), reinterpret_cast<st_fp8e4m3<32, 16, false>&>(input_scales[stage].B[1]));",
-    "        tma::expect_bytes(tiles_arrived[stage], 2 * sizeof(input_tiles_t));",
-    "        wait(tiles_arrived[stage], get_phasebit<0>(phasebits, stage));",
-    "        if (i == 0) mm2_ABt(out_tm, input_tiles[stage].A, input_tiles[stage].B, A_sc_tm.template subtile<full_tt_fp8e4m3<64>>(stage * MMA_PER_TILE * 16), B_sc_tm.template subtile<full_tt_fp8e4m3<128>>(stage * MMA_PER_TILE * 32), inputs_finished[stage]);",
-    "        else mma2_ABt(out_tm, input_tiles[stage].A, input_tiles[stage].B, A_sc_tm.template subtile<full_tt_fp8e4m3<64>>(stage * MMA_PER_TILE * 16), B_sc_tm.template subtile<full_tt_fp8e4m3<128>>(stage * MMA_PER_TILE * 32), inputs_finished[stage]);",
-    "        update_phasebit<0>(phasebits, stage);",
-    "        stage = (stage + 1) % LOAD_PIPE_DEPTH;",
-    "      }",
-    "      tensor_commit<2>(outputs_arrived);",
-    "      update_phasebit<1>(phasebits, 0);",
-    "    }",
-    "  }",
-    "} else {",
-    "  everyone::tma::cluster::wait_aligned();",
-    "  if (warpgroup::warpid() == 0) { tm_allocator.provision(tmem_addr); warp::arrive(tmem_provisioned); }",
-    "  wait(tmem_provisioned, 0); tm_allocator.set_addr(tmem_addr);",
-    "  auto out_tm = tm_allocator.template allocate<full_tt_fl<256>>(0);",
-    "  const float global_scale = A_sc_global[{0}] * B_sc_global[{0}];",
-    "  for (int block_idx = cluster_id; block_idx < num_blocks; block_idx += gridDim.x / CLUSTER_SIZE) {",
-    "    wait(outputs_arrived, get_phasebit<0>(phasebits, 0));",
-    "    rt_fl<32, 128> D_reg[EPI_PIPE_DEPTH];",
-    "    for (int i = 0; i < EPI_PIPE_DEPTH; i++) warpgroup::load_async(D_reg[i], out_tm.template subtile<full_tt_fl<128>>(0, 128 * i));",
-    "    tensor_load_wait();",
-    "    tensor_before_thread_sync();",
-    "    warpgroup::sync(1);",
-    "    warpgroup::tma::cluster::arrive(outputs_finished, 0, 1);",
-    "    for (int i = 0; i < EPI_PIPE_DEPTH; i++) {",
-    "      warp::mul(D_reg[i], D_reg[i], global_scale);",
-    "      warpgroup::tma::store_async_read_wait<NUM_D_TILES - 1>();",
-    "      warpgroup::sync(1);",
-    "      warpgroup::store(output_tiles.D[i % NUM_D_TILES], D_reg[i]);",
-    "      warpgroup::sync(1);",
-    "      warpgroup::tma::store_async<dim::ROW, cache_policy::EVICT_FIRST>(D, output_tiles.D[i % NUM_D_TILES], {block_idx * 2 + cta_id, EPI_PIPE_DEPTH * block_idx + i});",
-    "    }",
-    "  }",
-    "  warpgroup::sync(1);",
-    "  warpgroup::pdl::arrive();",
-    "  if (warpgroup::warpid() == 0) tm_allocator.deprovision();",
-    "}"
-  ]
+  let (accum, coord) ← nvfp4Accumulator aPtr bPtr m n k
+  let (aLocalScale, bLocalScale) ← GemmCommon.loadRowColScaleVectorsAsFloat32
+    (tileM := ctaTileM)
+    (tileN := ctaTileN)
+    aScalePtr bScalePtr coord
+  let locallyScaled ← GemmCommon.applyRowColScales accum aLocalScale bLocalScale
+  let zero ← constIntVal 0 "zero_offset"
+  let aGlobal ← loadFloat32Scalar aGlobalScalePtr zero "a_global_scale"
+  let bGlobal ← loadFloat32Scalar bGlobalScalePtr zero "b_global_scale"
+  let globalScale ← scalarMulVal aGlobal bGlobal "ab_global_scale"
+  let fullyScaled ← GemmCommon.applyGlobalScalar locallyScaled globalScale
+  GemmCommon.storeConvertedTile dPtr coord fullyScaled
 
 /-- NVFP4 quantization surface aligned with the quantizer stages in
 `nvfp4_b200_gemm.cu`. -/
@@ -195,20 +107,36 @@ def quantizeToFp4
     (m : KVal UInt64)
     (n : KVal UInt64)
     : KernelM Unit := do
-  let _ := (m, n)
+  let _ := (m, n, quantScaleRows)
   comment "=== NVFP4 quantization ==="
-  comment "ThunderKittens local-half-scale plus global-scale quantization to packed fp4e2m1_2 storage"
-  rawLines #[
-    s!"auto &X = {xPtr.id.toIdent};",
-    s!"auto &X_sc = {scalePtr.id.toIdent};",
-    s!"auto &X_sc_global = {globalScalePtr.id.toIdent};",
-    s!"auto &X_q = {xQPtr.id.toIdent};",
-    "/* Source-faithful nvfp4 quantization uses a preceding absmax pass, then writes",
-    "   packed fp4x2 tiles, local half scales, and one global scale scalar. */",
-    "zero_kernel({X, X_q, X_sc, X_sc_global});",
-    "absmax_kernel({X, X_q, X_sc, X_sc_global});",
-    "quantize_kernel({X, X_q, X_sc, X_sc_global});"
-  ]
+  comment "Typed quantizer shell: compute per-row local absmax scales, normalize, convert to packed fp4x2, and write one global scale scalar"
+  let coord ← blockCoord2D
+  let xShared : ST GpuFloat.BFloat16 ctaTileM quantTileK ← allocST .BFloat16 ctaTileM quantTileK
+  let xBf16 : RT GpuFloat.BFloat16 ctaTileM quantTileK ← allocRT .BFloat16 ctaTileM quantTileK
+  let xF32 : RT GpuFloat.Float32 ctaTileM quantTileK ← allocRT .Float32 ctaTileM quantTileK
+  let xAbs : RT GpuFloat.Float32 ctaTileM quantTileK ← allocRT .Float32 ctaTileM quantTileK
+  let xNorm : RT GpuFloat.Float32 ctaTileM quantTileK ← allocRT .Float32 ctaTileM quantTileK
+  let xFp4 : RT GpuFloat.FP4E2M1X2 ctaTileM quantTileK ← allocRT .FP4E2M1X2 ctaTileM quantTileK
+  let xOutShared : ST GpuFloat.FP4E2M1X2 ctaTileM quantTileK ← allocST .FP4E2M1X2 ctaTileM quantTileK
+  let rowScale : RV GpuFloat.Float32 ctaTileM ← allocRV .Float32 ctaTileM
+  let rowScaleHalf : RV GpuFloat.Float16 ctaTileM ← allocRV .Float16 ctaTileM
+  let rowScaleShared : SV GpuFloat.Float16 ctaTileM ← allocSV .Float16 ctaTileM
+  loadGlobal xShared xPtr coord
+  sync
+  load xBf16 xShared
+  convert xF32 xBf16
+  abs xAbs xF32
+  rowMax rowScale xAbs
+  divCol xNorm xF32 rowScale
+  convert xFp4 xNorm
+  store xOutShared xFp4
+  storeGlobal xQPtr xOutShared coord
+  convertVec rowScaleHalf rowScale
+  storeVec rowScaleShared rowScaleHalf
+  storeVecGlobalRow scalePtr rowScaleShared coord
+  let zero ← constIntVal 0 "zero_offset"
+  let one ← constFloatVal 1.0 "global_scale_one"
+  storeFloat32Scalar globalScalePtr zero one
 
 /-- Mixed FP8 activation by NVFP4 weight GEMM surface aligned with the vendored
 NVFP4 control-flow family. -/
@@ -223,21 +151,20 @@ def mixedFp4Fp8GemmFwd
     (n : KVal UInt64)
     (k : KVal UInt64)
     : KernelM Unit := do
-  let _ := (m, n, k)
-  comment "=== FP8 by NVFP4 GEMM ==="
-  comment "Mixed path that keeps activations in FP8 while weights follow the packed NVFP4 local/global scaling contract"
-  rawLines #[
-    s!"auto &A = {aPtr.id.toIdent};",
-    s!"auto &W = {wPtr.id.toIdent};",
-    s!"auto &W_sc = {wScalePtr.id.toIdent};",
-    s!"auto &W_sc_global = {wGlobalScalePtr.id.toIdent};",
-    s!"auto &D = {dPtr.id.toIdent};",
-    "/* This surface reuses the nvfp4_b200 MMA/epilogue structure with FP8 activations",
-    "   on the left-hand side and packed fp4x2 weights plus local/global scales on the right. */",
-    "const float global_scale = W_sc_global[{0}];",
-    "(void)global_scale;",
-    "/* The detailed producer/consumer structure is shared with tkB200NvFp4GemmFwd; the",
-    "   distinguishing contract here is the mixed left input dtype rather than the control flow. */"
-  ]
+  let (accum, coord) ← mixedFp8Nvfp4Accumulator aPtr wPtr m n k
+  let weightScaleShared : SV GpuFloat.Float16 ctaTileN ← allocSV .Float16 ctaTileN
+  let weightScaleHalf : RV GpuFloat.Float16 ctaTileN ← allocRV .Float16 ctaTileN
+  let weightScale : RV GpuFloat.Float32 ctaTileN ← allocRV .Float32 ctaTileN
+  let oneScalar ← constFloatVal 1.0 "one"
+  let rowScale : RV GpuFloat.Float32 ctaTileM ← allocRV .Float32 ctaTileM
+  fillVecScalar rowScale oneScalar
+  loadVecGlobalCol weightScaleShared wScalePtr coord
+  loadVec weightScaleHalf weightScaleShared
+  convertVec weightScale weightScaleHalf
+  let locallyScaled ← GemmCommon.applyRowColScales accum rowScale weightScale
+  let zero ← constIntVal 0 "zero_offset"
+  let globalScale ← loadFloat32Scalar wGlobalScalePtr zero "w_global_scale"
+  let fullyScaled ← GemmCommon.applyGlobalScalar locallyScaled globalScale
+  GemmCommon.storeConvertedTile dPtr coord fullyScaled
 
 end Tyr.GPU.Kernels.NvFp4Gemm

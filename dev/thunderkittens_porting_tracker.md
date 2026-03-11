@@ -55,9 +55,6 @@ counterpart that is part of the normal build/doc graph.
 Status meanings:
 
 - `implemented`: dedicated Lean surface exists and is built/documented
-- `implemented+raw`: dedicated Lean surface exists, but relies on `emitRaw`
-  backend blocks for TMEM/cluster/PGL-style constructs that are not yet
-  first-class in the Lean DSL
 
 | Vendored source | Lean counterpart | Status | Notes |
 | --- | --- | --- | --- |
@@ -68,14 +65,14 @@ Status meanings:
 | `fftconv/fftconv_pc.cu` | `Tyr/GPU/Kernels/FFTConv.lean` (`tkFFTConvPC1024`) | `implemented` | Persistent producer/consumer counterpart exists. |
 | `flux/flux_gate.cu` | `Tyr/GPU/Kernels/Flux.lean` (`tkFluxMatmulGateFwd`) | `implemented` | Dedicated gate+bias+residual counterpart exists. |
 | `flux/flux_gelu.cu` | `Tyr/GPU/Kernels/Flux.lean` (`tkFluxMatmulGeluFwd`) | `implemented` | Dedicated GELU+bias counterpart exists. |
-| `gemm/bf16_b200/bf16_b200_gemm.cu` | `Tyr/GPU/Kernels/Bf16Gemm.lean` (`tkB200Bf16GemmFwd`) | `implemented+raw` | Blackwell BF16 producer/consumer + TMEM structure encoded through raw backend blocks. |
+| `gemm/bf16_b200/bf16_b200_gemm.cu` | `Tyr/GPU/Kernels/Bf16Gemm.lean` (`tkB200Bf16GemmFwd`) | `implemented` | Blackwell BF16 surface now uses a typed 256x256 tiled mainloop and typed epilogue. |
 | `gemm/bf16_h100/bf16_h100_gemm.cu` | `Tyr/GPU/Kernels/Bf16Gemm.lean` (`tkH100Bf16GemmFwd`) | `implemented` | Dedicated Hopper BF16 counterpart exists. |
-| `gemm/fp8_b200/fp8_b200_gemm_1cta.cu` | `Tyr/GPU/Kernels/PrecisionGemm.lean` (`tkB200Fp8E4M3Gemm1CtaFwd`) | `implemented+raw` | Dedicated Blackwell 1-CTA FP8 counterpart exists. |
-| `gemm/fp8_b200/fp8_b200_gemm_2cta.cu` | `Tyr/GPU/Kernels/PrecisionGemm.lean` (`tkB200Fp8E4M3Gemm2CtaFwd`) | `implemented+raw` | Dedicated Blackwell 2-CTA FP8 counterpart exists. |
+| `gemm/fp8_b200/fp8_b200_gemm_1cta.cu` | `Tyr/GPU/Kernels/PrecisionGemm.lean` (`tkB200Fp8E4M3Gemm1CtaFwd`) | `implemented` | Dedicated Blackwell 1-CTA FP8 counterpart now uses a typed 128x256 Blackwell-sized mainloop. |
+| `gemm/fp8_b200/fp8_b200_gemm_2cta.cu` | `Tyr/GPU/Kernels/PrecisionGemm.lean` (`tkB200Fp8E4M3Gemm2CtaFwd`) | `implemented` | Dedicated Blackwell 2-CTA FP8 counterpart now uses the same typed tile family with cluster-sized output geometry. |
 | `gemm/fp8_h100/fp8_h100_gemm.cu` | `Tyr/GPU/Kernels/PrecisionGemm.lean` (`tkH100Fp8E4M3GemmFwd`) | `implemented` | Primary H100 FP8 surface. |
 | `gemm/fp8_h100_scaled/fp8_h100_gemm_scaled.cu` | `Tyr/GPU/Kernels/PrecisionGemm.lean` (`tkH100Fp8ScaledGemmFwd`) | `implemented` | Explicit scale epilogue represented. |
-| `gemm/mxfp8_b200/mxfp8_b200_gemm.cu` | `Tyr/GPU/Kernels/PrecisionGemm.lean` (`tkB200MxFp8GemmFwd`) | `implemented+raw` | MXFP8 counterpart uses raw backend blocks for the scale-tile/TMEM structure. |
-| `gemm/nvfp4_b200/nvfp4_b200_gemm.cu` | `Tyr/GPU/Kernels/NvFp4Gemm.lean` (`tkB200NvFp4GemmFwd`) | `implemented+raw` | Packed-fp4/local-scale/global-scale contract encoded directly in raw backend code. |
+| `gemm/mxfp8_b200/mxfp8_b200_gemm.cu` | `Tyr/GPU/Kernels/PrecisionGemm.lean` (`tkB200MxFp8GemmFwd`) | `implemented` | MXFP8 counterpart now uses typed e8m0 scale vectors converted into an FP32 epilogue. |
+| `gemm/nvfp4_b200/nvfp4_b200_gemm.cu` | `Tyr/GPU/Kernels/NvFp4Gemm.lean` (`tkB200NvFp4GemmFwd`) | `implemented` | Packed-fp4 local/global scale contract now rides on typed accumulator, converted scale vectors, and typed scalar global IO. |
 | `hedgehog/hedgehog.cu` | `Tyr/GPU/Kernels/Hedgehog.lean` (`tkHedgehogFwd`) | `implemented` | Canonical chunk/state surface exists. |
 | `layernorm/layernorm.cu` | `Tyr/GPU/Kernels/FusedLayerNorm.lean` (`tkFusedLayerNormResidual1024`) | `implemented` | Canonical fused residual + layernorm port. |
 | `linear_attention/linear_attention.cu` | `Tyr/GPU/Kernels/LinearAttn.lean` (`tkLinearAttnFwd`) | `implemented` | Dedicated decayed recurrent/local forward surface. |
@@ -92,7 +89,7 @@ Status meanings:
 | `parallel/gemm_rs/gemm_rs_b200.cu` | `Tyr/GPU/Kernels/Distributed.lean` (`gemmRsB200Fwd`) | `implemented` | Dedicated Blackwell GEMM+reduce-scatter counterpart now uses the typed distributed `store_add` surface. |
 | `parallel/gemm_rs/gemm_rs_h100.cu` | `Tyr/GPU/Kernels/Distributed.lean` (`gemmRsFwd`) | `implemented` | Dedicated H100 GEMM+reduce-scatter counterpart now uses the typed distributed `store_add` surface. |
 | `parallel/gemm_rs_fp8/gemm_rs_fp8_b200.cu` | `Tyr/GPU/Kernels/Distributed.lean` (`gemmRsFp8B200Fwd`) | `implemented` | Dedicated Blackwell FP8 GEMM+reduce-scatter counterpart now uses the typed distributed `store_add` surface. |
-| `parallel/moe_dispatch_gemm/moe_dispatch_gemm_h100.cu` | `Tyr/GPU/Kernels/MOE.lean` (`tkMoeDispatchGemm`) | `implemented+raw` | Canonical fused dispatch/grouped-GEMM surface exists. |
+| `parallel/moe_dispatch_gemm/moe_dispatch_gemm_h100.cu` | `Tyr/GPU/Kernels/MOE.lean` (`tkMoeDispatchGemm`) | `implemented` | Canonical fused dispatch/grouped-GEMM surface exists. |
 | `parallel/reduce_scatter/reduce_scatter.cu` | `Tyr/GPU/Kernels/Distributed.lean` (`reduceScatterFwd`) | `implemented` | The sharded transport path is now encoded through the typed tile/multimem surface. |
 | `parallel/ring_attn/ring_attn_h100.cu` | `Tyr/GPU/Kernels/RingAttn.lean` (`ringAttnPartial`, `ringAttnComm`, `ringAttnReduce`) | `implemented` | All three forward phases now use typed DSL code; the partial phase runs as a typed single-query-tile shell over a runtime-bounded KV-shard loop. |
 | `parallel/ulysses_attn/ulysses_attn.cu` | `Tyr/GPU/Kernels/UlyssesAttn.lean` (`allToAllFwd`, `ulyssesQkvAllToAll`, `ulyssesAttnFwd`) | `implemented` | Ulysses transport/orchestration now rides on the typed shared all-to-all surface instead of a raw backend block. |
@@ -112,12 +109,13 @@ the source-backed forward kernels rather than parity blockers.
 
 ## Fidelity Follow-Ups
 
-The remaining work is mostly about first-class DSL coverage and exact launch
+The remaining work is mostly about first-class DSL fidelity and exact launch
 arithmetic, not missing kernel families:
 
-1. Promote TMEM / cluster-specialized storage / scale-tile concepts so
-   `Bf16Gemm.lean`, `PrecisionGemm.lean`, and `NvFp4Gemm.lean` no longer need
-   raw backend blocks.
+1. Promote TMEM / cluster-specialized storage / scale-tile concepts as
+   first-class IR operations so the typed Blackwell GEMM surfaces can model the
+   source structure more literally instead of compressing it into CTA-local
+   mainloops plus explicit epilogues.
 2. Tighten exact CTA worker packing for `MhaH100LCF.lean`, `Based.lean`,
    `LinearAttn.lean`, `Hedgehog.lean`, and `Mamba2.lean`.
 
