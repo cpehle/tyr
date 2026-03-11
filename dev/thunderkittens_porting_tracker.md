@@ -79,18 +79,18 @@ Status meanings:
 | `layernorm/layernorm.cu` | `Tyr/GPU/Kernels/FusedLayerNorm.lean` (`tkFusedLayerNormResidual1024`) | `implemented` | Canonical fused residual + layernorm port. |
 | `linear_attention/linear_attention.cu` | `Tyr/GPU/Kernels/LinearAttn.lean` (`tkLinearAttnFwd`) | `implemented` | Dedicated decayed recurrent/local forward surface. |
 | `mamba2/mamba2.cu` | `Tyr/GPU/Kernels/Mamba2.lean` (`mamba2Fwd`) | `implemented+raw` | Dedicated lcsf-style producer/consumer surface exists. |
-| `parallel/ag_gemm/ag_gemm_b200.cu` | `Tyr/GPU/Kernels/Distributed.lean` (`agGemmB200Fwd`) | `implemented+raw` | Dedicated Blackwell AG+GEMM counterpart exists. |
-| `parallel/ag_gemm/ag_gemm_h100.cu` | `Tyr/GPU/Kernels/Distributed.lean` (`agGemmFwd`) | `implemented+raw` | Dedicated H100 AG+GEMM counterpart exists. |
-| `parallel/ag_gemm_fp8/ag_gemm_fp8_b200.cu` | `Tyr/GPU/Kernels/Distributed.lean` (`agGemmFp8B200Fwd`) | `implemented+raw` | Dedicated Blackwell FP8 AG+GEMM counterpart exists. |
+| `parallel/ag_gemm/ag_gemm_b200.cu` | `Tyr/GPU/Kernels/Distributed.lean` (`agGemmB200Fwd`) | `implemented` | Dedicated Blackwell AG+GEMM counterpart now uses the typed producer/consumer distributed surface. |
+| `parallel/ag_gemm/ag_gemm_h100.cu` | `Tyr/GPU/Kernels/Distributed.lean` (`agGemmFwd`) | `implemented` | Dedicated H100 AG+GEMM counterpart now uses the typed producer/consumer distributed surface. |
+| `parallel/ag_gemm_fp8/ag_gemm_fp8_b200.cu` | `Tyr/GPU/Kernels/Distributed.lean` (`agGemmFp8B200Fwd`) | `implemented` | Dedicated Blackwell FP8 AG+GEMM counterpart now uses the typed producer/consumer distributed surface. |
 | `parallel/all_gather/all_gather.cu` | `Tyr/GPU/Kernels/Distributed.lean` (`allGatherFwd`) | `implemented` | The transport path is now encoded through typed layout-dimension and scalar-control DSL primitives. |
 | `parallel/all_reduce/all_reduce.cu` | `Tyr/GPU/Kernels/Distributed.lean` (`allReduceFwd`) | `implemented` | The out-of-place collective now rides on the typed tile/multimem surface. |
 | `parallel/all_reduce_educational/all_reduce_educational.cu` | `Tyr/GPU/Kernels/Distributed.lean` (`allReduceEducationalFwd`) | `implemented` | Educational in-place all-reduce counterpart exists. |
 | `parallel/all_to_all/all_to_all.cu` | `Tyr/GPU/Kernels/Distributed.lean`, `Tyr/GPU/Kernels/UlyssesAttn.lean` | `implemented` | The shared all-to-all transport/indexing surface is now encoded through typed layout-dimension and scalar-control DSL primitives. |
-| `parallel/gemm_ar/gemm_ar_h100.cu` | `Tyr/GPU/Kernels/Distributed.lean` (`gemmArFwd`) | `implemented+raw` | Dedicated H100 GEMM+all-reduce counterpart exists. |
-| `parallel/gemm_ar/gemm_ar_h100_lcsc.cu` | `Tyr/GPU/Kernels/Distributed.lean` (`gemmArH100LcscFwd`) | `implemented+raw` | Dedicated LCSC GEMM+all-reduce counterpart exists. |
-| `parallel/gemm_rs/gemm_rs_b200.cu` | `Tyr/GPU/Kernels/Distributed.lean` (`gemmRsB200Fwd`) | `implemented+raw` | Dedicated Blackwell GEMM+reduce-scatter counterpart exists. |
-| `parallel/gemm_rs/gemm_rs_h100.cu` | `Tyr/GPU/Kernels/Distributed.lean` (`gemmRsFwd`) | `implemented+raw` | Dedicated H100 GEMM+reduce-scatter counterpart exists. |
-| `parallel/gemm_rs_fp8/gemm_rs_fp8_b200.cu` | `Tyr/GPU/Kernels/Distributed.lean` (`gemmRsFp8B200Fwd`) | `implemented+raw` | Dedicated Blackwell FP8 GEMM+reduce-scatter counterpart exists. |
+| `parallel/gemm_ar/gemm_ar_h100.cu` | `Tyr/GPU/Kernels/Distributed.lean` (`gemmArFwd`) | `implemented` | Dedicated H100 GEMM+all-reduce counterpart now uses the typed distributed epilogue surface. |
+| `parallel/gemm_ar/gemm_ar_h100_lcsc.cu` | `Tyr/GPU/Kernels/Distributed.lean` (`gemmArH100LcscFwd`) | `implemented` | Dedicated LCSC GEMM+all-reduce counterpart now uses the typed distributed epilogue surface. |
+| `parallel/gemm_rs/gemm_rs_b200.cu` | `Tyr/GPU/Kernels/Distributed.lean` (`gemmRsB200Fwd`) | `implemented` | Dedicated Blackwell GEMM+reduce-scatter counterpart now uses the typed distributed `store_add` surface. |
+| `parallel/gemm_rs/gemm_rs_h100.cu` | `Tyr/GPU/Kernels/Distributed.lean` (`gemmRsFwd`) | `implemented` | Dedicated H100 GEMM+reduce-scatter counterpart now uses the typed distributed `store_add` surface. |
+| `parallel/gemm_rs_fp8/gemm_rs_fp8_b200.cu` | `Tyr/GPU/Kernels/Distributed.lean` (`gemmRsFp8B200Fwd`) | `implemented` | Dedicated Blackwell FP8 GEMM+reduce-scatter counterpart now uses the typed distributed `store_add` surface. |
 | `parallel/moe_dispatch_gemm/moe_dispatch_gemm_h100.cu` | `Tyr/GPU/Kernels/MOE.lean` (`tkMoeDispatchGemm`) | `implemented+raw` | Canonical fused dispatch/grouped-GEMM surface exists. |
 | `parallel/reduce_scatter/reduce_scatter.cu` | `Tyr/GPU/Kernels/Distributed.lean` (`reduceScatterFwd`) | `implemented` | The sharded transport path is now encoded through the typed tile/multimem surface. |
 | `parallel/ring_attn/ring_attn_h100.cu` | `Tyr/GPU/Kernels/RingAttn.lean` (`ringAttnPartial`, `ringAttnComm`, `ringAttnReduce`) | `implemented+raw` | Forward ring attention is split into the same coarse phases as the vendored kernel. |
@@ -117,9 +117,9 @@ arithmetic, not missing kernel families:
 1. Promote TMEM / cluster-specialized storage / scale-tile concepts so the
    Blackwell GEMM family no longer needs raw backend blocks.
 2. Add first-class distributed PGL / peer arithmetic for the remaining
-   communication+GEMM and ring-attention kernels. The shared all-to-all,
-   all-gather, all-reduce, and reduce-scatter transport paths are now typed,
-   but the broader multi-peer topology DSL is still thin.
+   ring-attention kernels. The shared collectives and communication+GEMM
+   surfaces are now typed, but the broader multi-peer topology DSL is still
+   thin.
 3. Tighten exact CTA worker packing for `MhaH100LCF.lean`, `Based.lean`,
    `LinearAttn.lean`, `Hedgehog.lean`, and `Mamba2.lean`.
 
