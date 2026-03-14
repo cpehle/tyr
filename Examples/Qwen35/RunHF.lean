@@ -7,7 +7,7 @@
 import Tyr.Model.Qwen35
 import Tyr.Model.Qwen35.Media
 import Tyr.TensorStruct
-import Tyr.Tokenizer.Qwen3
+import Tyr.Tokenizer.Qwen35
 
 open torch
 open torch.qwen35
@@ -29,6 +29,8 @@ structure Args where
   maxNewTokens : UInt64 := 32
   stream : Bool := false
   multimodal : Bool := false
+  enableThinking : Bool := false
+  debugIds : Bool := false
   deriving Inhabited
 
 private def parseNatArg (name : String) (v : String) : IO UInt64 := do
@@ -52,6 +54,8 @@ private def printHelp : IO Unit := do
   IO.println "  --max-new-tokens <n>         Number of tokens to generate"
   IO.println "  --stream                     Stream generated tokens per decode step"
   IO.println "  --multimodal                 Force multimodal model load (auto-enabled by --image/--video)"
+  IO.println "  --enable-thinking            Use the Qwen3.5 thinking-enabled generation suffix"
+  IO.println "  --debug-ids                  Print generated token ids alongside decoded text"
   IO.println "Examples:"
   IO.println "  lake exe Qwen35RunHF --source tiny-random/qwen3.5 --stream"
   IO.println "  lake exe Qwen35RunHF --source Qwen/Qwen3.5-0.8B --prompt \"Write one sentence about Lean.\""
@@ -88,6 +92,10 @@ private partial def parseArgsLoop (xs : List String) (acc : Args) : IO Args := d
       parseArgsLoop rest { acc with stream := true }
   | "--multimodal" :: rest =>
       parseArgsLoop rest { acc with multimodal := true }
+  | "--enable-thinking" :: rest =>
+      parseArgsLoop rest { acc with enableThinking := true }
+  | "--debug-ids" :: rest =>
+      parseArgsLoop rest { acc with debugIds := true }
   | "--help" :: _ =>
       printHelp
       throw <| IO.userError ""
@@ -145,11 +153,16 @@ private def moveModelToDevice [TensorStruct α] (device : Device) (x : α) : IO 
   TensorStruct.mapM (fun t => pure (t.to device)) x
 
 private def encodePromptToIds
-    (tok : tokenizer.qwen3.QwenTokenizer)
+    (tok : tokenizer.qwen35.QwenTokenizer)
+    (enableThinking : Bool)
     (prompt : String)
     : Array UInt64 :=
-  let text := tokenizer.qwen3.chatTemplate prompt
-  (tokenizer.qwen3.encodeText tok text).map (fun t => t.toUInt64)
+  let text :=
+    if enableThinking then
+      tokenizer.qwen35.chatTemplateThinking prompt
+    else
+      tokenizer.qwen35.chatTemplate prompt
+  (tokenizer.qwen35.encodeText tok text).map (fun t => t.toUInt64)
 
 private def visionPrefixIds (cfg : VLConfig) (imageTokenCount videoTokenCount : UInt64) : Array UInt64 :=
   Id.run do
@@ -167,15 +180,24 @@ private def visionPrefixIds (cfg : VLConfig) (imageTokenCount videoTokenCount : 
     out
 
 private def encodePromptToIdsMultimodal
-    (tok : tokenizer.qwen3.QwenTokenizer)
+    (tok : tokenizer.qwen35.QwenTokenizer)
+    (enableThinking : Bool)
     (cfg : VLConfig)
     (imageTokenCount videoTokenCount : UInt64)
     (prompt : String)
-    : Array UInt64 :=
-  (visionPrefixIds cfg imageTokenCount videoTokenCount) ++ (encodePromptToIds tok prompt)
+    : Array UInt64 := Id.run do
+  let userPrefixIds := (tokenizer.qwen35.encodeText tok tokenizer.qwen35.userPrefix).map (fun t => t.toUInt64)
+  let promptIds := (tokenizer.qwen35.encodeText tok prompt).map (fun t => t.toUInt64)
+  let suffixText :=
+    if enableThinking then
+      tokenizer.qwen35.assistantGenerationSuffixThinking
+    else
+      tokenizer.qwen35.assistantGenerationSuffix
+  let suffix := (tokenizer.qwen35.encodeText tok suffixText).map (fun t => t.toUInt64)
+  return userPrefixIds ++ (visionPrefixIds cfg imageTokenCount videoTokenCount) ++ promptIds ++ suffix
 
 private def buildBatchInputWithEncoder
-    (tok : tokenizer.qwen3.QwenTokenizer)
+    (tok : tokenizer.qwen35.QwenTokenizer)
     (prompts : Array String)
     (encode : String → Array UInt64)
     : IO (Sigma (fun batch => Sigma (fun seq => T #[batch, seq] × Array Nat))) := do
@@ -207,7 +229,7 @@ private def eosFromCfg (cfg : Config) : Array UInt64 :=
   | none => #[]
 
 private def decodeGeneratedBatch
-    (tok : tokenizer.qwen3.QwenTokenizer)
+    (tok : tokenizer.qwen35.QwenTokenizer)
     (promptLens : Array Nat)
     {batch outSeq : UInt64}
     (ids : T #[batch, outSeq])
@@ -223,7 +245,7 @@ private def decodeGeneratedBatch
         #[]
       else
         vals.extract promptLen vals.size
-    let text := tokenizer.qwen3.decodeText tok (gen.map (fun x => x.toUInt32))
+    let text := tokenizer.qwen35.decodeText tok (gen.map (fun x => x.toUInt32))
     out := out.push text
   pure out
 
@@ -243,8 +265,39 @@ private def printDecodedBatch
       IO.println decoded[i]!
       IO.println s!"GEN[{idx}]_END"
 
+private def printGeneratedIds
+    (chunkStart : Nat)
+    (generatedIds : Array (Array UInt64))
+    (singleOnly : Bool := false)
+    : IO Unit := do
+  if singleOnly && generatedIds.size == 1 && chunkStart == 0 then
+    IO.println s!"GEN_IDS={generatedIds[0]!}"
+  else
+    for i in [:generatedIds.size] do
+      let idx := chunkStart + i
+      IO.println s!"GEN_IDS[{idx}]={generatedIds[i]!}"
+
+private def generatedIdsFromBatch
+    (promptLens : Array Nat)
+    {batch outSeq : UInt64}
+    (ids : T #[batch, outSeq])
+    : IO (Array (Array UInt64)) := do
+  let mut out : Array (Array UInt64) := #[]
+  for i in [:batch.toNat] do
+    let row2 : T #[1, outSeq] := data.slice ids 0 i.toUInt64 1
+    let row1 : T #[outSeq] := reshape (data.toLong row2) #[outSeq]
+    let vals ← data.tensorToUInt64Array row1
+    let promptLen := promptLens.getD i 0
+    let gen :=
+      if vals.size <= promptLen then
+        #[]
+      else
+        vals.extract promptLen vals.size
+    out := out.push gen
+  pure out
+
 private def streamCallback
-    (tok : tokenizer.qwen3.QwenTokenizer)
+    (tok : tokenizer.qwen35.QwenTokenizer)
     {batch : UInt64}
     (chunkStart : Nat)
     : Qwen35ForCausalLM.StreamCallback batch := fun _step nextTok => do
@@ -253,17 +306,17 @@ private def streamCallback
   if batch == 1 then
     match vals[0]? with
     | some v =>
-      let piece := tokenizer.qwen3.decodeOne tok v.toUInt32
+      let piece := tokenizer.qwen35.decodeOne tok v.toUInt32
       IO.print piece
     | none => pure ()
   else
     for i in [:vals.size] do
       let idx := chunkStart + i
-      let piece := tokenizer.qwen3.decodeOne tok vals[i]!.toUInt32
+      let piece := tokenizer.qwen35.decodeOne tok vals[i]!.toUInt32
       IO.println s!"STREAM[{idx}] {piece}"
 
 private def runTextBatches
-    (tok : tokenizer.qwen3.QwenTokenizer)
+    (tok : tokenizer.qwen35.QwenTokenizer)
     (cfg : Config)
     (model : Qwen35ForCausalLM cfg)
     (device : Device)
@@ -278,7 +331,7 @@ private def runTextBatches
     let stop := Nat.min prompts.size (start + chunkSize)
     let chunk := prompts.extract start stop
     let ⟨_batch, ⟨_seq, (inputIds, promptLens)⟩⟩ ←
-      buildBatchInputWithEncoder tok chunk (encodePromptToIds tok)
+      buildBatchInputWithEncoder tok chunk (encodePromptToIds tok args.enableThinking)
     let inputIds := inputIds.to device
 
     let ⟨_outSeq, outIds⟩ ←
@@ -296,11 +349,14 @@ private def runTextBatches
     if args.stream && chunk.size == 1 then
       IO.println ""
     let decoded ← decodeGeneratedBatch tok promptLens outIds
+    if args.debugIds then
+      let generatedIds ← generatedIdsFromBatch promptLens outIds
+      printGeneratedIds start generatedIds (singleOnly := prompts.size == 1)
     printDecodedBatch start decoded (singleOnly := prompts.size == 1)
     start := stop
 
 private def runMultimodalBatches
-    (tok : tokenizer.qwen3.QwenTokenizer)
+    (tok : tokenizer.qwen35.QwenTokenizer)
     (cfg : VLConfig)
     (model : Qwen35ForConditionalGeneration cfg)
     (device : Device)
@@ -318,7 +374,7 @@ private def runMultimodalBatches
   while start < prompts.size do
     let stop := Nat.min prompts.size (start + chunkSize)
     let chunk := prompts.extract start stop
-    let enc := encodePromptToIdsMultimodal tok cfg imageTokenCount videoTokenCount
+    let enc := encodePromptToIdsMultimodal tok args.enableThinking cfg imageTokenCount videoTokenCount
     let ⟨_batch, ⟨_seq, (inputIds, promptLens)⟩⟩ ←
       buildBatchInputWithEncoder tok chunk enc
     let inputIds := inputIds.to device
@@ -347,6 +403,9 @@ private def runMultimodalBatches
     if args.stream && chunk.size == 1 then
       IO.println ""
     let decoded ← decodeGeneratedBatch tok promptLens outIds
+    if args.debugIds then
+      let generatedIds ← generatedIdsFromBatch promptLens outIds
+      printGeneratedIds start generatedIds (singleOnly := prompts.size == 1)
     printDecodedBatch start decoded (singleOnly := prompts.size == 1)
     start := stop
 
@@ -365,7 +424,7 @@ def runMain (argv : List String) : IO UInt32 := do
   IO.println s!"Model directory: {modelDir}"
   IO.println s!"Using device: {deviceToString device}"
 
-  let tok ← tokenizer.qwen3.loadTokenizer modelDir
+  let tok ← tokenizer.qwen35.loadTokenizer modelDir
   let prompts ← loadPrompts args
 
   if useMultimodal then

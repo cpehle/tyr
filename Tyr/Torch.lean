@@ -507,6 +507,7 @@ opaque nll_loss_none {n c : UInt64}
 @[extern "lean_torch_tensor_softmax"] opaque softmax {s : Shape} (t : @& T s) (dim : Int32 := -1) : T s
 -- torch::nn::functional::softmin
 -- torch::nn::functional::softplus
+@[extern "lean_torch_tensor_softplus"] opaque softplus {s : Shape} (t : @& T s) : T s
 -- torch::nn::functional::softshrink
 -- torch::nn::functional::softsign
 -- torch::nn::functional::tanhshrink

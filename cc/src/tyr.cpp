@@ -254,16 +254,18 @@ static std::pair<torch::Tensor, torch::Tensor> qwen35_chunk_gated_delta_rule_imp
   v_beta = v_beta.reshape({batch_size, num_heads, num_chunks, chunk_size, v_head_dim});
   g = g.reshape({batch_size, num_heads, num_chunks, chunk_size});
 
-  auto strict_lower_mask =
-      torch::tril(torch::ones({chunk_size, chunk_size}, torch::TensorOptions().dtype(torch::kFloat32).device(query.device())), -1);
-  auto lower_mask =
-      torch::tril(torch::ones({chunk_size, chunk_size}, torch::TensorOptions().dtype(torch::kFloat32).device(query.device())), 0);
+  auto strict_upper_with_diag =
+      torch::triu(torch::ones({chunk_size, chunk_size}, torch::TensorOptions().dtype(torch::kBool).device(query.device())), 0);
+  auto strict_upper =
+      torch::triu(torch::ones({chunk_size, chunk_size}, torch::TensorOptions().dtype(torch::kBool).device(query.device())), 1);
 
   g = g.cumsum(-1);
-  auto decay_mask = torch::tril((g.unsqueeze(-1) - g.unsqueeze(-2)).exp()) *
-                    strict_lower_mask.view({1, 1, 1, chunk_size, chunk_size});
+  auto decay_mask =
+      torch::tril(g.unsqueeze(-1) - g.unsqueeze(-2)).exp().to(torch::kFloat32);
 
-  auto attn = -torch::matmul(k_beta, key.transpose(-1, -2)) * decay_mask;
+  auto attn =
+      -(torch::matmul(k_beta, key.transpose(-1, -2)) * decay_mask)
+           .masked_fill(strict_upper_with_diag.view({1, 1, 1, chunk_size, chunk_size}), 0.0);
   for (int64_t i = 1; i < chunk_size; ++i) {
     auto row = attn.index({Slice(), Slice(), Slice(), i, Slice(None, i)}).clone();
     auto sub = attn.index({Slice(), Slice(), Slice(), Slice(None, i), Slice(None, i)}).clone();
@@ -289,8 +291,8 @@ static std::pair<torch::Tensor, torch::Tensor> qwen35_chunk_gated_delta_rule_imp
     auto decay_i = decay_mask.index({Slice(), Slice(), i});
 
     auto intra_attn =
-        (torch::matmul(q_i, k_i.transpose(-1, -2)) * decay_i) *
-        lower_mask.view({1, 1, chunk_size, chunk_size});
+        (torch::matmul(q_i, k_i.transpose(-1, -2)) * decay_i)
+            .masked_fill(strict_upper.view({1, 1, chunk_size, chunk_size}), 0.0);
     auto v_prime = torch::matmul(k_cumdecay.index({Slice(), Slice(), i}), last_recurrent_state);
     auto v_new = v_i - v_prime;
     auto attn_inter = torch::matmul(q_i * g_i.exp().unsqueeze(-1), last_recurrent_state);
@@ -718,6 +720,7 @@ UNOP_FUN(tanh)
 UNOP_FUN(exp)
 UNOP_FUN(log)
 UNOP_FUN(log10)
+UNOP_FUN(softplus)
 #undef UNOP_FUN
 
 lean_object* lean_torch_tensor_grad(lean_obj_arg /* s */, lean_obj_arg /* s' */, b_lean_obj_arg output, b_lean_obj_arg input, b_lean_obj_arg grad_output) {

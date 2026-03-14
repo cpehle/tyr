@@ -60,9 +60,6 @@ private def applyFinishedEos {n : UInt64}
   let eos : T #[n] := (full_int #[n] (Int64.ofNat eosToken.toNat)).to tokens.device
   where_ finished eos tokens
 
-private def softplus {s : Shape} (x : T s) : T s :=
-  nn.log (add_scalar (nn.exp x) 1.0)
-
 private def l2NormLast4d {b s h d : UInt64}
     (x : T #[b, s, h, d])
     (eps : Float := 1e-6)
@@ -709,7 +706,7 @@ def forward {batch seq : UInt64}
     nn.expand (reshape m.dt_bias #[1, 1, cfg.linear_num_value_heads]) #[batch, seq, cfg.linear_num_value_heads]
   let aExp : T #[batch, seq, cfg.linear_num_value_heads] :=
     nn.expand (reshape (nn.exp (toFloat' m.a_log)) #[1, 1, cfg.linear_num_value_heads]) #[batch, seq, cfg.linear_num_value_heads]
-  let gPos : T #[batch, seq, cfg.linear_num_value_heads] := softplus (toFloat' (a + dt))
+  let gPos : T #[batch, seq, cfg.linear_num_value_heads] := nn.softplus (toFloat' (a + dt))
   let g : T #[batch, seq, cfg.linear_num_value_heads] := mul_scalar (gPos * aExp) (-1.0)
 
   let rep := Config.linearKVRepeat cfg
