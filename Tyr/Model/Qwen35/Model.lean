@@ -1198,7 +1198,72 @@ private partial def decodeLoopUncached {batch : UInt64}
   else
     decodeLoopUncached cfg m strategy eosTokenIds finished' (remaining - 1) appended
 
-/-- Generic generation entry point (cached decode). -/
+private partial def decodeLoopUncachedEmbeds {batch : UInt64}
+    (cfg : Config)
+    (m : Qwen35ForCausalLM cfg)
+    (strategy : SamplingStrategy)
+    (eosTokenIds : Array UInt64)
+    (finished : T #[batch])
+    (remaining : Nat)
+    {curSeq : UInt64}
+    (curIds : T #[batch, curSeq])
+    (curEmbeds : T #[batch, curSeq, cfg.hidden_size])
+    (onStep : Option (StreamCallback batch))
+    (generatedSoFar : UInt64)
+    : IO (Sigma (fun outSeq => T #[batch, outSeq])) := do
+  if remaining == 0 then
+    return ⟨curSeq, curIds⟩
+  if curSeq == 0 then
+    throw <| IO.userError "generate requires non-empty prompt sequence"
+
+  let logits := m.forwardEmbeds cfg curEmbeds none
+  let lastPos := curSeq - 1
+  let last3 : T #[batch, 1, cfg.vocab_size] :=
+    reshape (data.slice logits 1 lastPos 1) #[batch, 1, cfg.vocab_size]
+  let last2 : T #[batch, cfg.vocab_size] := reshape last3 #[batch, cfg.vocab_size]
+
+  let nextTokRaw ← sampleFromLogits last2 strategy
+  let finished' : T #[batch] :=
+    if eosTokenIds.isEmpty then
+      finished
+    else
+      logicalOr finished (tokenInSet nextTokRaw eosTokenIds)
+  let nextTok : T #[batch] :=
+    if eosTokenIds.isEmpty then
+      nextTokRaw
+    else
+      applyFinishedEos nextTokRaw finished (eosTokenIds.getD 0 0)
+
+  match onStep with
+  | some cb => cb generatedSoFar nextTok
+  | none => pure ()
+
+  let nextCol : T #[batch, 1] := reshape nextTok #[batch, 1]
+  let appendedIds : T #[batch, curSeq + 1] := nn.cat curIds nextCol 1
+
+  let stop :=
+    if eosTokenIds.isEmpty then
+      false
+    else
+      !(any (logical_not finished'))
+  if stop then
+    return ⟨curSeq + 1, appendedIds⟩
+  else
+    let nextEmb : T #[batch, 1, cfg.hidden_size] := m.embedTokens nextCol
+    let appendedEmbeds : T #[batch, curSeq + 1, cfg.hidden_size] := nn.cat curEmbeds nextEmb 1
+    decodeLoopUncachedEmbeds
+      cfg
+      m
+      strategy
+      eosTokenIds
+      finished'
+      (remaining - 1)
+      appendedIds
+      appendedEmbeds
+      onStep
+      (generatedSoFar + 1)
+
+/-- Exact generation entry point using full autoregressive re-forwarding. -/
 private def generateFromEmbedsCore {batch seq : UInt64}
     (cfg : Config)
     (m : Qwen35ForCausalLM cfg)
@@ -1213,26 +1278,20 @@ private def generateFromEmbedsCore {batch seq : UInt64}
     throw <| IO.userError "generate requires non-empty prompt sequence"
   if maxNewTokens == 0 then
     return ⟨seq, inputIds⟩
+  let finished0 : T #[batch] := falseMask (n := batch) inputIds.device
+  decodeLoopUncachedEmbeds
+    cfg
+    m
+    strategy
+    eosTokenIds
+    finished0
+    maxNewTokens.toNat
+    inputIds
+    inputsEmbeds
+    onStep
+    0
 
-  let cacheDevice := inputsEmbeds.device
-  let cacheMaxLen : UInt64 := seq + maxNewTokens
-  let (cosAll, sinAll) := precomputeDecodeRotary (maxLen := cacheMaxLen) cfg cacheDevice
-  let cache0 := m.model.initCache cfg cacheMaxLen cacheDevice
-
-  let tok0 : T #[batch, 1, cfg.hidden_size] := data.slice inputsEmbeds 1 0 1
-  let (_logits0, cache1) ← decodeStepFromEmbedWithCache cfg m cosAll sinAll tok0 0 cache0
-  let cachePrefill ← prefillCachesFromEmbeds cfg m cosAll sinAll inputsEmbeds cache1 1
-  let prefillLogits3 := m.forwardEmbeds cfg inputsEmbeds none
-  let lastPos := seq - 1
-  let lastLogits3 : T #[batch, 1, cfg.vocab_size] :=
-    reshape (data.slice prefillLogits3 1 lastPos 1) #[batch, 1, cfg.vocab_size]
-  let lastLogits : T #[batch, cfg.vocab_size] :=
-    reshape lastLogits3 #[batch, cfg.vocab_size]
-  let finished0 : T #[batch] := falseMask (n := batch) cacheDevice
-
-  decodeLoopCached cfg m cosAll sinAll strategy eosTokenIds finished0 maxNewTokens.toNat cachePrefill lastLogits onStep 0 inputIds
-
-/-- Cached generation from explicit input embeddings.
+/-- Exact generation from explicit input embeddings.
     Useful for multimodal wrappers that inject vision features into token embeddings. -/
 def generateFromEmbeds {batch seq : UInt64}
     (cfg : Config)
@@ -1245,7 +1304,7 @@ def generateFromEmbeds {batch seq : UInt64}
     : IO (Sigma (fun outSeq => T #[batch, outSeq])) :=
   generateFromEmbedsCore cfg m inputIds inputsEmbeds maxNewTokens strategy eosTokenIds none
 
-/-- Cached generation from explicit input embeddings with per-step token callback. -/
+/-- Exact generation from explicit input embeddings with per-step token callback. -/
 def generateFromEmbedsStream {batch seq : UInt64}
     (cfg : Config)
     (m : Qwen35ForCausalLM cfg)
@@ -1258,7 +1317,7 @@ def generateFromEmbedsStream {batch seq : UInt64}
     : IO (Sigma (fun outSeq => T #[batch, outSeq])) :=
   generateFromEmbedsCore cfg m inputIds inputsEmbeds maxNewTokens strategy eosTokenIds (some onStep)
 
-/-- Generic generation entry point (cached decode). -/
+/-- Exact generation entry point for token IDs. -/
 def generate {batch seq : UInt64}
     (cfg : Config)
     (m : Qwen35ForCausalLM cfg)
@@ -1270,7 +1329,7 @@ def generate {batch seq : UInt64}
   let inputsEmbeds := m.embedTokens inputIds
   generateFromEmbedsCore cfg m inputIds inputsEmbeds maxNewTokens strategy eosTokenIds none
 
-/-- Cached generation with per-step token callback (streaming). -/
+/-- Exact generation with per-step token callback (streaming). -/
 def generateStream {batch seq : UInt64}
     (cfg : Config)
     (m : Qwen35ForCausalLM cfg)

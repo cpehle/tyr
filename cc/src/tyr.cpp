@@ -227,6 +227,7 @@ static std::pair<torch::Tensor, torch::Tensor> qwen35_chunk_gated_delta_rule_imp
   const int64_t batch_size = key.size(0);
   const int64_t num_heads = key.size(1);
   const int64_t sequence_length = key.size(2);
+  const int64_t k_head_dim = key.size(3);
   const int64_t v_head_dim = value.size(3);
   const int64_t pad_size = (chunk_size - sequence_length % chunk_size) % chunk_size;
   const int64_t total_sequence_length = sequence_length + pad_size;
@@ -334,7 +335,6 @@ static std::pair<torch::Tensor, torch::Tensor> qwen35_recurrent_gated_delta_rule
   const int64_t batch_size = key.size(0);
   const int64_t num_heads = key.size(1);
   const int64_t sequence_length = key.size(2);
-  const int64_t k_head_dim = key.size(3);
   const int64_t v_head_dim = value.size(3);
 
   const double scale = 1.0 / std::sqrt(static_cast<double>(query.size(-1)));
