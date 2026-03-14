@@ -6,6 +6,7 @@
 -/
 import Tyr.Model.Qwen35
 import Tyr.Model.Qwen35.Media
+import Tyr.TensorStruct
 import Tyr.Tokenizer.Qwen3
 
 open torch
@@ -17,6 +18,7 @@ structure Args where
   source : String := "tiny-random/qwen3.5"
   revision : String := "main"
   cacheDir : String := "~/.cache/huggingface/tyr-models"
+  device : String := "auto"
   prompt : String := "Give a concise definition of a dependent type."
   promptFile : Option String := none
   imagePath : Option String := none
@@ -39,6 +41,7 @@ private def printHelp : IO Unit := do
   IO.println "  --source <path-or-repo>      Local model dir or HF repo id (default: tiny-random/qwen3.5)"
   IO.println "  --revision <rev>             HF revision/branch/tag (default: main)"
   IO.println "  --cache-dir <path>           Local cache for downloaded files"
+  IO.println "  --device <auto|cpu|mps|cuda[:n]>  Execution device (default: auto)"
   IO.println "  --prompt <text>              Prompt text"
   IO.println "  --prompt-file <path>         One prompt per non-empty line"
   IO.println "  --image <path>               Image file for multimodal generation (Apple-only)"
@@ -63,6 +66,8 @@ private partial def parseArgsLoop (xs : List String) (acc : Args) : IO Args := d
       parseArgsLoop rest { acc with revision := v }
   | "--cache-dir" :: v :: rest =>
       parseArgsLoop rest { acc with cacheDir := v }
+  | "--device" :: v :: rest =>
+      parseArgsLoop rest { acc with device := v }
   | "--prompt" :: v :: rest =>
       parseArgsLoop rest { acc with prompt := v }
   | "--prompt-file" :: v :: rest =>
@@ -107,6 +112,37 @@ private def loadPrompts (args : Args) : IO (Array String) := do
     pure prompts
   | none =>
     pure #[args.prompt]
+
+private def deviceToString : Device → String
+  | Device.MPS => "MPS"
+  | Device.CPU => "CPU"
+  | Device.CUDA n => s!"CUDA:{n}"
+
+private def resolveDevice (arg : String) : IO Device := do
+  let requested := arg.trimAscii.toString.toLower
+  match requested with
+  | "auto" => getBestDevice
+  | "cpu" => pure Device.CPU
+  | "mps" =>
+      if ← mps_is_available then pure Device.MPS else pure Device.CPU
+  | "cuda" =>
+      if ← cuda_is_available then pure (Device.CUDA 0) else pure Device.CPU
+  | _ =>
+      if requested.startsWith "cuda:" then
+        match (requested.drop 5).toNat? with
+        | some idx =>
+            if ← cuda_is_available then pure (Device.CUDA idx.toUInt64) else pure Device.CPU
+        | none => pure Device.CPU
+      else
+        pure Device.CPU
+
+private def moveSigmaTensorTo {d : UInt64} (device : Device)
+    (x : Sigma (fun n => T #[n, d])) : Sigma (fun n => T #[n, d]) :=
+  match x with
+  | ⟨n, t⟩ => ⟨n, t.to device⟩
+
+private def moveModelToDevice [TensorStruct α] (device : Device) (x : α) : IO α :=
+  TensorStruct.mapM (fun t => pure (t.to device)) x
 
 private def encodePromptToIds
     (tok : tokenizer.qwen3.QwenTokenizer)
@@ -230,6 +266,7 @@ private def runTextBatches
     (tok : tokenizer.qwen3.QwenTokenizer)
     (cfg : Config)
     (model : Qwen35ForCausalLM cfg)
+    (device : Device)
     (args : Args)
     (prompts : Array String)
     : IO Unit := do
@@ -242,6 +279,7 @@ private def runTextBatches
     let chunk := prompts.extract start stop
     let ⟨_batch, ⟨_seq, (inputIds, promptLens)⟩⟩ ←
       buildBatchInputWithEncoder tok chunk (encodePromptToIds tok)
+    let inputIds := inputIds.to device
 
     let ⟨_outSeq, outIds⟩ ←
       if args.stream then
@@ -265,6 +303,7 @@ private def runMultimodalBatches
     (tok : tokenizer.qwen3.QwenTokenizer)
     (cfg : VLConfig)
     (model : Qwen35ForConditionalGeneration cfg)
+    (device : Device)
     (args : Args)
     (prompts : Array String)
     (imageTokenCount : UInt64)
@@ -282,6 +321,7 @@ private def runMultimodalBatches
     let enc := encodePromptToIdsMultimodal tok cfg imageTokenCount videoTokenCount
     let ⟨_batch, ⟨_seq, (inputIds, promptLens)⟩⟩ ←
       buildBatchInputWithEncoder tok chunk enc
+    let inputIds := inputIds.to device
 
     let ⟨_outSeq, outIds⟩ ←
       if args.stream then
@@ -312,6 +352,7 @@ private def runMultimodalBatches
 
 def runMain (argv : List String) : IO UInt32 := do
   let args ← parseArgs argv
+  let device ← resolveDevice args.device
   let hasMedia := args.imagePath.isSome || args.videoPath.isSome
   let useMultimodal := args.multimodal || hasMedia
   if hasMedia && !args.multimodal then
@@ -322,6 +363,7 @@ def runMain (argv : List String) : IO UInt32 := do
     includeTokenizer := true
   }
   IO.println s!"Model directory: {modelDir}"
+  IO.println s!"Using device: {deviceToString device}"
 
   let tok ← tokenizer.qwen3.loadTokenizer modelDir
   let prompts ← loadPrompts args
@@ -329,22 +371,23 @@ def runMain (argv : List String) : IO UInt32 := do
   if useMultimodal then
     let cfg ← VLConfig.loadFromPretrainedDir modelDir {}
     let isSharded ← hub.detectWeightLayout modelDir
-    let model ←
+    let modelCpu ←
       if isSharded then
         Qwen35ForConditionalGeneration.loadSharded modelDir cfg
       else
         Qwen35ForConditionalGeneration.load s!"{modelDir}/model.safetensors" cfg
+    let model ← moveModelToDevice device modelCpu
     let imagePatches? ←
       match args.imagePath with
       | some p =>
         IO.println s!"Loading image patches from {p}..."
-        pure (some (← media.loadImagePatches cfg p))
+        pure (some (moveSigmaTensorTo device (← media.loadImagePatches cfg p)))
       | none => pure none
     let videoPatches? ←
       match args.videoPath with
       | some p =>
         IO.println s!"Loading video patches from {p} (maxFrames={args.videoMaxFrames}, frameStride={args.videoFrameStride})..."
-        pure (some (← media.loadVideoPatches cfg p args.videoMaxFrames args.videoFrameStride))
+        pure (some (moveSigmaTensorTo device (← media.loadVideoPatches cfg p args.videoMaxFrames args.videoFrameStride)))
       | none => pure none
 
     let imageFeatures? ←
@@ -375,18 +418,19 @@ def runMain (argv : List String) : IO UInt32 := do
       IO.println "Warning: --multimodal enabled but no --image/--video provided; running text-only path."
 
     runMultimodalBatches
-      tok cfg model args prompts
+      tok cfg model device args prompts
       imageTokenCount videoTokenCount
       imageFeatures? videoFeatures?
   else
     let cfg ← Config.loadFromPretrainedDir modelDir Config.qwen35_9B
     let isSharded ← hub.detectWeightLayout modelDir
-    let model ←
+    let modelCpu ←
       if isSharded then
         Qwen35ForCausalLM.loadSharded modelDir cfg
       else
         Qwen35ForCausalLM.load s!"{modelDir}/model.safetensors" cfg
-    runTextBatches tok cfg model args prompts
+    let model ← moveModelToDevice device modelCpu
+    runTextBatches tok cfg model device args prompts
 
   pure 0
 

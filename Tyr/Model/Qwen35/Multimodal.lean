@@ -321,6 +321,7 @@ end Qwen35VisionModel
 structure Qwen35ForConditionalGeneration (cfg : VLConfig) where
   visual : Qwen35VisionModel cfg.vision_config
   language_model : Qwen35ForCausalLM cfg.text_config
+  deriving TensorStruct
 
 namespace Qwen35ForConditionalGeneration
 

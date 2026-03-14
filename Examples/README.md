@@ -132,6 +132,10 @@ lake exe Qwen35RunHF --source Qwen/Qwen3.5-0.8B --prompt "Summarize dependent ty
 # Base checkpoint variant
 lake exe Qwen35RunHF --source Qwen/Qwen3.5-0.8B-Base --prompt "Summarize dependent types."
 
+# Prefer GPU/MPS when available.
+lake exe Qwen35RunHF --source Qwen/Qwen3.5-0.8B \
+  --device mps --prompt "Summarize dependent types."
+
 # Multimodal with Apple system media path (ImageIO/AVFoundation).
 # Passing --image/--video auto-enables multimodal mode.
 lake exe Qwen35RunHF --source Qwen/Qwen3.5-0.8B \
@@ -152,6 +156,7 @@ lake exe Qwen35RunHF --source tiny-random/qwen3.5 --prompt-file prompts.txt \
 ```
 
 Useful flags:
+- `--device <auto|cpu|mps|cuda[:n]>` execution device (default: `auto`; falls back to CPU if unavailable)
 - `--revision <rev>` HF branch/tag/commit (default: `main`)
 - `--cache-dir <path>` override model download cache directory
 - `--prompt-file <path>` one prompt per line (batched decode input)

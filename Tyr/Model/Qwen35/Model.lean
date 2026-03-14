@@ -784,6 +784,7 @@ structure Qwen35Layer (cfg : Config) where
   post_attention_layernorm : Qwen35RMSNorm cfg.hidden_size
   dense_mlp : Option (Qwen35MLP cfg.hidden_size cfg.intermediate_size) := none
   sparse_moe : Option (Qwen35SparseMoeBlock cfg) := none
+  deriving TensorStruct
 
 namespace Qwen35Layer
 
@@ -912,6 +913,7 @@ structure Qwen35Model (cfg : Config) where
   embed_tokens : T #[cfg.vocab_size, cfg.hidden_size]
   layers : Array (Qwen35Layer cfg)
   norm : Qwen35RMSNorm cfg.hidden_size
+  deriving TensorStruct
 
 namespace Qwen35Model
 
@@ -993,6 +995,7 @@ structure Qwen35ForCausalLM (cfg : Config) where
   model : Qwen35Model cfg
   lmHead : T #[cfg.vocab_size, cfg.hidden_size]
   tieWordEmbeddings : Bool := true
+  deriving TensorStruct
 
 namespace Qwen35ForCausalLM
 

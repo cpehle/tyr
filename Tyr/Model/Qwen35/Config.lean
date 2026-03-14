@@ -5,6 +5,7 @@
   Includes dense and MoE variants plus hybrid layer scheduling.
 -/
 import Tyr.Basic
+import Tyr.TensorStruct
 
 namespace torch.qwen35
 
@@ -31,6 +32,12 @@ def toString : LayerType → String
   | .fullAttention => "full_attention"
 
 end LayerType
+
+instance : TensorStruct LayerType where
+  map _ x := x
+  mapM _ x := pure x
+  zipWith _ x _ := x
+  fold _ init _ := init
 
 /-- Qwen3.5 text model configuration.
     Dense checkpoints use `num_experts = 0`.
