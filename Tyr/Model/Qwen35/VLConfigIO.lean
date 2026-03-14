@@ -87,93 +87,10 @@ private def parseVLConfig
   let textCfg :=
     match getObjVal? root "text_config" with
     | some _ =>
-      -- Parse true nested text config using Qwen35 text parser defaults.
-      let defaults := d.text_config
-      let hidden :=
-        match getObjVal? textJson "hidden_size" >>= getNat? with
-        | some n => n.toUInt64
-        | none => defaults.hidden_size
-      let heads :=
-        match getObjVal? textJson "num_attention_heads" >>= getNat? with
-        | some n => n.toUInt64
-        | none => defaults.num_attention_heads
-      let headDimDefault :=
-        if heads == 0 then defaults.head_dim else hidden / heads
-      let ropeTheta :=
-        match getObjVal? textJson "rope_parameters" >>= (fun x => getObjVal? x "rope_theta") >>= getFloat? with
-        | some x => x
-        | none =>
-          match getObjVal? textJson "rope_theta" >>= getFloat? with
-          | some x => x
-          | none => defaults.rope_theta
-      let partialRotary :=
-        match getObjVal? textJson "rope_parameters" >>= (fun x => getObjVal? x "partial_rotary_factor") >>= getFloat? with
-        | some x => x
-        | none =>
-          match getObjVal? textJson "partial_rotary_factor" >>= getFloat? with
-          | some x => x
-          | none => defaults.partial_rotary_factor
-      let layerTypes : Array LayerType :=
-        match getObjVal? textJson "layer_types" with
-        | some (.arr xs) =>
-          let mapped := xs.map (fun x => (getString? x >>= LayerType.ofString?))
-          if mapped.all Option.isSome then
-            mapped.map (fun x => x.getD .linearAttention)
-          else
-            defaults.layer_types
-        | _ => defaults.layer_types
-      {
-        vocab_size := getNatFieldD textJson "vocab_size" defaults.vocab_size
-        hidden_size := hidden
-        intermediate_size := getNatFieldD textJson "intermediate_size" defaults.intermediate_size
-        num_hidden_layers := getNatFieldD textJson "num_hidden_layers" defaults.num_hidden_layers
-        num_attention_heads := heads
-        num_key_value_heads := getNatFieldD textJson "num_key_value_heads" defaults.num_key_value_heads
-        head_dim := getNatFieldD textJson "head_dim" headDimDefault
-        rope_theta := ropeTheta
-        partial_rotary_factor := partialRotary
-        rms_norm_eps := getFloatFieldD textJson "rms_norm_eps" defaults.rms_norm_eps
-        max_position_embeddings := getNatFieldD textJson "max_position_embeddings" defaults.max_position_embeddings
-        attention_bias := getBoolFieldD textJson "attention_bias" defaults.attention_bias
-        attention_dropout := getFloatFieldD textJson "attention_dropout" defaults.attention_dropout
-        hidden_act := getStringFieldD textJson "hidden_act" defaults.hidden_act
-        linear_conv_kernel_dim := getNatFieldD textJson "linear_conv_kernel_dim" defaults.linear_conv_kernel_dim
-        linear_key_head_dim := getNatFieldD textJson "linear_key_head_dim" defaults.linear_key_head_dim
-        linear_value_head_dim := getNatFieldD textJson "linear_value_head_dim" defaults.linear_value_head_dim
-        linear_num_key_heads := getNatFieldD textJson "linear_num_key_heads" defaults.linear_num_key_heads
-        linear_num_value_heads := getNatFieldD textJson "linear_num_value_heads" defaults.linear_num_value_heads
-        layer_types := layerTypes
-        full_attention_interval := getNatFieldD textJson "full_attention_interval" defaults.full_attention_interval
-        moe_intermediate_size := getNatFieldD textJson "moe_intermediate_size" defaults.moe_intermediate_size
-        shared_expert_intermediate_size :=
-          getNatFieldD textJson "shared_expert_intermediate_size" defaults.shared_expert_intermediate_size
-        num_experts_per_tok := getNatFieldD textJson "num_experts_per_tok" defaults.num_experts_per_tok
-        num_experts := getNatFieldD textJson "num_experts" defaults.num_experts
-        use_cache := getBoolFieldD textJson "use_cache" defaults.use_cache
-        tie_word_embeddings :=
-          match getObjVal? root "tie_word_embeddings" >>= getBool? with
-          | some x => x
-          | none => getBoolFieldD textJson "tie_word_embeddings" defaults.tie_word_embeddings
-        pad_token_id :=
-          match getObjVal? textJson "pad_token_id" >>= getNat? with
-          | some x => some x.toUInt64
-          | none => defaults.pad_token_id
-        bos_token_id :=
-          match getObjVal? textJson "bos_token_id" >>= getNat? with
-          | some x => some x.toUInt64
-          | none => defaults.bos_token_id
-        eos_token_id :=
-          match getObjVal? textJson "eos_token_id" >>= getNat? with
-          | some x => some x.toUInt64
-          | none => defaults.eos_token_id
-      }
+      Config.normalize (Config.parseJson textJson d.text_config)
     | none =>
       -- Backward compatible: plain text-only config at root.
-      let cfg := Config.normalize <| {
-        d.text_config with
-        vocab_size := getNatFieldD root "vocab_size" d.text_config.vocab_size
-      }
-      cfg
+      Config.normalize (Config.parseJson root d.text_config)
 
   let visionCfg :=
     match getObjVal? root "vision_config" with

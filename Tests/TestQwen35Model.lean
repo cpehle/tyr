@@ -219,10 +219,14 @@ def testQwen35ConfigLoad : IO Unit := do
     "\"num_hidden_layers\":4,\"num_attention_heads\":6,\"num_key_value_heads\":2," ++
     "\"head_dim\":8,\"linear_num_key_heads\":3,\"linear_num_value_heads\":6," ++
     "\"linear_key_head_dim\":4,\"linear_value_head_dim\":4," ++
+    "\"attn_output_gate\":true,\"mamba_ssm_dtype\":\"float32\"," ++
+    "\"mlp_only_layers\":[1,3]," ++
     "\"moe_intermediate_size\":12,\"shared_expert_intermediate_size\":24," ++
     "\"num_experts\":8,\"num_experts_per_tok\":2," ++
     "\"layer_types\":[\"linear_attention\",\"full_attention\",\"linear_attention\",\"full_attention\"]," ++
-    "\"rope_parameters\":{\"rope_theta\":500000.0,\"partial_rotary_factor\":0.5}}"
+    "\"rope_parameters\":{\"rope_theta\":500000.0,\"partial_rotary_factor\":0.5," ++
+    "\"mrope_interleaved\":true,\"mrope_section\":[2,2,2]}," ++
+    "\"mtp_num_hidden_layers\":1,\"mtp_use_dedicated_embeddings\":false}"
   IO.FS.writeFile path json
 
   let cfg ← Config.loadFromFile path
@@ -231,6 +235,13 @@ def testQwen35ConfigLoad : IO Unit := do
   LeanTest.assertEqual cfg.num_experts 8 "num_experts should load"
   LeanTest.assertEqual cfg.layer_types.size 4 "layer_types should parse"
   LeanTest.assertEqual cfg.rope_theta 500000.0 "rope theta should load from rope_parameters"
+  LeanTest.assertEqual cfg.attn_output_gate true "attention output gate flag should load"
+  LeanTest.assertEqual cfg.mamba_ssm_dtype "float32" "mamba ssm dtype should load"
+  LeanTest.assertEqual cfg.mlp_only_layers #[1, 3] "mlp-only layers should load"
+  LeanTest.assertEqual cfg.mrope_interleaved true "mrope interleaving flag should load"
+  LeanTest.assertEqual cfg.mrope_section #[2, 2, 2] "mrope section should load"
+  LeanTest.assertEqual cfg.mtp_num_hidden_layers 1 "mtp hidden layer count should load"
+  LeanTest.assertEqual cfg.mtp_use_dedicated_embeddings false "mtp embedding flag should load"
 
 @[test]
 def testQwen35ConfigLoadNestedTextConfig : IO Unit := do
@@ -243,8 +254,11 @@ def testQwen35ConfigLoadNestedTextConfig : IO Unit := do
     "\"linear_key_head_dim\":4,\"linear_value_head_dim\":4," ++
     "\"moe_intermediate_size\":16,\"shared_expert_intermediate_size\":32," ++
     "\"num_experts\":16,\"num_experts_per_tok\":4," ++
+    "\"attn_output_gate\":true," ++
     "\"eos_token_id\":151645," ++
-    "\"rope_parameters\":{\"rope_theta\":10000000.0,\"partial_rotary_factor\":0.5}}}"
+    "\"rope_parameters\":{\"rope_theta\":10000000.0,\"partial_rotary_factor\":0.5," ++
+    "\"mrope_interleaved\":true,\"mrope_section\":[11,11,10]}," ++
+    "\"mtp_num_hidden_layers\":1,\"mtp_use_dedicated_embeddings\":false}}"
   IO.FS.writeFile path json
 
   let cfg ← Config.loadFromFile path
@@ -253,3 +267,8 @@ def testQwen35ConfigLoadNestedTextConfig : IO Unit := do
   LeanTest.assertEqual cfg.tie_word_embeddings true "tie_word_embeddings should load from top level"
   LeanTest.assertEqual cfg.num_experts 16 "nested text_config num_experts should load"
   LeanTest.assertEqual cfg.eos_token_id (some 151645) "nested text_config eos token should load"
+  LeanTest.assertEqual cfg.attn_output_gate true "nested text_config attention gate should load"
+  LeanTest.assertEqual cfg.mrope_interleaved true "nested mrope interleaving flag should load"
+  LeanTest.assertEqual cfg.mrope_section #[11, 11, 10] "nested mrope section should load"
+  LeanTest.assertEqual cfg.mtp_num_hidden_layers 1 "nested mtp hidden layer count should load"
+  LeanTest.assertEqual cfg.mtp_use_dedicated_embeddings false "nested mtp embedding flag should load"

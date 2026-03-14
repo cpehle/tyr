@@ -58,6 +58,7 @@ structure Qwen35Config where
 
   attention_bias : Bool := false
   attention_dropout : Float := 0.0
+  attn_output_gate : Bool := true
   hidden_act : String := "silu"
 
   linear_conv_kernel_dim : UInt64 := 4
@@ -65,9 +66,15 @@ structure Qwen35Config where
   linear_value_head_dim : UInt64 := 128
   linear_num_key_heads : UInt64 := 16
   linear_num_value_heads : UInt64 := 32
+  mamba_ssm_dtype : String := "float32"
 
   layer_types : Array LayerType := #[]
   full_attention_interval : UInt64 := 4
+  mlp_only_layers : Array UInt64 := #[]
+  mrope_interleaved : Bool := false
+  mrope_section : Array UInt64 := #[]
+  mtp_num_hidden_layers : UInt64 := 0
+  mtp_use_dedicated_embeddings : Bool := false
 
   moe_intermediate_size : UInt64 := 512
   shared_expert_intermediate_size : UInt64 := 512
@@ -103,14 +110,21 @@ def qwen35_35B_A3B : Qwen35Config := {
   max_position_embeddings := 32768
   attention_bias := false
   attention_dropout := 0.0
+  attn_output_gate := true
   hidden_act := "silu"
   linear_conv_kernel_dim := 4
   linear_key_head_dim := 128
   linear_value_head_dim := 128
   linear_num_key_heads := 16
   linear_num_value_heads := 32
+  mamba_ssm_dtype := "float32"
   layer_types := #[]
   full_attention_interval := 4
+  mlp_only_layers := #[]
+  mrope_interleaved := false
+  mrope_section := #[]
+  mtp_num_hidden_layers := 0
+  mtp_use_dedicated_embeddings := false
   moe_intermediate_size := 512
   shared_expert_intermediate_size := 512
   num_experts_per_tok := 8
@@ -157,14 +171,21 @@ def qwen35_0_8B : Qwen35Config := {
   max_position_embeddings := 262144
   attention_bias := false
   attention_dropout := 0.0
+  attn_output_gate := true
   hidden_act := "silu"
   linear_conv_kernel_dim := 4
   linear_key_head_dim := 128
   linear_value_head_dim := 128
   linear_num_key_heads := 16
   linear_num_value_heads := 16
+  mamba_ssm_dtype := "float32"
   layer_types := defaultLayerTypes 24 4
   full_attention_interval := 4
+  mlp_only_layers := #[]
+  mrope_interleaved := true
+  mrope_section := #[11, 11, 10]
+  mtp_num_hidden_layers := 1
+  mtp_use_dedicated_embeddings := false
   moe_intermediate_size := 512
   shared_expert_intermediate_size := 512
   num_experts_per_tok := 8

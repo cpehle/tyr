@@ -36,6 +36,16 @@ private def getBool? (j : Json) : Option Bool :=
 private def getString? (j : Json) : Option String :=
   fromJson? j
 
+private def getNatArray? (j : Json) : Option (Array UInt64) :=
+  match j with
+  | .arr xs =>
+    let mapped := xs.map (fun x => (getNat? x).map (·.toUInt64))
+    if mapped.all Option.isSome then
+      some <| mapped.map (fun x => x.getD 0)
+    else
+      none
+  | _ => none
+
 private def getFloat? (j : Json) : Option Float :=
   match (fromJson? (α := Float) j) with
   | some x => some x
@@ -77,7 +87,7 @@ private def parseLayerTypes (j : Json) (key : String) : Option (Array LayerType)
 private def nestedFloatField? (j : Json) (objKey fieldKey : String) : Option Float :=
   getObjVal? j objKey >>= fun nested => getObjVal? nested fieldKey >>= getFloat?
 
-private def parseConfig (j : Json) (d : Config := Config.qwen35_9B) : Config :=
+def Config.parseJson (j : Json) (d : Config := Config.qwen35_9B) : Config :=
   let textCfg := match getObjVal? j "text_config" with | some t => t | none => j
 
   let hidden := getNatFieldD textCfg "hidden_size" d.hidden_size
@@ -104,6 +114,24 @@ private def parseConfig (j : Json) (d : Config := Config.qwen35_9B) : Config :=
     | some x => x
     | none => getBoolFieldD textCfg "tie_word_embeddings" d.tie_word_embeddings
 
+  let mropeInterleaved :=
+    match getObjVal? textCfg "rope_parameters" >>= (fun nested => getObjVal? nested "mrope_interleaved") >>= getBool? with
+    | some x => x
+    | none => getBoolFieldD textCfg "mrope_interleaved" d.mrope_interleaved
+
+  let mropeSection :=
+    match getObjVal? textCfg "rope_parameters" >>= (fun nested => getObjVal? nested "mrope_section") >>= getNatArray? with
+    | some xs => xs
+    | none =>
+      match getObjVal? textCfg "mrope_section" >>= getNatArray? with
+      | some xs => xs
+      | none => d.mrope_section
+
+  let mlpOnlyLayers :=
+    match getObjVal? textCfg "mlp_only_layers" >>= getNatArray? with
+    | some xs => xs
+    | none => d.mlp_only_layers
+
   {
     vocab_size := getNatFieldD textCfg "vocab_size" d.vocab_size
     hidden_size := hidden
@@ -120,6 +148,7 @@ private def parseConfig (j : Json) (d : Config := Config.qwen35_9B) : Config :=
 
     attention_bias := getBoolFieldD textCfg "attention_bias" d.attention_bias
     attention_dropout := getFloatFieldD textCfg "attention_dropout" d.attention_dropout
+    attn_output_gate := getBoolFieldD textCfg "attn_output_gate" d.attn_output_gate
     hidden_act := getStringFieldD textCfg "hidden_act" d.hidden_act
 
     linear_conv_kernel_dim := getNatFieldD textCfg "linear_conv_kernel_dim" d.linear_conv_kernel_dim
@@ -127,9 +156,16 @@ private def parseConfig (j : Json) (d : Config := Config.qwen35_9B) : Config :=
     linear_value_head_dim := getNatFieldD textCfg "linear_value_head_dim" d.linear_value_head_dim
     linear_num_key_heads := getNatFieldD textCfg "linear_num_key_heads" d.linear_num_key_heads
     linear_num_value_heads := getNatFieldD textCfg "linear_num_value_heads" d.linear_num_value_heads
+    mamba_ssm_dtype := getStringFieldD textCfg "mamba_ssm_dtype" d.mamba_ssm_dtype
 
     layer_types := layerTypes
     full_attention_interval := getNatFieldD textCfg "full_attention_interval" d.full_attention_interval
+    mlp_only_layers := mlpOnlyLayers
+    mrope_interleaved := mropeInterleaved
+    mrope_section := mropeSection
+    mtp_num_hidden_layers := getNatFieldD textCfg "mtp_num_hidden_layers" d.mtp_num_hidden_layers
+    mtp_use_dedicated_embeddings :=
+      getBoolFieldD textCfg "mtp_use_dedicated_embeddings" d.mtp_use_dedicated_embeddings
 
     moe_intermediate_size := getNatFieldD textCfg "moe_intermediate_size" d.moe_intermediate_size
     shared_expert_intermediate_size :=
@@ -159,7 +195,7 @@ namespace Config
 /-- Load Qwen3.5 config from a HuggingFace-style `config.json` file. -/
 def loadFromFile (path : String) (defaults : Config := Config.qwen35_9B) : IO Config := do
   let root ← parseJsonFile path
-  pure (Config.normalize (parseConfig root defaults))
+  pure (Config.normalize (Config.parseJson root defaults))
 
 /-- Load Qwen3.5 config from a model directory containing `config.json`. -/
 def loadFromPretrainedDir (modelDir : String) (defaults : Config := Config.qwen35_9B) : IO Config :=
