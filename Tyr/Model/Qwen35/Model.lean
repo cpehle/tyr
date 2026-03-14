@@ -77,12 +77,36 @@ private def applyMaskToPaddingStates {batch seq hidden : UInt64}
     (x : T #[batch, seq, hidden])
     (attentionMask : Option (T #[batch, seq]))
     : T #[batch, seq, hidden] :=
-  match attentionMask with
-  | none => x
-  | some m =>
-    let mf : T #[batch, seq] := toFloat' m
-    let me : T #[batch, seq, hidden] := nn.expand (reshape mf #[batch, seq, 1]) #[batch, seq, hidden]
-    x * me
+  if batch <= 1 || seq <= 1 then
+    x
+  else
+    match attentionMask with
+    | none => x
+    | some m =>
+      let mf : T #[batch, seq] := toFloat' m
+      let me : T #[batch, seq, hidden] := nn.expand (reshape mf #[batch, seq, 1]) #[batch, seq, hidden]
+      x * me
+
+@[extern "lean_torch_qwen35_chunk_gated_delta_rule"]
+private opaque chunkGatedDeltaRule
+    {batch seq n_head kdim vdim : UInt64}
+    (query : @& T #[batch, seq, n_head, kdim])
+    (key : @& T #[batch, seq, n_head, kdim])
+    (value : @& T #[batch, seq, n_head, vdim])
+    (g : @& T #[batch, seq, n_head])
+    (beta : @& T #[batch, seq, n_head])
+    : T #[batch, seq, n_head, vdim] × T #[batch, n_head, kdim, vdim]
+
+@[extern "lean_torch_qwen35_recurrent_gated_delta_rule"]
+private opaque recurrentGatedDeltaRule
+    {batch seq n_head kdim vdim : UInt64}
+    (query : @& T #[batch, seq, n_head, kdim])
+    (key : @& T #[batch, seq, n_head, kdim])
+    (value : @& T #[batch, seq, n_head, vdim])
+    (g : @& T #[batch, seq, n_head])
+    (beta : @& T #[batch, seq, n_head])
+    (initialState : @& T #[batch, n_head, kdim, vdim])
+    : T #[batch, seq, n_head, vdim] × T #[batch, n_head, kdim, vdim]
 
 /-- Qwen3.5 RMSNorm with `(1 + weight)` scaling. -/
 structure Qwen35RMSNorm (dim : UInt64) where
@@ -97,6 +121,15 @@ def initZeroCentered (dim : UInt64) (eps : Float := 1e-6) : Qwen35RMSNorm dim :=
 
 def initOneCentered (dim : UInt64) (eps : Float := 1e-6) : Qwen35RMSNorm dim :=
   { weight := autograd.set_requires_grad (torch.ones #[dim]) true, eps }
+
+/-- HuggingFace Qwen3.5 checkpoints already store the zero-centered RMSNorm
+    parameter used by the `(1 + weight)` formulation, so the raw tensor should
+    be preserved as-is. -/
+def fromCheckpointWeight {dim : UInt64}
+    (weight : T #[dim])
+    (eps : Float := 1e-6)
+    : Qwen35RMSNorm dim :=
+  { weight := weight, eps }
 
 def forward2d {n dim : UInt64}
     (m : Qwen35RMSNorm dim)
@@ -359,6 +392,21 @@ private def applyRotaryPartial {batch seq n_head head_dim rotary_dim : UInt64}
   let xPass : T #[batch, seq, n_head, xPassLen] := data.slice x 3 rotary_dim xPassLen
   nn.cat xRot xPass 3
 
+private def splitQProjAndGate {batch seq : UInt64}
+    (cfg : Config)
+    (qgFlat : T #[batch, seq, cfg.num_attention_heads * cfg.head_dim * 2])
+    : T #[batch, seq, cfg.num_attention_heads, cfg.head_dim]
+      × T #[batch, seq, cfg.num_attention_heads * cfg.head_dim] :=
+  let qg : T #[batch, seq, cfg.num_attention_heads, cfg.head_dim * 2] :=
+    reshape qgFlat #[batch, seq, cfg.num_attention_heads, cfg.head_dim * 2]
+  let q : T #[batch, seq, cfg.num_attention_heads, cfg.head_dim] :=
+    data.slice qg 3 0 cfg.head_dim
+  let gate : T #[batch, seq, cfg.num_attention_heads, cfg.head_dim] :=
+    data.slice qg 3 cfg.head_dim cfg.head_dim
+  let gateFlat : T #[batch, seq, cfg.num_attention_heads * cfg.head_dim] :=
+    reshape gate #[batch, seq, cfg.num_attention_heads * cfg.head_dim]
+  (q, gateFlat)
+
 def forward {batch seq : UInt64}
     (cfg : Config)
     (m : Qwen35Attention cfg)
@@ -369,14 +417,11 @@ def forward {batch seq : UInt64}
     : T #[batch, seq, cfg.hidden_size] :=
   let qg : T #[batch, seq, cfg.num_attention_heads * cfg.head_dim * 2] := linear3d x m.q_proj
   let qLen : UInt64 := cfg.num_attention_heads * cfg.head_dim
-  let qFlat : T #[batch, seq, qLen] := data.slice qg 2 0 qLen
-  let gateFlat : T #[batch, seq, qLen] := data.slice qg 2 qLen qLen
+  let (q, gateFlat) := splitQProjAndGate cfg qg
 
   let kFlat : T #[batch, seq, cfg.num_key_value_heads * cfg.head_dim] := linear3d x m.k_proj
   let vFlat : T #[batch, seq, cfg.num_key_value_heads * cfg.head_dim] := linear3d x m.v_proj
 
-  let q : T #[batch, seq, cfg.num_attention_heads, cfg.head_dim] :=
-    reshape qFlat #[batch, seq, cfg.num_attention_heads, cfg.head_dim]
   let k : T #[batch, seq, cfg.num_key_value_heads, cfg.head_dim] :=
     reshape kFlat #[batch, seq, cfg.num_key_value_heads, cfg.head_dim]
   let v : T #[batch, seq, cfg.num_key_value_heads, cfg.head_dim] :=
@@ -411,14 +456,11 @@ def forwardMasked {batch seq : UInt64}
     : T #[batch, seq, cfg.hidden_size] :=
   let qg : T #[batch, seq, cfg.num_attention_heads * cfg.head_dim * 2] := linear3d x m.q_proj
   let qLen : UInt64 := cfg.num_attention_heads * cfg.head_dim
-  let qFlat : T #[batch, seq, qLen] := data.slice qg 2 0 qLen
-  let gateFlat : T #[batch, seq, qLen] := data.slice qg 2 qLen qLen
+  let (q, gateFlat) := splitQProjAndGate cfg qg
 
   let kFlat : T #[batch, seq, cfg.num_key_value_heads * cfg.head_dim] := linear3d x m.k_proj
   let vFlat : T #[batch, seq, cfg.num_key_value_heads * cfg.head_dim] := linear3d x m.v_proj
 
-  let q : T #[batch, seq, cfg.num_attention_heads, cfg.head_dim] :=
-    reshape qFlat #[batch, seq, cfg.num_attention_heads, cfg.head_dim]
   let k : T #[batch, seq, cfg.num_key_value_heads, cfg.head_dim] :=
     reshape kFlat #[batch, seq, cfg.num_key_value_heads, cfg.head_dim]
   let v : T #[batch, seq, cfg.num_key_value_heads, cfg.head_dim] :=
@@ -452,14 +494,11 @@ def forwardStep {batch : UInt64}
     : T #[batch, 1, cfg.hidden_size] × KVCache cfg batch :=
   let qg : T #[batch, 1, cfg.num_attention_heads * cfg.head_dim * 2] := linear3d x m.q_proj
   let qLen : UInt64 := cfg.num_attention_heads * cfg.head_dim
-  let qFlat : T #[batch, 1, qLen] := data.slice qg 2 0 qLen
-  let gateFlat : T #[batch, 1, qLen] := data.slice qg 2 qLen qLen
+  let (q, gateFlat) := splitQProjAndGate cfg qg
 
   let kFlat : T #[batch, 1, cfg.num_key_value_heads * cfg.head_dim] := linear3d x m.k_proj
   let vFlat : T #[batch, 1, cfg.num_key_value_heads * cfg.head_dim] := linear3d x m.v_proj
 
-  let q : T #[batch, 1, cfg.num_attention_heads, cfg.head_dim] :=
-    reshape qFlat #[batch, 1, cfg.num_attention_heads, cfg.head_dim]
   let k : T #[batch, 1, cfg.num_key_value_heads, cfg.head_dim] :=
     reshape kFlat #[batch, 1, cfg.num_key_value_heads, cfg.head_dim]
   let v : T #[batch, 1, cfg.num_key_value_heads, cfg.head_dim] :=
@@ -584,71 +623,6 @@ private def repeatHeads {batch seq n_head head_dim rep : UInt64}
     let x5 : T #[batch, seq, n_head, rep, head_dim] := nn.expand x5 #[batch, seq, n_head, rep, head_dim]
     reshape x5 #[batch, seq, n_head * rep, head_dim]
 
-private def recurrentGatedDelta {batch seq n_head kdim vdim : UInt64}
-    (query : T #[batch, seq, n_head, kdim])
-    (key : T #[batch, seq, n_head, kdim])
-    (value : T #[batch, seq, n_head, vdim])
-    (g : T #[batch, seq, n_head])
-    (beta : T #[batch, seq, n_head])
-    (initialState : Option (T #[batch, n_head, kdim, vdim]) := none)
-    : T #[batch, seq, n_head, vdim] × T #[batch, n_head, kdim, vdim] :=
-  Id.run do
-    let device := query.device
-    let q : T #[batch, seq, n_head, kdim] := l2NormLast4d query
-    let k : T #[batch, seq, n_head, kdim] := l2NormLast4d key
-
-    let scale := 1.0 / Float.sqrt kdim.toFloat
-    let q : T #[batch, seq, n_head, kdim] := q * scale
-
-    let qh : T #[batch, n_head, seq, kdim] := nn.transpose_for_attention q
-    let kh : T #[batch, n_head, seq, kdim] := nn.transpose_for_attention k
-    let vh : T #[batch, n_head, seq, vdim] := nn.transpose_for_attention value
-    let gh : T #[batch, n_head, seq] := nn.transpose3d_12 g
-    let bh : T #[batch, n_head, seq] := nn.transpose3d_12 beta
-
-    let mut state : T #[batch, n_head, kdim, vdim] :=
-      match initialState with
-      | some s => s
-      | none => zerosOn device
-
-    let mut out : T #[batch, n_head, seq, vdim] := zerosOn device
-
-    for t in [:seq.toNat] do
-      let q_t4 : T #[batch, n_head, 1, kdim] := data.slice qh 2 t.toUInt64 1
-      let k_t4 : T #[batch, n_head, 1, kdim] := data.slice kh 2 t.toUInt64 1
-      let v_t4 : T #[batch, n_head, 1, vdim] := data.slice vh 2 t.toUInt64 1
-      let g_t3 : T #[batch, n_head, 1] := data.slice gh 2 t.toUInt64 1
-      let b_t3 : T #[batch, n_head, 1] := data.slice bh 2 t.toUInt64 1
-
-      let q_t : T #[batch, n_head, kdim] := reshape q_t4 #[batch, n_head, kdim]
-      let k_t : T #[batch, n_head, kdim] := reshape k_t4 #[batch, n_head, kdim]
-      let v_t : T #[batch, n_head, vdim] := reshape v_t4 #[batch, n_head, vdim]
-      let g_t : T #[batch, n_head] := reshape g_t3 #[batch, n_head]
-      let b_t : T #[batch, n_head] := reshape b_t3 #[batch, n_head]
-
-      let gExp : T #[batch, n_head, kdim, vdim] :=
-        nn.expand (reshape (nn.exp g_t) #[batch, n_head, 1, 1]) #[batch, n_head, kdim, vdim]
-      state := state * gExp
-
-      let kExp : T #[batch, n_head, kdim, vdim] :=
-        nn.expand (reshape k_t #[batch, n_head, kdim, 1]) #[batch, n_head, kdim, vdim]
-      let kvMem : T #[batch, n_head, vdim] := nn.sumDim (state * kExp) 2 false
-
-      let bExp : T #[batch, n_head, vdim] :=
-        nn.expand (reshape b_t #[batch, n_head, 1]) #[batch, n_head, vdim]
-      let delta : T #[batch, n_head, vdim] := (v_t - kvMem) * bExp
-      let deltaExp : T #[batch, n_head, kdim, vdim] :=
-        nn.expand (reshape delta #[batch, n_head, 1, vdim]) #[batch, n_head, kdim, vdim]
-      state := state + (kExp * deltaExp)
-
-      let qExp : T #[batch, n_head, kdim, vdim] :=
-        nn.expand (reshape q_t #[batch, n_head, kdim, 1]) #[batch, n_head, kdim, vdim]
-      let out_t : T #[batch, n_head, vdim] := nn.sumDim (state * qExp) 2 false
-      let out_t4 : T #[batch, n_head, 1, vdim] := reshape out_t #[batch, n_head, 1, vdim]
-      out := data.sliceScatter out 2 t.toUInt64 out_t4
-
-    (nn.transpose_from_attention out, state)
-
 /-- Run linear token mixer. If `cacheConv`/`cacheRec` are provided and
     `usePrecomputedState=true`, performs incremental one-step update. -/
 def forward {batch seq : UInt64}
@@ -745,13 +719,14 @@ def forward {batch seq : UInt64}
     repeatHeads (rep := rep) k0
 
   let (core, finalState) :=
-    recurrentGatedDelta
-      q
-      k
-      v
-      g
-      beta
-      (if usePrecomputedState then cacheRec else none)
+    if usePrecomputedState then
+      match cacheRec with
+      | some rec =>
+        recurrentGatedDeltaRule q k v g beta rec
+      | none =>
+        chunkGatedDeltaRule q k v g beta
+    else
+      chunkGatedDeltaRule q k v g beta
 
   let core2d : T #[batch * seq * cfg.linear_num_value_heads, cfg.linear_value_head_dim] :=
     reshape core #[batch * seq * cfg.linear_num_value_heads, cfg.linear_value_head_dim]
@@ -1090,14 +1065,13 @@ private partial def prefillCachesFromEmbeds {batch seq maxLen : UInt64}
     (inputsEmbeds : T #[batch, seq, cfg.hidden_size])
     (cache : HybridCache cfg batch)
     (position : Nat)
-    (lastLogits : T #[batch, cfg.vocab_size])
-    : IO (T #[batch, cfg.vocab_size] × HybridCache cfg batch) := do
+    : IO (HybridCache cfg batch) := do
   if position >= seq.toNat then
-    pure (lastLogits, cache)
+    pure cache
   else
     let tok : T #[batch, 1, cfg.hidden_size] := data.slice inputsEmbeds 1 position.toUInt64 1
-    let (logits, cache') ← decodeStepFromEmbedWithCache cfg m cosAll sinAll tok position.toUInt64 cache
-    prefillCachesFromEmbeds cfg m cosAll sinAll inputsEmbeds cache' (position + 1) logits
+    let (_logits, cache') ← decodeStepFromEmbedWithCache cfg m cosAll sinAll tok position.toUInt64 cache
+    prefillCachesFromEmbeds cfg m cosAll sinAll inputsEmbeds cache' (position + 1)
 
 inductive SamplingStrategy where
   | greedy
@@ -1246,8 +1220,14 @@ private def generateFromEmbedsCore {batch seq : UInt64}
   let cache0 := m.model.initCache cfg cacheMaxLen cacheDevice
 
   let tok0 : T #[batch, 1, cfg.hidden_size] := data.slice inputsEmbeds 1 0 1
-  let (logits0, cache1) ← decodeStepFromEmbedWithCache cfg m cosAll sinAll tok0 0 cache0
-  let (lastLogits, cachePrefill) ← prefillCachesFromEmbeds cfg m cosAll sinAll inputsEmbeds cache1 1 logits0
+  let (_logits0, cache1) ← decodeStepFromEmbedWithCache cfg m cosAll sinAll tok0 0 cache0
+  let cachePrefill ← prefillCachesFromEmbeds cfg m cosAll sinAll inputsEmbeds cache1 1
+  let prefillLogits3 := m.forwardEmbeds cfg inputsEmbeds none
+  let lastPos := seq - 1
+  let lastLogits3 : T #[batch, 1, cfg.vocab_size] :=
+    reshape (data.slice prefillLogits3 1 lastPos 1) #[batch, 1, cfg.vocab_size]
+  let lastLogits : T #[batch, cfg.vocab_size] :=
+    reshape lastLogits3 #[batch, cfg.vocab_size]
   let finished0 : T #[batch] := falseMask (n := batch) cacheDevice
 
   decodeLoopCached cfg m cosAll sinAll strategy eosTokenIds finished0 maxNewTokens.toNat cachePrefill lastLogits onStep 0 inputIds

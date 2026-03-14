@@ -80,6 +80,42 @@ private def tinyBatchedEosCfg : Config := {
   eos_token_id := some 2
 }
 
+private def tinyAttentionCfg : Config := {
+  vocab_size := 8
+  hidden_size := 4
+  intermediate_size := 8
+  num_hidden_layers := 1
+  num_attention_heads := 2
+  num_key_value_heads := 2
+  head_dim := 2
+  rope_theta := 10000.0
+  partial_rotary_factor := 1.0
+  rms_norm_eps := 1e-6
+  max_position_embeddings := 16
+  attention_bias := false
+  attention_dropout := 0.0
+  hidden_act := "silu"
+  linear_conv_kernel_dim := 1
+  linear_key_head_dim := 1
+  linear_value_head_dim := 1
+  linear_num_key_heads := 1
+  linear_num_value_heads := 1
+  layer_types := #[.fullAttention]
+  full_attention_interval := 1
+  moe_intermediate_size := 4
+  shared_expert_intermediate_size := 4
+  num_experts_per_tok := 1
+  num_experts := 0
+  use_cache := true
+  tie_word_embeddings := false
+  pad_token_id := some 0
+  bos_token_id := some 1
+  eos_token_id := some 2
+}
+
+private def approxEq (a b : Float) (tol : Float := 1e-4) : Bool :=
+  Float.abs (a - b) <= tol
+
 private def batchedEosDeterministicModel : IO (Qwen35ForCausalLM tinyBatchedEosCfg) := do
   let base ← Qwen35ForCausalLM.init tinyBatchedEosCfg false
   let embedVals : Array Int64 := #[
@@ -139,6 +175,68 @@ def testQwen35DenseGreedyCachedUncachedParity : IO Unit := do
 
   LeanTest.assertEqual cachedIds uncachedIds
     "cached and uncached greedy should produce the same tokens"
+
+@[test]
+def testQwen35AttentionUsesPerHeadQGateLayout : IO Unit := do
+  let cfg := tinyAttentionCfg
+  let qProj : T #[cfg.num_attention_heads * cfg.head_dim * 2, cfg.hidden_size] :=
+    reshape (data.fromFloatArray #[
+      1.0, 0.0, 0.0, 0.0,
+      0.0, 1.0, 0.0, 0.0,
+      10.0, 0.0, 0.0, 0.0,
+      0.0, 10.0, 0.0, 0.0,
+      0.0, 0.0, 1.0, 0.0,
+      0.0, 0.0, 0.0, 1.0,
+      0.0, 0.0, -10.0, 0.0,
+      0.0, 0.0, 0.0, -10.0
+    ]) #[cfg.num_attention_heads * cfg.head_dim * 2, cfg.hidden_size]
+  let ident : T #[cfg.num_attention_heads * cfg.head_dim, cfg.hidden_size] :=
+    reshape (data.fromFloatArray #[
+      1.0, 0.0, 0.0, 0.0,
+      0.0, 1.0, 0.0, 0.0,
+      0.0, 0.0, 1.0, 0.0,
+      0.0, 0.0, 0.0, 1.0
+    ]) #[cfg.num_attention_heads * cfg.head_dim, cfg.hidden_size]
+  let oProj : T #[cfg.hidden_size, cfg.num_attention_heads * cfg.head_dim] :=
+    reshape (data.fromFloatArray #[
+      1.0, 0.0, 0.0, 0.0,
+      0.0, 1.0, 0.0, 0.0,
+      0.0, 0.0, 1.0, 0.0,
+      0.0, 0.0, 0.0, 1.0
+    ]) #[cfg.hidden_size, cfg.num_attention_heads * cfg.head_dim]
+  let attn : Qwen35Attention cfg := {
+    q_proj := qProj
+    k_proj := ident
+    v_proj := ident
+    o_proj := oProj
+    q_norm := Qwen35RMSNorm.initZeroCentered cfg.head_dim cfg.rms_norm_eps
+    k_norm := Qwen35RMSNorm.initZeroCentered cfg.head_dim cfg.rms_norm_eps
+  }
+  let x : T #[1, 1, cfg.hidden_size] :=
+    reshape (data.fromFloatArray #[1.0, 2.0, 3.0, 4.0]) #[1, 1, cfg.hidden_size]
+  let (cos, sin) := rotary.computeFreqsOnDevicePure 1 (Config.rotaryDim cfg) cfg.rope_theta x.device
+  let out : T #[1, 1, cfg.hidden_size] := attn.forward cfg x cos sin true
+  let vals ← data.tensorToFloatArray' (nn.eraseShape out)
+  LeanTest.assertTrue (approxEq vals[0]! (1.0 / (1.0 + Float.exp (-10.0))) 1e-4)
+    "head 0 dim 0 should use the head-local gate rows"
+  LeanTest.assertTrue (approxEq vals[1]! (2.0 / (1.0 + Float.exp (-20.0))) 1e-4)
+    "head 0 dim 1 should use the head-local gate rows"
+  LeanTest.assertTrue (Float.abs vals[2]! < 1e-4)
+    "head 1 dim 0 should be suppressed by its negative gate rows"
+  LeanTest.assertTrue (Float.abs vals[3]! < 1e-4)
+    "head 1 dim 1 should be suppressed by its negative gate rows"
+
+@[test]
+def testQwen35RMSNormCheckpointWeightIsZeroCentered : IO Unit := do
+  let raw : T #[2] := data.fromFloatArray #[0.25, -0.5]
+  let norm := Qwen35RMSNorm.fromCheckpointWeight raw
+  let x : T #[1, 2] := data.fromFloatArray #[1.0, 1.0]
+  let out := norm.forward2d x
+  let vals ← data.tensorToFloatArray' (nn.eraseShape out)
+  LeanTest.assertTrue (approxEq vals[0]! 1.25 1e-5)
+    "checkpoint RMSNorm weight should be preserved directly"
+  LeanTest.assertTrue (approxEq vals[1]! 0.5 1e-5)
+    "Qwen3.5 RMSNorm checkpoint weights are already zero-centered"
 
 @[test]
 def testQwen35DenseGreedyStreamParity : IO Unit := do

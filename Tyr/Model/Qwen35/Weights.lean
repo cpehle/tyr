@@ -16,9 +16,6 @@ open torch.Log
 private def reqGradFalse {s : Shape} (t : T s) : T s :=
   autograd.set_requires_grad (toFloat' t) false
 
-private def centeredScale {dim : UInt64} (w : T #[dim]) : T #[dim] :=
-  sub_scalar (toFloat' w) 1.0
-
 private def pushUnique (xs : Array String) (x : String) : Array String :=
   if xs.contains x then xs else xs.push x
 
@@ -186,12 +183,12 @@ private def loadMoeExpertWeight
 private def loadRMSNormSharded (modelDir : String) (baseName : String) (dim : UInt64)
     : IO (Qwen35RMSNorm dim) := do
   let w ← loadTensorShardedCandidates modelDir (nameCandidates s!"{baseName}.weight") #[dim]
-  pure { weight := reqGradFalse (centeredScale w), eps := 1e-6 }
+  pure (Qwen35RMSNorm.fromCheckpointWeight (reqGradFalse w) 1e-6)
 
 private def loadRMSNorm (path : String) (baseName : String) (dim : UInt64)
     : IO (Qwen35RMSNorm dim) := do
   let w ← loadTensorCandidates path (nameCandidates s!"{baseName}.weight") #[dim]
-  pure { weight := reqGradFalse (centeredScale w), eps := 1e-6 }
+  pure (Qwen35RMSNorm.fromCheckpointWeight (reqGradFalse w) 1e-6)
 
 private def loadRMSNormGatedSharded (modelDir : String) (baseName : String) (dim : UInt64)
     : IO (Qwen35RMSNormGated dim) := do
