@@ -1,6 +1,7 @@
 import Tyr.Model.Qwen35
 import LeanTest
 
+open torch
 open torch.qwen35
 
 private def ensureDir (path : String) : IO Unit :=
@@ -61,3 +62,16 @@ def testQwen35CollectionListCoverage : IO Unit := do
     "collection list should include 35B base variant"
   LeanTest.assertTrue (hub.isQwen35CollectionRepoId "Qwen/Qwen3.5-27B-FP8")
     "collection list should include 27B FP8 variant"
+
+@[test]
+def testSafeTensorsLoadShardedHfSingleShardPattern : IO Unit := do
+  let dir := "/tmp/qwen35_hf_single_shard_pattern"
+  ensureDir dir
+  let shardPath := s!"{dir}/model.safetensors-00001-of-00001.safetensors"
+  let input : T #[2, 2] := reshape (data.fromInt64Array #[1, 2, 3, 4]) #[2, 2]
+  safetensors.saveTensor shardPath "model.language_model.embed_tokens.weight" input
+  let loaded : T #[2, 2] ←
+    safetensors.loadTensorSharded dir "model.language_model.embed_tokens.weight" #[2, 2]
+  let vals ← data.tensorToUInt64Array (reshape (data.toLong loaded) #[4])
+  LeanTest.assertEqual vals #[1, 2, 3, 4]
+    "sharded loader should discover HuggingFace-style single-shard filenames"

@@ -55,6 +55,7 @@
 
 #include <iostream>
 #include <fstream>
+#include <filesystem>
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -3275,15 +3276,40 @@ lean_object* lean_torch_safetensors_load_sharded(
   const char* dir = lean_string_cstr(dir_obj);
   const char* tensor_name = lean_string_cstr(name_obj);
 
-  // Try common shard patterns
-  std::vector<std::string> patterns = {
-    std::string(dir) + "/model.safetensors",
-    std::string(dir) + "/model-00001-of-00002.safetensors",
-    std::string(dir) + "/model-00002-of-00002.safetensors",
-    std::string(dir) + "/model-00001-of-00003.safetensors",
-    std::string(dir) + "/model-00002-of-00003.safetensors",
-    std::string(dir) + "/model-00003-of-00003.safetensors",
+  std::vector<std::string> patterns;
+  std::unordered_set<std::string> seen;
+  auto pushUniquePath = [&](const std::string& path) {
+    if (seen.insert(path).second) {
+      patterns.push_back(path);
+    }
   };
+
+  const std::string model_path = std::string(dir) + "/model.safetensors";
+  pushUniquePath(model_path);
+
+  try {
+    std::vector<std::string> discovered;
+    for (const auto& entry : std::filesystem::directory_iterator(dir)) {
+      if (!entry.is_regular_file()) {
+        continue;
+      }
+      const auto path = entry.path();
+      if (path.extension() != ".safetensors") {
+        continue;
+      }
+      const auto filename = path.filename().string();
+      if (filename == "model.safetensors") {
+        continue;
+      }
+      discovered.push_back(path.string());
+    }
+    std::sort(discovered.begin(), discovered.end());
+    for (const auto& path : discovered) {
+      pushUniquePath(path);
+    }
+  } catch (const std::exception&) {
+    // Fall back to the explicit single-file path above.
+  }
 
   for (const auto& path : patterns) {
     std::ifstream test(path);
