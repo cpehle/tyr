@@ -25,6 +25,10 @@ private def initWeight (shape : Shape) (fanIn : UInt64) : IO (T shape) := do
 private def initBias (shape : Shape) : T shape :=
   autograd.set_requires_grad (torch.zeros shape) true
 
+private def arangeOn (start stop : UInt64) (step : UInt64 := 1) (device : Device) :
+    T #[(stop - start) / step] :=
+  (torch.arange start stop step).to device
+
 private def addBias2d {n d : UInt64}
     (x : T #[n, d])
     (b : T #[d])
@@ -171,7 +175,7 @@ def forward {tokens : UInt64}
     reshape v #[1, tokens, cfg.num_heads, VisionConfig.headDim cfg]
 
   -- Qwen3.5-VL uses 2D rotary; this keeps a deterministic 1D rotary signal for now.
-  let (cos, sin) := rotary.computeFreqsPure tokens (VisionConfig.headDim cfg) 10000.0
+  let (cos, sin) := rotary.computeFreqsOnDevicePure tokens (VisionConfig.headDim cfg) 10000.0 x.device
   let q : T #[1, tokens, cfg.num_heads, VisionConfig.headDim cfg] := rotary.applyRotaryEmb q cos sin
   let k : T #[1, tokens, cfg.num_heads, VisionConfig.headDim cfg] := rotary.applyRotaryEmb k cos sin
 
@@ -302,7 +306,7 @@ def forward {nPatches : UInt64}
       s!"vision patch count ({nPatches}) exceeds num_position_embeddings ({cfg.num_position_embeddings})"
 
   let x0 : T #[nPatches, cfg.hidden_size] := m.patch_embed.forward cfg patchifiedPixels
-  let posIds : T #[nPatches] := torch.arange 0 nPatches 1
+  let posIds : T #[nPatches] := arangeOn 0 nPatches 1 patchifiedPixels.device
   let pos : T #[nPatches, cfg.hidden_size] := nn.embedding1d posIds m.pos_embed
   let mut x : T #[nPatches, cfg.hidden_size] := x0 + pos
 

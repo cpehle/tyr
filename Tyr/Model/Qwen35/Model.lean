@@ -35,6 +35,12 @@ private def falseMask {n : UInt64} (device : Device) : T #[n] :=
   let zeros : T #[n] := (full_int #[n] 0).to device
   eq_scalar zeros 1
 
+private def zerosOn {s : Shape} (device : Device) : T s :=
+  torch.zeros s false device
+
+private def onesOn {s : Shape} (device : Device) : T s :=
+  torch.ones s false device
+
 private def tokenInSet {n : UInt64}
     (tokens : T #[n])
     (values : Array UInt64)
@@ -224,12 +230,13 @@ def forward2d {tokens : UInt64}
     (topIdx : T #[tokens, cfg.num_experts_per_tok])
     : T #[tokens, cfg.hidden_size] :=
   Id.run do
-    let mut acc : T #[tokens, cfg.hidden_size] := torch.zeros #[tokens, cfg.hidden_size]
+    let device := hidden.device
+    let mut acc : T #[tokens, cfg.hidden_size] := zerosOn device
 
     for slot in [:cfg.num_experts_per_tok.toNat] do
       let idx2d : T #[tokens, 1] := data.slice topIdx 1 slot.toUInt64 1
-      let srcOnes : T #[tokens, 1] := torch.ones #[tokens, 1]
-      let base : T #[tokens, cfg.num_experts] := torch.zeros #[tokens, cfg.num_experts]
+      let srcOnes : T #[tokens, 1] := onesOn device
+      let base : T #[tokens, cfg.num_experts] := zerosOn device
       let oneHot : T #[tokens, cfg.num_experts] := torch.scatter_2d base 1 idx2d srcOnes
 
       let tokGateUpDyn : T #[] := torch.einsum2 "te,eih->tih" oneHot m.gate_up_proj
@@ -586,6 +593,7 @@ private def recurrentGatedDelta {batch seq n_head kdim vdim : UInt64}
     (initialState : Option (T #[batch, n_head, kdim, vdim]) := none)
     : T #[batch, seq, n_head, vdim] × T #[batch, n_head, kdim, vdim] :=
   Id.run do
+    let device := query.device
     let q : T #[batch, seq, n_head, kdim] := l2NormLast4d query
     let k : T #[batch, seq, n_head, kdim] := l2NormLast4d key
 
@@ -601,9 +609,9 @@ private def recurrentGatedDelta {batch seq n_head kdim vdim : UInt64}
     let mut state : T #[batch, n_head, kdim, vdim] :=
       match initialState with
       | some s => s
-      | none => torch.zeros #[batch, n_head, kdim, vdim]
+      | none => zerosOn device
 
-    let mut out : T #[batch, n_head, seq, vdim] := torch.zeros #[batch, n_head, seq, vdim]
+    let mut out : T #[batch, n_head, seq, vdim] := zerosOn device
 
     for t in [:seq.toNat] do
       let q_t4 : T #[batch, n_head, 1, kdim] := data.slice qh 2 t.toUInt64 1
@@ -655,6 +663,7 @@ def forward {batch seq : UInt64}
       × Option (T #[batch, Config.linearConvDim cfg, cfg.linear_conv_kernel_dim])
       × Option (T #[batch, cfg.linear_num_value_heads, cfg.linear_key_head_dim, cfg.linear_value_head_dim]) :=
   let hidden := applyMaskToPaddingStates hidden attentionMask
+  let device := hidden.device
 
   let mixedQKV : T #[batch, seq, Config.linearConvDim cfg] := linear3d hidden m.in_proj_qkv
   let mixedQKVc : T #[batch, Config.linearConvDim cfg, seq] := nn.transpose3d_12 mixedQKV
@@ -688,7 +697,7 @@ def forward {batch seq : UInt64}
             some (data.slice mixedQKVc 2 (seq - cfg.linear_conv_kernel_dim) cfg.linear_conv_kernel_dim)
           else
             let padLen : UInt64 := cfg.linear_conv_kernel_dim - seq
-            let z0 : T #[batch, Config.linearConvDim cfg, padLen] := torch.zeros #[batch, Config.linearConvDim cfg, padLen]
+            let z0 : T #[batch, Config.linearConvDim cfg, padLen] := zerosOn device
             some (nn.cat z0 mixedQKVc 2)
         (nn.silu y, nextState)
     else
@@ -700,7 +709,7 @@ def forward {batch seq : UInt64}
           some (data.slice mixedQKVc 2 (seq - cfg.linear_conv_kernel_dim) cfg.linear_conv_kernel_dim)
         else
           let padLen : UInt64 := cfg.linear_conv_kernel_dim - seq
-          let z0 : T #[batch, Config.linearConvDim cfg, padLen] := torch.zeros #[batch, Config.linearConvDim cfg, padLen]
+          let z0 : T #[batch, Config.linearConvDim cfg, padLen] := zerosOn device
           some (nn.cat z0 mixedQKVc 2)
       (nn.silu y, nextState)
 
@@ -977,7 +986,7 @@ def forward {batch seq : UInt64}
     (attnMask : Option (T #[batch, seq]) := none)
     : T #[batch, seq, cfg.hidden_size] :=
   let x0 : T #[batch, seq, cfg.hidden_size] := nn.embedding inputIds m.embed_tokens
-  let (cos, sin) := rotary.computeFreqsPure seq (Config.rotaryDim cfg) cfg.rope_theta
+  let (cos, sin) := rotary.computeFreqsOnDevicePure seq (Config.rotaryDim cfg) cfg.rope_theta x0.device
   let h :=
     m.layers.foldl
       (fun h layer => layer.forward cfg h cos sin attnMask)
@@ -1020,7 +1029,7 @@ def forwardEmbeds {batch seq : UInt64}
     (inputsEmbeds : T #[batch, seq, cfg.hidden_size])
     (attnMask : Option (T #[batch, seq]) := none)
     : T #[batch, seq, cfg.vocab_size] :=
-  let (cos, sin) := rotary.computeFreqsPure seq (Config.rotaryDim cfg) cfg.rope_theta
+  let (cos, sin) := rotary.computeFreqsOnDevicePure seq (Config.rotaryDim cfg) cfg.rope_theta inputsEmbeds.device
   let hidden := m.model.layers.foldl (fun h layer => layer.forward cfg h cos sin attnMask) inputsEmbeds
   let hidden := m.model.norm.forward3d hidden
   linear3d hidden m.lmHead
