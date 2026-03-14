@@ -98,6 +98,10 @@ endif
 SRC_DIR := src
 HDR_DIR := include
 OUT_DIR := build
+TOOLS_DIR := tools
+GPU_STUB_SRC := $(SRC_DIR)/generated/tyr_gpu_kernel_stubs.cpp
+GPU_STUB_SCRIPT := $(TOOLS_DIR)/generate_gpu_kernel_stubs.py
+GPU_STUB_IR_ROOT := ../.lake/build/ir/Tyr/GPU
 
 HDRS :=
 
@@ -131,7 +135,7 @@ ifneq ($(strip $(CU_SRCS)),)
 $(warning NVCC not found; disabling CUDA kernel compilation and using CPU stubs)
 endif
 CU_SRCS :=
-SRCS += tyr_gpu_kernel_stubs.cpp
+SRCS += generated/tyr_gpu_kernel_stubs.cpp
 endif
 
 LIB_NAME := TyrC
@@ -220,14 +224,20 @@ $(OUT_DIR)/$(DYLIB) : $(OBJ_FILES) | $(OUT_DIR)
 	$(CXX) $(SHARED_FLAG) -o $@ $^ $(DYLIB_LINK_FLAGS)
 
 $(OUT_DIR)/%.o : $(SRC_DIR)/%.cpp $(HDR_FILES) | $(OUT_DIR)
+	@mkdir -p $(dir $@)
 	$(CXX) $(CXX_STD_FLAG) -o $@ -c $< -I$(HDR_DIR) -I$(LEAN_INCLUDE) $(TORCH_INC_FLAGS) $(XLA_INC_FLAGS) $(ARROW_INC_FLAGS) $(SOXR_INC_FLAGS) $(EXTRA_CXX_FLAGS) -fPIC
 
 $(OUT_DIR)/%.o : $(SRC_DIR)/%.mm $(HDR_FILES) | $(OUT_DIR)
+	@mkdir -p $(dir $@)
 	$(CXX) -x objective-c++ $(CXX_STD_FLAG) -o $@ -c $< -I$(HDR_DIR) -I$(LEAN_INCLUDE) $(TORCH_INC_FLAGS) $(XLA_INC_FLAGS) $(ARROW_INC_FLAGS) $(SOXR_INC_FLAGS) $(EXTRA_CXX_FLAGS) -fPIC -fobjc-arc
 
 $(OUT_DIR)/%.o : $(SRC_DIR)/%.cu $(HDR_FILES) | $(OUT_DIR)
 	@mkdir -p $(dir $@)
 	$(NVCC) -o $@ -c $< -I$(HDR_DIR) -I$(LEAN_INCLUDE) $(TORCH_INC_FLAGS) $(TK_INC_FLAGS) $(NVCCFLAGS)
+
+$(GPU_STUB_SRC): $(GPU_STUB_SCRIPT)
+	$(MKPATH) $(dir $@)
+	python3 $(GPU_STUB_SCRIPT) --ir-root $(GPU_STUB_IR_ROOT) --output $@
 
 clean:
 	$(RMPATH) $(OUT_DIR)

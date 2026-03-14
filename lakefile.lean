@@ -218,7 +218,11 @@ extern_lib libtyr pkg := do
   let srcJob ← inputDir (pkg.dir / "cc" / "src") (text := true) fun p =>
     p.toString.endsWith ".cpp" || p.toString.endsWith ".mm" ||
       p.toString.endsWith ".cu" || p.toString.endsWith ".h"
-  let depJob := makefileJob.mix srcJob
+  let toolJob ← inputDir (pkg.dir / "cc" / "tools") (text := true) fun p =>
+    p.toString.endsWith ".py"
+  let gpuIrJob ← inputDir (pkg.buildDir / "ir" / "Tyr" / "GPU") (text := false) fun p =>
+    p.toString.endsWith ".c.o.export"
+  let depJob := makefileJob.mix srcJob |>.mix toolJob |>.mix gpuIrJob
 
   buildFileAfterDep tyrCLib depJob fun _ => do
     let sysroot ← getLeanSysroot
