@@ -117,8 +117,8 @@ Bridge scripts are launched with `uv run python` by default (`--python uv`).
 
 Run Qwen3.5 text generation from either a local model directory or a Hugging Face repo ID. If you pass a repo ID, Tyr resolves a local HF snapshot if present, otherwise downloads `config.json` and model safetensors to cache.
 
-Supported collection coverage:
-- The loader path is wired for all models in `https://huggingface.co/collections/Qwen/qwen35` (dense/MoE, base, FP8 variants) via the same `Qwen35` config+weight resolution path.
+Supported repo coverage:
+- The loader path is wired for the public Qwen3.5 repo ids Tyr tracks explicitly, including the 0.8B instruct/base checkpoints and the larger dense/MoE/FP8 variants, via the same `Qwen35` config+weight resolution path.
 
 ```bash
 lake build Qwen35RunHF
@@ -126,21 +126,24 @@ lake build Qwen35RunHF
 # Small smoke-test model
 lake exe Qwen35RunHF --source tiny-random/qwen3.5 --prompt "Hello from Lean."
 
-# Official Qwen repo (large; requires enough VRAM/RAM)
-lake exe Qwen35RunHF --source Qwen/Qwen3.5-4B --prompt "Summarize dependent types."
+# Official Qwen repo
+lake exe Qwen35RunHF --source Qwen/Qwen3.5-0.8B --prompt "Summarize dependent types."
+
+# Base checkpoint variant
+lake exe Qwen35RunHF --source Qwen/Qwen3.5-0.8B-Base --prompt "Summarize dependent types."
 
 # Multimodal with Apple system media path (ImageIO/AVFoundation).
 # Passing --image/--video auto-enables multimodal mode.
-lake exe Qwen35RunHF --source Qwen/Qwen3.5-4B \
+lake exe Qwen35RunHF --source Qwen/Qwen3.5-0.8B \
   --image input.jpg --prompt "Describe this image."
 
 # Multimodal video with temporal downsampling
-lake exe Qwen35RunHF --source Qwen/Qwen3.5-4B \
+lake exe Qwen35RunHF --source Qwen/Qwen3.5-0.8B \
   --video clip.mp4 --video-max-frames 64 --video-frame-stride 4 \
   --prompt "Summarize this clip."
 
 # Multimodal streaming decode
-lake exe Qwen35RunHF --source Qwen/Qwen3.5-4B \
+lake exe Qwen35RunHF --source Qwen/Qwen3.5-0.8B \
   --image input.jpg --prompt "Describe this image." --stream
 
 # Batched prompts + streaming

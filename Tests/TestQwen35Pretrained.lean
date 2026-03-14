@@ -51,6 +51,10 @@ def testQwen35HubResolveLocalPretrainedDir : IO Unit := do
 
 @[test]
 def testQwen35CollectionListCoverage : IO Unit := do
+  LeanTest.assertTrue (hub.isQwen35CollectionRepoId "Qwen/Qwen3.5-0.8B")
+    "collection list should include 0.8B instruct variant"
+  LeanTest.assertTrue (hub.isQwen35CollectionRepoId "Qwen/Qwen3.5-0.8B-Base")
+    "collection list should include 0.8B base variant"
   LeanTest.assertTrue (hub.isQwen35CollectionRepoId "Qwen/Qwen3.5-397B-A17B")
     "collection list should include 397B"
   LeanTest.assertTrue (hub.isQwen35CollectionRepoId "Qwen/Qwen3.5-35B-A3B-Base")

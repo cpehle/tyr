@@ -33,3 +33,4 @@ MODULE.bazel.lock
 logs/
 data/
 cc/src/generated/
+.model-cache/

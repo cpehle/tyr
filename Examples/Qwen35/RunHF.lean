@@ -51,7 +51,7 @@ private def printHelp : IO Unit := do
   IO.println "  --multimodal                 Force multimodal model load (auto-enabled by --image/--video)"
   IO.println "Examples:"
   IO.println "  lake exe Qwen35RunHF --source tiny-random/qwen3.5 --stream"
-  IO.println "  lake exe Qwen35RunHF --source Qwen/Qwen3.5-4B --prompt \"Write one sentence about Lean.\""
+  IO.println "  lake exe Qwen35RunHF --source Qwen/Qwen3.5-0.8B --prompt \"Write one sentence about Lean.\""
   IO.println "  lake exe Qwen35RunHF --source tiny-random/qwen3.5 --prompt-file prompts.txt --batch-size 4"
 
 private partial def parseArgsLoop (xs : List String) (acc : Args) : IO Args := do
@@ -100,7 +100,7 @@ private def loadPrompts (args : Args) : IO (Array String) := do
     let prompts := lines.foldl
       (init := #[])
       (fun acc line =>
-        let s := line.trim
+        let s := line.trimAscii.toString
         if s.isEmpty then acc else acc.push s)
     if prompts.isEmpty then
       throw <| IO.userError s!"No prompts found in {path}"

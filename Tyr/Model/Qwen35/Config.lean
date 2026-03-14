@@ -135,6 +135,40 @@ def normalizedLayerTypes (cfg : Qwen35Config) : Array LayerType :=
   else
     defaultLayerTypes cfg.num_hidden_layers cfg.full_attention_interval
 
+/-- Default dense Qwen3.5-0.8B style config. -/
+def qwen35_0_8B : Qwen35Config := {
+  vocab_size := 248320
+  hidden_size := 1024
+  intermediate_size := 3584
+  num_hidden_layers := 24
+  num_attention_heads := 8
+  num_key_value_heads := 2
+  head_dim := 256
+  rope_theta := 10000000.0
+  partial_rotary_factor := 0.25
+  rms_norm_eps := 1e-6
+  max_position_embeddings := 262144
+  attention_bias := false
+  attention_dropout := 0.0
+  hidden_act := "silu"
+  linear_conv_kernel_dim := 4
+  linear_key_head_dim := 128
+  linear_value_head_dim := 128
+  linear_num_key_heads := 16
+  linear_num_value_heads := 16
+  layer_types := defaultLayerTypes 24 4
+  full_attention_interval := 4
+  moe_intermediate_size := 512
+  shared_expert_intermediate_size := 512
+  num_experts_per_tok := 8
+  num_experts := 0
+  use_cache := true
+  tie_word_embeddings := true
+  pad_token_id := none
+  bos_token_id := none
+  eos_token_id := some 248044
+}
+
 /-- Config with `layer_types` normalized for runtime use. -/
 def normalize (cfg : Qwen35Config) : Qwen35Config :=
   { cfg with layer_types := normalizedLayerTypes cfg }
@@ -186,6 +220,8 @@ end Qwen35Config
 abbrev Config := Qwen35Config
 
 namespace Config
+
+def qwen35_0_8B : Config := Qwen35Config.qwen35_0_8B
 
 def qwen35_9B : Config := Qwen35Config.qwen35_9B
 

@@ -21,8 +21,10 @@ structure DownloadOptions where
   includeTokenizer : Bool := true
   deriving Repr, Inhabited
 
-/-- Qwen3.5 model ids in HF collection `Qwen/qwen35` as of 2026-02-28. -/
+/-- Public Qwen3.5 repo ids explicitly covered by Tyr as of 2026-03-14. -/
 def qwen35CollectionRepoIds : Array String := #[
+  "Qwen/Qwen3.5-0.8B",
+  "Qwen/Qwen3.5-0.8B-Base",
   "Qwen/Qwen3.5-397B-A17B",
   "Qwen/Qwen3.5-397B-A17B-FP8",
   "Qwen/Qwen3.5-122B-A14B",

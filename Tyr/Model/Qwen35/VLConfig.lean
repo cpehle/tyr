@@ -25,6 +25,21 @@ structure Qwen35VisionConfig where
 
 namespace Qwen35VisionConfig
 
+def qwen35_0_8B : Qwen35VisionConfig := {
+  depth := 12
+  hidden_size := 768
+  hidden_act := "gelu_pytorch_tanh"
+  intermediate_size := 3072
+  num_heads := 12
+  in_channels := 3
+  patch_size := 16
+  spatial_merge_size := 2
+  temporal_patch_size := 2
+  out_hidden_size := 1024
+  num_position_embeddings := 2304
+  initializer_range := 0.02
+}
+
 def patchDim (cfg : Qwen35VisionConfig) : UInt64 :=
   cfg.in_channels * cfg.temporal_patch_size * cfg.patch_size * cfg.patch_size
 
@@ -53,6 +68,16 @@ structure Qwen35VLConfig where
 
 namespace Qwen35VLConfig
 
+def qwen35_0_8B : Qwen35VLConfig := {
+  text_config := Config.qwen35_0_8B
+  vision_config := Qwen35VisionConfig.qwen35_0_8B
+  image_token_id := 248056
+  video_token_id := 248057
+  vision_start_token_id := 248053
+  vision_end_token_id := 248054
+  tie_word_embeddings := true
+}
+
 def normalize (cfg : Qwen35VLConfig) : Qwen35VLConfig :=
   { cfg with text_config := Config.normalize cfg.text_config }
 
@@ -63,6 +88,8 @@ abbrev VLConfig := Qwen35VLConfig
 
 namespace VisionConfig
 
+def qwen35_0_8B : VisionConfig := Qwen35VisionConfig.qwen35_0_8B
+
 def patchDim (cfg : VisionConfig) : UInt64 := Qwen35VisionConfig.patchDim cfg
 def mergeUnit (cfg : VisionConfig) : UInt64 := Qwen35VisionConfig.mergeUnit cfg
 def headDim (cfg : VisionConfig) : UInt64 := Qwen35VisionConfig.headDim cfg
@@ -72,6 +99,8 @@ def mergedTokenCount (cfg : VisionConfig) (nPatches : UInt64) : UInt64 :=
 end VisionConfig
 
 namespace VLConfig
+
+def qwen35_0_8B : VLConfig := Qwen35VLConfig.qwen35_0_8B
 
 def normalize (cfg : VLConfig) : VLConfig := Qwen35VLConfig.normalize cfg
 
