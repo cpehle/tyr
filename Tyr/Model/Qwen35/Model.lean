@@ -1062,12 +1062,12 @@ private partial def prefillCachesFromEmbeds {batch seq maxLen : UInt64}
     (inputsEmbeds : T #[batch, seq, cfg.hidden_size])
     (cache : HybridCache cfg batch)
     (position : Nat)
-    : IO (HybridCache cfg batch) := do
-  if position >= seq.toNat then
-    pure cache
+    : IO (T #[batch, cfg.vocab_size] × HybridCache cfg batch) := do
+  let tok : T #[batch, 1, cfg.hidden_size] := data.slice inputsEmbeds 1 position.toUInt64 1
+  let (logits, cache') ← decodeStepFromEmbedWithCache cfg m cosAll sinAll tok position.toUInt64 cache
+  if position + 1 >= seq.toNat then
+    pure (logits, cache')
   else
-    let tok : T #[batch, 1, cfg.hidden_size] := data.slice inputsEmbeds 1 position.toUInt64 1
-    let (_logits, cache') ← decodeStepFromEmbedWithCache cfg m cosAll sinAll tok position.toUInt64 cache
     prefillCachesFromEmbeds cfg m cosAll sinAll inputsEmbeds cache' (position + 1)
 
 inductive SamplingStrategy where
@@ -1260,7 +1260,7 @@ private partial def decodeLoopUncachedEmbeds {batch : UInt64}
       onStep
       (generatedSoFar + 1)
 
-/-- Exact generation entry point using full autoregressive re-forwarding. -/
+/-- Exact generation entry point using KV-caching. -/
 private def generateFromEmbedsCore {batch seq : UInt64}
     (cfg : Config)
     (m : Qwen35ForCausalLM cfg)
@@ -1275,18 +1275,27 @@ private def generateFromEmbedsCore {batch seq : UInt64}
     throw <| IO.userError "generate requires non-empty prompt sequence"
   if maxNewTokens == 0 then
     return ⟨seq, inputIds⟩
+
+  let maxLen := seq + maxNewTokens
+  let (cosAll, sinAll) := rotary.computeFreqsOnDevicePure maxLen (Config.rotaryDim cfg) cfg.rope_theta inputsEmbeds.device
+  let cache := Qwen35Model.initCache cfg m.model maxLen inputsEmbeds.device
+
+  -- 1) Prefill caches and get last prompt logits
+  let (logits, caches) ← prefillCachesFromEmbeds cfg m cosAll sinAll inputsEmbeds cache 0
+
+  -- 2) Sample first new token
+  let nextTok ← sampleFromLogits logits strategy
+
+  -- 3) Call streaming callback for the first generated token if present
+  if let some cb := onStep then
+    cb 0 nextTok
+
+  -- 4) Start incremental decode loop
   let finished0 : T #[batch] := falseMask (n := batch) inputIds.device
-  decodeLoopUncachedEmbeds
-    cfg
-    m
-    strategy
-    eosTokenIds
-    finished0
-    maxNewTokens.toNat
-    inputIds
-    inputsEmbeds
-    onStep
-    0
+  decodeLoopCached
+    (maxLen := maxLen)
+    cfg m cosAll sinAll strategy eosTokenIds finished0 (maxNewTokens.toNat - 1)
+    caches logits onStep 1 (nn.cat inputIds (reshape nextTok #[batch, 1]) 1)
 
 /-- Exact generation from explicit input embeddings.
     Useful for multimodal wrappers that inject vision features into token embeddings. -/
