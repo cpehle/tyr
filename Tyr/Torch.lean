@@ -94,6 +94,25 @@ def uniform (s : Shape) (min : Float := 0.0) (max : Float := 1.0) : IO (T s) := 
 @[extern "lean_torch_get"] opaque T.getOp {s : Shape} (self : @& T s) (idx : Int) : T (s[1:].toArray)
 @[extern "lean_torch_to"] opaque T.to {s : Shape} (self : @& T s) (device : Device) : T s
 
+@[extern "lean_torch_tensor_relu"] opaque relu {s : Shape} (t : @& T s) : T s
+@[extern "lean_torch_tensor_relu6"] opaque relu6 {s : Shape} (t : @& T s) : T s
+@[extern "lean_torch_rsqrt"] opaque rsqrt {s : Shape} (input : @& T s) : T s
+@[extern "lean_torch_to_float"] opaque toFloat' {s : Shape} (input : @& T s) : T s
+
+/-- Broadcasting tensor-tensor multiplication -/
+@[extern "lean_torch_tensor_mul_diff"] opaque mul' {s1 s2 : Shape} (t1 : @& T s1) (t2 : @& T s2) : T s2
+
+instance {s1 s2 : Shape} : HMul (T s1) (T s2) (T s2) where
+  hMul := mul'
+
+/-- Stack an array of 1D tensors into a 2D tensor -/
+@[extern "lean_torch_stack_1d"]
+opaque stack1d {n k : UInt64} (tensors : Array (T #[n])) (dim : Int64 := 0) : T #[k, n]
+
+/-- Unbind a tensor along a dimension into an array of tensors -/
+@[extern "lean_torch_unbind"]
+opaque unbind {s : Shape} (t : @& T s) (dim : Nat := 0) : Array (T (unbindShape s dim))
+
 /-- Check if CUDA is available -/
 @[extern "lean_torch_cuda_is_available"]
 opaque cuda_is_available : IO Bool
@@ -488,15 +507,12 @@ opaque nll_loss_none {n c : UInt64}
 -- torch::nn::functional::pixel_unshuffle
 -- torch::nn::functional::poisson_nll_loss
 -- torch::nn::functional::prelu
--- torch::nn::functional::relu
-@[extern "lean_torch_tensor_relu"] opaque relu {s : Shape} (t : @& T s) : T s
-@[extern "lean_torch_tensor_relu6"] opaque relu6 {s : Shape} (t : @& T s) : T s
 -- torch::nn::functional::rrelu
-@[extern "lean_torch_tensor_selu"] opaque selu {s : Shape} (t : @& T s) : T s
-@[extern "lean_torch_tensor_silu"] opaque silu {s : Shape} (t : @& T s) : T s
 @[extern "lean_torch_tensor_sigmoid"] opaque sigmoid {s : Shape} (t : @& T s) : T s
-@[extern "lean_torch_tensor_sin"] opaque sin {s : Shape} (t : @& T s) : T s
+@[extern "lean_torch_tensor_silu"] opaque silu {s : Shape} (t : @& T s) : T s
+
 @[extern "lean_torch_tensor_cos"] opaque cos {s : Shape} (t : @& T s) : T s
+@[extern "lean_torch_tensor_sin"] opaque sin {s : Shape} (t : @& T s) : T s
 @[extern "lean_torch_tensor_atan"] opaque atan {s : Shape} (t : @& T s) : T s
 @[extern "lean_torch_tensor_exp"] opaque exp {s : Shape} (t : @& T s) : T s
 @[extern "lean_torch_tensor_log"] opaque log {s : Shape} (t : @& T s) : T s
@@ -582,7 +598,6 @@ opaque transpose_from_attention {batch n_head seq head_dim : UInt64}
 
 @[extern "lean_torch_softmax_dim"] opaque softmax_dim {s : Shape} (input : @& T s) (dim : Int64) : T s
 @[extern "lean_torch_sqrt"] opaque sqrt {s : Shape} (input : @& T s) : T s
-@[extern "lean_torch_rsqrt"] opaque rsqrt {s : Shape} (input : @& T s) : T s
 @[extern "lean_torch_div"] opaque div {s : Shape} (input : @& T s) (other : @& T s) : T s
 @[extern "lean_torch_pow"] opaque pow {s : Shape} (input : @& T s) (exponent : Float) : T s
 @[extern "lean_torch_unsqueeze"] opaque unsqueeze {s : Shape} (input : @& T s) (dim : Nat) : T (unsqueezeShape s dim)
@@ -813,10 +828,6 @@ opaque sliceScatter {s src : Shape}
 @[extern "lean_torch_slice_2d"]
 opaque slice2d {n d : UInt64} (data : @& T #[n, d]) (start len : UInt64) : T #[len, d]
 
-/-- Stack an array of 1D tensors into a 2D tensor -/
-@[extern "lean_torch_stack_1d"]
-opaque stack1d (tensors : Array (T #[n])) (dim : Int64 := 0) : T #[k, n]
-
 /-- Convert tensor to Long (int64) dtype -/
 @[extern "lean_torch_to_long"]
 opaque toLong {s : Shape} (t : @& T s) : T s
@@ -910,6 +921,22 @@ end signal
 -- SafeTensors loading utilities (alias for data.loadTensor with name-based loading)
 namespace safetensors
 
+/-- Opaque handle to a parsed SafeTensors file with open file handle. -/
+opaque SafeTensorsHandle : Type
+
+/-- Open a SafeTensors file, parsing its header once. -/
+@[extern "lean_torch_safetensors_open"]
+opaque openHandle (path : @& String) : IO SafeTensorsHandle
+
+/-- Load a tensor from an open SafeTensors handle by name and shape. -/
+@[extern "lean_torch_safetensors_load_from_handle"]
+opaque loadFromHandle (handle : @& SafeTensorsHandle) (name : @& String) (shape : Shape) : IO (T shape)
+
+/-- Load a tensor from SafeTensors handle and move it to `device`. -/
+def loadFromHandleOnDevice (handle : @& SafeTensorsHandle) (name : String) (s : Shape) (device : Device := Device.CPU) : IO (T s) := do
+  let t ← loadFromHandle handle name s
+  pure (t.to device)
+
 /-- Load a tensor from a SafeTensors file by name.
     path: path to the .safetensors file
     name: tensor name in the file
@@ -980,36 +1007,6 @@ opaque get_live_tensors : IO UInt64
 /-- Set global RNG seed for deterministic runs (CPU + CUDA generators). -/
 @[extern "lean_torch_manual_seed"]
 opaque manualSeed (seed : UInt64) : IO Unit
-
--- ============================================================================
--- NanoProof operations
--- ============================================================================
-
-namespace nanoproof
-
-/-- RMSNorm without learnable parameters: x / sqrt(mean(x^2) + eps)
-    Normalizes over the last dimension. -/
-@[extern "lean_torch_rms_norm"]
-opaque rmsNorm {s : Shape} (input : @& T s) (eps : Float := 1e-6) : T s
-
-/-- RMSNorm with learnable weight: (x / sqrt(mean(x^2) + eps)) * weight
-    Normalizes over the last dimension, then scales by weight.
-    Weight broadcasts over the last dimension. -/
-@[extern "lean_torch_rms_norm_weighted"]
-opaque rmsNormWeighted {s : Shape} {w : Shape}
-    (input : @& T s) (weight : @& T w) (eps : Float := 1e-6) : T s
-
-/-- ReLU squared activation: relu(x)^2
-    Used in nanoproof MLP instead of GELU. -/
-@[extern "lean_torch_relu_squared"]
-opaque reluSquared {s : Shape} (input : @& T s) : T s
-
-/-- Logit softcap: cap * tanh(x / cap)
-    Prevents logits from growing too large. -/
-@[extern "lean_torch_softcap"]
-opaque softcap {s : Shape} (input : @& T s) (cap : Float := 15.0) : T s
-
-end nanoproof
 
 namespace rotary
 
@@ -1120,6 +1117,37 @@ opaque scaledDotProductAttentionGQAMask
     (enable_gqa : Bool := false)
     : T #[batch, n_head, seq, head_dim]
 
+/-- RMSNorm without learnable parameters: x / sqrt(mean(x^2) + eps)
+    Normalizes over the last dimension. -/
+def rmsNorm {s : Shape} (x : T s) (eps : Float := 1e-6) : T s :=
+  let xf := toFloat' x
+  let var := meanDim (xf * xf) (s.size - 1) true
+  let inv := rsqrt (var + eps)
+  xf * inv
+
+/-- RMSNorm with learnable weight: (x / sqrt(mean(x^2) + eps)) * weight
+    Normalizes over the last dimension, then scales by weight.
+    Weight broadcasts over the last dimension. -/
+def rmsNormWeighted {s : Shape} {w : Shape}
+    (x : T s) (weight : T w) (eps : Float := 1e-6) : T s :=
+  let normed := rmsNorm x eps
+  normed * weight
+
+/-- ReLU squared activation: relu(x)^2 -/
+def reluSquared {s : Shape} (x : T s) : T s :=
+  let r := relu x
+  r * r
+
+/-- Logit softcap: cap * tanh(x / cap)
+    Prevents logits from growing too large. -/
+@[extern "lean_torch_softcap"]
+opaque softcap {s : Shape} (input : @& T s) (cap : Float := 15.0) : T s
+
+def relu {s : Shape} (x : T s) := torch.relu x
+def relu6 {s : Shape} (x : T s) := torch.relu6 x
+def rsqrt {s : Shape} (x : T s) := torch.rsqrt x
+def toFloat' {s : Shape} (x : T s) := torch.toFloat' x
+
 end nn
 
 -- ============================================================================
@@ -1181,10 +1209,6 @@ opaque logical_not {s : Shape} (input : @& T s) : T s
 /-- Logical AND for boolean tensors -/
 @[extern "lean_torch_logical_and"]
 opaque logical_and {s : Shape} (a : @& T s) (b : @& T s) : T s
-
-/-- Convert to float32 dtype -/
-@[extern "lean_torch_to_float"]
-opaque toFloat' {s : Shape} (input : @& T s) : T s
 
 /-- Convert to bfloat16 dtype. -/
 @[extern "lean_torch_to_bfloat16"]
