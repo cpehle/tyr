@@ -30,24 +30,24 @@ def init (dim : UInt64) (eps : Float := 1e-6) : RMSNorm dim :=
 /-- Forward pass for 2D input [seq, dim] -/
 def forward2d {dim seq : UInt64} (rn : RMSNorm dim)
     (x : T #[seq, dim]) : T #[seq, dim] :=
-  nanoproof.rmsNormWeighted x rn.weight rn.eps.val
+  nn.rmsNormWeighted x rn.weight rn.eps.val
 
 /-- Forward pass for 3D input [batch, seq, dim] -/
 def forward3d {dim batch seq : UInt64} (rn : RMSNorm dim)
     (x : T #[batch, seq, dim]) : T #[batch, seq, dim] :=
-  nanoproof.rmsNormWeighted x rn.weight rn.eps.val
+  nn.rmsNormWeighted x rn.weight rn.eps.val
 
 /-- Forward pass for 4D input [batch, seq, n_head, head_dim]
     Normalizes over the last dimension (head_dim). -/
 def forward4d {batch seq n_head head_dim : UInt64} (rn : RMSNorm head_dim)
     (x : T #[batch, seq, n_head, head_dim]) : T #[batch, seq, n_head, head_dim] :=
-  nanoproof.rmsNormWeighted x rn.weight rn.eps.val
+  nn.rmsNormWeighted x rn.weight rn.eps.val
 
 /-- Forward pass for 4D input in attention format [batch, n_head, seq, head_dim]
     Normalizes over the last dimension (head_dim). -/
 def forward5d {batch n_head seq head_dim : UInt64} (rn : RMSNorm head_dim)
     (x : T #[batch, n_head, seq, head_dim]) : T #[batch, n_head, seq, head_dim] :=
-  nanoproof.rmsNormWeighted x rn.weight rn.eps.val
+  nn.rmsNormWeighted x rn.weight rn.eps.val
 
 end RMSNorm
 

@@ -139,9 +139,19 @@ def reduceShape (s : Shape) (dim : Nat) (keepdim : Bool) : Shape :=
     else s[:dim].toArray ++ s[dim+1:].toArray
   else s
 
-/-- Replace dimension at `dim` with a new size -/
 def replaceAtDim (s : Shape) (dim : Nat) (newSize : UInt64) : Shape :=
   if h : dim < s.size then s.set (Fin.mk dim h) newSize else s
+
+/-- Compute output shape for stacking: insert a new dimension of size `n` at `dim` -/
+def stackShape (s : Shape) (n : Nat) (dim : Nat) : Shape :=
+  if dim > s.size then s
+  else s[:dim].toArray ++ #[n.toUInt64] ++ s[dim:].toArray
+
+/-- Compute output shape for unbinding: remove dimension at `dim` -/
+def unbindShape (s : Shape) (dim : Nat) : Shape :=
+  if dim < s.size then
+    s[:dim].toArray ++ s[dim+1:].toArray
+  else s
 
 /-- Broadcast two batch shapes (everything except last 2 dims) following PyTorch rules -/
 private def broadcastBatchShapes (s1 s2 : Shape) : Shape :=

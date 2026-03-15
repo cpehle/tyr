@@ -10,7 +10,7 @@ structure Inner where
   bias : T #[4]
   tag : Static String
   cache : Frozen #[4]
-  deriving TensorStruct, ToTensorStructSchema, TensorStructFlatten
+  deriving Model
 
 structure Outer where
   weight : T #[2, 4]
@@ -18,7 +18,7 @@ structure Outer where
   gates : torch.Vector 2 (Frozen #[1])
   optScale : Option (T #[3])
   flag : Bool
-  deriving TensorStruct, ToTensorStructSchema, TensorStructFlatten
+  deriving Model
 
 private def templateOuter : Outer :=
   { weight := zeros #[2, 4]

@@ -17,8 +17,11 @@ import Examples.NanoProof.Model
 namespace torch.diffusion
 
 open torch
-open torch.nanoproof (RotaryCache norm AttentionParams MLPParams BlockParams makeLeafParam)
 open TensorStruct
+
+/-- RMSNorm without learnable parameters (functional) -/
+def norm {s : Shape} (x : T s) : T s :=
+  nn.rmsNorm x
 
 /-- Diffusion model configuration -/
 structure Config where
@@ -157,7 +160,7 @@ def mlpForward {batch seq n_embd : UInt64}
     (x : T #[batch, seq, n_embd])
     : T #[batch, seq, n_embd] :=
   let h := linear3d x params.c_fc      -- Expand to 4x
-  let h := nanoproof.reluSquared h     -- ReLU² activation
+  let h := nn.reluSquared h            -- ReLU² activation
   linear3d h params.c_proj             -- Project back
 
 /-- Block forward pass (pre-norm with bidirectional attention) -/

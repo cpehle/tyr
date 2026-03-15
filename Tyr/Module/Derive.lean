@@ -6,6 +6,7 @@
 -/
 import Lean
 import Tyr.TensorStruct
+import Tyr.AD.TensorStructSchema
 
 open Lean Elab Command Term Meta
 
@@ -196,9 +197,22 @@ def mkTensorStructHandler (typeNames : Array Name) : CommandElabM Bool := do
 
   return true
 
--- Register the deriving handler
+/-- Unified deriving handler for full Tyr model support.
+    Registers TensorStruct, ToTensorStructSchema, and TensorStructFlatten. -/
+def mkModelHandler (typeNames : Array Name) : CommandElabM Bool := do
+  if typeNames.isEmpty then return false
+
+  -- Call individual handlers
+  let _ ← mkTensorStructHandler typeNames
+  let _ ← mkToTensorStructSchemaHandler typeNames
+  let _ ← mkTensorStructFlattenHandler typeNames
+
+  return true
+
+-- Register the deriving handlers
 open Lean Elab Deriving in
 initialize
   registerDerivingHandler ``TensorStruct mkTensorStructHandler
+  registerDerivingHandler ``Model mkModelHandler
 
 end torch

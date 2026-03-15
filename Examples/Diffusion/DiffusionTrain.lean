@@ -15,7 +15,6 @@ namespace torch.diffusion.train
 
 open torch
 open torch.diffusion
-open torch.nanoproof (RotaryCache BlockParams)
 
 /-- Diffusion training configuration -/
 structure TrainConfig where

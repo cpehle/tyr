@@ -238,6 +238,10 @@ and transformation of all tensors in the structure. This is similar to
 JAX's PyTree concept or Equinox's filtered transformations.
 -/
 
+/-- A marker class for deriving all Tyr structural instances at once.
+    Use `deriving Model` to derive TensorStruct, ToTensorStructSchema, and TensorStructFlatten. -/
+class Model (α : Type)
+
 /-- A typeclass for structures that contain tensors.
     Allows generic traversal and transformation of all tensors in the structure. -/
 class TensorStruct (α : Type) where
@@ -424,6 +428,14 @@ def add [TensorStruct α] (a b : α) : α :=
 /-- Element-wise subtraction of two structures -/
 def sub [TensorStruct α] (a b : α) : α :=
   zipWith torch.sub a b
+
+/-- Check if all tensors in the structure satisfy a predicate -/
+def all [TensorStruct α] (p : ∀ {s}, T s → Bool) (model : α) : Bool :=
+  fold (fun t acc => acc && p t) true model
+
+/-- Check if any tensor in the structure satisfies a predicate -/
+def any [TensorStruct α] (p : ∀ {s}, T s → Bool) (model : α) : Bool :=
+  fold (fun t acc => acc || p t) false model
 
 end TensorStruct
 

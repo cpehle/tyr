@@ -16,7 +16,6 @@ open torch
 open torch.diffusion
 open torch.diffusion.train
 open torch.diffusion.checkpoint
-open torch.nanoproof (RotaryCache)
 
 -- ANSI escape codes for TUI animation
 def ansiReset : String := "\x1b[0m"

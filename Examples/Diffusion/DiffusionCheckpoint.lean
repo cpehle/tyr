@@ -12,7 +12,6 @@ namespace torch.diffusion.checkpoint
 
 open torch
 open torch.diffusion
-open torch.nanoproof (AttentionParams MLPParams BlockParams makeLeafParam)
 open torch.Optim
 
 /-- Checkpoint metadata for diffusion training -/

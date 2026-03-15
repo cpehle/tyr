@@ -230,7 +230,7 @@ def testQwen35AttentionUsesPerHeadQGateLayout : IO Unit := do
 def testQwen35RMSNormCheckpointWeightIsZeroCentered : IO Unit := do
   let raw : T #[2] := data.fromFloatArray #[0.25, -0.5]
   let norm := Qwen35RMSNorm.fromCheckpointWeight raw
-  let x : T #[1, 2] := data.fromFloatArray #[1.0, 1.0]
+  let x : T #[1, 2] := reshape (data.fromFloatArray #[1.0, 1.0]) #[1, 2]
   let out := norm.forward2d x
   let vals ← data.tensorToFloatArray' (nn.eraseShape out)
   LeanTest.assertTrue (approxEq vals[0]! 1.25 1e-5)

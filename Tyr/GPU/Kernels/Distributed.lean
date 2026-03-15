@@ -15,6 +15,38 @@ namespace Tyr.GPU.Kernels.Distributed
 open Tyr.GPU
 open Tyr.GPU.Codegen
 
+/-- Async-load tiled GEMM mainloop shared by the distributed GEMM bodies.
+Allocates A/B shared stages and semaphores, zeroes an FP32 accumulator, then
+runs the standard load-A, load-B, MMA reduction loop.  Returns the
+accumulated FP32 register tile. -/
+private def localGemmAccumulate {inDtype : GpuFloat} {rowBlock colBlock redBlock numRedTiles : Nat}
+    (label : String)
+    (aPtr : GPtr inDtype) (bPtr : GPtr inDtype)
+    (coord : RTileCoord)
+    : KernelM (RT GpuFloat.Float32 rowBlock colBlock) := do
+  let aStage : ST inDtype rowBlock redBlock ← allocST inDtype rowBlock redBlock
+  let bStage : ST inDtype redBlock colBlock .Col ← allocST inDtype redBlock colBlock .Col
+  let semA ← allocSemaphore
+  let semB ← allocSemaphore
+  initSemaphore semA 1
+  initSemaphore semB 1
+  comment label
+  let cAcc : RT GpuFloat.Float32 rowBlock colBlock ← zeroRT .Float32 rowBlock colBlock
+  for redIdx in krange 0 numRedTiles do
+    expectBytes semA (rowBlock * redBlock * GpuFloat.bytes inDtype)
+    loadGlobalAsync aStage aPtr (coord.withCol redIdx.id) semA.id
+    waitSemaphore semA
+    expectBytes semB (redBlock * colBlock * GpuFloat.bytes inDtype)
+    loadGlobalAsync bStage bPtr (coord.withRow redIdx.id) semB.id
+    waitSemaphore semB
+    let aTile : RT inDtype rowBlock redBlock ← allocRT inDtype rowBlock redBlock
+    let bTile : RT inDtype redBlock colBlock .Col ← allocRT inDtype redBlock colBlock .Col
+    load aTile aStage
+    load bTile bStage
+    mma cAcc aTile bTile cAcc
+    sync
+  pure cAcc
+
 private def allReduceOutOfPlaceBody {tileRows tileCols : Nat}
     (label : String)
     (output_ptr : GPtr GpuFloat.Float32)
@@ -126,35 +158,12 @@ private def gemmArCompatBody {inDtype : GpuFloat} {rowBlock colBlock redBlock nu
   let _ := (dev_idx, world_size, num_comm_sms)
   let coord ← blockCoord2D
 
-  let aStage : ST inDtype rowBlock redBlock ← allocST inDtype rowBlock redBlock
-  let bStage : ST inDtype redBlock colBlock .Col ← allocST inDtype redBlock colBlock .Col
   let partialShared : ST GpuFloat.Float32 rowBlock colBlock ← allocST .Float32 rowBlock colBlock
   let reducedShared : ST GpuFloat.Float32 rowBlock colBlock ← allocST .Float32 rowBlock colBlock
   let outShared : ST GpuFloat.BFloat16 rowBlock colBlock ← allocST .BFloat16 rowBlock colBlock
 
-  let semA ← allocSemaphore
-  let semB ← allocSemaphore
-  initSemaphore semA 1
-  initSemaphore semB 1
-
-  comment label
   ifWarpGroup 1 do
-    let cAcc : RT GpuFloat.Float32 rowBlock colBlock ← zeroRT .Float32 rowBlock colBlock
-    for redIdx in krange 0 numRedTiles do
-      expectBytes semA (rowBlock * redBlock * GpuFloat.bytes inDtype)
-      loadGlobalAsync aStage a_ptr (coord.withCol redIdx.id) semA.id
-      waitSemaphore semA
-      expectBytes semB (redBlock * colBlock * GpuFloat.bytes inDtype)
-      loadGlobalAsync bStage b_ptr (coord.withRow redIdx.id) semB.id
-      waitSemaphore semB
-
-      let aTile : RT inDtype rowBlock redBlock ← allocRT inDtype rowBlock redBlock
-      let bTile : RT inDtype redBlock colBlock .Col ← allocRT inDtype redBlock colBlock .Col
-      load aTile aStage
-      load bTile bStage
-      mma cAcc aTile bTile cAcc
-      sync
-
+    let cAcc ← localGemmAccumulate (redBlock := redBlock) (numRedTiles := numRedTiles) label a_ptr b_ptr coord
     store partialShared cAcc
     namedBarrierArrive 3 128
 
@@ -181,34 +190,10 @@ private def gemmRsReduceBody {inDtype : GpuFloat} {rowBlock colBlock redBlock nu
     (world_size : KVal UInt32) : KernelM Unit := do
   let _ := (dev_idx, world_size)
   let coord ← blockCoord2D
+  let cAcc ← localGemmAccumulate (redBlock := redBlock) (numRedTiles := numRedTiles) label a_ptr b_ptr coord
 
-  let aStage : ST inDtype rowBlock redBlock ← allocST inDtype rowBlock redBlock
-  let bStage : ST inDtype redBlock colBlock .Col ← allocST inDtype redBlock colBlock .Col
   let partialShared : ST GpuFloat.Float32 rowBlock colBlock ← allocST .Float32 rowBlock colBlock
   let outShared : ST GpuFloat.BFloat16 rowBlock colBlock ← allocST .BFloat16 rowBlock colBlock
-
-  let semA ← allocSemaphore
-  let semB ← allocSemaphore
-  initSemaphore semA 1
-  initSemaphore semB 1
-
-  comment label
-  let cAcc : RT GpuFloat.Float32 rowBlock colBlock ← zeroRT .Float32 rowBlock colBlock
-  for redIdx in krange 0 numRedTiles do
-    expectBytes semA (rowBlock * redBlock * GpuFloat.bytes inDtype)
-    loadGlobalAsync aStage a_ptr (coord.withCol redIdx.id) semA.id
-    waitSemaphore semA
-    expectBytes semB (redBlock * colBlock * GpuFloat.bytes inDtype)
-    loadGlobalAsync bStage b_ptr (coord.withRow redIdx.id) semB.id
-    waitSemaphore semB
-
-    let aTile : RT inDtype rowBlock redBlock ← allocRT inDtype rowBlock redBlock
-    let bTile : RT inDtype redBlock colBlock .Col ← allocRT inDtype redBlock colBlock .Col
-    load aTile aStage
-    load bTile bStage
-    mma cAcc aTile bTile cAcc
-    sync
-
   store partialShared cAcc
   let cReduced : RT GpuFloat.Float32 rowBlock colBlock ← allocRT .Float32 rowBlock colBlock
   multimemLoadReduce cReduced partialShared .Sum
@@ -228,33 +213,9 @@ private def gemmRsStoreAddCompatBody {inDtype : GpuFloat} {rowBlock colBlock red
     (world_size : KVal UInt32) : KernelM Unit := do
   let _ := (dev_idx, world_size)
   let coord ← blockCoord2D
+  let cAcc ← localGemmAccumulate (redBlock := redBlock) (numRedTiles := numRedTiles) label a_ptr b_ptr coord
 
-  let aStage : ST inDtype rowBlock redBlock ← allocST inDtype rowBlock redBlock
-  let bStage : ST inDtype redBlock colBlock .Col ← allocST inDtype redBlock colBlock .Col
   let outShared : ST GpuFloat.BFloat16 rowBlock colBlock ← allocST .BFloat16 rowBlock colBlock
-
-  let semA ← allocSemaphore
-  let semB ← allocSemaphore
-  initSemaphore semA 1
-  initSemaphore semB 1
-
-  comment label
-  let cAcc : RT GpuFloat.Float32 rowBlock colBlock ← zeroRT .Float32 rowBlock colBlock
-  for redIdx in krange 0 numRedTiles do
-    expectBytes semA (rowBlock * redBlock * GpuFloat.bytes inDtype)
-    loadGlobalAsync aStage a_ptr (coord.withCol redIdx.id) semA.id
-    waitSemaphore semA
-    expectBytes semB (redBlock * colBlock * GpuFloat.bytes inDtype)
-    loadGlobalAsync bStage b_ptr (coord.withRow redIdx.id) semB.id
-    waitSemaphore semB
-
-    let aTile : RT inDtype rowBlock redBlock ← allocRT inDtype rowBlock redBlock
-    let bTile : RT inDtype redBlock colBlock .Col ← allocRT inDtype redBlock colBlock .Col
-    load aTile aStage
-    load bTile bStage
-    mma cAcc aTile bTile cAcc
-    sync
-
   Support.barrierAllDevices "gemm_rs local tiles ready for distributed store_add" 0
   let out : RT GpuFloat.BFloat16 rowBlock colBlock ← allocRT .BFloat16 rowBlock colBlock
   convert out cAcc

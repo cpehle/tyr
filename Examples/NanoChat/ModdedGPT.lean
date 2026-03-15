@@ -237,7 +237,7 @@ def CausalSelfAttention.init (dim headDim numHeads : UInt64)
 
 /-- Functional RMSNorm (no learnable parameters) -/
 def rmsNorm3d {batch seq dim : UInt64} (x : T #[batch, seq, dim]) : T #[batch, seq, dim] :=
-  nanoproof.rmsNorm x
+  nn.rmsNorm x
 
 /-- Forward pass for attention with rotary embeddings and QK norm.
     x: [batch, seq, dim]
@@ -281,8 +281,8 @@ def CausalSelfAttention.forward {batch seq dim headDim numHeads rotaryLen : UInt
   let k := rotary.applyRotaryEmb k cos sin
 
   -- QK normalization (nanochat style: normalize queries and keys)
-  let q := nanoproof.rmsNorm q
-  let k := nanoproof.rmsNorm k
+  let q := nn.rmsNorm q
+  let k := nn.rmsNorm k
 
   -- Transpose to [batch, numHeads, seq, headDim] for attention
   let q := nn.transpose_for_attention q
@@ -339,7 +339,7 @@ def MLP.forward {batch seq dim : UInt64} (mlp : MLP dim) (x : T #[batch, seq, di
   -- x @ c_fc.T -> [batch, seq, 4*dim]
   let h := linear3d x mlp.cFc
   -- ReLU^2 activation
-  let h := nanoproof.reluSquared h
+  let h := nn.reluSquared h
   -- h @ c_proj -> [batch, seq, dim] (transposed weight layout)
   -- Note: In transposed layout, we use the transpose for the projection
   let cProjT := nn.transpose2d mlp.cProj
@@ -515,7 +515,7 @@ def forward {cfg : Config} {batch seq : UInt64}
   let smearIn : T #[batch, seq, 12] := data.slice tokEmb 2 0 12
   let smearGate := nn.sigmoid (params.smearGate.forward smearIn)
   let smearGateExpanded := nn.expand smearGate #[batch, seq, cfg.modelDim]
-  let x0 := nanoproof.rmsNorm (tokEmb + (tokEmb * smearGateExpanded))
+  let x0 := nn.rmsNorm (tokEmb + (tokEmb * smearGateExpanded))
 
   -- Precompute token value embeddings and global scalar controls.
   let valueEmbeds := params.valueEmbeds.map (nn.embedding inputSeq ·)
@@ -549,14 +549,14 @@ def forward {cfg : Config} {batch seq : UInt64}
     match block.attn with
     | some attn =>
       -- Pre-norm (RMSNorm before attention)
-      let xNormed := nanoproof.rmsNorm xIn
+      let xNormed := nn.rmsNorm xIn
       let layerVE := layerValueEmbed (cfg := cfg) valueEmbeds i
       -- Apply attention with rotary embeddings/window and optional value embedding.
       let attnOut := attn.forward xNormed yarn windowSize layerVE valueMix
       -- Residual connection
       let x' := xIn + scaleByScalar attnOut lamAttn
       -- Pre-norm before MLP
-      let xMlpNormed := nanoproof.rmsNorm x'
+      let xMlpNormed := nn.rmsNorm x'
       -- Apply MLP
       let h ← block.mlp.forward xMlpNormed
       -- Residual connection
@@ -570,18 +570,18 @@ def forward {cfg : Config} {batch seq : UInt64}
       | none =>
         x := xIn
       -- Pre-norm before MLP
-      let xNormed := nanoproof.rmsNorm x
+      let xNormed := nn.rmsNorm x
       let h ← block.mlp.forward xNormed
       x := x + scaleByScalar h lamMlp
 
   -- 3) Final layer norm / projection / softcap.
-  let xNormed := nanoproof.rmsNorm (scaleByScalar x finalScale)
+  let xNormed := nn.rmsNorm (scaleByScalar x finalScale)
 
   -- Final projection to vocab
   let logits := params.lmHead.forward xNormed
 
   -- Softcap logits
-  let logitsCapped := nanoproof.softcap logits cfg.softcapValue
+  let logitsCapped := nn.softcap logits cfg.softcapValue
 
   return logitsCapped
 

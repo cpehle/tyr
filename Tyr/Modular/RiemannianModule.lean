@@ -66,7 +66,7 @@ private def mapRows {rows inDim outDim : UInt64}
     for i in [:rows.toNat] do
       acc := acc.push (f (rowAt matrix (UInt64.ofNat i)))
     pure acc
-  data.stack1d mapped
+  torch.stack1d mapped
 
 /-- Materialize the dense input Jacobian for debugging/tests. -/
 def materializeA {inDim paramDim outDim : UInt64}

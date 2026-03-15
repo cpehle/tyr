@@ -41,6 +41,16 @@ instance : ToString TensorLeafPath := ⟨TensorLeafPath.toString⟩
 
 end TensorLeafPath
 
+private def renderPath (path : TensorLeafPath) : String :=
+  let rendered := toString path
+  if rendered.isEmpty then "<root>" else rendered
+
+private def shapeToString (s : Shape) : String :=
+  "[" ++ String.intercalate ", " (s.toList.map toString) ++ "]"
+
+private def shapeToNatArray (s : Shape) : Array Nat :=
+  s.map UInt64.toNat
+
 /-- AD participation role for one structural leaf. -/
 inductive TensorLeafRole where
   | diff
@@ -69,17 +79,18 @@ def leafPaths (schema : TensorStructSchema) : Array TensorLeafPath :=
 def renderedLeafPaths (schema : TensorStructSchema) : Array String :=
   schema.leafPaths.map (fun path => toString path)
 
+/-- Render a human-readable summary of the model structure. -/
+def summary (schema : TensorStructSchema) : String :=
+  let header := s!"Model Structure: {schema.typeName}\n"
+  let line := "--------------------------------------------------\n"
+  let leaves := schema.leaves.foldl (init := "") fun acc leaf =>
+    let shapeStr := match leaf.shape with
+      | some s => s!"{s}"
+      | none => "static"
+    acc ++ s!"{renderPath leaf.path} : {shapeStr} ({reprStr leaf.role})\n"
+  header ++ line ++ leaves ++ line
+
 end TensorStructSchema
-
-private def shapeToNatArray (s : Shape) : Array Nat :=
-  s.map UInt64.toNat
-
-private def shapeToString (s : Shape) : String :=
-  "[" ++ String.intercalate ", " (s.toList.map toString) ++ "]"
-
-private def renderPath (path : TensorLeafPath) : String :=
-  let rendered := toString path
-  if rendered.isEmpty then "<root>" else rendered
 
 /--
 Controls which tensor leaves participate in flatten/rebuild operations.
@@ -139,6 +150,10 @@ namespace ToTensorStructSchema
 def schema [ToTensorStructSchema α] (x : α) : TensorStructSchema :=
   { typeName := ToTensorStructSchema.typeName (α := α)
     leaves := ToTensorStructSchema.describeLeaves x {} }
+
+/-- Render a human-readable summary of a value's structure. -/
+def summary [ToTensorStructSchema α] (x : α) : String :=
+  (schema x).summary
 
 end ToTensorStructSchema
 
