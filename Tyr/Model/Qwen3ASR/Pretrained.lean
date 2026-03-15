@@ -93,28 +93,29 @@ private def downloadFile (url : String) (dest : String) : IO Bool := do
 
   ensureParentDir dest
   let tmp := s!"{dest}.tmp"
+  let resumeArgs :=
+    if ← fileExists tmp then
+      #["-C", "-"]
+    else
+      #[]
   let token? ← IO.getEnv "HF_TOKEN"
   let args :=
     match token? with
     | some tok =>
       #[
         "-fL", "--retry", "3", "--retry-delay", "1",
-        "-H", s!"Authorization: Bearer {tok}",
-        "-o", tmp, url
-      ]
+        "-H", s!"Authorization: Bearer {tok}"
+      ] ++ resumeArgs ++ #["-o", tmp, url]
     | none =>
       #[
-        "-fL", "--retry", "3", "--retry-delay", "1",
-        "-o", tmp, url
-      ]
+        "-fL", "--retry", "3", "--retry-delay", "1"
+      ] ++ resumeArgs ++ #["-o", tmp, url]
 
   let out ← IO.Process.output { cmd := "curl", args := args }
   if out.exitCode == 0 then
     IO.FS.rename ⟨tmp⟩ ⟨dest⟩
     pure true
   else
-    if ← fileExists tmp then
-      IO.FS.removeFile ⟨tmp⟩
     pure false
 
 private def ensureRemoteFile (repoId revision relPath dest : String) : IO Unit := do
