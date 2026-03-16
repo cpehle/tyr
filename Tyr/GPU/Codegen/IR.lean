@@ -56,6 +56,9 @@ inductive KStmt where
   | declSV (v : VarId) (dtype : GpuFloat) (len : Nat)
   | declSemaphore (v : VarId)  -- Semaphore/barrier declaration
 
+  -- Tensor memory tile declarations (Blackwell SM100)
+  | declTT (v : VarId) (dtype : GpuFloat) (rows cols : Nat)  -- TMEM tile (tt<dtype, rows, cols>)
+
   -- Kernel parameter declarations (used by attribute-generated code)
   | declGPtr (v : VarId) (dtype : GpuFloat) (name : String)  -- Global memory pointer param
   | declKVal (v : VarId) (dtype : GpuFloat) (name : String)  -- Scalar value param
@@ -106,7 +109,24 @@ inductive KStmt where
   | mmaAsyncWait (n : Nat)
 
   -- Blackwell-specific MMA (tcgen05 / 2-CTA MMA)
-  | tcgen05Mma (trans : MMATranspose) (dst a b c : VarId)  -- SM100 2-CTA MMA
+  | tcgen05Mm (trans : MMATranspose) (dst a b : VarId)     -- SM100 MMA zero-init to TMEM
+  | tcgen05Mma (trans : MMATranspose) (dst a b c : VarId)  -- SM100 accumulating MMA to TMEM
+  | tcgen05MmaScaled (trans : MMATranspose) (dst a b c scaleA scaleB : VarId)  -- SM100 scaled MMA (MXFP8/NVFP4)
+  | tcgen05Commit (sem : VarId) (clusterSize : Nat)        -- Commit tcgen05 results
+
+  -- Tensor memory operations (Blackwell SM100)
+  | tmemAllocate (dst pool : VarId) (offset : Nat)         -- Allocate TT from TMEM pool
+  | tmemProvision (pool : VarId) (clusterSize : Nat)       -- Provision TMEM across cluster
+  | tmemDeprovision (pool : VarId)                         -- Release provisioned TMEM
+  | loadScaleTmem (dst src : VarId) (stage : Nat)          -- Load E8M0 scale tile into TMEM
+  | tmemSubtile (dst src : VarId) (offset : Nat)           -- Extract subtile from pipelined TMEM
+
+  -- Cluster operations (SM90+ clusters, SM100 2-CTA)
+  | clusterIdx (dst : VarId) (axis : Nat)                  -- Cluster CTA rank (axis: 0=x, 1=y, 2=z)
+  | clusterTmaLoad (dst src : VarId) (coordB coordD coordR coordC sem : VarId)   -- Cluster-scope TMA load
+  | clusterTmaStore (dst src : VarId) (coordB coordD coordR coordC : VarId)      -- Cluster-scope TMA store
+  | clusterArrive (sem : VarId)                            -- Cluster barrier arrive
+  | clusterWait (sem : VarId)                              -- Cluster barrier wait
 
   -- Architecture-specific load variants (for explicit control)
   | cpAsyncLoad (dst src : VarId) (coordB coordD coordR coordC sem : VarId)  -- cp.async (SM80)

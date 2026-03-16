@@ -613,4 +613,124 @@ The `@[gpu_kernel]` attribute can automate this instantiation when enhanced to d
 the typeclass-constrained pattern.
 -/
 
+/-! ## Blackwell TMEM / Cluster / tcgen05 Tests -/
+
+/-- TMEM tile allocation emits tt<> declaration -/
+def tmemAllocKernel : Kernel :=
+  buildKernelM "tmem_alloc" .SM100 #[] do
+    let _acc : TT GpuFloat.Float32 128 128 ← allocTT .Float32 128 128
+    let _accZ : TT GpuFloat.Float32 64 64 ← zeroTT .Float32 64 64
+
+/--
+info: #include <kittens.cuh>
+using namespace kittens;
+
+#if defined(KITTENS_BLACKWELL)
+__global__ void tmem_alloc(/* TODO: params */) {
+  tt<float, 128, 128> v0;
+  tt<float, 64, 64> v1;
+  warp::zero(v1);
+}
+#endif
+-/
+#guard_msgs in
+#eval IO.println (generateKernel tmemAllocKernel)
+
+/-- Cluster coordinate accessor emits clusterIdx() -/
+def clusterIdxKernel : Kernel :=
+  buildKernelM "cluster_idx" .SM100 #[] do
+    let _cidx ← clusterIdx 0
+
+/--
+info: #include <kittens.cuh>
+using namespace kittens;
+
+#if defined(KITTENS_BLACKWELL)
+__global__ void cluster_idx(/* TODO: params */) {
+  int v0 = clusterIdx().x;
+}
+#endif
+-/
+#guard_msgs in
+#eval IO.println (generateKernel clusterIdxKernel)
+
+/-- tcgen05 MMA operations emit mm2/mma2 calls -/
+def tcgen05MmaKernel : Kernel :=
+  buildKernelM "tcgen05_mma" .SM100 #[] do
+    let acc ← allocTT .Float32 64 64
+    let a ← allocST .BFloat16 64 64
+    let b ← allocST .BFloat16 64 64 .Col
+    tcgen05Mm .ABt acc a b
+    tcgen05Mma .ABt acc a b acc
+    let sem ← allocSemaphore
+    tcgen05Commit sem 2
+
+/--
+info: #include <kittens.cuh>
+using namespace kittens;
+
+#if defined(KITTENS_BLACKWELL)
+__global__ void tcgen05_mma(/* TODO: params */) {
+  tt<float, 64, 64> v0;
+  __shared__ st<bf16, 64, 64> v1;
+  __shared__ st<bf16, 64, 64> v2;
+  warpgroup::mm2_ABt(v0, v1, v2);
+  warpgroup::mma2_ABt(v0, v1, v2, v0);
+  __shared__ semaphore v3;
+  detail::tcgen05::commit<2>(v3);
+}
+#endif
+-/
+#guard_msgs in
+#eval IO.println (generateKernel tcgen05MmaKernel)
+
+/-- Cluster TMA and barrier operations -/
+def clusterTmaKernel : Kernel :=
+  buildKernelM "cluster_tma" .SM100 #[
+    { name := "A", dtype := .BFloat16, isPointer := true }
+  ] do
+    let sem ← allocSemaphore
+    clusterArrive sem
+    clusterWait sem
+
+/--
+info: #include <kittens.cuh>
+using namespace kittens;
+
+#if defined(KITTENS_BLACKWELL)
+__global__ void cluster_tma(gl<bf16, 1, 1, -1, -1> v0) {
+  __shared__ semaphore v1;
+  cluster::arrive(v1);
+  cluster::wait(v1);
+}
+#endif
+-/
+#guard_msgs in
+#eval IO.println (generateKernel clusterTmaKernel)
+
+/-- TMEM pool operations (allocate, provision, subtile) -/
+def tmemPoolKernel : Kernel :=
+  buildKernelM "tmem_pool" .SM100 #[] do
+    -- Pool is raw because TMEMPool needs a `tensor_allocator<>` decl,
+    -- which the emitter generates from a raw snippet for now.
+    emitRaw "tensor_allocator<1, 2, false> tm_alloc;"
+    let pool : TMEMPool := ⟨⟨0⟩⟩  -- placeholder VarId for the allocator
+    tmemProvision pool 2
+    tmemDeprovision pool
+
+/--
+info: #include <kittens.cuh>
+using namespace kittens;
+
+#if defined(KITTENS_BLACKWELL)
+__global__ void tmem_pool(/* TODO: params */) {
+  tensor_allocator<1, 2, false> tm_alloc;
+  if(elect_one) v0.provision<2>(tmem_addr);
+  if(elect_one) v0.deprovision();
+}
+#endif
+-/
+#guard_msgs in
+#eval IO.println (generateKernel tmemPoolKernel)
+
 end Tyr.GPU.Codegen.Tests

@@ -55,6 +55,7 @@ structure RVLayoutState where
 private inductive TileKind where
   | RT
   | ST
+  | TT  -- Tensor memory tile (Blackwell)
   deriving Repr, BEq, Hashable, Inhabited
 
 private structure TileInfo where
@@ -84,6 +85,7 @@ private def collectRtLayoutsStmt (acc : Std.HashMap VarId TileLayout) : KStmt â†
 private def collectTileInfoStmt (acc : Std.HashMap VarId TileInfo) : KStmt â†’ Std.HashMap VarId TileInfo
   | .declRT v _ rows cols _ => acc.insert v { kind := .RT, rows := rows, cols := cols }
   | .declST v _ rows cols _ => acc.insert v { kind := .ST, rows := rows, cols := cols }
+  | .declTT v _ rows cols => acc.insert v { kind := .TT, rows := rows, cols := cols }
   | .forLoop _ _ _ body => body.foldl collectTileInfoStmt acc
   | .forLoopVal _ _ _ body => body.foldl collectTileInfoStmt acc
   | .ifStmt _ thenBody elseBody =>
@@ -218,6 +220,8 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout)
     s!"{indent}rv<{dtype.toCpp}, {len}{rvLayoutSuffix rvLayouts v}> {v.toIdent};\n"
   | .declSV v dtype len =>
     s!"{indent}__shared__ sv<{dtype.toCpp}, {len}> {v.toIdent};\n"
+  | .declTT v dtype rows cols =>
+    s!"{indent}tt<{dtype.toCpp}, {rows}, {cols}> {v.toIdent};\n"
   | .declSemaphore v =>
     s!"{indent}__shared__ semaphore {v.toIdent};\n"
 
@@ -319,8 +323,44 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout)
   | .mmaAsyncWait n => s!"{indent}warpgroup::mma_async_wait<{n}>();\n"
 
   -- Blackwell-specific MMA (tcgen05 / 2-CTA MMA)
+  | .tcgen05Mm trans dst a b =>
+    s!"{indent}warpgroup::mm2_{trans.toSuffix}({dst.toIdent}, {a.toIdent}, {b.toIdent});\n"
   | .tcgen05Mma trans dst a b c =>
-    s!"{indent}warpgroup::mma_{trans.toSuffix}({dst.toIdent}, {a.toIdent}, {b.toIdent}, {c.toIdent});\n"
+    s!"{indent}warpgroup::mma2_{trans.toSuffix}({dst.toIdent}, {a.toIdent}, {b.toIdent}, {c.toIdent});\n"
+  | .tcgen05MmaScaled trans dst a b c scaleA scaleB =>
+    s!"{indent}warpgroup::mma2_{trans.toSuffix}({dst.toIdent}, {a.toIdent}, {b.toIdent}, {c.toIdent}, {scaleA.toIdent}, {scaleB.toIdent});\n"
+  | .tcgen05Commit sem clusterSize =>
+    s!"{indent}detail::tcgen05::commit<{clusterSize}>({sem.toIdent});\n"
+
+  -- Tensor memory operations (Blackwell SM100)
+  | .tmemAllocate dst pool offset =>
+    s!"{indent}auto {dst.toIdent} = {pool.toIdent}.allocate({offset});\n"
+  | .tmemProvision pool clusterSize =>
+    s!"{indent}if(elect_one) {pool.toIdent}.provision<{clusterSize}>(tmem_addr);\n"
+  | .tmemDeprovision pool =>
+    s!"{indent}if(elect_one) {pool.toIdent}.deprovision();\n"
+  | .loadScaleTmem dst src stage =>
+    s!"{indent}load_mxnv_scale_async2({dst.toIdent}[{stage}], {src.toIdent});\n"
+  | .tmemSubtile dst src offset =>
+    s!"{indent}auto {dst.toIdent} = {src.toIdent}.subtile({offset});\n"
+
+  -- Cluster operations (SM90+ clusters, SM100 2-CTA)
+  | .clusterIdx dst axis =>
+    s!"{indent}int {dst.toIdent} = clusterIdx().{match axis with | 0 => "x" | 1 => "y" | _ => "z"};\n"
+  | .clusterTmaLoad dst src coordB coordD coordR coordC sem =>
+    let (rowScale, colScale) := match tileInfo[dst]? with
+      | some info => (info.rows, info.cols)
+      | none => (1, 1)
+    s!"{indent}tma::cluster::load_async({dst.toIdent}, {src.toIdent}, kittens::coord<>({coordB.toIdent}, {coordD.toIdent}, ({coordR.toIdent} * {rowScale}), ({coordC.toIdent} * {colScale})), {sem.toIdent});\n"
+  | .clusterTmaStore dst src coordB coordD coordR coordC =>
+    let (rowScale, colScale) := match tileInfo[src]? with
+      | some info => (info.rows, info.cols)
+      | none => (1, 1)
+    s!"{indent}tma::cluster::store_async({dst.toIdent}, {src.toIdent}, kittens::coord<>({coordB.toIdent}, {coordD.toIdent}, ({coordR.toIdent} * {rowScale}), ({coordC.toIdent} * {colScale})));\n"
+  | .clusterArrive sem =>
+    s!"{indent}cluster::arrive({sem.toIdent});\n"
+  | .clusterWait sem =>
+    s!"{indent}cluster::wait({sem.toIdent});\n"
 
   -- Architecture-specific load variants
   | .cpAsyncLoad dst src coordB coordD coordR coordC _sem =>

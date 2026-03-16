@@ -109,15 +109,152 @@ the source-backed forward kernels rather than parity blockers.
 
 ## Fidelity Follow-Ups
 
-The remaining work is mostly about first-class DSL fidelity and exact launch
-arithmetic, not missing kernel families:
+The remaining work is about first-class DSL fidelity and exact launch
+arithmetic, not missing kernel families. The items below are ordered by
+dependency: later items often require earlier ones.
 
-1. Promote TMEM / cluster-specialized storage / scale-tile concepts as
-   first-class IR operations so the typed Blackwell GEMM surfaces can model the
-   source structure more literally instead of compressing it into CTA-local
-   mainloops plus explicit epilogues.
-2. Tighten exact CTA worker packing for `MhaH100LCF.lean`, `Based.lean`,
-   `LinearAttn.lean`, `Hedgehog.lean`, and `Mamba2.lean`.
+### 1. Tensor Memory (TMEM) as a First-Class IR Tile Kind
+
+**Status**: `hasTMEM` flag exists in `ArchConfig`; no IR support.
+
+The B200 ThunderKittens kernels store MMA output accumulators and scale tiles in
+TMEM (144 KB per CTA). The current IR only has `declRT`/`declST`/`declRV`/`declSV`.
+
+**What to add to `KStmt`**:
+
+| Statement | Semantics |
+| --- | --- |
+| `declTT v dtype rows cols` | Tensor-memory tile declaration (analogous to `declRT`) |
+| `tmemAllocate v pool offset` | Allocate a TT from a provisioned TMEM pool at `offset` |
+| `tmemProvision pool clusterSize` | Provision a TMEM address region across the cluster |
+| `tmemDeprovision pool` | Release the provisioned region |
+
+**Emit mapping** (`EmitNew.lean`):
+- `declTT` → `kittens::tt<dtype, rows, cols> v;`
+- `tmemAllocate` → `v = pool.allocate<tt_t>(offset);`
+- `tmemProvision` → `pool.provision(tmem_addr);` (inside `if(elect_one)`)
+- `tmemDeprovision` → `pool.deprovision();`
+
+**Affected kernel surfaces**: `Bf16Gemm.lean` (B200), `PrecisionGemm.lean`
+(FP8/MXFP8 B200), `NvFp4Gemm.lean` (NVFP4 B200). These currently compress TMEM
+fragments into register-tile accumulators.
+
+### 2. Cluster Coordinate Accessors and Cluster-Aware TMA
+
+**Status**: `hasClusterBarrier` flag exists; `clusterSize` in `ArchKernelConfig`.
+No IR statements for cluster coordination.
+
+The B200 2-CTA GEMM kernels query cluster rank and use cluster-scoped TMA to
+share B-tiles across CTAs via distributed shared memory (DSMEM).
+
+**What to add to `KStmt`**:
+
+| Statement | Semantics |
+| --- | --- |
+| `clusterIdx dst axis` | Read cluster coordinate (`cluster_ctarank()`) |
+| `clusterTmaLoad dst src coords sem` | TMA load visible to the full cluster |
+| `clusterTmaStore dst src coords` | TMA store from cluster scope |
+| `clusterArrive sem` | Cluster-scope barrier arrive |
+| `clusterWait sem` | Cluster-scope barrier wait |
+
+**Emit mapping**: These map directly to `tma::cluster::load_async()`,
+`tma::cluster::store_async()`, and cluster barrier primitives.
+
+**Affected kernel surfaces**: `Bf16Gemm.lean` (B200 2-CTA), `PrecisionGemm.lean`
+(FP8 B200 2-CTA).
+
+### 3. tcgen05 MMA with TMEM Destination and Scale Operands
+
+**Status**: `tcgen05Mma` exists in IR but has no DSL wrapper and cannot target
+TMEM destinations or accept scale-tile operands.
+
+The B200 MMA uses `mm2_ABt` / `mma2_ABt` which write directly to TMEM and
+optionally accept E8M0 scale tiles for block-scaled formats.
+
+**What to add to `KStmt`**:
+
+| Statement | Semantics |
+| --- | --- |
+| `tcgen05Mm trans dst a b` | First MMA (zero-init) to TMEM |
+| `tcgen05Mma trans dst a b c` | Accumulating MMA to TMEM (already exists, needs TMEM dst) |
+| `tcgen05MmaScaled trans dst a b c scaleA scaleB` | Scaled MMA with E8M0 scale tiles |
+| `tcgen05Commit sem` | Commit tcgen05 results with cluster-aware semaphore |
+
+**Emit mapping**:
+- `tcgen05Mm` → `mm2_ABt(dst, a, b);` (or `mm2_AB` etc. per transpose mode)
+- `tcgen05MmaScaled` → `mma2_ABt(dst, a, b, c, scaleA, scaleB, sem);`
+- `tcgen05Commit` → `detail::tcgen05::commit<CLUSTER_SIZE>(sem);`
+
+**Affected kernel surfaces**: All B200 GEMM variants.
+
+### 4. Scale-Tile TMEM Loading
+
+**Status**: Not represented. Scale vectors are currently loaded as shared-memory
+vectors and applied in an explicit FP32 epilogue.
+
+The MXFP8 and NVFP4 kernels pipeline E8M0 scale tiles through TMEM alongside
+the main A/B tiles. Scale subtiles are indexed per pipeline stage.
+
+**What to add to `KStmt`**:
+
+| Statement | Semantics |
+| --- | --- |
+| `loadScaleTmem dst src stage` | Load scale tile (E8M0) into TMEM subtile for pipeline stage |
+| `tmemSubtile dst src offset` | Extract a subtile from a pipelined TMEM allocation |
+
+This is lower priority than items 1–3; the current explicit epilogue is
+functionally correct.
+
+### 5. Pipelined Barrier Sequencing (Phasebits)
+
+**Status**: Semaphore ops exist (`Init`, `Wait`, `Arrive`, etc.) but no
+ring-buffer phasebit tracking.
+
+The ThunderKittens mainloops track pipeline stages via a `phasebits` word:
+`get_phasebit<N>(phasebits, ring_idx)` / `update_phasebit<N>(phasebits, ring_idx)`.
+This enables overlapping loads of stage N+2 with compute on stage N.
+
+This can likely be handled as a DSL-level abstraction over the existing semaphore
+ops rather than new IR statements. A `PipelineRing` combinator in the DSL that
+emits the right `semaphore` / `tmaExpect` / `arrive` sequence per stage would
+suffice.
+
+### 6. CTA Worker Packing — Per-Kernel Status
+
+The five kernels below flatten the source's multi-worker CTA packing to one
+logical tile per kernel instance. Tightening means adding warpgroup-level role
+assignment and (where applicable) multi-tile-per-CTA launch arithmetic.
+
+**Prerequisites**: `ifWarpGroup` already exists in `KStmt`. What's missing is
+the launch-side grid calculation that divides work across `NUM_WORKERS` query
+tiles per CTA.
+
+| Kernel | Source Workers | Current Lean Model | What to Tighten |
+| --- | --- | --- | --- |
+| `MhaH100LCF.lean` | 1 producer + 3 consumer warpgroups (12 consumer warps), each consumer holds one 64×D query tile | Single query tile per kernel | Add `ifWarpGroup 0` producer path for async K/V loads; replicate consumer path across warpgroups 1–3; adjust grid to `⌈seqLen / (3 × 64)⌉` |
+| `Based.lean` | 1 warpgroup (4 warps), warp 0 prefetches TMA; lane-level shuffles for `mul_slice_row`/`mul_slice_col` | All threads compute uniformly; quadratic features materialized via explicit slice + broadcast | Add warp-0 TMA prefetch path; replace slice+broadcast with warp-shuffle DSL op when available |
+| `LinearAttn.lean` | 2 warpgroups: WG0 builds `q_decay`, WG1 builds `k_decay`; 3-ring K/V buffering | Single-threaded decay computation; double-buffer staging | Split decay construction across `ifWarpGroup 0` / `ifWarpGroup 1`; upgrade to 3-ring staging when pipeline abstraction lands |
+| `Hedgehog.lean` | 2 warpgroups: WG0 = sliding-window attention, WG1 = linear attention; 3-ring K/V; per-head alpha/beta mixing | Both paths computed sequentially in one thread group; 2-buffer staging | Partition sliding/linear paths across warpgroups; upgrade to 3-ring; keep combined normalization after barrier |
+| `Mamba2.lean` | 8 consumer warps (2 warpgroups), producer warp rotates per iteration; per-warpgroup Hillis-Steele cumsum; 2-stage input/output pipeline | Single sequential chunk loop; decay built in-kernel | Add rotating producer warp; split cumsum across warpgroups; use `PipelineRing` (item 5) for I/O overlap |
+
+### Dependency Graph
+
+```
+(1) TMEM Tiles ──┬──→ (3) tcgen05 MMA w/ TMEM dst
+                 │
+                 └──→ (4) Scale-Tile TMEM Loading
+                           │
+(2) Cluster TMA ─────→ (3) tcgen05 MMA w/ TMEM dst
+                           │
+(5) Pipeline Ring ────→ (6) CTA Worker Packing
+                           ↑
+                    ifWarpGroup (already in IR)
+```
+
+Items 1–3 unblock faithful Blackwell GEMM surfaces.
+Item 5 unblocks most of the CTA worker packing in item 6.
+Item 6 can be partially started now using `ifWarpGroup` for the kernels that
+only need role assignment (MhaH100LCF, Hedgehog, LinearAttn).
 
 ## Notes
 

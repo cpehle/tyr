@@ -30,8 +30,9 @@ open Tyr.GPU
 /-- Emit exact backend code when the typed DSL does not yet expose a primitive.
 
 This is intentionally narrow and should be used to isolate backend-specific
-constructs such as Blackwell tensor-memory plumbing until they are promoted to
-first-class statements. -/
+constructs until they are promoted to first-class statements. Most Blackwell
+TMEM and cluster operations now have typed wrappers (`allocTT`, `tcgen05Mm`,
+`clusterIdx`, etc.). -/
 def emitRaw (code : String) : KernelM Unit := do
   emit (.raw code)
 
@@ -66,6 +67,41 @@ def allocSV (dtype : GpuFloat) (len : Nat) : KernelM (SV dtype len) := do
   emit (.declSV v dtype len)
   let bytes := len * dtype.bytes
   modify fun s => { s with sharedMemBytes := s.sharedMemBytes + bytes }
+  pure ⟨v⟩
+
+/-- Allocate a tensor memory tile (Blackwell TMEM).
+    These live in the SM100 tensor memory unit (144 KB per CTA). -/
+def allocTT (dtype : GpuFloat) (rows cols : Nat) : KernelM (TT dtype rows cols) := do
+  let v ← freshVar
+  emit (.declTT v dtype rows cols)
+  pure ⟨v⟩
+
+/-- Allocate a zero-initialized tensor memory tile -/
+def zeroTT (dtype : GpuFloat) (rows cols : Nat) : KernelM (TT dtype rows cols) := do
+  let tile ← allocTT dtype rows cols
+  emit (.unary .Zero tile.id tile.id)
+  pure tile
+
+/-- Allocate a TT from a TMEM pool at a given byte offset. -/
+def tmemAllocate (pool : TMEMPool) (dtype : GpuFloat) (rows cols : Nat) (offset : Nat)
+    : KernelM (TT dtype rows cols) := do
+  let v ← freshVar
+  emit (.tmemAllocate v pool.id offset)
+  pure ⟨v⟩
+
+/-- Provision a TMEM pool across the cluster. Must be called inside `electOneSync`. -/
+def tmemProvision (pool : TMEMPool) (clusterSize : Nat := 1) : KernelM Unit := do
+  emit (.tmemProvision pool.id clusterSize)
+
+/-- Release a provisioned TMEM pool. -/
+def tmemDeprovision (pool : TMEMPool) : KernelM Unit := do
+  emit (.tmemDeprovision pool.id)
+
+/-- Extract a subtile from a pipelined TMEM allocation at a given offset. -/
+def tmemSubtile (src : TT dtype rows cols) (offset : Nat)
+    : KernelM (TT dtype rows cols) := do
+  let v ← freshVar
+  emit (.tmemSubtile v src.id offset)
   pure ⟨v⟩
 
 /-- Semaphore type (barrier) for async operations -/
@@ -1063,6 +1099,73 @@ def mmaCommitGroup : KernelM Unit := do
 /-- Wait for N MMA groups -/
 def mmaAsyncWait (n : Nat := 0) : KernelM Unit := do
   emit (.mmaAsyncWait n)
+
+/-! ## Blackwell tcgen05 MMA Operations -/
+
+/-- Blackwell tcgen05 MMA: zero-init multiply to TMEM destination.
+    `mm2_ABt(dst, a, b)` — first MMA that initializes the accumulator. -/
+def tcgen05Mm {M K N : Nat} {inDtype accDtype : GpuFloat}
+    {inLayout : TileLayout} {accLayout : TileLayout}
+    (trans : MMATranspose)
+    (dst : TT accDtype M N) (a : ST inDtype M K inLayout) (b : ST inDtype N K accLayout)
+    : KernelM Unit := do
+  emit (.tcgen05Mm trans dst.id a.id b.id)
+
+/-- Blackwell tcgen05 MMA: accumulating multiply to TMEM destination.
+    `mma2_ABt(dst, a, b, c)` — adds to existing accumulator `c`. -/
+def tcgen05Mma {M K N : Nat} {inDtype accDtype : GpuFloat}
+    {inLayout : TileLayout} {accLayout : TileLayout}
+    (trans : MMATranspose)
+    (dst : TT accDtype M N) (a : ST inDtype M K inLayout) (b : ST inDtype N K accLayout)
+    (c : TT accDtype M N)
+    : KernelM Unit := do
+  emit (.tcgen05Mma trans dst.id a.id b.id c.id)
+
+/-- Blackwell tcgen05 scaled MMA with E8M0 scale tiles (MXFP8/NVFP4).
+    `mma2_ABt(dst, a, b, c, scaleA, scaleB)`. -/
+def tcgen05MmaScaled {M K N : Nat} {inDtype accDtype scaleDtype : GpuFloat}
+    {inLayout : TileLayout} {accLayout : TileLayout}
+    (trans : MMATranspose)
+    (dst : TT accDtype M N) (a : ST inDtype M K inLayout) (b : ST inDtype N K accLayout)
+    (c : TT accDtype M N)
+    (scaleA : TT scaleDtype M K) (scaleB : TT scaleDtype N K)
+    : KernelM Unit := do
+  emit (.tcgen05MmaScaled trans dst.id a.id b.id c.id scaleA.id scaleB.id)
+
+/-- Commit tcgen05 results to the cluster-aware semaphore. -/
+def tcgen05Commit (sem : Semaphore) (clusterSize : Nat := 1) : KernelM Unit := do
+  emit (.tcgen05Commit sem.id clusterSize)
+
+/-! ## Cluster Operations -/
+
+/-- Read cluster CTA index along axis (0=x, 1=y, 2=z).
+    Returns which CTA this is within the cluster (e.g. 0 or 1 for 2-CTA). -/
+def clusterIdx (axis : Nat := 0) : KernelM (KVal UInt32) := do
+  let v ← freshVar
+  emit (.clusterIdx v axis)
+  pure ⟨v, "cluster_idx"⟩
+
+/-- Cluster-scoped TMA load: visible to all CTAs in the cluster. -/
+def clusterTmaLoad {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
+    (dst : ST dtype rows cols layout) (src : GPtr dtype)
+    (coordB coordD coordR coordC : KVal UInt64) (sem : Semaphore)
+    : KernelM Unit := do
+  emit (.clusterTmaLoad dst.id src.id coordB.id coordD.id coordR.id coordC.id sem.id)
+
+/-- Cluster-scoped TMA store: write from cluster scope. -/
+def clusterTmaStore {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
+    (dst : GPtr dtype) (src : ST dtype rows cols layout)
+    (coordB coordD coordR coordC : KVal UInt64)
+    : KernelM Unit := do
+  emit (.clusterTmaStore dst.id src.id coordB.id coordD.id coordR.id coordC.id)
+
+/-- Cluster barrier arrive. -/
+def clusterArrive (sem : Semaphore) : KernelM Unit := do
+  emit (.clusterArrive sem.id)
+
+/-- Cluster barrier wait. -/
+def clusterWait (sem : Semaphore) : KernelM Unit := do
+  emit (.clusterWait sem.id)
 
 /-! ## FlashAttention3 Warp Specialization Operations -/
 

@@ -42,6 +42,16 @@ structure SV (dtype : GpuFloat) (len : Nat) where
   id : VarId
   deriving Repr
 
+/-- Tensor memory tile (Blackwell SM100 TMEM) -/
+structure TT (dtype : GpuFloat) (rows cols : Nat) where
+  id : VarId
+  deriving Repr
+
+/-- TMEM allocation pool handle -/
+structure TMEMPool where
+  id : VarId
+  deriving Repr
+
 /-! ## Kernel Parameter Types
 
 These types represent kernel parameters as first-class Lean values.
@@ -81,6 +91,12 @@ def RV.varId {dtype : GpuFloat} {len : Nat} (v : RV dtype len) : VarId := v.id
 
 /-- Get VarId from shared vector -/
 def SV.varId {dtype : GpuFloat} {len : Nat} (v : SV dtype len) : VarId := v.id
+
+/-- Get VarId from tensor memory tile -/
+def TT.varId {dtype : GpuFloat} {rows cols : Nat} (t : TT dtype rows cols) : VarId := t.id
+
+/-- Get VarId from TMEM pool -/
+def TMEMPool.varId (p : TMEMPool) : VarId := p.id
 
 /-! ## Complex Number Types -/
 
