@@ -442,6 +442,62 @@ def forward {batch seq : UInt64}
   let gated : T #[batch, seq, qLen] := attnFlat * nn.sigmoid gateFlat
   linear3d gated m.o_proj
 
+/-- Forward pass with optional KV-cache update (for batch prefill). -/
+def forwardWithCache {batch seq : UInt64}
+    (cfg : Config)
+    (m : Qwen35Attention cfg)
+    (x : T #[batch, seq, cfg.hidden_size])
+    (cos : T #[seq, Config.rotaryHalfDim cfg])
+    (sin : T #[seq, Config.rotaryHalfDim cfg])
+    (cache : KVCache cfg batch)
+    : T #[batch, seq, cfg.hidden_size] × KVCache cfg batch :=
+  let qg : T #[batch, seq, cfg.num_attention_heads * cfg.head_dim * 2] := linear3d x m.q_proj
+  let qLen : UInt64 := cfg.num_attention_heads * cfg.head_dim
+  let (q, gateFlat) := splitQProjAndGate cfg qg
+
+  let kFlat : T #[batch, seq, cfg.num_key_value_heads * cfg.head_dim] := linear3d x m.k_proj
+  let vFlat : T #[batch, seq, cfg.num_key_value_heads * cfg.head_dim] := linear3d x m.v_proj
+
+  let k : T #[batch, seq, cfg.num_key_value_heads, cfg.head_dim] :=
+    reshape kFlat #[batch, seq, cfg.num_key_value_heads, cfg.head_dim]
+  let v : T #[batch, seq, cfg.num_key_value_heads, cfg.head_dim] :=
+    reshape vFlat #[batch, seq, cfg.num_key_value_heads, cfg.head_dim]
+
+  let q := applyHeadNorm m.q_norm q
+  let k := applyHeadNorm m.k_norm k
+
+  let q := applyRotaryPartial q cos sin
+  let k := applyRotaryPartial k cos sin
+
+  -- Update cache with full sequence
+  let kStore : T #[batch, cfg.num_key_value_heads, cache.maxLen, cfg.head_dim] :=
+    reshape cache.kStoreDyn #[batch, cfg.num_key_value_heads, cache.maxLen, cfg.head_dim]
+  let vStore : T #[batch, cfg.num_key_value_heads, cache.maxLen, cfg.head_dim] :=
+    reshape cache.vStoreDyn #[batch, cfg.num_key_value_heads, cache.maxLen, cfg.head_dim]
+
+  let kh_new := nn.transpose_for_attention k
+  let vh_new := nn.transpose_for_attention v
+
+  let kStore' := data.sliceScatter kStore 2 0 kh_new
+  let vStore' := data.sliceScatter vStore 2 0 vh_new
+
+  let cache' : KVCache cfg batch := { cache with
+    kStoreDyn := nn.eraseShape kStore'
+    vStoreDyn := nn.eraseShape vStore'
+    seq := seq
+  }
+
+  let qh : T #[batch, cfg.num_attention_heads, seq, cfg.head_dim] := nn.transpose_for_attention q
+  let kh : T #[batch, cfg.num_key_value_heads, seq, cfg.head_dim] := data.slice kStore' 2 0 seq
+  let vh : T #[batch, cfg.num_key_value_heads, seq, cfg.head_dim] := data.slice vStore' 2 0 seq
+  let attn : T #[batch, cfg.num_attention_heads, seq, cfg.head_dim] :=
+    nn.scaledDotProductAttentionGQA qh kh vh 0.0 true true
+
+  let attn : T #[batch, seq, cfg.num_attention_heads, cfg.head_dim] := nn.transpose_from_attention attn
+  let attnFlat : T #[batch, seq, qLen] := reshape attn #[batch, seq, qLen]
+  let gated : T #[batch, seq, qLen] := attnFlat * nn.sigmoid gateFlat
+  (linear3d gated m.o_proj, cache')
+
 def forwardMasked {batch seq : UInt64}
     (cfg : Config)
     (m : Qwen35Attention cfg)
@@ -840,6 +896,52 @@ def forward {batch seq : UInt64}
     | _, _ => h3
   residual2 + ffn
 
+/-- Forward pass with optional cache update (for batch prefill). -/
+def forwardWithCache {batch seq : UInt64}
+    (cfg : Config)
+    (layer : Qwen35Layer cfg)
+    (x : T #[batch, seq, cfg.hidden_size])
+    (cos : T #[seq, Config.rotaryHalfDim cfg])
+    (sin : T #[seq, Config.rotaryHalfDim cfg])
+    (cache : HybridCache cfg batch)
+    (layerIdx : Nat)
+    : T #[batch, seq, cfg.hidden_size] × HybridCache cfg batch :=
+  let residual1 := x
+  let h1 := layer.input_layernorm.forward3d x
+
+  let (mixed, cache') :=
+    match layer.layerType with
+    | .fullAttention =>
+      match layer.full_attn, cache.attnCaches[layerIdx]? with
+      | some a, some (some kv) =>
+        let (out, kv') := a.forwardWithCache cfg h1 cos sin kv
+        let c' := { cache with attnCaches := cache.attnCaches.modify layerIdx (fun _ => some kv') }
+        (out, c')
+      | _, _ => (h1, cache)
+    | .linearAttention =>
+      match layer.linear_attn with
+      | some l =>
+        let convOpt := (cache.convStates[layerIdx]?).bind id
+        let recOpt := (cache.recurrentStates[layerIdx]?).bind id
+        -- Batch prefill for linear attention just uses standard forward and updates state
+        let (out, conv', rec') := l.forward cfg h1 none convOpt recOpt false
+        let c' := { cache with
+          convStates := cache.convStates.modify layerIdx (fun _ => conv')
+          recurrentStates := cache.recurrentStates.modify layerIdx (fun _ => rec')
+        }
+        (out, c')
+      | none => (h1, cache)
+
+  let h2 := residual1 + mixed
+  let residual2 := h2
+  let h3 := layer.post_attention_layernorm.forward3d h2
+  let ffn :=
+    match layer.dense_mlp, layer.sparse_moe with
+    | some mlp, _ => mlp.forward h3
+    | _, some moe => moe.forward cfg h3
+    | _, _ => h3
+  (residual2 + ffn, cache')
+
 def forwardStep {batch : UInt64}
     (cfg : Config)
     (layer : Qwen35Layer cfg)
@@ -965,6 +1067,26 @@ def forward {batch seq : UInt64}
       x0
   m.norm.forward3d h
 
+def forwardWithCache {batch seq : UInt64}
+    (cfg : Config)
+    (m : Qwen35Model cfg)
+    (x0 : T #[batch, seq, cfg.hidden_size])
+    (cos : T #[seq, Config.rotaryHalfDim cfg])
+    (sin : T #[seq, Config.rotaryHalfDim cfg])
+    (cache : HybridCache cfg batch)
+    : IO (T #[batch, seq, cfg.hidden_size] × HybridCache cfg batch) := do
+  let mut h := x0
+  let mut c := cache
+  for i in [:m.layers.size] do
+    let layer ← match m.layers[i]? with
+      | some l => pure l
+      | none => throw <| IO.userError s!"missing layer at index {i}"
+    let (hNext, cNext) := layer.forwardWithCache cfg h cos sin c i
+    h := hNext
+    c := cNext
+  return (m.norm.forward3d h, c)
+
+
 end Qwen35Model
 
 /-- Causal-LM output container. -/
@@ -1025,6 +1147,25 @@ private def precomputeDecodeRotary {maxLen : UInt64}
     cfg.rope_theta
     device
 
+/-- Single-pass prompt prefill for KV-cache. -/
+private def prefillCachesFromEmbeds {batch seq maxLen : UInt64}
+    (cfg : Config)
+    (m : Qwen35ForCausalLM cfg)
+    (cosAll : T #[maxLen, Config.rotaryHalfDim cfg])
+    (sinAll : T #[maxLen, Config.rotaryHalfDim cfg])
+    (inputsEmbeds : T #[batch, seq, cfg.hidden_size])
+    (cache : HybridCache cfg batch)
+    : IO (T #[batch, cfg.vocab_size] × HybridCache cfg batch) := do
+  let cos : T #[seq, Config.rotaryHalfDim cfg] := data.slice cosAll 0 0 seq
+  let sin : T #[seq, Config.rotaryHalfDim cfg] := data.slice sinAll 0 0 seq
+
+  let (hidden, cache') ← Qwen35Model.forwardWithCache cfg m.model inputsEmbeds cos sin cache
+
+  let lastHidden : T #[batch, 1, cfg.hidden_size] := data.slice hidden 1 (seq - 1) 1
+  let logits3 : T #[batch, 1, cfg.vocab_size] := linear3d lastHidden m.lmHead
+  let logits : T #[batch, cfg.vocab_size] := reshape logits3 #[batch, cfg.vocab_size]
+  pure (logits, cache')
+
 private def decodeStepFromEmbedWithCache {batch maxLen : UInt64}
     (cfg : Config)
     (m : Qwen35ForCausalLM cfg)
@@ -1053,22 +1194,6 @@ private def decodeStepFromEmbedWithCache {batch maxLen : UInt64}
   let logits3 : T #[batch, 1, cfg.vocab_size] := linear3d hiddenNorm m.lmHead
   let logits2 : T #[batch, cfg.vocab_size] := reshape logits3 #[batch, cfg.vocab_size]
   pure (logits2, cache')
-
-private partial def prefillCachesFromEmbeds {batch seq maxLen : UInt64}
-    (cfg : Config)
-    (m : Qwen35ForCausalLM cfg)
-    (cosAll : T #[maxLen, Config.rotaryHalfDim cfg])
-    (sinAll : T #[maxLen, Config.rotaryHalfDim cfg])
-    (inputsEmbeds : T #[batch, seq, cfg.hidden_size])
-    (cache : HybridCache cfg batch)
-    (position : Nat)
-    : IO (T #[batch, cfg.vocab_size] × HybridCache cfg batch) := do
-  let tok : T #[batch, 1, cfg.hidden_size] := data.slice inputsEmbeds 1 position.toUInt64 1
-  let (logits, cache') ← decodeStepFromEmbedWithCache cfg m cosAll sinAll tok position.toUInt64 cache
-  if position + 1 >= seq.toNat then
-    pure (logits, cache')
-  else
-    prefillCachesFromEmbeds cfg m cosAll sinAll inputsEmbeds cache' (position + 1)
 
 inductive SamplingStrategy where
   | greedy
@@ -1281,7 +1406,7 @@ private def generateFromEmbedsCore {batch seq : UInt64}
   let cache := Qwen35Model.initCache cfg m.model maxLen inputsEmbeds.device
 
   -- 1) Prefill caches and get last prompt logits
-  let (logits, caches) ← prefillCachesFromEmbeds cfg m cosAll sinAll inputsEmbeds cache 0
+  let (logits, caches) ← prefillCachesFromEmbeds cfg m cosAll sinAll inputsEmbeds cache
 
   -- 2) Sample first new token
   let nextTok ← sampleFromLogits logits strategy
@@ -1292,10 +1417,13 @@ private def generateFromEmbedsCore {batch seq : UInt64}
 
   -- 4) Start incremental decode loop
   let finished0 : T #[batch] := falseMask (n := batch) inputIds.device
-  decodeLoopCached
+  let finalIds ← decodeLoopCached
     (maxLen := maxLen)
     cfg m cosAll sinAll strategy eosTokenIds finished0 (maxNewTokens.toNat - 1)
     caches logits onStep 1 (nn.cat inputIds (reshape nextTok #[batch, 1]) 1)
+
+  pure finalIds
+
 
 /-- Exact generation from explicit input embeddings.
     Useful for multimodal wrappers that inject vision features into token embeddings. -/
