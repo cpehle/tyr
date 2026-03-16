@@ -15,6 +15,11 @@ import Tyr.GPU.Codegen.EmitNew
 import Tyr.GPU.Codegen.ArchConfig
 import Tyr.GPU.Codegen.Arch
 import Tyr.GPU.Codegen.Attribute
+import Tyr.GPU.Codegen.Pipeline
+import Tyr.GPU.Codegen.PersistentKernel
+import Tyr.GPU.Codegen.KernelTemplate
+import Tyr.GPU.Codegen.Launch
+import Tyr.GPU.Codegen.TileDispatch
 
 namespace Tyr.GPU.Codegen.Tests
 
@@ -732,5 +737,250 @@ __global__ void tmem_pool(/* TODO: params */) {
 -/
 #guard_msgs in
 #eval IO.println (generateKernel tmemPoolKernel)
+
+/-! ## Pipeline Tests -/
+
+/-- 3-stage ring buffer emits 3 shared tiles + 3 semaphores -/
+def ringBuffer3StageKernel : Kernel :=
+  buildKernelM "ring_buffer_3" .SM90 #[] do
+    let _rb ← allocRingBuffer .BFloat16 64 64 .Row 3
+
+/--
+info: #include <kittens.cuh>
+using namespace kittens;
+
+#if defined(KITTENS_HOPPER)
+__global__ void ring_buffer_3(/* TODO: params */) {
+  __shared__ st<bf16, 64, 64> v0;
+  __shared__ semaphore v1;
+  __shared__ st<bf16, 64, 64> v2;
+  __shared__ semaphore v3;
+  __shared__ st<bf16, 64, 64> v4;
+  __shared__ semaphore v5;
+  init_semaphore(v1, 1);
+  init_semaphore(v3, 0);
+  init_semaphore(v5, 0);
+}
+#endif
+-/
+#guard_msgs in
+#eval IO.println (generateKernel ringBuffer3StageKernel)
+
+/-- Warp-specialized pipeline emits ifWarpGroup blocks -/
+def warpSpecPipelineKernel : Kernel :=
+  buildKernelM "warp_spec_pipeline" .SM90 #[] do
+    pipelinedRingLoop { numIters := 4, depth := 2, warpSpecialized := true }
+      (fun _ => sync)
+      (fun _ => sync 1)
+
+/--
+info: #include <kittens.cuh>
+using namespace kittens;
+
+#if defined(KITTENS_HOPPER)
+__global__ void warp_spec_pipeline(/* TODO: params */) {
+  // Pipeline prologue: fill 2 stages
+  if (kittens::warpgroup::groupid() == 0) {
+    warp::sync(0);
+  }
+  if (kittens::warpgroup::groupid() == 0) {
+    warp::sync(0);
+  }
+  warp::sync(0);
+  // Pipeline main loop: 2 iterations
+  for (int v0 = 0; v0 < 2; v0++) {
+    if (kittens::warpgroup::groupid() == 0) {
+      warp::sync(0);
+    }
+    if (kittens::warpgroup::groupid() == 1) {
+      warp::sync(1);
+    }
+    warp::sync(0);
+  }
+  // Pipeline epilogue: drain 2 stages
+  if (kittens::warpgroup::groupid() == 1) {
+    warp::sync(1);
+  }
+  warp::sync(0);
+  if (kittens::warpgroup::groupid() == 1) {
+    warp::sync(1);
+  }
+  warp::sync(0);
+}
+#endif
+-/
+#guard_msgs in
+#eval IO.println (generateKernel warpSpecPipelineKernel)
+
+/-! ## Persistent Kernel Tests -/
+
+/-- Fixed stride emits for loop with gridDim stride -/
+def fixedStrideKernel : Kernel :=
+  buildKernelM "fixed_stride" .SM90 #[
+    { name := "totalWork", dtype := .Float32, isPointer := false, scalarTy := .UInt32 }
+  ] do
+    let totalWork : KVal UInt32 := ⟨⟨0⟩, "totalWork"⟩
+    persistentLoop { mode := .fixedStride } totalWork.id fun _wi => do
+      comment "work item body"
+
+/--
+info: #include <kittens.cuh>
+using namespace kittens;
+
+#if defined(KITTENS_HOPPER)
+__global__ void fixed_stride(uint32_t v0) {
+  // Persistent loop (fixed stride)
+  int v1 = blockIdx.x;
+  int v3 = 1;
+  for (int v2 = v1; v2 < v0; v2 += gridDim.x) {
+  // work item body
+  }
+}
+#endif
+-/
+#guard_msgs in
+#eval IO.println (generateKernel fixedStrideKernel)
+
+/-- workIdToSwizzledCoord emits div/mod scalar ops -/
+def swizzleCoordKernel : Kernel :=
+  buildKernelM "swizzle_coord" .SM90 #[] do
+    let wid ← freshVar
+    emit (.constInt wid 42)
+    let ncols ← freshVar
+    emit (.constInt ncols 16)
+    let (_row, _col) ← workIdToSwizzledCoord wid ncols 8
+
+/--
+info: #include <kittens.cuh>
+using namespace kittens;
+
+#if defined(KITTENS_HOPPER)
+__global__ void swizzle_coord(/* TODO: params */) {
+  int v0 = 42;
+  int v1 = 16;
+  // L2 swizzle (group size = 8)
+  int v2 = 8;
+  int v4 = 7;
+  auto v3 = v1 + v4;
+  auto v5 = v3 / v2;
+  auto v6 = v0 / v2;
+  auto v7 = v0 % v2;
+  auto v8 = v6 / v5;
+  auto v9 = v6 % v5;
+  auto v10 = v9 * v2;
+  auto v11 = v10 + v7;
+}
+#endif
+-/
+#guard_msgs in
+#eval IO.println (generateKernel swizzleCoordKernel)
+
+/-! ## KernelTemplate Tests -/
+
+/-- 2-phase template emits both phases with barrier between -/
+def twoPhaseKernel : Kernel :=
+  let tmpl : KernelTemplate := {
+    name := "two_phase"
+    arch := .SM90
+    phases := #[
+      { name := "phase1", emit := do
+          let _ ← allocRT .BFloat16 64 64
+          pure () },
+      { name := "phase2", emit := do
+          let _ ← allocRT .Float32 64 64
+          pure () }
+    ]
+  }
+  tmpl.build
+
+/--
+info: #include <kittens.cuh>
+using namespace kittens;
+
+#if defined(KITTENS_HOPPER)
+__global__ void two_phase(/* TODO: params */) {
+  // === Phase: phase1 ===
+  rt<bf16, 64, 64, row_l> v0;
+  warp::sync(0);
+  // === Phase: phase2 ===
+  rt<float, 64, 64, row_l> v1;
+}
+#endif
+-/
+#guard_msgs in
+#eval IO.println (generateKernel twoPhaseKernel)
+
+/-- FusedGemm emits GEMM loop + epilogue callback -/
+def fusedGemmTestKernel : Kernel :=
+  buildKernelM "fused_gemm" .SM90 #[] do
+    let lhs ← allocST .BFloat16 64 64
+    let rhs ← allocST .BFloat16 64 64 .Col
+    fusedGemm { tileM := 64, tileN := 64, tileK := 64, kBlocks := 4 } lhs rhs fun accum => do
+      let out ← allocRT .BFloat16 64 64
+      convert out accum
+
+/--
+info: #include <kittens.cuh>
+using namespace kittens;
+
+#if defined(KITTENS_HOPPER)
+__global__ void fused_gemm(/* TODO: params */) {
+  __shared__ st<bf16, 64, 64> v0;
+  __shared__ st<bf16, 64, 64> v1;
+  // Fused GEMM: 64x64x64, 4 K-blocks
+  rt<float, 64, 64, row_l> v2;
+  warp::zero(v2);
+  rt<bf16, 64, 64, row_l> v3;
+  rt<bf16, 64, 64, col_l> v4;
+  for (int v5 = 0; v5 < 4; v5++) {
+    warp::load(v3, v0);
+    warp::load(v4, v1);
+    warp::mma_AB(v2, v3, v4, v2);
+    warp::sync(0);
+  }
+  // GEMM epilogue
+  rt<bf16, 64, 64, row_l> v6;
+  warp::copy(v6, v2);
+}
+#endif
+-/
+#guard_msgs in
+#eval IO.println (generateKernel fusedGemmTestKernel)
+
+/-! ## TileDispatch Tests -/
+
+-- selectVariant picks correct variant based on problem size
+#guard (selectVariant { name := "test", variants := #[
+  { name := "large", tileM := 128, tileN := 128, minM := 512, minN := 0 },
+  { name := "small", tileM := 64, tileN := 64, minM := 0, minN := 0 }
+] } 1024 1024).name = "large"
+
+#guard (selectVariant { name := "test", variants := #[
+  { name := "large", tileM := 128, tileN := 128, minM := 512, minN := 0 },
+  { name := "small", tileM := 64, tileN := 64, minM := 0, minN := 0 }
+] } 64 64).name = "small"
+
+-- computeGridDims returns correct grid
+#guard (computeGridDims 4096 4096 64 64).x = 64
+#guard (computeGridDims 4096 4096 64 64).y = 64
+#guard (computeGridDims 1000 2000 64 128).x = 16
+#guard (computeGridDims 1000 2000 64 128).y = 16
+
+/-! ## Launch Tests -/
+
+-- computeLaunchConfig returns correct grid/block for problem sizes
+private def dummyKernelForLaunch : Kernel :=
+  { name := "dummy", arch := .SM90, params := #[], body := #[], sharedMemBytes := 49152 }
+
+#guard (computeLaunchConfig dummyKernelForLaunch 4096 4096 64 64).grid.x = 64
+#guard (computeLaunchConfig dummyKernelForLaunch 4096 4096 64 64).grid.y = 64
+#guard (computeLaunchConfig dummyKernelForLaunch 4096 4096 64 64).sharedMemBytes = 49152
+
+-- Persistent launch uses SM count
+#guard (computePersistentLaunchConfigForArch dummyKernelForLaunch .SM90 2).grid.x = 264
+#guard (computePersistentLaunchConfigForArch dummyKernelForLaunch .SM90 2).cooperative = true
+
+-- Batched launch includes z dimension
+#guard (computeBatchedLaunchConfig dummyKernelForLaunch 32 4096 4096 64 64).grid.z = 32
 
 end Tyr.GPU.Codegen.Tests
