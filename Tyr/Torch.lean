@@ -107,7 +107,7 @@ instance {s1 s2 : Shape} : HMul (T s1) (T s2) (T s2) where
 
 /-- Stack an array of 1D tensors into a 2D tensor -/
 @[extern "lean_torch_stack_1d"]
-opaque stack1d {n k : UInt64} (tensors : Array (T #[n])) (dim : Int64 := 0) : T #[k, n]
+opaque stack1d {n k : UInt64} (tensors : Array (T #[n])) (dim : Int64 := 0) : T (if dim == 0 then #[k, n] else #[n, k])
 
 /-- Unbind a tensor along a dimension into an array of tensors -/
 @[extern "lean_torch_unbind"]
