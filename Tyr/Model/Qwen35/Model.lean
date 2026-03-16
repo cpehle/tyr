@@ -1408,19 +1408,12 @@ private def generateFromEmbedsCore {batch seq : UInt64}
   -- 1) Prefill caches and get last prompt logits
   let (logits, caches) ← prefillCachesFromEmbeds cfg m cosAll sinAll inputsEmbeds cache
 
-  -- 2) Sample first new token
-  let nextTok ← sampleFromLogits logits strategy
-
-  -- 3) Call streaming callback for the first generated token if present
-  if let some cb := onStep then
-    cb 0 nextTok
-
-  -- 4) Start incremental decode loop
+  -- 2) Start incremental decode loop
   let finished0 : T #[batch] := falseMask (n := batch) inputIds.device
   let finalIds ← decodeLoopCached
     (maxLen := maxLen)
-    cfg m cosAll sinAll strategy eosTokenIds finished0 (maxNewTokens.toNat - 1)
-    caches logits onStep 1 (nn.cat inputIds (reshape nextTok #[batch, 1]) 1)
+    cfg m cosAll sinAll strategy eosTokenIds finished0 maxNewTokens.toNat
+    caches logits onStep 0 inputIds
 
   pure finalIds
 

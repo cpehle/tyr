@@ -348,11 +348,13 @@ private def runTextBatches
 
     if args.stream && chunk.size == 1 then
       IO.println ""
-    let decoded ← decodeGeneratedBatch tok promptLens outIds
-    if args.debugIds then
-      let generatedIds ← generatedIdsFromBatch promptLens outIds
-      printGeneratedIds start generatedIds (singleOnly := prompts.size == 1)
-    printDecodedBatch start decoded (singleOnly := prompts.size == 1)
+
+    if !args.stream then
+      let decoded ← decodeGeneratedBatch tok promptLens outIds
+      if args.debugIds then
+        let generatedIds ← generatedIdsFromBatch promptLens outIds
+        printGeneratedIds start generatedIds (singleOnly := prompts.size == 1)
+      printDecodedBatch start decoded (singleOnly := prompts.size == 1)
     start := stop
 
 private def runMultimodalBatches
@@ -402,11 +404,13 @@ private def runMultimodalBatches
 
     if args.stream && chunk.size == 1 then
       IO.println ""
-    let decoded ← decodeGeneratedBatch tok promptLens outIds
-    if args.debugIds then
-      let generatedIds ← generatedIdsFromBatch promptLens outIds
-      printGeneratedIds start generatedIds (singleOnly := prompts.size == 1)
-    printDecodedBatch start decoded (singleOnly := prompts.size == 1)
+
+    if !args.stream then
+      let decoded ← decodeGeneratedBatch tok promptLens outIds
+      if args.debugIds then
+        let generatedIds ← generatedIdsFromBatch promptLens outIds
+        printGeneratedIds start generatedIds (singleOnly := prompts.size == 1)
+      printDecodedBatch start decoded (singleOnly := prompts.size == 1)
     start := stop
 
 def runMain (argv : List String) : IO UInt32 := do
