@@ -318,70 +318,84 @@ def runMain (argv : List String) : IO UInt32 := do
   try
     match args.useCase with
     | .conversation =>
-        let mut ring := mkAudioRing ringCapSamples
-        let mut tstate : RealtimeTranscriptState := { rollbackChars := args.rollbackChars }
+        -- Accumulate full utterance audio (not a sliding window) so early
+        -- words are never lost.  Re-transcribe the full buffer periodically.
+        let preRollSamples := toSamples 0.5
+        let transcribeInterval := toSamples 2.0
+        let mut utteranceAudio : Array Float := #[]
         let mut prevSimple := ""
         let mut activeSpeechSamples := 0
         let mut activeSilenceSamples := 0
         let mut conversationActive := false
         let mut seenSpeech := false
+        let mut lastTranscribeSize : Nat := 0
         for _ in [:steps] do
           let pcm ← Tyr.Audio.AppleInput.read hopSamples.toUInt64 1500
-          if !pcm.isEmpty then
-            ring := ring.pushChunk pcm
+          if pcm.isEmpty then continue
 
           let frameRms := rms pcm
+          -- Always accumulate audio.
+          utteranceAudio := utteranceAudio ++ pcm
+
           if frameRms >= args.speechRmsThreshold then
             activeSpeechSamples := activeSpeechSamples + pcm.size
             activeSilenceSamples := 0
             if !conversationActive && activeSpeechSamples >= minSpeechSamples then
               conversationActive := true
               seenSpeech := true
-              -- Drop any pre-speech hypotheses once speech has truly started.
-              tstate := { rollbackChars := args.rollbackChars }
               prevSimple := ""
-          else if conversationActive then
-            activeSilenceSamples := activeSilenceSamples + pcm.size
+          else
+            if conversationActive then
+              activeSilenceSamples := activeSilenceSamples + pcm.size
+            else
+              -- Not yet active — slide pre-roll window.
+              if utteranceAudio.size > preRollSamples then
+                utteranceAudio := utteranceAudio.extract (utteranceAudio.size - preRollSamples) utteranceAudio.size
 
-          if conversationActive && ring.size >= chunkSamples then
-            let window := ring.tail chunkSamples
-            let (tstate', delta) ← decodeOverlapStep
-              model
-              tok
-              pre
-              window
-              tstate
-              (context := args.context)
-              (language := args.language)
+          -- Periodic transcription on the full accumulated audio.
+          let newSinceTranscribe := utteranceAudio.size - lastTranscribeSize
+          if conversationActive && newSinceTranscribe >= transcribeInterval && utteranceAudio.size > 0 then
+            lastTranscribeSize := utteranceAudio.size
+            let out ← model.transcribeWaveform
+              tok pre utteranceAudio
+              (context := args.context) (language := args.language)
               (maxNewTokens := maxNewTokensStream)
-            tstate := tstate'
-            if args.simpleOutput then
-              if delta.fullText != prevSimple then
-                IO.println s!"TEXT: {delta.fullText}"
-                prevSimple := delta.fullText
-            else if args.emitPartials && delta.fullText != prevSimple then
-              IO.println s!"PARTIAL= {delta.fullText}"
-              prevSimple := delta.fullText
+            let text := trimWhitespace out.text
+            if !text.isEmpty && text != prevSimple then
+              prevSimple := text
+              if args.simpleOutput then
+                IO.println s!"TEXT: {text}"
+              else if args.emitPartials then
+                IO.println s!"PARTIAL= {text}"
+              if args.prettyUI && !args.simpleOutput then
+                uiPrintInline s!"LIVE: {previewTailText text}"
 
+          -- Utterance endpoint: silence exceeded threshold.
           if conversationActive && activeSilenceSamples >= silenceSamples then
-            let (tstateFinal, deltaFinal) := finalizeTranscriptState tstate
-            tstate := tstateFinal
-            let finalText := trimWhitespace deltaFinal.fullText
+            -- Final transcription on the full utterance.
+            let out ← model.transcribeWaveform
+              tok pre utteranceAudio
+              (context := args.context) (language := args.language)
+              (maxNewTokens := maxNewTokensStream)
+            let finalText := trimWhitespace out.text
             if !finalText.isEmpty then
               if args.prettyUI then
                 uiClearInline
               IO.println s!"UTTERANCE: {finalText}"
-            ring := mkAudioRing ringCapSamples
-            tstate := { rollbackChars := args.rollbackChars }
+            utteranceAudio := #[]
             prevSimple := ""
             activeSpeechSamples := 0
             activeSilenceSamples := 0
             conversationActive := false
             seenSpeech := false
+            lastTranscribeSize := 0
 
         if seenSpeech || conversationActive then
-          let (_tstateFinal, deltaFinal) := finalizeTranscriptState tstate
-          let finalText := trimWhitespace deltaFinal.fullText
+          let out ← model.transcribeWaveform
+            tok pre utteranceAudio
+            (context := args.context) (language := args.language)
+            (maxNewTokens := maxNewTokensStream)
+          let finalText := trimWhitespace out.text
           if !finalText.isEmpty then
             if args.prettyUI then
               uiClearInline

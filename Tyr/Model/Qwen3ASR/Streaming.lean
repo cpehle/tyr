@@ -16,6 +16,15 @@ namespace torch.qwen3asr
 
 private def asrTextTag : String := "<asr_text>"
 private def languagePrefix : String := "language "
+
+/-- Strip special/control tokens that may leak into decoded ASR text. -/
+private def stripSpecialTokens (s : String) : String :=
+  let s := s.replace "<|im_end|>" ""
+  let s := s.replace "<|im_start|>" ""
+  let s := s.replace "<|endoftext|>" ""
+  let s := s.replace "<asr_text>" ""
+  let s := s.replace "<|asr_text|>" ""
+  s.trimAscii.toString
 private def sampleRate16k : Float := 16000.0
 
 inductive StreamingDecodeMode where
@@ -559,16 +568,16 @@ def parseAsrOutput (raw : String) (userLanguage : Option String := none) : Strin
     | some forced =>
       let f := forced.trimAscii.toString
       if f.isEmpty then
-        ("", s)
+        ("", stripSpecialTokens s)
       else
-        (f, s)
+        (f, stripSpecialTokens s)
     | none =>
       match splitFirst s asrTextTag with
-      | none => ("", s.trimAscii.toString)
+      | none => ("", stripSpecialTokens s)
       | some (metaPart, textPart) =>
         let metaLower := toLower metaPart
         if containsSubstr metaLower "language none" then
-          let t := textPart.trimAscii.toString
+          let t := stripSpecialTokens textPart
           if t.isEmpty then
             ("", "")
           else
@@ -587,7 +596,7 @@ def parseAsrOutput (raw : String) (userLanguage : Option String := none) : Strin
                       match normalizeLanguageName val with
                       | .ok ln => lang := ln
                       | .error _ => lang := val
-            (lang, textPart.trimAscii.toString)
+            (lang, stripSpecialTokens textPart)
 
 private def joinArrayWith (sep : String) (xs : Array String) : String := Id.run do
   if xs.isEmpty then
