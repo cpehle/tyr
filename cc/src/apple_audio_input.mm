@@ -1,11 +1,15 @@
 #include <lean/lean.h>
 
+#include <cmath>
 #include <deque>
 #include <mutex>
 #include <thread>
 #include <chrono>
 #include <string>
 #include <atomic>
+
+// Defined in float_buffer.cpp — creates a FloatBuffer from raw float data.
+extern "C" lean_object* lean_float_buffer_from_raw(const float* src, size_t n);
 
 #ifdef __APPLE__
 #include <AudioToolbox/AudioToolbox.h>
@@ -180,11 +184,56 @@ lean_object* lean_tyr_audio_input_read(
   return lean_io_result_mk_ok(out);
 }
 
+lean_object* lean_tyr_audio_input_read_buffer(
+    uint64_t max_samples,
+    uint64_t block_ms,
+    lean_object* /*w*/) {
+  if (max_samples == 0) {
+    return lean_io_result_mk_ok(lean_float_buffer_from_raw(nullptr, 0));
+  }
+
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(block_ms);
+  while (true) {
+    {
+      std::lock_guard<std::mutex> lock(g_audio_mu);
+      if (!g_audio_fifo.empty() || !g_running.load(std::memory_order_acquire)) break;
+    }
+    if (block_ms == 0 || std::chrono::steady_clock::now() >= deadline) break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(5));
+  }
+
+  // Drain from FIFO into a temporary contiguous float buffer, then wrap as FloatBuffer.
+  std::lock_guard<std::mutex> lock(g_audio_mu);
+  size_t n = std::min(static_cast<size_t>(max_samples), g_audio_fifo.size());
+  if (n == 0) {
+    return lean_io_result_mk_ok(lean_float_buffer_from_raw(nullptr, 0));
+  }
+  auto* tmp = static_cast<float*>(std::malloc(sizeof(float) * n));
+  for (size_t i = 0; i < n; ++i) {
+    tmp[i] = g_audio_fifo.front();
+    g_audio_fifo.pop_front();
+  }
+  lean_object* fb = lean_float_buffer_from_raw(tmp, n);
+  std::free(tmp);
+  return lean_io_result_mk_ok(fb);
+}
+
 lean_object* lean_tyr_audio_input_stop(lean_object* /*w*/) {
   stop_queue();
   std::lock_guard<std::mutex> lock(g_audio_mu);
   g_audio_fifo.clear();
   return lean_io_result_mk_ok(lean_box(0));
+}
+
+lean_object* lean_tyr_audio_rms(b_lean_obj_arg arr, lean_object* /*w*/) {
+  size_t n = lean_array_size(arr);
+  if (n == 0) return lean_io_result_mk_ok(lean_box_float(0.0));
+  double sum_sq = 0.0;
+  for (size_t i = 0; i < n; ++i) {
+    double x = lean_unbox_float(lean_array_uget(arr, i));
+    sum_sq += x * x;
+  }
+  return lean_io_result_mk_ok(lean_box_float(std::sqrt(sum_sq / static_cast<double>(n))));
 }
 
 } // extern "C"
@@ -202,8 +251,23 @@ lean_object* lean_tyr_audio_input_read(uint64_t, uint64_t, lean_object* /*w*/) {
   return lean_io_result_mk_ok(lean_mk_empty_array());
 }
 
+lean_object* lean_tyr_audio_input_read_buffer(uint64_t, uint64_t, lean_object* /*w*/) {
+  return lean_io_result_mk_ok(lean_float_buffer_from_raw(nullptr, 0));
+}
+
 lean_object* lean_tyr_audio_input_stop(lean_object* /*w*/) {
   return lean_io_result_mk_ok(lean_box(0));
+}
+
+lean_object* lean_tyr_audio_rms(b_lean_obj_arg arr, lean_object* /*w*/) {
+  size_t n = lean_array_size(arr);
+  if (n == 0) return lean_io_result_mk_ok(lean_box_float(0.0));
+  double sum_sq = 0.0;
+  for (size_t i = 0; i < n; ++i) {
+    double x = lean_unbox_float(lean_array_uget(arr, i));
+    sum_sq += x * x;
+  }
+  return lean_io_result_mk_ok(lean_box_float(std::sqrt(sum_sq / static_cast<double>(n))));
 }
 
 } // extern "C"

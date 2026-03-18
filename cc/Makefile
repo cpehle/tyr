@@ -111,11 +111,13 @@ SRCS := \
 	tyr_polar.cpp\
 	tyr_media_stub.cpp\
 	tyr_parquet.cpp\
-	tyr_execution.cpp
+	tyr_execution.cpp\
+	float_buffer.cpp
 MM_SRCS :=
 ifeq ($(UNAME_S),Darwin)
 MM_SRCS += apple_vl_processor.mm
 MM_SRCS += apple_audio_input.mm
+MM_SRCS += apple_audio_output.mm
 APPLE_FRAMEWORK_FLAGS := \
 	-framework Foundation \
 	-framework CoreFoundation \
@@ -125,7 +127,8 @@ APPLE_FRAMEWORK_FLAGS := \
 	-framework CoreMedia \
 	-framework CoreVideo \
 	-framework VideoToolbox \
-	-framework Accelerate
+	-framework Accelerate \
+	-framework AudioToolbox
 else
 APPLE_FRAMEWORK_FLAGS :=
 endif
