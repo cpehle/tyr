@@ -1214,18 +1214,17 @@ def loadFromPretrainedDir (modelDir : String) : IO WhisperBundle := do
   let model ← WhisperForConditionalGeneration.loadSharded modelDir cfg
   pure { cfg, model, tok, preprocessor }
 
-def transcribeWav
+private def transcribeWavCore
     {cfg : WhisperConfig}
     (model : WhisperForConditionalGeneration cfg)
     (tok : tokenizer.qwen3.QwenTokenizer)
     (pre : PreprocessorConfig)
-    (wavPath : String)
-    (language : String := "en")
-    (maxNewTokens : UInt64 := 128)
-    (noTimestamps : Bool := true)
-    (decodeOpts : WhisperDecodeOptions := {})
+    (wav16k : Array Float)
+    (language : String)
+    (maxNewTokens : UInt64)
+    (noTimestamps : Bool)
+    (decodeOpts : WhisperDecodeOptions)
     : IO WhisperTranscription := do
-  let wav16k ← normalizeAudioTo16kFromWav wavPath
   let frontendDevice := model.model.decoderTokenEmbedding.device
   let basePrompt := buildPromptIds cfg tok language noTimestamps
   let rules := buildDecodeTokenRules tok cfg noTimestamps
@@ -1411,5 +1410,32 @@ def transcribeWav
     text := finalText
     tokenIds := allTokenIds
   }
+
+def transcribeWaveform16k
+    {cfg : WhisperConfig}
+    (model : WhisperForConditionalGeneration cfg)
+    (tok : tokenizer.qwen3.QwenTokenizer)
+    (pre : PreprocessorConfig)
+    (wav16k : Array Float)
+    (language : String := "en")
+    (maxNewTokens : UInt64 := 128)
+    (noTimestamps : Bool := true)
+    (decodeOpts : WhisperDecodeOptions := {})
+    : IO WhisperTranscription :=
+  transcribeWavCore model tok pre wav16k language maxNewTokens noTimestamps decodeOpts
+
+def transcribeWav
+    {cfg : WhisperConfig}
+    (model : WhisperForConditionalGeneration cfg)
+    (tok : tokenizer.qwen3.QwenTokenizer)
+    (pre : PreprocessorConfig)
+    (wavPath : String)
+    (language : String := "en")
+    (maxNewTokens : UInt64 := 128)
+    (noTimestamps : Bool := true)
+    (decodeOpts : WhisperDecodeOptions := {})
+    : IO WhisperTranscription := do
+  let wav16k ← normalizeAudioTo16kFromWav wavPath
+  transcribeWavCore model tok pre wav16k language maxNewTokens noTimestamps decodeOpts
 
 end torch.whisper

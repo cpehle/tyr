@@ -425,6 +425,18 @@ lean_exe WhisperTranscribe where
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
+/-- Interactive Whisper voice mode with microphone input and silence detection. -/
+lean_exe WhisperVoiceMode where
+  root := `Examples.Whisper.VoiceMode
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
+/-- Isolated test: in-memory Whisper transcription (no WAV round-trip). -/
+lean_exe WhisperTranscribeInMem where
+  root := `Examples.Whisper.TranscribeInMem
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
 /-- Qwen3.5 model loader/generation demo with HF repo-id resolution. -/
 lean_exe Qwen35RunHF where
   root := `Examples.Qwen35.RunHF
