@@ -14,6 +14,7 @@ safetensors_type_provider "Tests/fixtures/safetensors/single.safetensors" as Sin
 safetensors_type_provider "Tests/fixtures/safetensors/sharded" as ShardedSafe
 safetensors_type_provider "Tests/fixtures/safetensors/indexed.safetensors" as IndexedSafe
 safetensors_type_provider "Tests/fixtures/safetensors/indexed_dir" as IndexedDirSafe
+safetensors_type_provider "Tests/fixtures/safetensors/provider_errors/nonuniform.safetensors" as NonUniformSafe
 
 private def writeBinCopy (src dst : String) : IO Unit := do
   let bytes ← IO.FS.readBinFile src
@@ -142,6 +143,9 @@ def testSafeTensorsTypeProviderSingle : IO Unit := do
   let weights ← SingleSafe.loadAll
   LeanTest.assertTrue (weights.linear.weight.runtimeShape == #[2, 3])
     "hierarchical aggregate typed record should expose nested typed tensor fields"
+  let linear ← SingleSafe.linear.load
+  LeanTest.assertTrue (linear.weight.runtimeShape == #[2, 3])
+    "hierarchical namespace loader should expose subtree load"
 
 @[test]
 def testSafeTensorsTypeProviderSharded : IO Unit := do
@@ -163,16 +167,25 @@ def testSafeTensorsTypeProviderSharded : IO Unit := do
     "hierarchical aggregate typed record should expose nested embed tensor"
   LeanTest.assertTrue (weights.proj.bias.runtimeShape == #[3])
     "hierarchical aggregate typed record should expose nested bias tensor"
+  let embed ← ShardedSafe.embed.load
+  LeanTest.assertTrue (embed.weight.runtimeShape == #[2, 2])
+    "hierarchical namespace loader should work for sharded subtree"
 
 @[test]
 def testSafeTensorsTypeProviderIndexedHierarchy : IO Unit := do
   LeanTest.assertEqual IndexedSafe.tensorCount 2 "indexed fixture should have two tensors"
   let weights ← IndexedSafe.loadAll
   LeanTest.assertEqual weights.layers.size 2 "numeric path segments should produce an indexed collection"
-  LeanTest.assertTrue (weights.layers[0]!.weight.runtimeShape == #[2])
+  let some layer0 := weights.layers[0]?
+    | throw <| IO.userError "expected first indexed layer"
+  let some layer1 := weights.layers[1]?
+    | throw <| IO.userError "expected second indexed layer"
+  LeanTest.assertTrue (layer0.weight.runtimeShape == #[2])
     "first indexed subtree should expose typed nested tensor"
-  LeanTest.assertTrue (weights.layers[1]!.weight.runtimeShape == #[2])
+  LeanTest.assertTrue (layer1.weight.runtimeShape == #[2])
     "second indexed subtree should expose typed nested tensor"
+  let layers ← IndexedSafe.layers.load
+  LeanTest.assertEqual layers.size 2 "hierarchical namespace loader should load array subtree"
 
 @[test]
 def testSafeTensorsTypeProviderShardedIndexJson : IO Unit := do
@@ -188,3 +201,15 @@ def testSafeTensorsTypeProviderShardedIndexJson : IO Unit := do
     "index-backed loadAll should load embed tensor from mapped shard"
   LeanTest.assertTrue (weights.proj.bias.runtimeShape == #[3])
     "index-backed loadAll should load proj bias tensor from mapped shard"
+
+@[test]
+def testSafeTensorsTypeProviderNonUniformIndexedHierarchy : IO Unit := do
+  LeanTest.assertEqual NonUniformSafe.tensorCount 2 "non-uniform fixture should have two tensors"
+  let weights ← NonUniformSafe.loadAll
+  LeanTest.assertTrue (weights.layers.i0.weight.runtimeShape == #[1])
+    "non-uniform indexed subtree should fall back to named index fields"
+  LeanTest.assertTrue (weights.layers.i1.weight.runtimeShape == #[2])
+    "non-uniform indexed subtree should retain later numeric siblings"
+  let layers ← NonUniformSafe.layers.load
+  LeanTest.assertTrue (layers.i0.weight.runtimeShape == #[1])
+    "hierarchical namespace loader should work for non-uniform subtree"

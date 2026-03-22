@@ -252,6 +252,10 @@ def inspectWeights : IO Unit := do
   let weights ← ModelWeights.loadAll
   let qProj := weights.model.layers[0]!.self_attn.q_proj.weight
   IO.println s!"q_proj shape: {qProj.runtimeShape}"
+
+  -- Hierarchical subtree loaders are also generated
+  let decoder ← ModelWeights.model.load
+  IO.println s!"loaded subtree"
 ```
 
 Notes:

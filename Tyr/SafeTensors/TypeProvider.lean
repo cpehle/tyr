@@ -221,7 +221,7 @@ private partial def nodeFingerprint (node : PathNode) : String :=
 private def pathLabel (path : List String) : String :=
   if path.isEmpty then "<root>" else String.intercalate "." path
 
-private def validateIndexedGroup (path : List String) (children : Array (Nat × PathNode))
+private def validateIndexedContiguous (path : List String) (children : Array (Nat × PathNode))
     : CommandElabM Unit := do
   let mut expected : Nat := 0
   for (idx, _) in children do
@@ -230,20 +230,26 @@ private def validateIndexedGroup (path : List String) (children : Array (Nat × 
         "safetensors_type_provider: non-contiguous numeric path segment under '{pathLabel path}'. expected index {expected}, found {idx}."
     expected := expected + 1
 
-  let mut firstFp? : Option String := none
-  for (_, child) in children do
-    let fp := nodeFingerprint child
-    match firstFp? with
-    | none => firstFp? := some fp
-    | some firstFp =>
-        if fp != firstFp then
-          throwError
-            "safetensors_type_provider: non-uniform indexed subtree under '{pathLabel path}'. All numeric siblings must share the same schema to form an indexed collection."
+private def indexedChildrenUniform (children : Array (Nat × PathNode)) : Bool :=
+  Id.run do
+    let mut firstFp? : Option String := none
+    for (_, child) in children do
+      let fp := nodeFingerprint child
+      match firstFp? with
+      | none => firstFp? := some fp
+      | some firstFp =>
+          if fp != firstFp then
+            return false
+    true
 
 private inductive FieldSource where
   | value
   | named (segment : String)
-  | indexed
+  | indexedCollection
+  | indexedAt (idx : Nat)
+
+private def indexFieldBase (idx : Nat) : String :=
+  s!"i{idx}"
 
 private inductive TypeRepr where
   | leaf (declName : String)
@@ -252,8 +258,11 @@ private inductive TypeRepr where
 
 private partial def TypeRepr.typeExpr : TypeRepr → String
   | .leaf declName => s!"_root_.torch.T {declName}Shape"
-  | .array elem _ => s!"Array {elem.typeExpr}"
+  | .array elem _ => s!"Array ({elem.typeExpr})"
   | .struct typeName _ => typeName
+
+private def loaderNameForType (typeName : String) : String :=
+  "load_node_" ++ sanitizeIdent (replaceInvalidChars typeName) "node"
 
 private partial def buildTypeRepr
     (node : PathNode)
@@ -270,11 +279,35 @@ private partial def buildTypeRepr
     return (.leaf leaf.declName, #[], usedTypeNames)
 
   if !hasLeaf && named.isEmpty && !indexed.isEmpty then
-    validateIndexedGroup path indexed
-    let some (_, firstChild) := indexed[0]?
-      | throwError "safetensors_type_provider internal error: missing first indexed child"
-    let (elemRepr, elemDecls, used') ← buildTypeRepr firstChild (path ++ ["item"]) usedTypeNames
-    return (.array elemRepr indexed.size, elemDecls, used')
+    validateIndexedContiguous path indexed
+    if indexedChildrenUniform indexed then
+      let some (_, firstChild) := indexed[0]?
+        | throwError "safetensors_type_provider internal error: missing first indexed child"
+      let (elemRepr, elemDecls, used') ← buildTypeRepr firstChild (path ++ ["item"]) usedTypeNames
+      return (.array elemRepr indexed.size, elemDecls, used')
+    else
+      let mut decls : Array String := #[]
+      let mut used := usedTypeNames
+      let mut fields : Array (String × FieldSource × TypeRepr) := #[]
+      let mut usedFieldNames : List String := []
+      for (idx, child) in indexed do
+        let fieldName := freshName usedFieldNames (indexFieldBase idx)
+        usedFieldNames := fieldName :: usedFieldNames
+        let (childRepr, childDecls, used') ← buildTypeRepr child (path ++ [fieldName]) used
+        used := used'
+        decls := decls ++ childDecls
+        fields := fields.push (fieldName, .indexedAt idx, childRepr)
+      let typeName := freshName used (typeNameBase path)
+      used := typeName :: used
+      let fieldLines :=
+        fields.map fun (fieldName, _, childRepr) => s!"  {fieldName} : {childRepr.typeExpr}"
+      let fieldsBlock := if fieldLines.isEmpty then "" else String.intercalate "\n" fieldLines.toList ++ "\n"
+      let structDecl :=
+        s!"/-- Generated hierarchical checkpoint node `{typeName}`. -/\n" ++
+        s!"structure {typeName} where\n" ++
+        fieldsBlock
+      decls := decls.push structDecl
+      return (.struct typeName fields, decls, used)
 
   let mut decls : Array String := #[]
   let mut used := usedTypeNames
@@ -296,15 +329,24 @@ private partial def buildTypeRepr
     fields := fields.push (fieldName, .named seg, childRepr)
 
   if !indexed.isEmpty then
-    validateIndexedGroup (path ++ ["<index>"]) indexed
-    let fieldName := freshName usedFieldNames "items"
-    usedFieldNames := fieldName :: usedFieldNames
-    let some (_, firstChild) := indexed[0]?
-      | throwError "safetensors_type_provider internal error: missing first indexed child for struct field"
-    let (elemRepr, elemDecls, used') ← buildTypeRepr firstChild (path ++ [fieldName]) used
-    used := used'
-    decls := decls ++ elemDecls
-    fields := fields.push (fieldName, .indexed, .array elemRepr indexed.size)
+    validateIndexedContiguous (path ++ ["<index>"]) indexed
+    if indexedChildrenUniform indexed then
+      let fieldName := freshName usedFieldNames "items"
+      usedFieldNames := fieldName :: usedFieldNames
+      let some (_, firstChild) := indexed[0]?
+        | throwError "safetensors_type_provider internal error: missing first indexed child for struct field"
+      let (elemRepr, elemDecls, used') ← buildTypeRepr firstChild (path ++ [fieldName]) used
+      used := used'
+      decls := decls ++ elemDecls
+      fields := fields.push (fieldName, .indexedCollection, .array elemRepr indexed.size)
+    else
+      for (idx, child) in indexed do
+        let fieldName := freshName usedFieldNames (indexFieldBase idx)
+        usedFieldNames := fieldName :: usedFieldNames
+        let (childRepr, childDecls, used') ← buildTypeRepr child (path ++ [fieldName]) used
+        used := used'
+        decls := decls ++ childDecls
+        fields := fields.push (fieldName, .indexedAt idx, childRepr)
 
   let typeName := freshName used (typeNameBase path)
   used := typeName :: used
@@ -314,10 +356,29 @@ private partial def buildTypeRepr
   let structDecl :=
     s!"/-- Generated hierarchical checkpoint node `{typeName}`. -/\n" ++
     s!"structure {typeName} where\n" ++
-    fieldsBlock ++
-    "deriving Repr, Inhabited\n"
+    fieldsBlock
   decls := decls.push structDecl
   return (.struct typeName fields, decls, used)
+
+private def childNodeForFieldSource
+    (node : PathNode)
+    (source : FieldSource)
+    : CommandElabM PathNode := do
+  match source with
+  | .value => pure node
+  | .named segment =>
+      match node.named.findSome? (fun (k, c) => if k == segment then some c else none) with
+      | some child => pure child
+      | none =>
+          throwError
+            "safetensors_type_provider internal error: missing named child segment '{segment}' while building hierarchical checkpoint type."
+  | .indexedCollection => pure node
+  | .indexedAt idx =>
+      match node.indexed.findSome? (fun (k, c) => if k == idx then some c else none) with
+      | some child => pure child
+      | none =>
+          throwError
+            "safetensors_type_provider internal error: missing indexed child '{idx}' while building hierarchical checkpoint type."
 
 private partial def buildLoadExpr
     (node : PathNode)
@@ -348,42 +409,97 @@ private partial def buildLoadExpr
       let arrayLiteral := "#[" ++ String.intercalate ", " valueNames.toList ++ "]"
       lines := lines.push s!"  pure {arrayLiteral}"
       pure <| String.intercalate "\n" lines.toList
+  | .struct typeName _ =>
+      pure s!"{loaderNameForType typeName} {sourceExpr}"
+
+private partial def buildStructLoaderDecls
+    (node : PathNode)
+    (repr : TypeRepr)
+    : CommandElabM (Array String) := do
+  match repr with
+  | .leaf _ => pure #[]
+  | .array elem _ =>
+      match (indexedChildren node)[0]? with
+      | some (_, firstChild) => buildStructLoaderDecls firstChild elem
+      | none => pure #[]
   | .struct typeName fields =>
+      let mut decls : Array String := #[]
       let mut lines : Array String := #["do"]
       let mut assignments : Array String := #[]
       let mut i : Nat := 0
       for (fieldName, source, childRepr) in fields do
-        let childNode ←
-          match source with
-          | .value => pure node
-          | .named segment =>
-              match node.named.findSome? (fun (k, c) => if k == segment then some c else none) with
-              | some child => pure child
-              | none =>
-                  throwError
-                    "safetensors_type_provider internal error: missing named child segment '{segment}' while building hierarchical checkpoint type."
-          | .indexed => pure node
-        let valueName := sanitizeIdent s!"{hint}_{fieldName}" s!"field_{i}"
-        let childExpr ← buildLoadExpr childNode childRepr sourceExpr valueName
+        let childNode ← childNodeForFieldSource node source
+        decls := decls ++ (← buildStructLoaderDecls childNode childRepr)
+        let valueName := sanitizeIdent s!"{typeName}_{fieldName}" s!"field_{i}"
+        let childExpr ← buildLoadExpr childNode childRepr "source" valueName
         lines := lines.push s!"  let {valueName} ←"
         lines := lines.push (indentBlock 4 childExpr)
         assignments := assignments.push s!"{fieldName} := {valueName}"
         i := i + 1
       let recordLiteral := "{" ++ String.intercalate ", " assignments.toList ++ "}"
       lines := lines.push s!"  pure ({recordLiteral} : {typeName})"
-      pure <| String.intercalate "\n" lines.toList
+      let loaderDecl :=
+        s!"/-- Load typed checkpoint node `{typeName}`. -/\n" ++
+        s!"def {loaderNameForType typeName} (source : String := defaultSource) : IO {typeName} :=\n" ++
+        indentBlock 2 (String.intercalate "\n" lines.toList) ++ "\n"
+      pure (decls.push loaderDecl)
 
-@[command_elab safetensorsTypeProviderCmd]
-def elabSafeTensorsTypeProvider : CommandElab
-  | `(safetensors_type_provider $sourcePath:str as $ns:ident) => do
-      let source := sourcePath.getString
+private partial def buildNamespaceDeclsForChild
+    (nsName : String)
+    (node : PathNode)
+    (repr : TypeRepr)
+    : CommandElabM (Array String) := do
+  match repr with
+  | .leaf _ => pure #[]
+  | .array _ _ =>
+      let loadExpr ← buildLoadExpr node repr "source" nsName
+      pure #[
+        s!"namespace {nsName}\n",
+        s!"abbrev Weights := {repr.typeExpr}\n",
+        "/-- Load this checkpoint subtree. -/\n" ++
+          "def load (source : String := defaultSource) : IO Weights :=\n" ++
+          indentBlock 2 loadExpr ++ "\n",
+        s!"end {nsName}\n"
+      ]
+  | .struct _ fields =>
+      let loadExpr ← buildLoadExpr node repr "source" nsName
+      let mut decls : Array String := #[
+        s!"namespace {nsName}\n",
+        s!"abbrev Weights := {repr.typeExpr}\n",
+        "/-- Load this checkpoint subtree. -/\n" ++
+          "def load (source : String := defaultSource) : IO Weights :=\n" ++
+          indentBlock 2 loadExpr ++ "\n"
+      ]
+      for (fieldName, source, childRepr) in fields do
+        let childNode ← childNodeForFieldSource node source
+        decls := decls ++ (← buildNamespaceDeclsForChild fieldName childNode childRepr)
+      decls := decls.push s!"end {nsName}\n"
+      pure decls
+
+private def buildRootNamespaceDecls
+    (node : PathNode)
+    (repr : TypeRepr)
+    : CommandElabM (Array String) := do
+  match repr with
+  | .struct _ fields =>
+      let mut decls : Array String := #[]
+      for (fieldName, source, childRepr) in fields do
+        let childNode ← childNodeForFieldSource node source
+        decls := decls ++ (← buildNamespaceDeclsForChild fieldName childNode childRepr)
+      pure decls
+  | _ => pure #[]
+
+private def elabSafeTensorsTypeProviderCore
+    (source : String)
+    (ns : Name)
+    : CommandElabM Unit := do
       let discovered ←
         try
           liftIO <| introspect source
         catch _ =>
           throwError "safetensors_type_provider failed while introspecting source '{source}'."
 
-      let namespaceName := ns.getId.toString
+      let namespaceName := ns.toString
       elabGeneratedCommand s!"namespace {namespaceName}"
       try
         elabGeneratedCommand <|
@@ -433,6 +549,10 @@ def elabSafeTensorsTypeProvider : CommandElab
           let (weightsRepr, weightsTypeDecls, _) ← buildTypeRepr root [] []
           for decl in weightsTypeDecls do
             elabGeneratedCommand decl
+          for decl in (← buildStructLoaderDecls root weightsRepr) do
+            elabGeneratedCommand decl
+          for decl in (← buildRootNamespaceDecls root weightsRepr) do
+            elabGeneratedCommand decl
           if weightsRepr.typeExpr != "Weights" then
             elabGeneratedCommand s!"abbrev Weights := {weightsRepr.typeExpr}\n"
           let loadExpr ← buildLoadExpr root weightsRepr "source" "weights"
@@ -470,6 +590,11 @@ def elabSafeTensorsTypeProvider : CommandElab
           "  schema.findSome? (fun t => if t.name == tensorName then some t else none)\n"
       finally
         elabGeneratedCommand s!"end {namespaceName}"
+
+@[command_elab safetensorsTypeProviderCmd]
+def elabSafeTensorsTypeProvider : CommandElab
+  | `(safetensors_type_provider $sourcePath:str as $ns:ident) =>
+      elabSafeTensorsTypeProviderCore sourcePath.getString ns.getId
   | _ => throwUnsupportedSyntax
 
 end torch.safetensors
