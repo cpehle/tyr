@@ -413,6 +413,27 @@ lean_exe Qwen3TTSEndToEnd where
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
+/-- Offline KittenTTS / Kokoro synthesis demo using converted safetensors checkpoints. -/
+lean_exe KittenTTSPretrained where
+  root := `Examples.KittenTTSPretrained
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
+lean_exe KittenTTSDurations where
+  root := `Examples.KittenTTSDurations
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
+lean_exe KittenTTSDebug where
+  root := `Examples.KittenTTSDebug
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
+lean_exe KittenTTSCompare where
+  root := `Examples.KittenTTSCompare
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
 /-- Offline Qwen3-ASR transcription demo (fully Lean pipeline). -/
 lean_exe Qwen3ASRTranscribe where
   root := `Examples.Qwen3ASR.Transcribe

@@ -14,6 +14,14 @@ namespace torch.safetensors
 
 open Lean
 
+instance : ToJson DType where
+  toJson dt := Json.str dt.canonicalName
+
+instance : FromJson DType where
+  fromJson?
+    | .str s => pure (DType.parse s)
+    | _ => .error "expected dtype string"
+
 /-- One tensor entry discovered in a SafeTensors source. -/
 structure TensorSchema where
   name : String
@@ -21,14 +29,14 @@ structure TensorSchema where
   shape : Shape
   /-- For directory sources this is the shard filename; for single-file sources it is empty. -/
   sourceFile : String := ""
-  deriving Inhabited, Repr, BEq
+  deriving Inhabited, Repr, BEq, ToJson, FromJson
 
 /-- Full schema discovered from a SafeTensors source path. -/
 structure Schema where
   source : String
   sourceIsDirectory : Bool
   tensors : Array TensorSchema
-  deriving Inhabited, Repr
+  deriving Inhabited, Repr, ToJson, FromJson
 
 /-- Look up a tensor schema by exact tensor name. -/
 def Schema.find? (schema : Schema) (tensorName : String) : Option TensorSchema :=
@@ -248,6 +256,31 @@ private def ensureUniqueNames (tensors : Array TensorSchema) : IO Unit := do
 private def sortedByName (tensors : Array TensorSchema) : Array TensorSchema :=
   tensors.qsort (fun a b => a.name < b.name)
 
+private def isSchemaSnapshotPath (path : System.FilePath) : Bool :=
+  let s := path.toString
+  s.endsWith ".schema.json" || s.endsWith ".safetensors.schema.json"
+
+/-- Load a previously saved SafeTensors schema snapshot. -/
+def loadSnapshot (path : String) : IO Schema := do
+  let text ← IO.FS.readFile ⟨path⟩
+  let json ←
+    match Json.parse text with
+    | Except.ok j => pure j
+    | Except.error err =>
+        throw <| IO.userError s!"Invalid SafeTensors schema snapshot '{path}': {err}"
+  let schema : Schema ←
+    match (FromJson.fromJson? json : Except String Schema) with
+    | .ok s => pure s
+    | .error err =>
+        throw <| IO.userError s!"Invalid SafeTensors schema snapshot '{path}': {err}"
+  ensureUniqueNames schema.tensors
+  pure { schema with tensors := sortedByName schema.tensors }
+
+/-- Persist a SafeTensors schema snapshot as JSON for later type-provider use. -/
+def saveSnapshot (path : String) (schema : Schema) : IO Unit := do
+  let normalized := { schema with tensors := sortedByName schema.tensors }
+  IO.FS.writeFile ⟨path⟩ (toJson normalized).compress
+
 /-- Introspect tensor schema from either:
     - a single `.safetensors` file, or
     - a directory containing shard `.safetensors` files. -/
@@ -255,6 +288,9 @@ def introspect (source : String) : IO Schema := do
   let sourcePath : System.FilePath := ⟨source⟩
   if !(← sourcePath.pathExists) then
     throw <| IO.userError s!"SafeTensors source does not exist: {source}"
+
+  if isSchemaSnapshotPath sourcePath then
+    return ← loadSnapshot source
 
   if ← sourcePath.isDir then
     let indexPath := sourcePath / "model.safetensors.index.json"

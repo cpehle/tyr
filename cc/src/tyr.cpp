@@ -719,12 +719,20 @@ UNOP_FUN(sigmoid)
 UNOP_FUN(sin)
 UNOP_FUN(cos)
 UNOP_FUN(atan)
+UNOP_FUN(floor)
 UNOP_FUN(tanh)
 UNOP_FUN(exp)
 UNOP_FUN(log)
 UNOP_FUN(log10)
 UNOP_FUN(softplus)
 #undef UNOP_FUN
+
+lean_object* lean_torch_atan2(lean_obj_arg /*s*/, b_lean_obj_arg y, b_lean_obj_arg x) {
+  auto y_ = borrowTensor(y);
+  auto x_ = borrowTensor(x);
+  auto out_ = torch::atan2(y_, x_);
+  return fromTorchTensor(out_);
+}
 
 lean_object* lean_torch_tensor_grad(lean_obj_arg /* s */, lean_obj_arg /* s' */, b_lean_obj_arg output, b_lean_obj_arg input, b_lean_obj_arg grad_output) {
   auto output_ = borrowTensor(output);
@@ -1707,6 +1715,13 @@ lean_object* lean_torch_scaled_dot_product_attention(
 lean_object* lean_torch_softmax_dim(lean_obj_arg /*s*/, b_lean_obj_arg input, int64_t dim) {
   auto input_ = borrowTensor(input);
   auto result_ = torch::softmax(input_, dim);
+  return fromTorchTensor(result_);
+}
+
+// Cumulative sum along a dimension.
+lean_object* lean_torch_cumsum(lean_obj_arg /*s*/, b_lean_obj_arg input, int64_t dim) {
+  auto input_ = borrowTensor(input);
+  auto result_ = torch::cumsum(input_, dim);
   return fromTorchTensor(result_);
 }
 
@@ -3377,7 +3392,7 @@ extern "C" LEAN_EXPORT lean_object* lean_torch_safetensors_open(b_lean_obj_arg p
     auto* wrapper = new std::shared_ptr<SafeTensorsFile>(loader);
     return lean_io_result_mk_ok(lean_alloc_external(g_safetensors_handle_class, wrapper));
   } catch (const std::exception& e) {
-    return lean_io_result_mk_error(mkIoUserError(e.what()));
+    return mkIoUserError(e.what());
   }
 }
 
@@ -3394,13 +3409,13 @@ extern "C" LEAN_EXPORT lean_object* lean_torch_safetensors_load_from_handle(
 
   auto entry_opt = loader->findEntry(name);
   if (!entry_opt) {
-    return lean_io_result_mk_error(mkIoUserError("Tensor not found: " + name));
+    return mkIoUserError("Tensor not found: " + name);
   }
 
   const auto& e = *entry_opt;
   uint64_t n_bytes = e.offsets[1] - e.offsets[0];
   auto dtype_opt = parseDtype(e.dtype);
-  if (!dtype_opt) return lean_io_result_mk_error(mkIoUserError("Unsupported dtype: " + e.dtype));
+  if (!dtype_opt) return mkIoUserError("Unsupported dtype: " + e.dtype);
 
   auto tensor = torch::empty(e.shape, torch::TensorOptions().dtype(*dtype_opt));
   loader->file.seekg(8 + loader->header_size + e.offsets[0], std::ios::beg);
@@ -3686,6 +3701,34 @@ lean_object* lean_torch_rfft_1d(uint64_t /*n*/, b_lean_obj_arg input) {
   auto complex_ = at::fft_rfft(input_, c10::nullopt, -1, c10::nullopt);
   auto packed_ = torch::view_as_real(complex_);
   return fromTorchTensor(packed_);
+}
+
+// 1D inverse STFT from real/imag packed input.
+lean_object* lean_torch_istft_1d(
+    b_lean_obj_arg input,
+    uint64_t n_fft,
+    uint64_t hop_length,
+    uint64_t win_length,
+    b_lean_obj_arg window,
+    uint8_t center,
+    uint8_t normalized,
+    uint64_t length
+) {
+  auto input_ = borrowTensor(input).contiguous();
+  auto window_ = borrowTensor(window);
+  auto complex_ = torch::view_as_complex(input_);
+  auto out_ = torch::istft(
+      complex_,
+      static_cast<int64_t>(n_fft),
+      static_cast<int64_t>(hop_length),
+      static_cast<int64_t>(win_length),
+      window_,
+      center != 0,
+      normalized != 0,
+      true,
+      length == 0 ? c10::optional<int64_t>() : c10::optional<int64_t>(static_cast<int64_t>(length)),
+      false);
+  return fromTorchTensor(out_);
 }
 
 // ============================================================================

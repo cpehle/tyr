@@ -26,6 +26,9 @@ private def writeIndexDir (name indexJson : String) : IO String := do
   IO.FS.writeFile s!"{dir}/model.safetensors.index.json" indexJson
   pure dir
 
+private def tensorValues {s : Shape} (t : T s) : Array Float :=
+  t.getValues 1024 |>.toList.toArray
+
 @[test]
 def testSafeTensorsIntrospectionSingle : IO Unit := do
   let schema ← safetensors.introspect "Tests/fixtures/safetensors/single.safetensors"
@@ -174,6 +177,12 @@ def testSafeTensorsTypeProviderSharded : IO Unit := do
 @[test]
 def testSafeTensorsTypeProviderIndexedHierarchy : IO Unit := do
   LeanTest.assertEqual IndexedSafe.tensorCount 2 "indexed fixture should have two tensors"
+  let direct0 ← IndexedSafe.load_layers_0_weight
+  let direct1 ← IndexedSafe.load_layers_1_weight
+  let directVals0 := tensorValues direct0
+  let directVals1 := tensorValues direct1
+  LeanTest.assertTrue (directVals0 != directVals1)
+    "indexed fixture should use distinct tensor values across numeric siblings"
   let weights ← IndexedSafe.loadAll
   LeanTest.assertEqual weights.layers.size 2 "numeric path segments should produce an indexed collection"
   let some layer0 := weights.layers[0]?
@@ -184,8 +193,20 @@ def testSafeTensorsTypeProviderIndexedHierarchy : IO Unit := do
     "first indexed subtree should expose typed nested tensor"
   LeanTest.assertTrue (layer1.weight.runtimeShape == #[2])
     "second indexed subtree should expose typed nested tensor"
+  LeanTest.assertTrue (tensorValues layer0.weight == directVals0)
+    "loadAll should preserve the first indexed tensor values"
+  LeanTest.assertTrue (tensorValues layer1.weight == directVals1)
+    "loadAll should preserve later indexed tensor values instead of repeating the first"
   let layers ← IndexedSafe.layers.load
   LeanTest.assertEqual layers.size 2 "hierarchical namespace loader should load array subtree"
+  let some nsLayer0 := layers[0]?
+    | throw <| IO.userError "expected first indexed layer from namespace loader"
+  let some nsLayer1 := layers[1]?
+    | throw <| IO.userError "expected second indexed layer from namespace loader"
+  LeanTest.assertTrue (tensorValues nsLayer0.weight == directVals0)
+    "namespace array loader should preserve the first indexed tensor values"
+  LeanTest.assertTrue (tensorValues nsLayer1.weight == directVals1)
+    "namespace array loader should preserve later indexed tensor values"
 
 @[test]
 def testSafeTensorsTypeProviderShardedIndexJson : IO Unit := do

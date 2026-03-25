@@ -514,9 +514,11 @@ opaque nll_loss_none {n c : UInt64}
 @[extern "lean_torch_tensor_cos"] opaque cos {s : Shape} (t : @& T s) : T s
 @[extern "lean_torch_tensor_sin"] opaque sin {s : Shape} (t : @& T s) : T s
 @[extern "lean_torch_tensor_atan"] opaque atan {s : Shape} (t : @& T s) : T s
+@[extern "lean_torch_tensor_floor"] opaque floor {s : Shape} (t : @& T s) : T s
 @[extern "lean_torch_tensor_exp"] opaque exp {s : Shape} (t : @& T s) : T s
 @[extern "lean_torch_tensor_log"] opaque log {s : Shape} (t : @& T s) : T s
 @[extern "lean_torch_tensor_log10"] opaque log10 {s : Shape} (t : @& T s) : T s
+@[extern "lean_torch_atan2"] opaque atan2 {s : Shape} (y : @& T s) (x : @& T s) : T s
 @[extern "lean_torch_smooth_l1_loss"] opaque smooth_l1_loss {s : Shape} (input : @& T s) (target : @& T s) (reduction : String := "mean") (beta : Float := 1.0) : T #[]
 -- torch::nn::functional::soft_margin_loss
 -- torch::nn::functional::softmax
@@ -700,6 +702,10 @@ def sumDim {s : Shape} (t : T s) (dim : Nat) (keepdim : Bool := false) : T (redu
 def meanDim {s : Shape} (t : T s) (dim : Nat) (keepdim : Bool := false) : T (reduceShape s dim keepdim) :=
   let result := mean_impl t (some #[dim.toUInt64]) keepdim
   reshape result (reduceShape s dim keepdim)
+
+/-- Cumulative sum along a dimension, preserving shape. -/
+@[extern "lean_torch_cumsum"]
+opaque cumsum {s : Shape} (input : @& T s) (dim : Int64) : T s
 
 -- Sampling operations
 @[extern "lean_torch_topk_values"] opaque topk_values {s : Shape} (t : @& T s) (k : UInt64) (dim : UInt64) : T (replaceAtDim s dim.toNat k)
@@ -915,6 +921,20 @@ opaque stft1d {n : UInt64}
 /-- 1D RFFT returning real/imag packed output with dynamic shape. -/
 @[extern "lean_torch_rfft_1d"]
 opaque rfft1d {n : UInt64} (input : @& T #[n]) : T #[]
+
+/-- 1D inverse STFT from packed real/imag input.
+    Input should follow `stft1d` packing with last dimension 2. -/
+@[extern "lean_torch_istft_1d"]
+opaque istft1d
+    (input : @& T #[])
+    (n_fft : UInt64)
+    (hop_length : UInt64)
+    (win_length : UInt64)
+    (window : @& T #[win_length])
+    (center : Bool := true)
+    (normalized : Bool := false)
+    (length : UInt64 := 0)
+    : T #[]
 
 end signal
 

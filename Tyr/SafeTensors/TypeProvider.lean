@@ -380,7 +380,7 @@ private def childNodeForFieldSource
           throwError
             "safetensors_type_provider internal error: missing indexed child '{idx}' while building hierarchical checkpoint type."
 
-private partial def buildLoadExpr
+private partial def buildInlineLoadExpr
     (node : PathNode)
     (repr : TypeRepr)
     (sourceExpr : String)
@@ -401,7 +401,7 @@ private partial def buildLoadExpr
       let mut i : Nat := 0
       for (idx, child) in indexed do
         let valueName := sanitizeIdent s!"{hint}_{idx}" s!"item_{i}"
-        let childExpr ← buildLoadExpr child elem sourceExpr valueName
+        let childExpr ← buildInlineLoadExpr child elem sourceExpr valueName
         lines := lines.push s!"  let {valueName} ←"
         lines := lines.push (indentBlock 4 childExpr)
         valueNames := valueNames.push valueName
@@ -409,8 +409,33 @@ private partial def buildLoadExpr
       let arrayLiteral := "#[" ++ String.intercalate ", " valueNames.toList ++ "]"
       lines := lines.push s!"  pure {arrayLiteral}"
       pure <| String.intercalate "\n" lines.toList
+  | .struct typeName fields =>
+      let mut lines : Array String := #["do"]
+      let mut assignments : Array String := #[]
+      let mut i : Nat := 0
+      for (fieldName, source, childRepr) in fields do
+        let childNode ← childNodeForFieldSource node source
+        let valueName := sanitizeIdent s!"{hint}_{fieldName}" s!"field_{i}"
+        let childExpr ← buildInlineLoadExpr childNode childRepr sourceExpr valueName
+        lines := lines.push s!"  let {valueName} ←"
+        lines := lines.push (indentBlock 4 childExpr)
+        assignments := assignments.push s!"{fieldName} := {valueName}"
+        i := i + 1
+      let recordLiteral := "{" ++ String.intercalate ", " assignments.toList ++ "}"
+      lines := lines.push s!"  pure ({recordLiteral} : {typeName})"
+      pure <| String.intercalate "\n" lines.toList
+
+private partial def buildLoadExpr
+    (node : PathNode)
+    (repr : TypeRepr)
+    (sourceExpr : String)
+    (hint : String)
+    : CommandElabM String := do
+  match repr with
   | .struct typeName _ =>
       pure s!"{loaderNameForType typeName} {sourceExpr}"
+  | _ =>
+      buildInlineLoadExpr node repr sourceExpr hint
 
 private partial def buildStructLoaderDecls
     (node : PathNode)

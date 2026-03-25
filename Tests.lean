@@ -55,6 +55,7 @@ import Tests.TestQwen3ASR
 import Tests.TestSileroVAD
 import Tests.TestQwen3Model
 import Tests.TestQwen3TTS
+import Tests.TestKittenTTS
 import Tests.TestQwen35Model
 import Tests.TestQwen35Multimodal
 import Tests.TestQwen35Pretrained
