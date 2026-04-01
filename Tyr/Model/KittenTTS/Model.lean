@@ -1490,7 +1490,86 @@ def forward {baseFrames : UInt64}
     (style : T #[1, cfg.styleDim])
     (f0Curve : T #[1, 1, baseFrames])
     : IO (T #[]) := do
-  pure (← m.debugForward x style f0Curve).audio
+  let f0Up : T #[1, 1, GeneratorConfig.waveSamples cfg.generator baseFrames] :=
+    repeatNearest1d (scale := GeneratorConfig.sourceUpsample cfg.generator) f0Curve
+  let f0Seq : T #[1, GeneratorConfig.waveSamples cfg.generator baseFrames, 1] := cfToSeq f0Up
+  let (harSource, _noiseSource, _uv) ← m.source.forward f0Seq
+  let har1d : T #[GeneratorConfig.waveSamples cfg.generator baseFrames] :=
+    reshape harSource #[GeneratorConfig.waveSamples cfg.generator baseFrames]
+  let har : T #[1, GeneratorConfig.stftFeatureChannels cfg.generator, GeneratorConfig.harFrames cfg.generator baseFrames] :=
+    buildHarFeatures m har1d
+
+  let mut xDyn : T #[] := nn.eraseShape x
+  for i in [:m.stages.size] do
+    let stage := safeIndex m.stages i
+    let inC := GeneratorConfig.stageInChannels cfg.generator i
+    let outC := GeneratorConfig.stageOutChannels cfg.generator i
+    let inFrames := GeneratorConfig.stageInFrames cfg.generator baseFrames i
+    let outFrames := GeneratorConfig.stageOutFrames cfg.generator baseFrames i
+    let xIn : T #[1, inC, inFrames] := reshape xDyn #[1, inC, inFrames]
+    let xAct : T #[1, inC, inFrames] := nn.leaky_relu xIn 0.1
+    let xSource0 : T #[1, outC, convOutputSize (GeneratorConfig.harFrames cfg.generator baseFrames) stage.noiseConv.kernel stage.noiseConv.stride stage.noiseConv.padding stage.noiseConv.dilation] :=
+      stage.noiseConv.forward har
+    let xSource1 : T #[1, outC, outFrames] := reshape xSource0 #[1, outC, outFrames]
+    let xSource : T #[1, outC, outFrames] := stage.noiseRes.forward xSource1 style
+    let xUp0 : T #[1, outC, convTransposeOutputSize inFrames stage.up.kernel stage.up.stride stage.up.padding stage.up.outputPadding stage.up.dilation] :=
+      stage.up.forward xAct
+    let xUp : T #[1, outC, outFrames] :=
+      if i + 1 < m.stages.size then
+        reshape xUp0 #[1, outC, outFrames]
+      else
+        reflectPadLeft1 xUp0
+    let xMix : T #[1, outC, outFrames] := xUp + xSource
+    let first : T #[1, outC, outFrames] := (safeIndex stage.resBlocks 0).forward xMix style
+    let mut acc := first
+    for j in [1:stage.resBlocks.size] do
+      acc := acc + (safeIndex stage.resBlocks j).forward xMix style
+    let xOut : T #[1, outC, outFrames] := acc / stage.resBlocks.size.toFloat
+    xDyn := nn.eraseShape xOut
+
+  let xFinal : T #[1, GeneratorConfig.finalChannels cfg.generator, GeneratorConfig.harFrames cfg.generator baseFrames] :=
+    reshape xDyn #[1, GeneratorConfig.finalChannels cfg.generator, GeneratorConfig.harFrames cfg.generator baseFrames]
+  let postIn : T #[1, GeneratorConfig.finalChannels cfg.generator, GeneratorConfig.harFrames cfg.generator baseFrames] := nn.leaky_relu xFinal 0.01
+  let post : T #[1, cfg.generator.genIstftNFft + 2, GeneratorConfig.harFrames cfg.generator baseFrames] :=
+    reshape
+      (WNConv1dDyn.forward
+        (inC := GeneratorConfig.finalChannels cfg.generator)
+        (outC := cfg.generator.genIstftNFft + 2)
+        m.convPost
+        postIn)
+      #[1, cfg.generator.genIstftNFft + 2, GeneratorConfig.harFrames cfg.generator baseFrames]
+
+  let freqBins := GeneratorConfig.freqBins cfg.generator
+  let specLog : T #[1, GeneratorConfig.freqBins cfg.generator, GeneratorConfig.harFrames cfg.generator baseFrames] :=
+    data.slice post 1 0 freqBins
+  let phaseRaw : T #[1, GeneratorConfig.freqBins cfg.generator, GeneratorConfig.harFrames cfg.generator baseFrames] :=
+    data.slice post 1 freqBins freqBins
+  let spec : T #[1, GeneratorConfig.freqBins cfg.generator, GeneratorConfig.harFrames cfg.generator baseFrames] := nn.exp specLog
+  let phase : T #[1, GeneratorConfig.freqBins cfg.generator, GeneratorConfig.harFrames cfg.generator baseFrames] := nn.sin phaseRaw
+  let re : T #[1, GeneratorConfig.freqBins cfg.generator, GeneratorConfig.harFrames cfg.generator baseFrames] := spec * nn.cos phase
+  let im : T #[1, GeneratorConfig.freqBins cfg.generator, GeneratorConfig.harFrames cfg.generator baseFrames] := spec * nn.sin phase
+  let re3 : T #[GeneratorConfig.freqBins cfg.generator, GeneratorConfig.harFrames cfg.generator baseFrames, 1] :=
+    reshape re #[GeneratorConfig.freqBins cfg.generator, GeneratorConfig.harFrames cfg.generator baseFrames, 1]
+  let im3 : T #[GeneratorConfig.freqBins cfg.generator, GeneratorConfig.harFrames cfg.generator baseFrames, 1] :=
+    reshape im #[GeneratorConfig.freqBins cfg.generator, GeneratorConfig.harFrames cfg.generator baseFrames, 1]
+  let packed : T #[GeneratorConfig.freqBins cfg.generator, GeneratorConfig.harFrames cfg.generator baseFrames, 2] :=
+    reshape
+      (nn.cat_dyn #[nn.eraseShape re3, nn.eraseShape im3] 2)
+      #[GeneratorConfig.freqBins cfg.generator, GeneratorConfig.harFrames cfg.generator baseFrames, 2]
+  let window : T #[cfg.generator.genIstftNFft] := m.window.to post.device
+  let audio1d : T #[GeneratorConfig.waveSamples cfg.generator baseFrames] :=
+    reshape
+      (signal.istft1d
+        (nn.eraseShape packed)
+        cfg.generator.genIstftNFft
+        cfg.generator.genIstftHopSize
+        cfg.generator.genIstftNFft
+        window
+        true
+        false
+        (GeneratorConfig.waveSamples cfg.generator baseFrames))
+      #[GeneratorConfig.waveSamples cfg.generator baseFrames]
+  pure (nn.eraseShape (reshape audio1d #[1, 1, GeneratorConfig.waveSamples cfg.generator baseFrames]))
 
 end Generator
 
@@ -1573,7 +1652,20 @@ def forward {frames : UInt64}
     (nCurve : T #[1, 1, 2 * frames])
     (style : T #[1, cfg.styleDim])
     : IO (T #[]) := do
-  pure (← m.debugForward asr f0Curve nCurve style).generator.audio
+  let f0 : T #[1, 1, frames] := m.f0Conv.forward f0Curve
+  let n : T #[1, 1, frames] := m.nConv.forward nCurve
+  let x0 : T #[1, cfg.hiddenDim + 2, frames] := nn.cat asr (nn.cat f0 n 1) 1
+  let x1 : T #[1, cfg.maxConvDim, frames] := m.encode.forward x0 style
+  let asrRes : T #[1, cfg.asrResDim, frames] := m.asrRes.forward asr
+  let d0In : T #[1, cfg.maxConvDim + cfg.asrResDim + 2, frames] := nn.cat x1 (nn.cat asrRes (nn.cat f0 n 1) 1) 1
+  let d0 : T #[1, cfg.maxConvDim, frames] := m.decode0.forward d0In style
+  let d1In : T #[1, cfg.maxConvDim + cfg.asrResDim + 2, frames] := nn.cat d0 (nn.cat asrRes (nn.cat f0 n 1) 1) 1
+  let d1 : T #[1, cfg.maxConvDim, frames] := m.decode1.forward d1In style
+  let d2In : T #[1, cfg.maxConvDim + cfg.asrResDim + 2, frames] := nn.cat d1 (nn.cat asrRes (nn.cat f0 n 1) 1) 1
+  let d2 : T #[1, cfg.maxConvDim, frames] := m.decode2.forward d2In style
+  let d3In : T #[1, cfg.maxConvDim + cfg.asrResDim + 2, frames] := nn.cat d2 (nn.cat asrRes (nn.cat f0 n 1) 1) 1
+  let d3 : T #[1, KittenTTSConfig.decoderChannels cfg, 2 * frames] := m.decode3.forward d3In style
+  m.generator.forward d3 style f0Curve
 
 end Decoder
 
@@ -1609,6 +1701,14 @@ namespace Model
 
 private def modelDevice (m : Model cfg) : Device :=
   m.bert.embeddings.wordEmbeddings.device
+
+private structure PreparedSynthesis where
+  decoderStyle : T #[]
+  asr : T #[]
+  f0Curve : T #[]
+  nCurve : T #[]
+  predDurations : Array UInt64
+  alignmentFrames : UInt64
 
 private def prepareInputs {seq : UInt64}
     (m : Model cfg)
@@ -1686,20 +1786,16 @@ def predictDurations {seq : UInt64}
       alignmentFrames := frames
     }
 
-def synthesizeIds {seq : UInt64}
+private def prepareSynthesis {seq : UInt64}
     (m : Model cfg)
     (inputIds : T #[1, seq])
     (refStyle : T #[1, KittenTTSConfig.fullStyleDim cfg])
     (speed : Float := 1.0)
-    : IO KittenTTSOutput := do
+    : IO (Option PreparedSynthesis) := do
   let (inputIds, refStyle) := prepareInputs m inputIds refStyle
-  let durPred ← m.predictDurations inputIds refStyle speed
+  let durPred ← predictDurations m inputIds refStyle speed
   if durPred.alignmentFrames == 0 then
-    pure {
-      audio := nn.eraseShape (torch.zeros #[1, 1, 0] false inputIds.device)
-      predDurations := #[]
-      alignmentFrames := 0
-    }
+    pure none
   else
     let frames := durPred.alignmentFrames
     let decoderStyle : T #[1, cfg.styleDim] := data.slice refStyle 1 0 cfg.styleDim
@@ -1714,10 +1810,38 @@ def synthesizeIds {seq : UInt64}
     let (f0Curve, nCurve) := m.predictor.forwardF0N prosodyFrames predictorStyle
     let textEnc : T #[1, cfg.hiddenDim, seq] := m.textEncoder.forward inputIds
     let asr : T #[1, cfg.hiddenDim, frames] := nn.bmm textEnc align
+    pure <| some {
+      decoderStyle := nn.eraseShape decoderStyle
+      asr := nn.eraseShape asr
+      f0Curve := nn.eraseShape f0Curve
+      nCurve := nn.eraseShape nCurve
+      predDurations := durPred.predDurations
+      alignmentFrames := frames
+    }
+
+def synthesizeIds {seq : UInt64}
+    (m : Model cfg)
+    (inputIds : T #[1, seq])
+    (refStyle : T #[1, KittenTTSConfig.fullStyleDim cfg])
+    (speed : Float := 1.0)
+    : IO KittenTTSOutput := do
+  match (← prepareSynthesis m inputIds refStyle speed) with
+  | none =>
+    pure {
+      audio := nn.eraseShape (torch.zeros #[1, 1, 0] false (modelDevice m))
+      predDurations := #[]
+      alignmentFrames := 0
+    }
+  | some prepared =>
+    let frames := prepared.alignmentFrames
+    let decoderStyle : T #[1, cfg.styleDim] := reshape prepared.decoderStyle #[1, cfg.styleDim]
+    let asr : T #[1, cfg.hiddenDim, frames] := reshape prepared.asr #[1, cfg.hiddenDim, frames]
+    let f0Curve : T #[1, 1, 2 * frames] := reshape prepared.f0Curve #[1, 1, 2 * frames]
+    let nCurve : T #[1, 1, 2 * frames] := reshape prepared.nCurve #[1, 1, 2 * frames]
     let audio ← m.decoder.forward asr f0Curve nCurve decoderStyle
     pure {
       audio
-      predDurations := durPred.predDurations
+      predDurations := prepared.predDurations
       alignmentFrames := frames
     }
 
@@ -1727,38 +1851,30 @@ def debugSynthesizeIds {seq : UInt64}
     (refStyle : T #[1, KittenTTSConfig.fullStyleDim cfg])
     (speed : Float := 1.0)
     : IO KittenTTSDebugOutput := do
-  let (inputIds, refStyle) := prepareInputs m inputIds refStyle
-  let durPred ← m.predictDurations inputIds refStyle speed
-  if durPred.alignmentFrames == 0 then
+  match (← prepareSynthesis m inputIds refStyle speed) with
+  | none =>
+    let device := modelDevice m
     pure {
-      asr := nn.eraseShape (torch.zeros #[1, cfg.hiddenDim, 0] false inputIds.device)
-      f0Curve := nn.eraseShape (torch.zeros #[1, 1, 0] false inputIds.device)
-      nCurve := nn.eraseShape (torch.zeros #[1, 1, 0] false inputIds.device)
-      audio := nn.eraseShape (torch.zeros #[1, 1, 0] false inputIds.device)
+      asr := nn.eraseShape (torch.zeros #[1, cfg.hiddenDim, 0] false device)
+      f0Curve := nn.eraseShape (torch.zeros #[1, 1, 0] false device)
+      nCurve := nn.eraseShape (torch.zeros #[1, 1, 0] false device)
+      audio := nn.eraseShape (torch.zeros #[1, 1, 0] false device)
       predDurations := #[]
       alignmentFrames := 0
     }
-  else
-    let frames := durPred.alignmentFrames
-    let decoderStyle : T #[1, cfg.styleDim] := data.slice refStyle 1 0 cfg.styleDim
-    let predictorStyle : T #[1, cfg.styleDim] := data.slice refStyle 1 cfg.styleDim cfg.styleDim
-    let (bertOut, _pooled) := m.bert.forward inputIds
-    let dEnSeq : T #[1, seq, cfg.hiddenDim] := m.bertEncoder.forward3d bertOut
-    let dEn : T #[1, cfg.hiddenDim, seq] := seqToCF dEnSeq
-    let durEnc : T #[1, cfg.hiddenDim + cfg.styleDim, seq] :=
-      m.predictor.durationEncoding dEn predictorStyle
-    let align : T #[1, seq, frames] := buildAlignment durPred.predDurations inputIds.device
-    let prosodyFrames : T #[1, cfg.hiddenDim + cfg.styleDim, frames] := nn.bmm durEnc align
-    let (f0Curve, nCurve) := m.predictor.forwardF0N prosodyFrames predictorStyle
-    let textEnc : T #[1, cfg.hiddenDim, seq] := m.textEncoder.forward inputIds
-    let asr : T #[1, cfg.hiddenDim, frames] := nn.bmm textEnc align
+  | some prepared =>
+    let frames := prepared.alignmentFrames
+    let decoderStyle : T #[1, cfg.styleDim] := reshape prepared.decoderStyle #[1, cfg.styleDim]
+    let asr : T #[1, cfg.hiddenDim, frames] := reshape prepared.asr #[1, cfg.hiddenDim, frames]
+    let f0Curve : T #[1, 1, 2 * frames] := reshape prepared.f0Curve #[1, 1, 2 * frames]
+    let nCurve : T #[1, 1, 2 * frames] := reshape prepared.nCurve #[1, 1, 2 * frames]
     let audio ← m.decoder.forward asr f0Curve nCurve decoderStyle
     pure {
-      asr := nn.eraseShape asr
-      f0Curve := nn.eraseShape f0Curve
-      nCurve := nn.eraseShape nCurve
+      asr := prepared.asr
+      f0Curve := prepared.f0Curve
+      nCurve := prepared.nCurve
       audio := audio
-      predDurations := durPred.predDurations
+      predDurations := prepared.predDurations
       alignmentFrames := frames
     }
 

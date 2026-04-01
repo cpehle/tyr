@@ -142,13 +142,23 @@ def testSafeTensorsTypeProviderSingle : IO Unit := do
   LeanTest.assertTrue (t.runtimeShape == #[2, 3]) "typed loader should enforce generated shape"
   LeanTest.assertEqual SingleSafe.linear_weightSpec.dtype DType.Float32
     "generated spec should retain typed core DType"
+  let handle ← safetensors.openHandle "Tests/fixtures/safetensors/single.safetensors"
+  let tFromHandle ← SingleSafe.load_linear_weightFromHandle handle
+  LeanTest.assertTrue (tFromHandle.runtimeShape == #[2, 3])
+    "single-file provider should expose a per-tensor from-handle loader"
 
   let weights ← SingleSafe.loadAll
   LeanTest.assertTrue (weights.linear.weight.runtimeShape == #[2, 3])
     "hierarchical aggregate typed record should expose nested typed tensor fields"
+  let weightsFromHandle ← SingleSafe.loadAllFromHandle handle
+  LeanTest.assertTrue (weightsFromHandle.linear.weight.runtimeShape == #[2, 3])
+    "single-file provider should expose a handle-reusing loadAll"
   let linear ← SingleSafe.linear.load
   LeanTest.assertTrue (linear.weight.runtimeShape == #[2, 3])
     "hierarchical namespace loader should expose subtree load"
+  let linearFromHandle ← SingleSafe.linear.loadFromHandle handle
+  LeanTest.assertTrue (linearFromHandle.weight.runtimeShape == #[2, 3])
+    "single-file provider should expose handle-reusing subtree loads"
 
 @[test]
 def testSafeTensorsTypeProviderSharded : IO Unit := do
@@ -197,6 +207,16 @@ def testSafeTensorsTypeProviderIndexedHierarchy : IO Unit := do
     "loadAll should preserve the first indexed tensor values"
   LeanTest.assertTrue (tensorValues layer1.weight == directVals1)
     "loadAll should preserve later indexed tensor values instead of repeating the first"
+  let handle ← safetensors.openHandle "Tests/fixtures/safetensors/indexed.safetensors"
+  let weightsFromHandle ← IndexedSafe.loadAllFromHandle handle
+  let some handleLayer0 := weightsFromHandle.layers[0]?
+    | throw <| IO.userError "expected first indexed layer from loadAllFromHandle"
+  let some handleLayer1 := weightsFromHandle.layers[1]?
+    | throw <| IO.userError "expected second indexed layer from loadAllFromHandle"
+  LeanTest.assertTrue (tensorValues handleLayer0.weight == directVals0)
+    "loadAllFromHandle should preserve the first indexed tensor values"
+  LeanTest.assertTrue (tensorValues handleLayer1.weight == directVals1)
+    "loadAllFromHandle should preserve later indexed tensor values"
   let layers ← IndexedSafe.layers.load
   LeanTest.assertEqual layers.size 2 "hierarchical namespace loader should load array subtree"
   let some nsLayer0 := layers[0]?
@@ -207,6 +227,15 @@ def testSafeTensorsTypeProviderIndexedHierarchy : IO Unit := do
     "namespace array loader should preserve the first indexed tensor values"
   LeanTest.assertTrue (tensorValues nsLayer1.weight == directVals1)
     "namespace array loader should preserve later indexed tensor values"
+  let layersFromHandle ← IndexedSafe.layers.loadFromHandle handle
+  let some nsHandleLayer0 := layersFromHandle[0]?
+    | throw <| IO.userError "expected first indexed layer from namespace handle loader"
+  let some nsHandleLayer1 := layersFromHandle[1]?
+    | throw <| IO.userError "expected second indexed layer from namespace handle loader"
+  LeanTest.assertTrue (tensorValues nsHandleLayer0.weight == directVals0)
+    "namespace handle loader should preserve the first indexed tensor values"
+  LeanTest.assertTrue (tensorValues nsHandleLayer1.weight == directVals1)
+    "namespace handle loader should preserve later indexed tensor values"
 
 @[test]
 def testSafeTensorsTypeProviderShardedIndexJson : IO Unit := do

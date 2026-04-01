@@ -47,9 +47,14 @@ def testKittenTTSInitAndForward : IO Unit := do
   let inputIds : T #[1, 5] ← randint 0 cfg.nToken.toInt64 #[1, 5]
   let refStyle : T #[1, KittenTTSConfig.fullStyleDim cfg] ← randn #[1, KittenTTSConfig.fullStyleDim cfg]
   let out ← model.synthesizeIds inputIds refStyle
+  let debugOut ← model.debugSynthesizeIds inputIds refStyle
 
   LeanTest.assertEqual out.predDurations.size 5 "predicted durations should align with the input token count"
   LeanTest.assertTrue (out.alignmentFrames >= 5) "each token should contribute at least one frame"
+  LeanTest.assertEqual debugOut.predDurations out.predDurations
+    "debug synthesis should preserve duration predictions"
+  LeanTest.assertEqual debugOut.alignmentFrames out.alignmentFrames
+    "debug synthesis should preserve alignment length"
   let audioShape := out.audio.runtimeShape
   LeanTest.assertEqual (audioShape.getD 0 0) 1 "audio batch dimension should be 1"
   LeanTest.assertEqual (audioShape.getD 1 0) 1 "audio channel dimension should be 1"
@@ -59,6 +64,14 @@ def testKittenTTSInitAndForward : IO Unit := do
     "audio sample length should match the full iSTFT vocoder expansion"
 
   let audioVals ← data.tensorToFloatArray' out.audio
+  let debugAudioVals ← data.tensorToFloatArray' debugOut.audio
   LeanTest.assertTrue (!audioVals.isEmpty) "audio output should contain samples"
+  LeanTest.assertEqual debugAudioVals.size audioVals.size
+    "debug synthesis audio should match the regular forward path sample count"
   for v in audioVals do
     LeanTest.assertTrue (Float.isFinite v) "audio values should be finite"
+  for i in [:audioVals.size] do
+    let dv := debugAudioVals[i]!
+    let v := audioVals[i]!
+    LeanTest.assertTrue (Float.abs (dv - v) <= 1e-6)
+      "debug synthesis audio should stay numerically aligned with the normal forward path"

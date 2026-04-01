@@ -127,7 +127,7 @@ private def indentBlock (n : Nat) (source : String) : String :=
   let pad := String.ofList (List.replicate n ' ')
   String.intercalate "\n" <| (source.splitOn "\n").map (fun line => pad ++ line)
 
-private def renderTensorDecls (tensor : TensorSchema) (declName : String) : Array String :=
+private def renderTensorDecls (sourceIsDirectory : Bool) (tensor : TensorSchema) (declName : String) : Array String :=
   let shapeLit := renderShapeLit tensor.shape
   let shapeDecl :=
     s!"/-- Static shape for tensor `{tensor.name}`. -/\n" ++
@@ -141,16 +141,26 @@ private def renderTensorDecls (tensor : TensorSchema) (declName : String) : Arra
     s!"    shape := {declName}Shape,\n" ++
     s!"    sourceFile := {leanStringLit tensor.sourceFile}\n" ++
     "  }\n"
+  let loadFromHandleDecl :=
+    s!"/-- Load `{tensor.name}` from an open SafeTensors handle with a type-safe shape. -/\n" ++
+    s!"def load_{declName}FromHandle (handle : _root_.torch.safetensors.SafeTensorsHandle) : IO (_root_.torch.T {declName}Shape) :=\n" ++
+    s!"  _root_.torch.safetensors.loadFromHandle handle {declName}Spec.name {declName}Shape\n"
   let loadDecl :=
-    s!"/-- Load `{tensor.name}` with a type-safe shape. -/\n" ++
-    s!"def load_{declName} (source : String := defaultSource) : IO (_root_.torch.T {declName}Shape) := do\n" ++
-    "  let filePath : String :=\n" ++
-    "    if sourceIsDirectory then\n" ++
-    "      if " ++ declName ++ "Spec.sourceFile.isEmpty then source else source ++ \"/\" ++ " ++ declName ++ "Spec.sourceFile\n" ++
-    "    else\n" ++
-    "      source\n" ++
-    s!"  _root_.torch.safetensors.loadTensor filePath {declName}Spec.name {declName}Shape\n"
-  #[shapeDecl, specDecl, loadDecl]
+    if sourceIsDirectory then
+      s!"/-- Load `{tensor.name}` with a type-safe shape. -/\n" ++
+      s!"def load_{declName} (source : String := defaultSource) : IO (_root_.torch.T {declName}Shape) := do\n" ++
+      "  let filePath : String :=\n" ++
+      "    if " ++ declName ++ "Spec.sourceFile.isEmpty then source else source ++ \"/\" ++ " ++ declName ++ "Spec.sourceFile\n" ++
+      s!"  _root_.torch.safetensors.loadTensor filePath {declName}Spec.name {declName}Shape\n"
+    else
+      s!"/-- Load `{tensor.name}` with a type-safe shape. -/\n" ++
+      s!"def load_{declName} (source : String := defaultSource) : IO (_root_.torch.T {declName}Shape) := do\n" ++
+      "  let handle ← _root_.torch.safetensors.openHandle source\n" ++
+      s!"  load_{declName}FromHandle handle\n"
+  if sourceIsDirectory then
+    #[shapeDecl, specDecl, loadDecl]
+  else
+    #[shapeDecl, specDecl, loadFromHandleDecl, loadDecl]
 
 private structure LeafInfo where
   declName : String
@@ -263,6 +273,9 @@ private partial def TypeRepr.typeExpr : TypeRepr → String
 
 private def loaderNameForType (typeName : String) : String :=
   "load_node_" ++ sanitizeIdent (replaceInvalidChars typeName) "node"
+
+private def handleLoaderNameForType (typeName : String) : String :=
+  loaderNameForType typeName ++ "_fromHandle"
 
 private partial def buildTypeRepr
     (node : PathNode)
@@ -385,12 +398,13 @@ private partial def buildInlineLoadExpr
     (repr : TypeRepr)
     (sourceExpr : String)
     (hint : String)
+    (useHandle : Bool)
     : CommandElabM String := do
   match repr with
   | .leaf _ =>
       let some leaf := node.leaf?
         | throwError "safetensors_type_provider internal error: missing leaf while building load expression"
-      pure s!"load_{leaf.declName} {sourceExpr}"
+      pure <| if useHandle then s!"load_{leaf.declName}FromHandle {sourceExpr}" else s!"load_{leaf.declName} {sourceExpr}"
   | .array elem expectedCount =>
       let indexed := indexedChildren node
       if indexed.size != expectedCount then
@@ -401,7 +415,7 @@ private partial def buildInlineLoadExpr
       let mut i : Nat := 0
       for (idx, child) in indexed do
         let valueName := sanitizeIdent s!"{hint}_{idx}" s!"item_{i}"
-        let childExpr ← buildInlineLoadExpr child elem sourceExpr valueName
+        let childExpr ← buildInlineLoadExpr child elem sourceExpr valueName useHandle
         lines := lines.push s!"  let {valueName} ←"
         lines := lines.push (indentBlock 4 childExpr)
         valueNames := valueNames.push valueName
@@ -416,7 +430,7 @@ private partial def buildInlineLoadExpr
       for (fieldName, source, childRepr) in fields do
         let childNode ← childNodeForFieldSource node source
         let valueName := sanitizeIdent s!"{hint}_{fieldName}" s!"field_{i}"
-        let childExpr ← buildInlineLoadExpr childNode childRepr sourceExpr valueName
+        let childExpr ← buildInlineLoadExpr childNode childRepr sourceExpr valueName useHandle
         lines := lines.push s!"  let {valueName} ←"
         lines := lines.push (indentBlock 4 childExpr)
         assignments := assignments.push s!"{fieldName} := {valueName}"
@@ -430,87 +444,149 @@ private partial def buildLoadExpr
     (repr : TypeRepr)
     (sourceExpr : String)
     (hint : String)
+    (useHandle : Bool)
     : CommandElabM String := do
   match repr with
   | .struct typeName _ =>
-      pure s!"{loaderNameForType typeName} {sourceExpr}"
+      pure <| if useHandle then s!"{handleLoaderNameForType typeName} {sourceExpr}" else s!"{loaderNameForType typeName} {sourceExpr}"
   | _ =>
-      buildInlineLoadExpr node repr sourceExpr hint
+      buildInlineLoadExpr node repr sourceExpr hint useHandle
 
 private partial def buildStructLoaderDecls
     (node : PathNode)
     (repr : TypeRepr)
+    (sourceIsDirectory : Bool)
     : CommandElabM (Array String) := do
   match repr with
   | .leaf _ => pure #[]
   | .array elem _ =>
       match (indexedChildren node)[0]? with
-      | some (_, firstChild) => buildStructLoaderDecls firstChild elem
+      | some (_, firstChild) => buildStructLoaderDecls firstChild elem sourceIsDirectory
       | none => pure #[]
   | .struct typeName fields =>
       let mut decls : Array String := #[]
-      let mut lines : Array String := #["do"]
-      let mut assignments : Array String := #[]
-      let mut i : Nat := 0
-      for (fieldName, source, childRepr) in fields do
+      for (_, source, childRepr) in fields do
         let childNode ← childNodeForFieldSource node source
-        decls := decls ++ (← buildStructLoaderDecls childNode childRepr)
-        let valueName := sanitizeIdent s!"{typeName}_{fieldName}" s!"field_{i}"
-        let childExpr ← buildLoadExpr childNode childRepr "source" valueName
-        lines := lines.push s!"  let {valueName} ←"
-        lines := lines.push (indentBlock 4 childExpr)
-        assignments := assignments.push s!"{fieldName} := {valueName}"
-        i := i + 1
-      let recordLiteral := "{" ++ String.intercalate ", " assignments.toList ++ "}"
-      lines := lines.push s!"  pure ({recordLiteral} : {typeName})"
-      let loaderDecl :=
-        s!"/-- Load typed checkpoint node `{typeName}`. -/\n" ++
-        s!"def {loaderNameForType typeName} (source : String := defaultSource) : IO {typeName} :=\n" ++
-        indentBlock 2 (String.intercalate "\n" lines.toList) ++ "\n"
-      pure (decls.push loaderDecl)
+        decls := decls ++ (← buildStructLoaderDecls childNode childRepr sourceIsDirectory)
+      if sourceIsDirectory then
+        let mut lines : Array String := #["do"]
+        let mut assignments : Array String := #[]
+        let mut i : Nat := 0
+        for (fieldName, source, childRepr) in fields do
+          let childNode ← childNodeForFieldSource node source
+          let valueName := sanitizeIdent s!"{typeName}_{fieldName}" s!"field_{i}"
+          let childExpr ← buildLoadExpr childNode childRepr "source" valueName false
+          lines := lines.push s!"  let {valueName} ←"
+          lines := lines.push (indentBlock 4 childExpr)
+          assignments := assignments.push s!"{fieldName} := {valueName}"
+          i := i + 1
+        let recordLiteral := "{" ++ String.intercalate ", " assignments.toList ++ "}"
+        lines := lines.push s!"  pure ({recordLiteral} : {typeName})"
+        let loaderDecl :=
+          s!"/-- Load typed checkpoint node `{typeName}`. -/\n" ++
+          s!"def {loaderNameForType typeName} (source : String := defaultSource) : IO {typeName} :=\n" ++
+          indentBlock 2 (String.intercalate "\n" lines.toList) ++ "\n"
+        pure (decls.push loaderDecl)
+      else
+        let mut lines : Array String := #["do"]
+        let mut assignments : Array String := #[]
+        let mut i : Nat := 0
+        for (fieldName, source, childRepr) in fields do
+          let childNode ← childNodeForFieldSource node source
+          let valueName := sanitizeIdent s!"{typeName}_{fieldName}" s!"field_{i}"
+          let childExpr ← buildLoadExpr childNode childRepr "handle" valueName true
+          lines := lines.push s!"  let {valueName} ←"
+          lines := lines.push (indentBlock 4 childExpr)
+          assignments := assignments.push s!"{fieldName} := {valueName}"
+          i := i + 1
+        let recordLiteral := "{" ++ String.intercalate ", " assignments.toList ++ "}"
+        lines := lines.push s!"  pure ({recordLiteral} : {typeName})"
+        let fromHandleDecl :=
+          s!"/-- Load typed checkpoint node `{typeName}` from an open SafeTensors handle. -/\n" ++
+          s!"def {handleLoaderNameForType typeName} (handle : _root_.torch.safetensors.SafeTensorsHandle) : IO {typeName} :=\n" ++
+          indentBlock 2 (String.intercalate "\n" lines.toList) ++ "\n"
+        let loaderDecl :=
+          s!"/-- Load typed checkpoint node `{typeName}`. -/\n" ++
+          s!"def {loaderNameForType typeName} (source : String := defaultSource) : IO {typeName} := do\n" ++
+          "  let handle ← _root_.torch.safetensors.openHandle source\n" ++
+          s!"  {handleLoaderNameForType typeName} handle\n"
+        pure (decls.push fromHandleDecl |>.push loaderDecl)
 
 private partial def buildNamespaceDeclsForChild
     (nsName : String)
     (node : PathNode)
     (repr : TypeRepr)
+    (sourceIsDirectory : Bool)
     : CommandElabM (Array String) := do
   match repr with
   | .leaf _ => pure #[]
   | .array _ _ =>
-      let loadExpr ← buildLoadExpr node repr "source" nsName
-      pure #[
-        s!"namespace {nsName}\n",
-        s!"abbrev Weights := {repr.typeExpr}\n",
-        "/-- Load this checkpoint subtree. -/\n" ++
-          "def load (source : String := defaultSource) : IO Weights :=\n" ++
-          indentBlock 2 loadExpr ++ "\n",
-        s!"end {nsName}\n"
-      ]
+      if sourceIsDirectory then
+        let loadExpr ← buildLoadExpr node repr "source" nsName false
+        pure #[
+          s!"namespace {nsName}\n",
+          s!"abbrev Weights := {repr.typeExpr}\n",
+          "/-- Load this checkpoint subtree. -/\n" ++
+            "def load (source : String := defaultSource) : IO Weights :=\n" ++
+            indentBlock 2 loadExpr ++ "\n",
+          s!"end {nsName}\n"
+        ]
+      else
+        let loadFromHandleExpr ← buildLoadExpr node repr "handle" nsName true
+        pure #[
+          s!"namespace {nsName}\n",
+          s!"abbrev Weights := {repr.typeExpr}\n",
+          "/-- Load this checkpoint subtree from an open SafeTensors handle. -/\n" ++
+            "def loadFromHandle (handle : _root_.torch.safetensors.SafeTensorsHandle) : IO Weights :=\n" ++
+            indentBlock 2 loadFromHandleExpr ++ "\n",
+          "/-- Load this checkpoint subtree. -/\n" ++
+            "def load (source : String := defaultSource) : IO Weights := do\n" ++
+            "  let handle ← _root_.torch.safetensors.openHandle source\n" ++
+            "  loadFromHandle handle\n",
+          s!"end {nsName}\n"
+        ]
   | .struct _ fields =>
-      let loadExpr ← buildLoadExpr node repr "source" nsName
-      let mut decls : Array String := #[
-        s!"namespace {nsName}\n",
-        s!"abbrev Weights := {repr.typeExpr}\n",
-        "/-- Load this checkpoint subtree. -/\n" ++
-          "def load (source : String := defaultSource) : IO Weights :=\n" ++
-          indentBlock 2 loadExpr ++ "\n"
-      ]
+      let decls0 : Array String ←
+        if sourceIsDirectory then do
+          let loadExpr ← buildLoadExpr node repr "source" nsName false
+          pure #[
+            s!"namespace {nsName}\n",
+            s!"abbrev Weights := {repr.typeExpr}\n",
+            "/-- Load this checkpoint subtree. -/\n" ++
+              "def load (source : String := defaultSource) : IO Weights :=\n" ++
+              indentBlock 2 loadExpr ++ "\n"
+          ]
+        else do
+          let loadFromHandleExpr ← buildLoadExpr node repr "handle" nsName true
+          pure #[
+            s!"namespace {nsName}\n",
+            s!"abbrev Weights := {repr.typeExpr}\n",
+            "/-- Load this checkpoint subtree from an open SafeTensors handle. -/\n" ++
+              "def loadFromHandle (handle : _root_.torch.safetensors.SafeTensorsHandle) : IO Weights :=\n" ++
+              indentBlock 2 loadFromHandleExpr ++ "\n",
+            "/-- Load this checkpoint subtree. -/\n" ++
+              "def load (source : String := defaultSource) : IO Weights := do\n" ++
+              "  let handle ← _root_.torch.safetensors.openHandle source\n" ++
+              "  loadFromHandle handle\n"
+          ]
+      let mut decls : Array String := decls0
       for (fieldName, source, childRepr) in fields do
         let childNode ← childNodeForFieldSource node source
-        decls := decls ++ (← buildNamespaceDeclsForChild fieldName childNode childRepr)
+        decls := decls ++ (← buildNamespaceDeclsForChild fieldName childNode childRepr sourceIsDirectory)
       decls := decls.push s!"end {nsName}\n"
       pure decls
 
 private def buildRootNamespaceDecls
     (node : PathNode)
     (repr : TypeRepr)
+    (sourceIsDirectory : Bool)
     : CommandElabM (Array String) := do
   match repr with
   | .struct _ fields =>
       let mut decls : Array String := #[]
       for (fieldName, source, childRepr) in fields do
         let childNode ← childNodeForFieldSource node source
-        decls := decls ++ (← buildNamespaceDeclsForChild fieldName childNode childRepr)
+        decls := decls ++ (← buildNamespaceDeclsForChild fieldName childNode childRepr sourceIsDirectory)
       pure decls
   | _ => pure #[]
 
@@ -545,7 +621,7 @@ private def elabSafeTensorsTypeProviderCore
           usedDeclNames := declName :: usedDeclNames
           specNames := specNames.push s!"{declName}Spec"
           tensorFieldPairs := tensorFieldPairs.push (declName, tensor.name)
-          for decl in renderTensorDecls tensor declName do
+          for decl in renderTensorDecls discovered.sourceIsDirectory tensor declName do
             elabGeneratedCommand decl
 
           let segments := (tensor.name.splitOn ".").filter (fun s => !s.isEmpty)
@@ -574,18 +650,32 @@ private def elabSafeTensorsTypeProviderCore
           let (weightsRepr, weightsTypeDecls, _) ← buildTypeRepr root [] []
           for decl in weightsTypeDecls do
             elabGeneratedCommand decl
-          for decl in (← buildStructLoaderDecls root weightsRepr) do
+          for decl in (← buildStructLoaderDecls root weightsRepr discovered.sourceIsDirectory) do
             elabGeneratedCommand decl
-          for decl in (← buildRootNamespaceDecls root weightsRepr) do
+          for decl in (← buildRootNamespaceDecls root weightsRepr discovered.sourceIsDirectory) do
             elabGeneratedCommand decl
           if weightsRepr.typeExpr != "Weights" then
             elabGeneratedCommand s!"abbrev Weights := {weightsRepr.typeExpr}\n"
-          let loadExpr ← buildLoadExpr root weightsRepr "source" "weights"
-          let loadAllDecl :=
-            "/-- Load all tensors into a typed checkpoint record. -/\n" ++
-            "def loadAll (source : String := defaultSource) : IO Weights :=\n" ++
-            indentBlock 2 loadExpr ++ "\n"
-          elabGeneratedCommand loadAllDecl
+          if discovered.sourceIsDirectory then
+            let loadExpr ← buildLoadExpr root weightsRepr "source" "weights" false
+            let loadAllDecl :=
+              "/-- Load all tensors into a typed checkpoint record. -/\n" ++
+              "def loadAll (source : String := defaultSource) : IO Weights :=\n" ++
+              indentBlock 2 loadExpr ++ "\n"
+            elabGeneratedCommand loadAllDecl
+          else
+            let loadFromHandleExpr ← buildLoadExpr root weightsRepr "handle" "weights" true
+            let loadAllFromHandleDecl :=
+              "/-- Load all tensors into a typed checkpoint record from an open SafeTensors handle. -/\n" ++
+              "def loadAllFromHandle (handle : _root_.torch.safetensors.SafeTensorsHandle) : IO Weights :=\n" ++
+              indentBlock 2 loadFromHandleExpr ++ "\n"
+            elabGeneratedCommand loadAllFromHandleDecl
+            let loadAllDecl :=
+              "/-- Load all tensors into a typed checkpoint record. -/\n" ++
+              "def loadAll (source : String := defaultSource) : IO Weights := do\n" ++
+              "  let handle ← _root_.torch.safetensors.openHandle source\n" ++
+              "  loadAllFromHandle handle\n"
+            elabGeneratedCommand loadAllDecl
 
         let fieldPairsLit := tensorFieldPairs.map fun (fieldName, tensorName) =>
           s!"({leanStringLit fieldName}, {leanStringLit tensorName})"
