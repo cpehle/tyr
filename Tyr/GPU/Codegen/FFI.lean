@@ -260,7 +260,8 @@ def generateModuleKernelCu (moduleName : Name) (kernels : Array RegisteredKernel
   let needLegacyTma := kernels.any (·.needsLegacyTma)
   let needSlice := kernels.any (·.needsSlice)
   let needOuter := kernels.any (·.needsOuter)
-  let helpers := generateHelpersFromFlags needStoreAdd needLegacyTma needSlice needOuter
+  let needEqMask := kernels.any (·.needsEqMask)
+  let helpers := generateHelpersFromFlags needStoreAdd needLegacyTma needSlice needOuter needEqMask
   let kernelDefs := String.intercalate "\n" (kernels.toList.map (·.kernelDef))
   let launchers := String.intercalate "\n" (kernels.toList.map (·.cppCode))
   generateCppHeader ++

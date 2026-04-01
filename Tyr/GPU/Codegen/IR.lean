@@ -141,6 +141,9 @@ inductive KStmt where
   -- Element-wise ternary (FMA)
   | ternary (op : TernaryOp) (dst a b c : VarId)
 
+  -- Element-wise comparison mask
+  | eqMask (dst a b : VarId)  -- 1 where a == b, else 0
+
   -- Scalar operations
   | scalarMul (dst src : VarId) (scalar : Float)
   | scalarAdd (dst src : VarId) (scalar : Float)

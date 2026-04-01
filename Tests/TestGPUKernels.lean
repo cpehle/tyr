@@ -205,7 +205,7 @@ def testUnsupportedSliceRowsCodegenFailsLoudly : IO Unit := do
     params := #[]
     body := #[
       .declRT { idx := 0 } .Float32 64 64 .Row,
-      .declST { idx := 1 } .Float32 64 64 .Row,
+      .declTT { idx := 1 } .Float32 64 64,
       .sliceRows { idx := 0 } { idx := 1 } 0 64
     ]
   }
@@ -215,6 +215,148 @@ def testUnsupportedSliceRowsCodegenFailsLoudly : IO Unit := do
     "Unsupported sliceRows lowering should fail loudly instead of becoming a comment"
 
 @[test]
+def testMixedSliceRowsFromSharedToRegisterCodegen : IO Unit := do
+  let kernel : Kernel := {
+    name := "test_slice_rows_mixed"
+    arch := .SM90
+    params := #[]
+    body := #[
+      .declRT { idx := 0 } .Float32 64 64 .Row,
+      .declST { idx := 1 } .Float32 64 64 .Row,
+      .sliceRows { idx := 0 } { idx := 1 } 0 64
+    ]
+  }
+
+  let code := generateKernel kernel
+  assertTrue (code.containsSubstr "auto _tk_src_sub = v1.template subtile<64, 64>(make_int2(0, 0));")
+    "Shared-to-register sliceRows should create a shared subtile view"
+  assertTrue (code.containsSubstr "kittens::warp::copy(v0, _tk_src_sub);")
+    "Shared-to-register sliceRows should copy from the shared subtile into the register tile"
+
+@[test]
+def testMixedSliceRowsFromRegisterToSharedCodegen : IO Unit := do
+  let kernel : Kernel := {
+    name := "test_slice_rows_into_shared_supported"
+    arch := .SM90
+    params := #[]
+    body := #[
+      .declST { idx := 0 } .Float32 64 64 .Row,
+      .declRT { idx := 1 } .Float32 64 64 .Row,
+      .sliceRows { idx := 0 } { idx := 1 } 0 64
+    ]
+  }
+
+  let code := generateKernel kernel
+  assertTrue (code.containsSubstr "auto _tk_dst_sub = v0.template subtile<64, 64>(make_int2(0, 0));")
+    "Register-to-shared sliceRows should create a shared destination subtile"
+  assertTrue (code.containsSubstr "kittens::warp::copy(_tk_dst_sub, v1);")
+    "Register-to-shared sliceRows should copy the register tile into the shared subtile"
+
+@[test]
+def testMixedSliceColsFromSharedToRegisterCodegen : IO Unit := do
+  let kernel : Kernel := {
+    name := "test_slice_cols_mixed"
+    arch := .SM90
+    params := #[]
+    body := #[
+      .declRT { idx := 0 } .Float32 64 64 .Row,
+      .declST { idx := 1 } .Float32 64 64 .Row,
+      .sliceCols { idx := 0 } { idx := 1 } 0 64
+    ]
+  }
+
+  let code := generateKernel kernel
+  assertTrue (code.containsSubstr "auto _tk_src_sub = v1.template subtile<64, 64>(make_int2(0, 0));")
+    "Shared-to-register sliceCols should create a shared subtile view"
+  assertTrue (code.containsSubstr "kittens::warp::copy(v0, _tk_src_sub);")
+    "Shared-to-register sliceCols should copy from the shared subtile into the register tile"
+
+@[test]
+def testMixedSliceColsFromRegisterToSharedCodegen : IO Unit := do
+  let kernel : Kernel := {
+    name := "test_slice_cols_into_shared_supported"
+    arch := .SM90
+    params := #[]
+    body := #[
+      .declST { idx := 0 } .Float32 64 64 .Row,
+      .declRT { idx := 1 } .Float32 64 64 .Row,
+      .sliceCols { idx := 0 } { idx := 1 } 0 64
+    ]
+  }
+
+  let code := generateKernel kernel
+  assertTrue (code.containsSubstr "auto _tk_dst_sub = v0.template subtile<64, 64>(make_int2(0, 0));")
+    "Register-to-shared sliceCols should create a shared destination subtile"
+  assertTrue (code.containsSubstr "kittens::warp::copy(_tk_dst_sub, v1);")
+    "Register-to-shared sliceCols should copy the register tile into the shared subtile"
+
+@[test]
+def testMixedConcatColsIntoSharedCodegen : IO Unit := do
+  let kernel : Kernel := {
+    name := "test_concat_cols_into_shared"
+    arch := .SM90
+    params := #[]
+    body := #[
+      .declST { idx := 0 } .Float32 64 128 .Row,
+      .declRT { idx := 1 } .Float32 64 64 .Row,
+      .declST { idx := 2 } .Float32 64 64 .Row,
+      .concatCols { idx := 0 } { idx := 1 } { idx := 2 }
+    ]
+  }
+
+  let code := generateKernel kernel
+  assertTrue (code.containsSubstr "auto _tk_dst_left = v0.template subtile<64, 64>(make_int2(0, 0));")
+    "Shared concat should create a left subtile"
+  assertTrue (code.containsSubstr "auto _tk_dst_right = v0.template subtile<64, 64>(make_int2(0, 64));")
+    "Shared concat should create a right subtile"
+  assertTrue (code.containsSubstr "kittens::warp::copy(_tk_dst_left, v1);")
+    "Shared concat should accept register-tile left inputs"
+  assertTrue (code.containsSubstr "kittens::warp::copy(_tk_dst_right, v2);")
+    "Shared concat should accept shared-tile right inputs"
+
+@[test]
+def testMixedConcatColsIntoRegisterCodegen : IO Unit := do
+  let kernel : Kernel := {
+    name := "test_concat_cols_into_register_supported"
+    arch := .SM90
+    params := #[]
+    body := #[
+      .declRT { idx := 0 } .Float32 64 128 .Row,
+      .declRT { idx := 1 } .Float32 64 64 .Row,
+      .declST { idx := 2 } .Float32 64 64 .Row,
+      .concatCols { idx := 0 } { idx := 1 } { idx := 2 }
+    ]
+  }
+
+  let code := generateKernel kernel
+  assertTrue (code.containsSubstr "rt<float, 64, 64, row_l> _tk_right_rt;")
+    "Mixed concat into a register tile should materialize a temporary register tile for the shared input"
+  assertTrue (code.containsSubstr "auto _tk_right_sub = v2.template subtile<64, 64>(make_int2(0, 0));")
+    "Mixed concat into a register tile should create a shared subtile view for the shared input"
+  assertTrue (code.containsSubstr "kittens::warp::copy(_tk_right_rt, _tk_right_sub);")
+    "Mixed concat into a register tile should copy the shared side into the temporary register tile"
+
+@[test]
+def testEqMaskCodegenEmitsHelpers : IO Unit := do
+  let kernel : Kernel := {
+    name := "test_eq_mask"
+    arch := .SM90
+    params := #[]
+    body := #[
+      .declRT { idx := 0 } .Float32 64 64 .Row,
+      .declRT { idx := 1 } .Float32 64 64 .Row,
+      .declRT { idx := 2 } .Float32 64 64 .Row,
+      .eqMask { idx := 0 } { idx := 1 } { idx := 2 }
+    ]
+  }
+
+  let code := generateKernel kernel
+  assertTrue (code.containsSubstr "tk_eq_mask(v0, v1, v2);")
+    "eqMask should lower to the dedicated helper call"
+  assertTrue (code.containsSubstr "template<ducks::rt::all T>")
+    "eqMask helper templates should be emitted when the kernel uses eqMask"
+
+@[test]
 def testUnsupportedSliceColsCodegenFailsLoudly : IO Unit := do
   let kernel : Kernel := {
     name := "test_bad_slice_cols"
@@ -222,7 +364,7 @@ def testUnsupportedSliceColsCodegenFailsLoudly : IO Unit := do
     params := #[]
     body := #[
       .declRT { idx := 0 } .Float32 64 64 .Row,
-      .declST { idx := 1 } .Float32 64 64 .Row,
+      .declTT { idx := 1 } .Float32 64 64,
       .sliceCols { idx := 0 } { idx := 1 } 0 64
     ]
   }
@@ -238,9 +380,9 @@ def testUnsupportedConcatColsCodegenFailsLoudly : IO Unit := do
     arch := .SM90
     params := #[]
     body := #[
-      .declRT { idx := 0 } .Float32 64 128 .Row,
+      .declTT { idx := 0 } .Float32 64 128,
       .declRT { idx := 1 } .Float32 64 64 .Row,
-      .declST { idx := 2 } .Float32 64 64 .Row,
+      .declRT { idx := 2 } .Float32 64 64 .Row,
       .concatCols { idx := 0 } { idx := 1 } { idx := 2 }
     ]
   }
