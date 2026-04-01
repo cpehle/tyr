@@ -23,6 +23,7 @@ output.ppm
 # Python
 .mypy_cache/
 .venv*/
+scripts/__pycache__/
 
 # Bazel
 bazel-*
@@ -34,3 +35,4 @@ logs/
 data/
 cc/src/generated/
 .model-cache/
+.claude/
