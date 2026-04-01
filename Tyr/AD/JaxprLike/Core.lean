@@ -383,7 +383,7 @@ structure ActionBinding where
   isEliminable : Bool := false
   deriving Repr, Inhabited, BEq
 
-/-- Deterministic action table derived from graph partitions and value IDs. -/
+/-- Deterministic action table derived from the explicit eliminable graph partition. -/
 structure ActionTable where
   bindings : Array ActionBinding := #[]
   deriving Repr, Inhabited, BEq
@@ -519,25 +519,17 @@ private def derivedEliminableGraphVertices (jaxpr : LeanJaxpr) : Array JVarId :=
         out := out.push outvar.id
   return out
 
-private def hasExplicitPartitions (jaxpr : LeanJaxpr) : Bool :=
-  !(jaxpr.partitions.inputs.isEmpty &&
-    jaxpr.partitions.outputs.isEmpty &&
-    jaxpr.partitions.eliminable.isEmpty)
+/-- Infer graph partitions from boundary declarations and produced values. -/
+def inferVertexPartitions (jaxpr : LeanJaxpr) : VertexPartitions :=
+  {
+    inputs := derivedInputVertices jaxpr
+    outputs := derivedOutputVertices jaxpr
+    eliminable := derivedEliminableGraphVertices jaxpr
+  }
 
-/-- Graph partitions, preferring explicit stored metadata when present. -/
+/-- Graph partitions are explicit normalized metadata, not inferred on access. -/
 def vertexPartitions (jaxpr : LeanJaxpr) : VertexPartitions :=
-  if hasExplicitPartitions jaxpr then
-    {
-      inputs := dedupPreserveOrder jaxpr.partitions.inputs
-      outputs := dedupPreserveOrder jaxpr.partitions.outputs
-      eliminable := dedupPreserveOrder jaxpr.partitions.eliminable
-    }
-  else
-    {
-      inputs := derivedInputVertices jaxpr
-      outputs := derivedOutputVertices jaxpr
-      eliminable := derivedEliminableGraphVertices jaxpr
-    }
+  jaxpr.partitions
 
 /-- Input-like graph vertices (`constvars ++ invars`) in declaration order. -/
 def inputVertices (jaxpr : LeanJaxpr) : Array JVarId :=
@@ -597,15 +589,6 @@ private def allPresentPositiveVertices (jaxpr : LeanJaxpr) : Std.HashSet Nat := 
       present := remember present v.id
   return present
 
-private def actionSurfaceUpperBound (jaxpr : LeanJaxpr) : Nat := Id.run do
-  let mut ub : Nat := 0
-  for v in jaxpr.constvars ++ jaxpr.invars ++ jaxpr.outvars do
-    ub := max ub v.id
-  for eqn in jaxpr.eqns do
-    for v in eqn.invars ++ eqn.outvars do
-      ub := max ub v.id
-  return ub
-
 private def producerOpIdsByValueId (jaxpr : LeanJaxpr) : Std.HashMap JVarId OpId := Id.run do
   let mut out : Std.HashMap JVarId OpId := {}
   for h : eqnIdx0 in [:jaxpr.eqns.size] do
@@ -615,58 +598,34 @@ private def producerOpIdsByValueId (jaxpr : LeanJaxpr) : Std.HashMap JVarId OpId
       out := out.insert outvar.id opId
   return out
 
-private def hasExplicitActions (jaxpr : LeanJaxpr) : Bool :=
-  !jaxpr.actions.isEmpty
+/-- Infer the fixed action surface from the explicit eliminable partition. -/
+def inferActionTable (jaxpr : LeanJaxpr) : ActionTable :=
+  let parts := jaxpr.inferVertexPartitions
+  let present := allPresentPositiveVertices jaxpr
+  let producers := producerOpIdsByValueId jaxpr
+  {
+    bindings := parts.eliminable.mapIdx fun action0 vertex1 =>
+      {
+        action0 := action0
+        vertex1 := vertex1
+        valueId? := if present.contains vertex1 then some vertex1 else none
+        producerOpId? := producers.get? vertex1
+        role? := some (valueRoleOfId jaxpr vertex1)
+        isBoundary := false
+        isEliminable := true
+      }
+  }
 
-/-- Deterministic fixed action surface, preferring explicit stored bindings when present. -/
+/-- Action table is explicit normalized metadata, not inferred on access. -/
 def actionTable (jaxpr : LeanJaxpr) : ActionTable :=
-  if hasExplicitActions jaxpr then
-    jaxpr.actions
-  else
-    let parts := jaxpr.vertexPartitions
-    let inputs :=
-      (jaxpr.constvars ++ jaxpr.invars).foldl (init := ({} : Std.HashSet JVarId)) fun acc v =>
-        acc.insert v.id
-    let outputs :=
-      jaxpr.outvars.foldl (init := ({} : Std.HashSet JVarId)) fun acc v =>
-        acc.insert v.id
-    let eliminable :=
-      parts.eliminable.foldl (init := ({} : Std.HashSet JVarId)) fun acc v =>
-        acc.insert v
-    let present := allPresentPositiveVertices jaxpr
-    let producers := producerOpIdsByValueId jaxpr
-    let ub := actionSurfaceUpperBound jaxpr
-    {
-      bindings := (Array.range ub).map fun action0 =>
-        let vertex1 := action0 + 1
-        let role? :=
-          if outputs.contains vertex1 then
-            some ValueRole.output
-          else if jaxpr.constvars.any (fun v => v.id = vertex1) then
-            some ValueRole.const
-          else if jaxpr.invars.any (fun v => v.id = vertex1) then
-            some ValueRole.input
-          else if present.contains vertex1 then
-            some ValueRole.intermediate
-          else
-            none
-        {
-          action0 := action0
-          vertex1 := vertex1
-          valueId? := if present.contains vertex1 then some vertex1 else none
-          producerOpId? := producers.get? vertex1
-          role? := role?
-          isBoundary := inputs.contains vertex1 || outputs.contains vertex1
-          isEliminable := eliminable.contains vertex1
-        }
-    }
+  jaxpr.actions
 
 /-- Populate stored partitions/actions and missing value roles from derived graph metadata. -/
 def materializeDerivedMetadata (jaxpr : LeanJaxpr) : LeanJaxpr :=
   let jaxpr := jaxpr.withInferredValueRoles
   { jaxpr with
-    partitions := jaxpr.vertexPartitions
-    actions := jaxpr.actionTable }
+    partitions := jaxpr.inferVertexPartitions
+    actions := jaxpr.inferActionTable }
 
 end LeanJaxpr
 

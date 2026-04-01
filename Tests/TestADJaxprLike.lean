@@ -848,7 +848,7 @@ def testVertexOrderHelpers : IO Unit := do
 
 @[test]
 def testLeanJaxprVertexPartitions : IO Unit := do
-  let jaxpr : LeanJaxpr := {
+  let jaxpr : LeanJaxpr := ({
     constvars := #[{ id := 7 }]
     invars := #[{ id := 0 }, { id := 1 }]
     eqns := #[
@@ -856,7 +856,7 @@ def testLeanJaxprVertexPartitions : IO Unit := do
       { op := `test.eqn1, invars := #[{ id := 2 }, { id := 1 }], outvars := #[{ id := 3 }, { id := 4 }] }
     ]
     outvars := #[{ id := 4 }]
-  }
+  } : LeanJaxpr).materializeDerivedMetadata
   let parts := jaxpr.vertexPartitions
   LeanTest.assertEqual parts.inputs #[7, 0, 1]
     "Input partition should preserve constvars/invars declaration order"
@@ -867,35 +867,35 @@ def testLeanJaxprVertexPartitions : IO Unit := do
 
 @[test]
 def testLeanJaxprDerivedActionTable : IO Unit := do
-  let jaxpr : LeanJaxpr := {
+  let jaxpr : LeanJaxpr := ({
     invars := #[{ id := 0 }, { id := 1 }]
     eqns := #[
       { id := 1, op := `test.eqn0, invars := #[{ id := 0 }], outvars := #[{ id := 2 }] },
       { id := 2, op := `test.eqn1, invars := #[{ id := 2 }, { id := 1 }], outvars := #[{ id := 3 }] }
     ]
     outvars := #[{ id := 3 }]
-  }
+  } : LeanJaxpr).materializeDerivedMetadata
   let table := jaxpr.actionTable
-  LeanTest.assertEqual (table.bindings.map (·.vertex1)) #[1, 2, 3]
-    "Derived action surface should stay dense over positive vertex IDs"
-  LeanTest.assertEqual (table.bindings.map (·.isEliminable)) #[false, true, false]
-    "Only intermediate positive vertices should be marked eliminable in the action surface"
-  LeanTest.assertEqual (table.bindings.map (·.producerOpId?)) #[none, some 1, some 2]
-    "Derived action bindings should record the producer op ID for produced values"
+  LeanTest.assertEqual (table.bindings.map (·.vertex1)) #[2]
+    "Derived action surface should track only eliminable intermediate vertices"
+  LeanTest.assertEqual (table.bindings.map (·.isEliminable)) #[true]
+    "Derived action bindings should be eliminable choices only"
+  LeanTest.assertEqual (table.bindings.map (·.producerOpId?)) #[some 1]
+    "Derived action bindings should record the producer op ID for each eliminable value"
   LeanTest.assertTrue
-    ((table.bindings.map (·.role?)) = #[some .input, some .intermediate, some .output])
-    "Derived action bindings should expose boundary/intermediate roles"
+    ((table.bindings.map (·.role?)) = #[some .intermediate])
+    "Derived action bindings should expose the eliminable value role"
 
 @[test]
 def testValidateTopologicalFailure : IO Unit := do
-  let jaxpr : LeanJaxpr := {
+  let jaxpr : LeanJaxpr := ({
     invars := #[{ id := 0 }]
     eqns := #[
       { op := `test.eqn0, invars := #[{ id := 2 }], outvars := #[{ id := 3 }] },
       { op := `test.eqn1, invars := #[{ id := 0 }], outvars := #[{ id := 2 }] }
     ]
     outvars := #[{ id := 3 }]
-  }
+  } : LeanJaxpr).materializeDerivedMetadata
   match validate jaxpr with
   | .ok () => LeanTest.fail "Topological validation should fail for forward reference input"
   | .error errs =>
@@ -905,11 +905,11 @@ def testValidateTopologicalFailure : IO Unit := do
 
 @[test]
 def testValidateOutvarAvailabilityFailure : IO Unit := do
-  let jaxpr : LeanJaxpr := {
+  let jaxpr : LeanJaxpr := ({
     invars := #[{ id := 0 }]
     eqns := #[{ op := `test.eqn0, invars := #[{ id := 0 }], outvars := #[{ id := 1 }] }]
     outvars := #[{ id := 99 }]
-  }
+  } : LeanJaxpr).materializeDerivedMetadata
   match validate jaxpr with
   | .ok () => LeanTest.fail "Output availability validation should fail for unknown outvar"
   | .error errs =>

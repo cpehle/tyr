@@ -152,7 +152,7 @@ def validateExplicitVertexOrderAgainstGraph
 
 /--
 Validate an AlphaGrad action sequence against the graph's explicit eliminable set.
-The action domain remains `[0, maxVertexId)` with `vertex = action + 1`.
+The action domain is the graph's explicit `ActionId0 -> VertexId1` lookup table.
 -/
 def validateAlphaGradActionOrderAgainstGraph
     (g : ElimGraph)
@@ -250,8 +250,7 @@ def normalizeOrderPolicyAgainstGraph
     match validateAlphaGradActionOrderAgainstGraph g actions0 with
     | .error msg => .error msg
     | .ok () =>
-      let order1 := actions0.map fun action =>
-        (graphActionVertex? g action).getD (action + 1)
+      let order1 := actions0.filterMap (graphActionVertex? g ·)
       .ok {
         baseOrder1? := some order1
         constraints := constraints?.getD {}

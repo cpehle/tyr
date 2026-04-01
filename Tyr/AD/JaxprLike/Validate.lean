@@ -97,11 +97,6 @@ def validateOutvarsAvailable (jaxpr : LeanJaxpr) : Except String Unit :=
   | none =>
     .ok ()
 
-private def hasExplicitPartitions (jaxpr : LeanJaxpr) : Bool :=
-  !(jaxpr.partitions.inputs.isEmpty &&
-    jaxpr.partitions.outputs.isEmpty &&
-    jaxpr.partitions.eliminable.isEmpty)
-
 private def collectAvailableValueIds (jaxpr : LeanJaxpr) : Std.HashSet Nat := Id.run do
   let mut available := initAvailableVarIds jaxpr
   for eqn in jaxpr.eqns do
@@ -109,10 +104,22 @@ private def collectAvailableValueIds (jaxpr : LeanJaxpr) : Std.HashSet Nat := Id
       available := available.insert outvar.id
   return available
 
+/-- Normalized graphs must carry the materialized partition metadata explicitly. -/
+def validateStoredPartitions (jaxpr : LeanJaxpr) : Except String Unit :=
+  if jaxpr.partitions == LeanJaxpr.inferVertexPartitions jaxpr then
+    .ok ()
+  else
+    .error "LeanJaxpr validation failed: stored graph partitions are missing or stale; re-run materializeDerivedMetadata."
+
+/-- Normalized graphs must carry the materialized action table explicitly. -/
+def validateStoredActionTable (jaxpr : LeanJaxpr) : Except String Unit :=
+  if jaxpr.actions == LeanJaxpr.inferActionTable jaxpr then
+    .ok ()
+  else
+    .error "LeanJaxpr validation failed: stored action table is missing or stale; re-run materializeDerivedMetadata."
+
 /-- Validate explicit partition metadata when it is present on the graph. -/
 def validateExplicitPartitions (jaxpr : LeanJaxpr) : Except String Unit := do
-  if !hasExplicitPartitions jaxpr then
-    pure ()
   let raw := jaxpr.partitions
   if !hasNoDuplicates raw.inputs then
     throw "LeanJaxpr validation failed: explicit input partition contains duplicate value IDs."
@@ -143,21 +150,27 @@ def validateActionTable (jaxpr : LeanJaxpr) : Except String Unit := do
   let boundary :=
     (jaxpr.inputVertices ++ jaxpr.outputVertices).foldl (init := ({} : Std.HashSet Nat)) fun acc v =>
       acc.insert v
+  if bindings.size != jaxpr.eliminableGraphVertices.size then
+    throw s!"LeanJaxpr validation failed: action table size {bindings.size} does not match eliminable partition size {jaxpr.eliminableGraphVertices.size}."
   let mut expectedAction : Nat := 0
   for binding in bindings do
     if binding.action0 != expectedAction then
       throw s!"LeanJaxpr validation failed: action table expected action slot {expectedAction}, got {binding.action0}."
-    if binding.vertex1 != binding.action0 + 1 then
-      throw s!"LeanJaxpr validation failed: action slot {binding.action0} must map to vertex {binding.action0 + 1}, got {binding.vertex1}."
+    if binding.vertex1 = 0 then
+      throw s!"LeanJaxpr validation failed: action slot {binding.action0} references non-positive vertex ID 0."
+    if !eliminable.contains binding.vertex1 then
+      throw s!"LeanJaxpr validation failed: action slot {binding.action0} references non-eliminable vertex {binding.vertex1}."
     match binding.producerOpId? with
     | some opId =>
       if !validOpIds.contains opId then
         throw s!"LeanJaxpr validation failed: action slot {binding.action0} references unknown producer op ID {opId}."
     | none => pure ()
-    if binding.isEliminable && !eliminable.contains binding.vertex1 then
-      throw s!"LeanJaxpr validation failed: action slot {binding.action0} marks non-eliminable vertex {binding.vertex1} eliminable."
-    if binding.isBoundary && !boundary.contains binding.vertex1 then
-      throw s!"LeanJaxpr validation failed: action slot {binding.action0} marks non-boundary vertex {binding.vertex1} as boundary."
+    if !binding.isEliminable then
+      throw s!"LeanJaxpr validation failed: action slot {binding.action0} must be marked eliminable."
+    if binding.isBoundary then
+      throw s!"LeanJaxpr validation failed: action slot {binding.action0} may not mark eliminable vertex {binding.vertex1} as boundary."
+    if boundary.contains binding.vertex1 then
+      throw s!"LeanJaxpr validation failed: action slot {binding.action0} references boundary vertex {binding.vertex1}."
     expectedAction := expectedAction + 1
 
 /-- Aggregate validation pass used before elimination planning. -/
@@ -174,7 +187,11 @@ def validate (jaxpr : LeanJaxpr) : Except (Array String) Unit :=
       es := es.push msg
     if let .error msg := validateOutvarsAvailable jaxpr then
       es := es.push msg
+    if let .error msg := validateStoredPartitions jaxpr then
+      es := es.push msg
     if let .error msg := validateExplicitPartitions jaxpr then
+      es := es.push msg
+    if let .error msg := validateStoredActionTable jaxpr then
       es := es.push msg
     if let .error msg := validateActionTable jaxpr then
       es := es.push msg

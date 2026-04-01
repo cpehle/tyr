@@ -91,8 +91,8 @@ def testBuildElimGraphFromJaxprTracksPartitions : IO Unit := do
       "Partitioned graph should keep final outputs as explicit boundary outputs"
     LeanTest.assertEqual g.eliminable #[2]
       "Partitioned graph should expose only non-output intermediates as eliminable vertices"
-    LeanTest.assertEqual g.actionVertices #[1, 2, 3]
-      "Partitioned graph should carry the fixed positive action surface derived from LeanJaxpr"
+    LeanTest.assertEqual g.actionVertices #[2]
+      "Partitioned graph should carry only explicit eliminable action vertices from LeanJaxpr"
 
 @[test]
 def testForwardAndReverseEliminationOnJaxpr : IO Unit := do

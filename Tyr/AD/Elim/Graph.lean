@@ -170,13 +170,6 @@ private def firstDuplicateVertex? (xs : Array JVarId) : Option JVarId := Id.run 
     seen := seen.insert x
   return none
 
-private def positiveVertexUpperBound (g : ElimGraph) : Nat :=
-  (vertices g).foldl (init := 0) max
-
-private def densePositiveActionVertices (g : ElimGraph) : Array JVarId :=
-  let ub := positiveVertexUpperBound g
-  (Array.range ub).map (· + 1)
-
 /--
 Attach explicit graph partitions.
 `inputs` and `outputs` may overlap, but `eliminable` must stay disjoint from both.
@@ -206,7 +199,7 @@ def withPartitions
     pure {
       g' with
       actionVertices :=
-        if g'.actionVertices.isEmpty then densePositiveActionVertices g' else dedupPreserveOrder g'.actionVertices
+        if g'.actionVertices.isEmpty then g'.eliminable else dedupPreserveOrder g'.actionVertices
     }
 
 /-- Attach an explicit action-space lookup table (`ActionId0 -> VertexId1`). -/
@@ -214,8 +207,6 @@ def withActionVertices
     (g : ElimGraph)
     (actionVertices : Array JVarId) :
     Except String ElimGraph := do
-  if actionVertices.isEmpty then
-    throw "Action-space vertex table must be non-empty."
   if let some dup := firstDuplicateVertex? actionVertices then
     throw s!"Action-space vertex table contains duplicate vertex {dup}."
   match actionVertices.find? (fun v => v = 0) with
@@ -231,7 +222,7 @@ def ofLocalJacEdges (edges : Array LocalJacEdge) : ElimGraph :=
       insertEdge g e.src e.dst e.map
   let inferred := vertices base
   let g := { base with eliminable := inferred }
-  { g with actionVertices := densePositiveActionVertices g }
+  { g with actionVertices := g.eliminable }
 
 /-- Build elimination graph from local Jacobian edges plus explicit partitions. -/
 def ofLocalJacEdgesWithPartitions

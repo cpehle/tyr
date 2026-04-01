@@ -45,6 +45,10 @@ private def runGraphWithPolicy
 def buildElimGraphFromJaxpr
     (jaxpr : LeanJaxpr) :
     Lean.CoreM (Except String ElimGraph) := do
+  match validate jaxpr with
+  | .error errs =>
+    return .error <| "LeanJaxpr validation failed:\n" ++ String.intercalate "\n" errs.toList
+  | .ok () => pure ()
   match (← extractLocalJacEdges jaxpr) with
   | .ok edges =>
     return buildPartitionedGraph? jaxpr edges
