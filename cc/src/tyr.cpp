@@ -60,10 +60,13 @@
 #include <atomic>
 #include <cmath>
 #include <limits>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <sstream>
 #include <string>
 #include <stdexcept>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 #include <lean/lean.h>
@@ -3300,69 +3303,385 @@ lean_object* lean_torch_safetensors_save_many(
 
 class SafeTensorsFile {
 public:
+  struct Entry {
+    std::string dtype_name;
+    torch::ScalarType dtype;
+    std::vector<int64_t> shape;
+    uint64_t data_start = 0;
+    uint64_t data_end = 0;
+  };
+
   std::string path;
+  uint64_t file_size = 0;
   std::ifstream file;
   uint64_t header_size;
   std::string header_json;
+  std::unordered_map<std::string, Entry> entries;
+  mutable std::mutex io_mutex;
+
+  static void skipWhitespace(const std::string& s, size_t& pos) {
+    while (pos < s.size() && (s[pos] == ' ' || s[pos] == '\t' || s[pos] == '\r' || s[pos] == '\n')) {
+      pos++;
+    }
+  }
+
+  static std::string parseJsonString(const std::string& s, size_t& pos) {
+    if (pos >= s.size() || s[pos] != '"') {
+      throw std::runtime_error("SafeTensors load error: malformed JSON string.");
+    }
+    pos++;
+    std::string out;
+    bool escaped = false;
+    while (pos < s.size()) {
+      char c = s[pos++];
+      if (escaped) {
+        switch (c) {
+          case '"': out.push_back('"'); break;
+          case '\\': out.push_back('\\'); break;
+          case '/': out.push_back('/'); break;
+          case 'b': out.push_back('\b'); break;
+          case 'f': out.push_back('\f'); break;
+          case 'n': out.push_back('\n'); break;
+          case 'r': out.push_back('\r'); break;
+          case 't': out.push_back('\t'); break;
+          case 'u':
+            if (pos + 4 > s.size()) {
+              throw std::runtime_error("SafeTensors load error: truncated unicode escape.");
+            }
+            pos += 4;
+            break;
+          default:
+            throw std::runtime_error("SafeTensors load error: invalid escape sequence.");
+        }
+        escaped = false;
+        continue;
+      }
+      if (c == '\\') {
+        escaped = true;
+        continue;
+      }
+      if (c == '"') {
+        return out;
+      }
+      out.push_back(c);
+    }
+    throw std::runtime_error("SafeTensors load error: unterminated JSON string.");
+  }
+
+  static Entry parseEntryObject(const std::string& obj) {
+    Entry e;
+
+    size_t dtype_key = obj.find("\"dtype\"");
+    if (dtype_key == std::string::npos) {
+      throw std::runtime_error("SafeTensors load error: missing dtype field.");
+    }
+    size_t dtype_colon = obj.find(':', dtype_key);
+    if (dtype_colon == std::string::npos) {
+      throw std::runtime_error("SafeTensors load error: malformed dtype field.");
+    }
+    size_t dtype_quote_start = obj.find('"', dtype_colon + 1);
+    if (dtype_quote_start == std::string::npos) {
+      throw std::runtime_error("SafeTensors load error: malformed dtype value.");
+    }
+    size_t dtype_quote_end = obj.find('"', dtype_quote_start + 1);
+    if (dtype_quote_end == std::string::npos) {
+      throw std::runtime_error("SafeTensors load error: malformed dtype value.");
+    }
+    e.dtype_name = obj.substr(dtype_quote_start + 1, dtype_quote_end - dtype_quote_start - 1);
+    auto dtype_opt = parseDtype(e.dtype_name);
+    if (!dtype_opt.has_value()) {
+      throw std::runtime_error("SafeTensors load error: unsupported dtype '" + e.dtype_name + "'.");
+    }
+    e.dtype = *dtype_opt;
+
+    size_t shape_key = obj.find("\"shape\"");
+    if (shape_key == std::string::npos) {
+      throw std::runtime_error("SafeTensors load error: missing shape field.");
+    }
+    size_t shape_start = obj.find('[', shape_key);
+    if (shape_start == std::string::npos) {
+      throw std::runtime_error("SafeTensors load error: malformed shape field.");
+    }
+    auto shape_end_opt = findMatchingDelim(obj, shape_start, '[', ']');
+    if (!shape_end_opt.has_value()) {
+      throw std::runtime_error("SafeTensors load error: malformed shape array.");
+    }
+    std::string shape_str = obj.substr(shape_start + 1, *shape_end_opt - shape_start - 1);
+    if (!trimAscii(shape_str).empty()) {
+      std::istringstream shape_stream(shape_str);
+      std::string dim;
+      while (std::getline(shape_stream, dim, ',')) {
+        dim = trimAscii(dim);
+        int64_t d = 0;
+        if (dim.empty() || !parseI64Strict(dim, d) || d < 0) {
+          throw std::runtime_error("SafeTensors load error: invalid shape entry.");
+        }
+        e.shape.push_back(d);
+      }
+    }
+
+    size_t offsets_key = obj.find("\"data_offsets\"");
+    if (offsets_key == std::string::npos) {
+      throw std::runtime_error("SafeTensors load error: missing data_offsets field.");
+    }
+    size_t offsets_start = obj.find('[', offsets_key);
+    if (offsets_start == std::string::npos) {
+      throw std::runtime_error("SafeTensors load error: malformed data_offsets field.");
+    }
+    auto offsets_end_opt = findMatchingDelim(obj, offsets_start, '[', ']');
+    if (!offsets_end_opt.has_value()) {
+      throw std::runtime_error("SafeTensors load error: malformed data_offsets array.");
+    }
+    std::string offsets_str = obj.substr(offsets_start + 1, *offsets_end_opt - offsets_start - 1);
+    std::istringstream offsets_stream(offsets_str);
+    std::vector<int64_t> offsets;
+    std::string off;
+    while (std::getline(offsets_stream, off, ',')) {
+      off = trimAscii(off);
+      int64_t v = 0;
+      if (off.empty() || !parseI64Strict(off, v) || v < 0) {
+        throw std::runtime_error("SafeTensors load error: invalid data_offsets entry.");
+      }
+      offsets.push_back(v);
+    }
+    if (offsets.size() != 2 || offsets[1] < offsets[0]) {
+      throw std::runtime_error("SafeTensors load error: invalid data_offsets range.");
+    }
+    e.data_start = static_cast<uint64_t>(offsets[0]);
+    e.data_end = static_cast<uint64_t>(offsets[1]);
+
+    auto numel_opt = checkedNumel(e.shape);
+    if (!numel_opt.has_value()) {
+      throw std::runtime_error("SafeTensors load error: invalid or overflowing shape.");
+    }
+    const size_t elem_size = dtypeSize(e.dtype);
+    if (*numel_opt > (std::numeric_limits<uint64_t>::max() / static_cast<uint64_t>(elem_size))) {
+      throw std::runtime_error("SafeTensors load error: tensor byte size overflows.");
+    }
+    const uint64_t expected_bytes = *numel_opt * static_cast<uint64_t>(elem_size);
+    const uint64_t actual_bytes = e.data_end - e.data_start;
+    if (actual_bytes != expected_bytes) {
+      throw std::runtime_error(
+        "SafeTensors load error: data size mismatch (offset range " +
+        std::to_string(actual_bytes) + " bytes vs expected " + std::to_string(expected_bytes) + " bytes).");
+    }
+
+    return e;
+  }
+
+  void parseHeaderEntries() {
+    size_t pos = 0;
+    skipWhitespace(header_json, pos);
+    if (pos >= header_json.size() || header_json[pos] != '{') {
+      throw std::runtime_error("SafeTensors load error: malformed header JSON.");
+    }
+    pos++;
+
+    while (true) {
+      skipWhitespace(header_json, pos);
+      if (pos >= header_json.size()) {
+        throw std::runtime_error("SafeTensors load error: truncated header JSON.");
+      }
+      if (header_json[pos] == '}') {
+        pos++;
+        break;
+      }
+      std::string key = parseJsonString(header_json, pos);
+      skipWhitespace(header_json, pos);
+      if (pos >= header_json.size() || header_json[pos] != ':') {
+        throw std::runtime_error("SafeTensors load error: malformed header key/value separator.");
+      }
+      pos++;
+      skipWhitespace(header_json, pos);
+      if (pos >= header_json.size() || header_json[pos] != '{') {
+        throw std::runtime_error("SafeTensors load error: malformed tensor metadata object.");
+      }
+      auto entry_end_opt = findMatchingDelim(header_json, pos, '{', '}');
+      if (!entry_end_opt.has_value()) {
+        throw std::runtime_error("SafeTensors load error: malformed tensor metadata object.");
+      }
+      if (key != "__metadata__") {
+        std::string obj = header_json.substr(pos, *entry_end_opt - pos + 1);
+        entries.emplace(std::move(key), parseEntryObject(obj));
+      }
+      pos = *entry_end_opt + 1;
+      skipWhitespace(header_json, pos);
+      if (pos < header_json.size() && header_json[pos] == ',') {
+        pos++;
+      }
+    }
+  }
 
   SafeTensorsFile(const std::string& p) : path(p), file(p, std::ios::binary) {
     if (!file.is_open()) throw std::runtime_error("Failed to open: " + p);
 
+    file.seekg(0, std::ios::end);
+    std::streamoff size_off = file.tellg();
+    if (size_off < 0) throw std::runtime_error("Failed to determine safetensors file size: " + p);
+    file_size = static_cast<uint64_t>(size_off);
+    if (file_size < sizeof(uint64_t)) throw std::runtime_error("SafeTensors load error: file too small to contain metadata size.");
+    file.seekg(0, std::ios::beg);
+
     file.read(reinterpret_cast<char*>(&header_size), sizeof(uint64_t));
     if (header_size > 100000000ULL) throw std::runtime_error("Unreasonable header size");
+    if (header_size == 0) throw std::runtime_error("SafeTensors load error: metadata header is empty.");
+    if (header_size > file_size - sizeof(uint64_t)) throw std::runtime_error("SafeTensors load error: metadata is truncated.");
 
     header_json.resize(header_size);
     file.read(&header_json[0], header_size);
+    parseHeaderEntries();
   }
 
-  // Fast lookup using the original logic
-  struct Entry {
-    std::string dtype;
-    std::vector<int64_t> shape;
-    uint64_t offsets[2];
-  };
-
-  std::optional<Entry> findEntry(const std::string& name) {
-    std::string search_key = "\"" + jsonEscape(name) + "\"";
-    size_t key_pos = header_json.find(search_key);
-    while (key_pos != std::string::npos) {
-      size_t colon_pos = header_json.find(':', key_pos + search_key.size());
-      if (colon_pos == std::string::npos) break;
-      size_t candidate = header_json.find_first_not_of(" \t\r\n", colon_pos + 1);
-      if (candidate != std::string::npos && header_json[candidate] == '{') {
-        auto end_opt = findMatchingDelim(header_json, candidate, '{', '}');
-        if (end_opt) {
-          std::string obj = header_json.substr(candidate, *end_opt - candidate + 1);
-          Entry e;
-          // dtype
-          size_t dt_k = obj.find("\"dtype\"");
-          size_t dt_q = obj.find('"', obj.find(':', dt_k) + 1);
-          e.dtype = obj.substr(dt_q + 1, obj.find('"', dt_q + 1) - dt_q - 1);
-          // shape
-          size_t sh_k = obj.find("\"shape\"");
-          size_t sh_s = obj.find('[', sh_k);
-          size_t sh_e = obj.find(']', sh_s);
-          std::string sh_str = obj.substr(sh_s + 1, sh_e - sh_s - 1);
-          std::istringstream ss(sh_str); std::string d;
-          while(std::getline(ss, d, ',')) {
-             d = trimAscii(d);
-             if (!d.empty()) e.shape.push_back(std::stoll(d));
-          }
-          // offsets
-          size_t of_k = obj.find("\"data_offsets\"");
-          size_t of_s = obj.find('[', of_k);
-          e.offsets[0] = std::stoull(obj.substr(of_s + 1));
-          e.offsets[1] = std::stoull(obj.substr(obj.find(',', of_s) + 1));
-          return e;
-        }
-      }
-      key_pos = header_json.find(search_key, key_pos + search_key.size());
+  const Entry* findEntry(const std::string& name) const {
+    auto it = entries.find(name);
+    if (it == entries.end()) {
+      return nullptr;
     }
-    return std::nullopt;
+    return &it->second;
+  }
+
+  torch::Tensor loadTensor(const Entry& e, const std::vector<int64_t>& expected_shape) {
+    const uint64_t n_bytes = e.data_end - e.data_start;
+    const uint64_t data_base = sizeof(uint64_t) + header_size;
+    if (data_base > file_size || e.data_end > file_size - data_base) {
+      throw std::runtime_error("SafeTensors load error: tensor data range exceeds file payload (truncated file).");
+    }
+
+    auto tensor = torch::empty(e.shape, torch::TensorOptions().dtype(e.dtype));
+    {
+      std::lock_guard<std::mutex> guard(io_mutex);
+      file.clear();
+      file.seekg(static_cast<std::streamoff>(data_base + e.data_start), std::ios::beg);
+      if (!file.good()) {
+        throw std::runtime_error("SafeTensors load error: failed to seek to tensor data.");
+      }
+      if (n_bytes > 0 &&
+          !file.read(reinterpret_cast<char*>(tensor.data_ptr()), static_cast<std::streamsize>(n_bytes))) {
+        throw std::runtime_error("SafeTensors load error: failed to read tensor data (file truncated).");
+      }
+    }
+
+    if (!expected_shape.empty()) {
+      auto expected_numel = checkedNumel(expected_shape);
+      if (!expected_numel.has_value()) {
+        throw std::runtime_error("SafeTensors load error: invalid expected output shape.");
+      }
+      if (static_cast<uint64_t>(tensor.numel()) != *expected_numel) {
+        throw std::runtime_error("SafeTensors load error: loaded tensor size does not match requested shape.");
+      }
+      tensor = tensor.reshape(expected_shape);
+    }
+    return tensor;
   }
 };
 
 static std::unordered_map<std::string, std::shared_ptr<SafeTensorsFile>> g_safetensors_cache;
+static std::mutex g_safetensors_cache_mutex;
+
+class ShardedSafeTensorsDir {
+public:
+  struct ResolvedTensor {
+    std::shared_ptr<SafeTensorsFile> file;
+    SafeTensorsFile::Entry entry;
+  };
+
+  std::string dir;
+  std::vector<std::shared_ptr<SafeTensorsFile>> shards;
+  std::unordered_map<std::string, ResolvedTensor> tensors;
+
+  explicit ShardedSafeTensorsDir(const std::string& dir_) : dir(dir_) {
+    std::vector<std::string> paths;
+    std::unordered_set<std::string> seen;
+    auto pushUniquePath = [&](const std::string& path) {
+      if (seen.insert(path).second) {
+        paths.push_back(path);
+      }
+    };
+
+    const std::string model_path = dir + "/model.safetensors";
+    if (std::filesystem::exists(model_path)) {
+      pushUniquePath(model_path);
+    }
+
+    for (const auto& entry : std::filesystem::directory_iterator(dir)) {
+      if (!entry.is_regular_file()) {
+        continue;
+      }
+      const auto path = entry.path();
+      if (path.extension() != ".safetensors") {
+        continue;
+      }
+      pushUniquePath(path.string());
+    }
+    std::sort(paths.begin(), paths.end());
+    if (paths.empty()) {
+      throw std::runtime_error("No .safetensors files found in directory: " + dir);
+    }
+
+    for (const auto& path : paths) {
+      auto file = [&]() -> std::shared_ptr<SafeTensorsFile> {
+        {
+          std::lock_guard<std::mutex> guard(g_safetensors_cache_mutex);
+          auto it = g_safetensors_cache.find(path);
+          if (it != g_safetensors_cache.end()) {
+            return it->second;
+          }
+        }
+        auto created = std::make_shared<SafeTensorsFile>(path);
+        std::lock_guard<std::mutex> guard(g_safetensors_cache_mutex);
+        auto [it, _inserted] = g_safetensors_cache.emplace(path, created);
+        return it->second;
+      }();
+
+      shards.push_back(file);
+      for (const auto& kv : file->entries) {
+        auto [_, inserted] = tensors.emplace(kv.first, ResolvedTensor { file, kv.second });
+        if (!inserted) {
+          throw std::runtime_error("Duplicate tensor found across safetensors shards: " + kv.first);
+        }
+      }
+    }
+  }
+
+  const ResolvedTensor* find(const std::string& name) const {
+    auto it = tensors.find(name);
+    if (it == tensors.end()) {
+      return nullptr;
+    }
+    return &it->second;
+  }
+};
+
+static std::unordered_map<std::string, std::shared_ptr<ShardedSafeTensorsDir>> g_sharded_safetensors_cache;
+static std::mutex g_sharded_safetensors_cache_mutex;
+
+static std::shared_ptr<SafeTensorsFile> getCachedSafeTensorsFile(const std::string& path) {
+  {
+    std::lock_guard<std::mutex> guard(g_safetensors_cache_mutex);
+    auto it = g_safetensors_cache.find(path);
+    if (it != g_safetensors_cache.end()) {
+      return it->second;
+    }
+  }
+  auto created = std::make_shared<SafeTensorsFile>(path);
+  std::lock_guard<std::mutex> guard(g_safetensors_cache_mutex);
+  auto [it, _inserted] = g_safetensors_cache.emplace(path, created);
+  return it->second;
+}
+
+static std::shared_ptr<ShardedSafeTensorsDir> getCachedShardedSafeTensorsDir(const std::string& dir) {
+  {
+    std::lock_guard<std::mutex> guard(g_sharded_safetensors_cache_mutex);
+    auto it = g_sharded_safetensors_cache.find(dir);
+    if (it != g_sharded_safetensors_cache.end()) {
+      return it->second;
+    }
+  }
+  auto created = std::make_shared<ShardedSafeTensorsDir>(dir);
+  std::lock_guard<std::mutex> guard(g_sharded_safetensors_cache_mutex);
+  auto [it, _inserted] = g_sharded_safetensors_cache.emplace(dir, created);
+  return it->second;
+}
 
 static lean_external_class* g_safetensors_handle_class = nullptr;
 
@@ -3379,14 +3698,7 @@ extern "C" LEAN_EXPORT lean_object* lean_torch_safetensors_open(b_lean_obj_arg p
       g_safetensors_handle_class = lean_register_external_class(safetensors_handle_finalizer, safetensors_handle_foreach);
     }
 
-    std::shared_ptr<SafeTensorsFile> loader;
-    auto it = g_safetensors_cache.find(path);
-    if (it != g_safetensors_cache.end()) {
-      loader = it->second;
-    } else {
-      loader = std::make_shared<SafeTensorsFile>(path);
-      g_safetensors_cache[path] = loader;
-    }
+    std::shared_ptr<SafeTensorsFile> loader = getCachedSafeTensorsFile(path);
 
     // We wrap the shared_ptr in an external object
     auto* wrapper = new std::shared_ptr<SafeTensorsFile>(loader);
@@ -3407,21 +3719,15 @@ extern "C" LEAN_EXPORT lean_object* lean_torch_safetensors_load_from_handle(
   auto expected_shape = getShape(shape_obj);
   lean_dec(shape_obj);
 
-  auto entry_opt = loader->findEntry(name);
-  if (!entry_opt) {
-    return mkIoUserError("Tensor not found: " + name);
+  try {
+    const auto* entry = loader->findEntry(name);
+    if (!entry) {
+      return mkIoUserError("Tensor not found: " + name);
+    }
+    return lean_io_result_mk_ok(fromTorchTensor(loader->loadTensor(*entry, expected_shape)));
+  } catch (const std::exception& e) {
+    return mkIoUserError(e.what());
   }
-
-  const auto& e = *entry_opt;
-  uint64_t n_bytes = e.offsets[1] - e.offsets[0];
-  auto dtype_opt = parseDtype(e.dtype);
-  if (!dtype_opt) return mkIoUserError("Unsupported dtype: " + e.dtype);
-
-  auto tensor = torch::empty(e.shape, torch::TensorOptions().dtype(*dtype_opt));
-  loader->file.seekg(8 + loader->header_size + e.offsets[0], std::ios::beg);
-  loader->file.read(reinterpret_cast<char*>(tensor.data_ptr()), n_bytes);
-
-  return lean_io_result_mk_ok(fromTorchTensor(tensor.reshape(expected_shape)));
 }
 
 lean_object* lean_torch_safetensors_load(
@@ -3436,30 +3742,12 @@ lean_object* lean_torch_safetensors_load(
   lean_dec(shape_obj);
 
   try {
-    std::shared_ptr<SafeTensorsFile> loader;
-    auto it_cache = g_safetensors_cache.find(path);
-    if (it_cache != g_safetensors_cache.end()) {
-      loader = it_cache->second;
-    } else {
-      loader = std::make_shared<SafeTensorsFile>(path);
-      g_safetensors_cache[path] = loader;
-    }
-
-    auto entry_opt = loader->findEntry(tensor_name);
-    if (!entry_opt) {
+    auto loader = getCachedSafeTensorsFile(path);
+    const auto* entry = loader->findEntry(tensor_name);
+    if (!entry) {
       return mkIoUserError("Tensor not found: " + tensor_name);
     }
-
-    const auto& e = *entry_opt;
-    uint64_t n_bytes = e.offsets[1] - e.offsets[0];
-    auto dtype_opt = parseDtype(e.dtype);
-    if (!dtype_opt) return mkIoUserError("Unsupported dtype: " + e.dtype);
-
-    auto tensor = torch::empty(e.shape, torch::TensorOptions().dtype(*dtype_opt));
-    loader->file.seekg(8 + loader->header_size + e.offsets[0], std::ios::beg);
-    loader->file.read(reinterpret_cast<char*>(tensor.data_ptr()), n_bytes);
-
-    return lean_io_result_mk_ok(fromTorchTensor(tensor.reshape(expected_shape)));
+    return lean_io_result_mk_ok(fromTorchTensor(loader->loadTensor(*entry, expected_shape)));
   } catch (const std::exception& e) {
     return mkIoUserError(e.what());
   }
@@ -3471,68 +3759,21 @@ lean_object* lean_torch_safetensors_load_sharded(
   lean_obj_arg shape,
   lean_object* w
 ) {
-  const char* dir = lean_string_cstr(dir_obj);
-  const char* tensor_name = lean_string_cstr(name_obj);
-
-  std::vector<std::string> patterns;
-  std::unordered_set<std::string> seen;
-  auto pushUniquePath = [&](const std::string& path) {
-    if (seen.insert(path).second) {
-      patterns.push_back(path);
-    }
-  };
-
-  const std::string model_path = std::string(dir) + "/model.safetensors";
-  pushUniquePath(model_path);
-
   try {
-    std::vector<std::string> discovered;
-    for (const auto& entry : std::filesystem::directory_iterator(dir)) {
-      if (!entry.is_regular_file()) {
-        continue;
-      }
-      const auto path = entry.path();
-      if (path.extension() != ".safetensors") {
-        continue;
-      }
-      const auto filename = path.filename().string();
-      if (filename == "model.safetensors") {
-        continue;
-      }
-      discovered.push_back(path.string());
+    std::string dir(lean_string_cstr(dir_obj));
+    std::string tensor_name(lean_string_cstr(name_obj));
+    auto expected_shape = getShape(shape);
+    lean_dec(shape);
+
+    auto sharded = getCachedShardedSafeTensorsDir(dir);
+    const auto* resolved = sharded->find(tensor_name);
+    if (!resolved) {
+      return mkIoUserError("Tensor not found in any shard: " + tensor_name);
     }
-    std::sort(discovered.begin(), discovered.end());
-    for (const auto& path : discovered) {
-      pushUniquePath(path);
-    }
-  } catch (const std::exception&) {
-    // Fall back to the explicit single-file path above.
+    return lean_io_result_mk_ok(fromTorchTensor(resolved->file->loadTensor(resolved->entry, expected_shape)));
+  } catch (const std::exception& e) {
+    return mkIoUserError(e.what());
   }
-
-  for (const auto& path : patterns) {
-    std::ifstream test(path);
-    if (test.good()) {
-      test.close();
-      // Try loading from this shard
-      lean_inc(shape);
-      lean_object* name_copy = lean_mk_string(tensor_name);
-      lean_object* path_str = lean_mk_string(path.c_str());
-      lean_object* result = lean_torch_safetensors_load(path_str, name_copy, shape, w);
-      lean_dec(path_str);
-      lean_dec(name_copy);
-
-      // Check if successful
-      if (!lean_io_result_is_error(result)) {
-        lean_dec(shape);
-        return result;
-      }
-      lean_dec(result);
-    }
-  }
-
-  lean_dec(shape);
-  return lean_io_result_mk_error(lean_mk_io_user_error(
-    lean_mk_string(("Tensor not found in any shard: " + std::string(tensor_name)).c_str())));
 }
 
 // Find positions of BOS tokens in a 1D tensor
