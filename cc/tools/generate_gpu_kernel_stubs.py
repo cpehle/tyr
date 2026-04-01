@@ -8,16 +8,47 @@ import re
 
 
 PATTERN = re.compile(rb"lean_launch_[A-Za-z0-9_]+")
+GPU_KERNEL_ATTR_RE = re.compile(r"^\s*@\[gpu_kernel(?:\s+[^\]]+)?\]")
+NAMESPACE_RE = re.compile(r"^\s*namespace\s+([A-Za-z0-9_.]+)")
+DEF_RE = re.compile(
+    r"^\s*(?:private\s+|unsafe\s+|partial\s+|protected\s+|noncomputable\s+)*"
+    r"(?:def|abbrev|opaque)\s+([A-Za-z0-9_.']+)"
+)
 
 
 def collect_symbols(ir_root: pathlib.Path) -> list[str]:
     symbols: set[str] = set()
-    if not ir_root.exists():
-        return []
-    for path in ir_root.rglob("*.c.o.export"):
-        data = path.read_bytes()
-        for match in PATTERN.finditer(data):
-            symbols.add(match.group().decode("utf-8"))
+    if ir_root.exists():
+        for path in ir_root.rglob("*.c.o.export"):
+            data = path.read_bytes()
+            for match in PATTERN.finditer(data):
+                symbols.add(match.group().decode("utf-8"))
+
+    repo_root = pathlib.Path(__file__).resolve().parents[2]
+    kernel_src_root = repo_root / "Tyr" / "GPU" / "Kernels"
+    if kernel_src_root.exists():
+        for path in sorted(kernel_src_root.rglob("*.lean")):
+            namespace = ""
+            pending_gpu_kernel = False
+            for line in path.read_text(encoding="utf-8").splitlines():
+                namespace_match = NAMESPACE_RE.match(line)
+                if namespace_match:
+                    namespace = namespace_match.group(1)
+                if GPU_KERNEL_ATTR_RE.match(line):
+                    pending_gpu_kernel = True
+                    continue
+                if not pending_gpu_kernel:
+                    continue
+                def_match = DEF_RE.match(line)
+                if def_match:
+                    name = def_match.group(1)
+                    full_name = name if "." in name else f"{namespace}.{name}" if namespace else name
+                    symbols.add("lean_launch_" + full_name.replace(".", "_"))
+                    pending_gpu_kernel = False
+                else:
+                    stripped = line.strip()
+                    if stripped and not stripped.startswith("--"):
+                        pending_gpu_kernel = False
     return sorted(symbols)
 
 

@@ -146,6 +146,20 @@ lean_binary(
 )
 
 lean_binary(
+    name = "WhisperVoiceMode",
+    srcs = ["Examples/Whisper/VoiceMode.lean"],
+    deps = [":Examples"],
+    cc_deps = ["//cc:TyrC"],
+)
+
+lean_binary(
+    name = "WhisperTranscribeInMem",
+    srcs = ["Examples/Whisper/TranscribeInMem.lean"],
+    deps = [":Examples"],
+    cc_deps = ["//cc:TyrC"],
+)
+
+lean_binary(
     name = "Qwen35RunHF",
     srcs = ["Examples/Qwen35/RunHF.lean"],
     deps = [":Examples"],
@@ -162,6 +176,34 @@ lean_binary(
 lean_binary(
     name = "Qwen3TTSEndToEnd",
     srcs = ["Examples/Qwen3TTS/EndToEnd.lean"],
+    deps = [":Examples"],
+    cc_deps = ["//cc:TyrC"],
+)
+
+lean_binary(
+    name = "KittenTTSPretrained",
+    srcs = ["Examples/KittenTTSPretrained.lean"],
+    deps = [":Examples"],
+    cc_deps = ["//cc:TyrC"],
+)
+
+lean_binary(
+    name = "KittenTTSDurations",
+    srcs = ["Examples/KittenTTSDurations.lean"],
+    deps = [":Examples"],
+    cc_deps = ["//cc:TyrC"],
+)
+
+lean_binary(
+    name = "KittenTTSDebug",
+    srcs = ["Examples/KittenTTSDebug.lean"],
+    deps = [":Examples"],
+    cc_deps = ["//cc:TyrC"],
+)
+
+lean_binary(
+    name = "KittenTTSCompare",
+    srcs = ["Examples/KittenTTSCompare.lean"],
     deps = [":Examples"],
     cc_deps = ["//cc:TyrC"],
 )
