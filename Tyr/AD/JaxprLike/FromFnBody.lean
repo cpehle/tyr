@@ -48,6 +48,7 @@ structure FromFnBodyCtx where
 structure FromFnBodyState where
   varEnv : Std.HashMap Nat JVar := {}
   nextId : Nat := 1
+  nextOpId : OpId := 1
   eqns : Array JEqn := #[]
   outvars : Array JVar := #[]
   diagnostics : Array FromFnBodyDiagnostic := #[]
@@ -240,6 +241,34 @@ private def extraParamsForEqn
       dotGeneralDefaultParams rawOp canonicalOp
   OpParams.mergePreferRight defaults (hintedEqnParams ctx outIrVar)
 
+private def typedOpForFnBody
+    (canonicalOp : OpName)
+    (params : OpParams) : TypedOp :=
+  if canonicalOp == kstmtDotGeneralOpName then
+    TypedOp.dotGeneral
+      ((params.findName? .variant).getD `generic)
+      ((params.findNats? .lhsContract).getD #[])
+      ((params.findNats? .rhsContract).getD #[])
+      ((params.findNats? .lhsBatch).getD #[])
+      ((params.findNats? .rhsBatch).getD #[])
+  else if isCondAliasOpName canonicalOp then
+    TypedOp.controlFlow {
+      variant := `cond
+      staticArgCount := (params.findNat? .controlStaticArgCount).getD 0
+      predicateCount := (params.findNat? .condPredicateCount).getD 0
+      dataInputCount := (params.findNat? .condDataInputCount).getD 0
+    }
+  else if isScanAliasOpName canonicalOp then
+    TypedOp.controlFlow {
+      variant := `scan
+      staticArgCount := (params.findNat? .controlStaticArgCount).getD 0
+      dataInputCount := (params.findNat? .scanDataInputCount).getD 0
+      carryInputCount := (params.findNat? .scanCarryInputCount).getD 0
+      carryOutputCount := (params.findNat? .scanCarryOutputCount).getD 0
+    }
+  else
+    TypedOp.generic
+
 def exprKind : IR.Expr → String
   | .ctor _ _ => "Expr.ctor"
   | .reset _ _ => "Expr.reset"
@@ -295,17 +324,24 @@ def traverseFnBody (ctx : FromFnBodyCtx) (body : FnBody) : FromFnBodyM Unit := d
       | some (invars, staticCount) =>
         let extraParams :=
           extraParamsForEqn ctx op canonicalOp x invars staticCount
+        let params :=
+          #[
+            OpParam.mkName .loweringKind (loweringKindForOp op),
+            OpParam.mkName .sourceOp op,
+            OpParam.mkNat .fnbodyOutVarIdx outvar.id
+          ] ++ extraParams
+        let typedOp := typedOpForFnBody canonicalOp params
+        let opId := (← get).nextOpId
         modify fun st =>
           { st with
+              nextOpId := opId + 1
               eqns := st.eqns.push {
+                id := opId
                 op := canonicalOp
                 invars := invars
                 outvars := #[outvar]
-                params := #[
-                  OpParam.mkName .loweringKind (loweringKindForOp op),
-                  OpParam.mkName .sourceOp op,
-                  OpParam.mkNat .fnbodyOutVarIdx outvar.id
-                ] ++ extraParams
+                params := params
+                typed? := some typedOp
                 source := ctx.source
               }
           }
@@ -386,12 +422,12 @@ def fromFnBodyWithHints
   if st.outvars.isEmpty then
     return .error s!"FnBody -> LeanJaxpr conversion failed: no terminal `ret` output found for `{declName}`."
 
-  return .ok {
+  return .ok <| ({
     constvars := #[]
     invars := invars
     eqns := st.eqns
     outvars := st.outvars
-  }
+  } : LeanJaxpr).materializeDerivedMetadata
 
 /-- Convert a function body to `LeanJaxpr` using a conservative lowering strategy. -/
 def fromFnBody

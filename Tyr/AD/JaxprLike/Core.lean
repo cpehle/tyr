@@ -5,7 +5,9 @@ import Lean.Compiler.IR.Basic
 # Tyr.AD.JaxprLike.Core
 
 Core data structures for a Jaxpr-like IR layer in Tyr.
-This layer is intentionally lightweight and independent from elimination execution.
+This layer is intentionally lightweight and independent from elimination execution,
+but now carries enough structured metadata to serve as a shared contract for
+Graphax/AlphaGrad-oriented elimination planning.
 -/
 
 namespace Tyr.AD.JaxprLike
@@ -15,6 +17,15 @@ open Lean.IR
 
 /-- Stable ID for variables in the LeanJaxpr-like representation. -/
 abbrev JVarId := Nat
+
+/-- Stable ID for normalized equations/ops. -/
+abbrev OpId := Nat
+
+/-- Region/subgraph ID for nested-control lowering. -/
+abbrev RegionId := Nat
+
+/-- AlphaGrad-style action IDs live in 0-based action space. -/
+abbrev ActionId0 := Nat
 
 /-- Primitive/op identifier, mirroring Graphax's equation-level primitive naming. -/
 abbrev OpName := Name
@@ -169,6 +180,15 @@ inductive DiffParticipation where
   | frozen
   deriving Repr, BEq, Inhabited, DecidableEq
 
+/-- Semantic role of a value within the normalized graph boundary. -/
+inductive ValueRole where
+  | const
+  | input
+  | output
+  | intermediate
+  | parameter
+  deriving Repr, BEq, Inhabited, DecidableEq
+
 /-- AD-relevant metadata that survives normalization. -/
 structure VarMeta where
   participation : DiffParticipation := .diff
@@ -176,6 +196,7 @@ structure VarMeta where
   dtype : Option String := none
   sharding : Option String := none
   aliasGroup? : Option Nat := none
+  role? : Option ValueRole := none
   deriving Repr, Inhabited
 
 /--
@@ -223,6 +244,160 @@ structure SourceRef where
   col? : Option Nat := none
   deriving Repr, Inhabited
 
+/-- Schema family for typed normalized ops. -/
+inductive OpSchema where
+  | generic
+  | unary
+  | binary
+  | reduce
+  | reduceAccum
+  | broadcast
+  | binaryBroadcast
+  | transpose
+  | swapLayout
+  | convert
+  | sliceRows
+  | sliceCols
+  | concatCols
+  | outer
+  | dotGeneral
+  | mma
+  | cumsum
+  | cumprod
+  | controlFlow
+  deriving Repr, BEq, Inhabited, DecidableEq
+
+/-- Structured payload for higher-order control ops. -/
+structure ControlFlowInfo where
+  variant : Name
+  staticArgCount : Nat := 0
+  predicateCount : Nat := 0
+  dataInputCount : Nat := 0
+  carryInputCount : Nat := 0
+  carryOutputCount : Nat := 0
+  deriving Repr, BEq, Inhabited
+
+/-- Typed normalized op payload used instead of ad hoc metadata where possible. -/
+inductive OpPayload where
+  | none
+  | unary (tag : Name)
+  | binary (tag : Name)
+  | reduce (tag axis : Name)
+  | broadcast (axis : Name)
+  | binaryBroadcast (tag axis : Name)
+  | sliceRows (startRow numRows : Nat)
+  | sliceCols (startCol numCols : Nat)
+  | dotGeneral
+      (variant : Name)
+      (lhsContract rhsContract lhsBatch rhsBatch : Array Nat)
+  | variant (name : Name)
+  | controlFlow (info : ControlFlowInfo)
+  deriving Repr, BEq, Inhabited
+
+/-- Typed op descriptor shared by graph construction, elimination, and policies. -/
+structure TypedOp where
+  schema : OpSchema := .generic
+  payload : OpPayload := .none
+  deriving Repr, BEq, Inhabited
+
+namespace TypedOp
+
+def generic : TypedOp := {}
+
+def unary (tag : Name) : TypedOp :=
+  { schema := .unary, payload := .unary tag }
+
+def binary (tag : Name) : TypedOp :=
+  { schema := .binary, payload := .binary tag }
+
+def reduce (tag axis : Name) : TypedOp :=
+  { schema := .reduce, payload := .reduce tag axis }
+
+def reduceAccum (tag axis : Name) : TypedOp :=
+  { schema := .reduceAccum, payload := .reduce tag axis }
+
+def broadcast (axis : Name) : TypedOp :=
+  { schema := .broadcast, payload := .broadcast axis }
+
+def binaryBroadcast (tag axis : Name) : TypedOp :=
+  { schema := .binaryBroadcast, payload := .binaryBroadcast tag axis }
+
+def transpose : TypedOp :=
+  { schema := .transpose }
+
+def swapLayout : TypedOp :=
+  { schema := .swapLayout }
+
+def convert : TypedOp :=
+  { schema := .convert }
+
+def sliceRows (startRow numRows : Nat) : TypedOp :=
+  { schema := .sliceRows, payload := .sliceRows startRow numRows }
+
+def sliceCols (startCol numCols : Nat) : TypedOp :=
+  { schema := .sliceCols, payload := .sliceCols startCol numCols }
+
+def concatCols : TypedOp :=
+  { schema := .concatCols }
+
+def outer : TypedOp :=
+  { schema := .outer }
+
+def dotGeneral
+    (variant : Name)
+    (lhsContract rhsContract lhsBatch rhsBatch : Array Nat) : TypedOp :=
+  {
+    schema := .dotGeneral
+    payload := .dotGeneral variant lhsContract rhsContract lhsBatch rhsBatch
+  }
+
+def mma (variant : Name) : TypedOp :=
+  { schema := .mma, payload := .variant variant }
+
+def cumsum (axis : Name) : TypedOp :=
+  { schema := .cumsum, payload := .broadcast axis }
+
+def cumprod (axis : Name) : TypedOp :=
+  { schema := .cumprod, payload := .broadcast axis }
+
+def controlFlow (info : ControlFlowInfo) : TypedOp :=
+  { schema := .controlFlow, payload := .controlFlow info }
+
+end TypedOp
+
+/-- Explicit graph partitions used by Graphax-style elimination helpers. -/
+structure VertexPartitions where
+  inputs : Array JVarId := #[]
+  outputs : Array JVarId := #[]
+  eliminable : Array JVarId := #[]
+  deriving Repr, Inhabited, BEq
+
+/-- One action slot in the fixed AlphaGrad/Graphax action surface. -/
+structure ActionBinding where
+  action0 : ActionId0
+  vertex1 : Nat
+  valueId? : Option JVarId := none
+  producerOpId? : Option OpId := none
+  role? : Option ValueRole := none
+  isBoundary : Bool := false
+  isEliminable : Bool := false
+  deriving Repr, Inhabited, BEq
+
+/-- Deterministic action table derived from graph partitions and value IDs. -/
+structure ActionTable where
+  bindings : Array ActionBinding := #[]
+  deriving Repr, Inhabited, BEq
+
+namespace ActionTable
+
+def isEmpty (table : ActionTable) : Bool :=
+  table.bindings.isEmpty
+
+def vertices1 (table : ActionTable) : Array Nat :=
+  table.bindings.map (·.vertex1)
+
+end ActionTable
+
 /-- Variable in LeanJaxpr-like IR. -/
 structure JVar where
   id : JVarId
@@ -232,10 +407,13 @@ structure JVar where
 
 /-- Equation in LeanJaxpr-like IR. -/
 structure JEqn where
+  id : OpId := 0
+  region : RegionId := 0
   op : OpName
   invars : Array JVar
   outvars : Array JVar
   params : OpParams := #[]
+  typed? : Option TypedOp := none
   source : SourceRef := {}
   deriving Repr, Inhabited
 
@@ -249,6 +427,14 @@ def normalizedOpName (eqn : JEqn) : OpName :=
 def sourceOpName (eqn : JEqn) : OpName :=
   (eqn.params.findName? .sourceOp).getD eqn.op
 
+/-- Typed structured op when available, otherwise a generic fallback. -/
+def typedOp (eqn : JEqn) : TypedOp :=
+  eqn.typed?.getD TypedOp.generic
+
+/-- Primary output value ID when the equation has at least one output. -/
+def primaryOutId? (eqn : JEqn) : Option JVarId :=
+  eqn.outvars[0]?.map (·.id)
+
 end JEqn
 
 /-- Jaxpr-like normalized IR for elimination-based AD. -/
@@ -257,6 +443,8 @@ structure LeanJaxpr where
   invars : Array JVar := #[]
   eqns : Array JEqn := #[]
   outvars : Array JVar := #[]
+  partitions : VertexPartitions := {}
+  actions : ActionTable := {}
   deriving Repr, Inhabited
 
 namespace LeanJaxpr
@@ -277,13 +465,6 @@ def withDefaultSourceDecl
         else
           eqn }
 
-/-- Explicit graph partitions used by Graphax-style elimination helpers. -/
-structure VertexPartitions where
-  inputs : Array JVarId := #[]
-  outputs : Array JVarId := #[]
-  eliminable : Array JVarId := #[]
-  deriving Repr, Inhabited
-
 private def dedupPreserveOrder (xs : Array JVarId) : Array JVarId := Id.run do
   let mut seen : Std.HashSet JVarId := {}
   let mut out : Array JVarId := #[]
@@ -297,6 +478,17 @@ private def dedupPreserveOrder (xs : Array JVarId) : Array JVarId := Id.run do
 def eqnVertexId1 (eqnIdx0 : Nat) : Nat :=
   eqnIdx0 + 1
 
+/-- Effective op ID: explicit `eqn.id`, or deterministic fallback from equation index. -/
+def effectiveOpIdAt (jaxpr : LeanJaxpr) (eqnIdx0 : Nat) : OpId :=
+  match jaxpr.eqns[eqnIdx0]? with
+  | some eqn =>
+    if eqn.id = 0 then
+      eqnIdx0 + 1
+    else
+      eqn.id
+  | none =>
+    eqnIdx0 + 1
+
 /-- Inverse of `eqnVertexId1` with domain check for 1-based IDs. -/
 def vertexToEqnIdx0? (vertexId1 : Nat) : Option Nat :=
   if vertexId1 = 0 then none else some (vertexId1 - 1)
@@ -306,20 +498,20 @@ def eliminableVertices1 (jaxpr : LeanJaxpr) : Array Nat :=
   (Array.range jaxpr.eqns.size).map eqnVertexId1
 
 /-- Input-like graph vertices (`constvars ++ invars`) in declaration order. -/
-def inputVertices (jaxpr : LeanJaxpr) : Array JVarId :=
+private def derivedInputVertices (jaxpr : LeanJaxpr) : Array JVarId :=
   dedupPreserveOrder <| (jaxpr.constvars ++ jaxpr.invars).map (·.id)
 
 /-- Output boundary graph vertices in declaration order. -/
-def outputVertices (jaxpr : LeanJaxpr) : Array JVarId :=
+private def derivedOutputVertices (jaxpr : LeanJaxpr) : Array JVarId :=
   dedupPreserveOrder <| jaxpr.outvars.map (·.id)
 
 /--
 Eliminable graph vertices in equation-topological order.
 This tracks produced variables that are not final outputs.
 -/
-def eliminableGraphVertices (jaxpr : LeanJaxpr) : Array JVarId := Id.run do
+private def derivedEliminableGraphVertices (jaxpr : LeanJaxpr) : Array JVarId := Id.run do
   let outputs : Std.HashSet JVarId :=
-    jaxpr.outputVertices.foldl (init := {}) fun acc v => acc.insert v
+    (derivedOutputVertices jaxpr).foldl (init := {}) fun acc v => acc.insert v
   let mut out : Array JVarId := #[]
   for eqn in jaxpr.eqns do
     for outvar in eqn.outvars do
@@ -327,13 +519,154 @@ def eliminableGraphVertices (jaxpr : LeanJaxpr) : Array JVarId := Id.run do
         out := out.push outvar.id
   return out
 
-/-- Graph partitions derived from normalized `LeanJaxpr` boundaries. -/
+private def hasExplicitPartitions (jaxpr : LeanJaxpr) : Bool :=
+  !(jaxpr.partitions.inputs.isEmpty &&
+    jaxpr.partitions.outputs.isEmpty &&
+    jaxpr.partitions.eliminable.isEmpty)
+
+/-- Graph partitions, preferring explicit stored metadata when present. -/
 def vertexPartitions (jaxpr : LeanJaxpr) : VertexPartitions :=
+  if hasExplicitPartitions jaxpr then
+    {
+      inputs := dedupPreserveOrder jaxpr.partitions.inputs
+      outputs := dedupPreserveOrder jaxpr.partitions.outputs
+      eliminable := dedupPreserveOrder jaxpr.partitions.eliminable
+    }
+  else
+    {
+      inputs := derivedInputVertices jaxpr
+      outputs := derivedOutputVertices jaxpr
+      eliminable := derivedEliminableGraphVertices jaxpr
+    }
+
+/-- Input-like graph vertices (`constvars ++ invars`) in declaration order. -/
+def inputVertices (jaxpr : LeanJaxpr) : Array JVarId :=
+  jaxpr.vertexPartitions.inputs
+
+/-- Output boundary graph vertices in declaration order. -/
+def outputVertices (jaxpr : LeanJaxpr) : Array JVarId :=
+  jaxpr.vertexPartitions.outputs
+
+/--
+Eliminable graph vertices in equation-topological order.
+This tracks produced variables that are not final outputs.
+-/
+def eliminableGraphVertices (jaxpr : LeanJaxpr) : Array JVarId :=
+  jaxpr.vertexPartitions.eliminable
+
+private def valueRoleOfId (jaxpr : LeanJaxpr) (id : JVarId) : ValueRole :=
+  if jaxpr.outvars.any (fun v => v.id = id) then
+    .output
+  else if jaxpr.constvars.any (fun v => v.id = id) then
+    .const
+  else if jaxpr.invars.any (fun v => v.id = id) then
+    .input
+  else
+    .intermediate
+
+private def withRoleIfMissing (role : ValueRole) (v : JVar) : JVar :=
+  if v.metaInfo.role?.isSome then
+    v
+  else
+    { v with metaInfo := { v.metaInfo with role? := some role } }
+
+/-- Populate missing `ValueRole` annotations from graph boundaries and outputs. -/
+def withInferredValueRoles (jaxpr : LeanJaxpr) : LeanJaxpr :=
+  let annotate := fun v => withRoleIfMissing (valueRoleOfId jaxpr v.id) v
   {
-    inputs := jaxpr.inputVertices
-    outputs := jaxpr.outputVertices
-    eliminable := jaxpr.eliminableGraphVertices
+    jaxpr with
+    constvars := jaxpr.constvars.map annotate
+    invars := jaxpr.invars.map annotate
+    outvars := jaxpr.outvars.map annotate
+    eqns := jaxpr.eqns.map fun eqn =>
+      {
+        eqn with
+        invars := eqn.invars.map annotate
+        outvars := eqn.outvars.map annotate
+      }
   }
+
+private def allPresentPositiveVertices (jaxpr : LeanJaxpr) : Std.HashSet Nat := Id.run do
+  let mut present : Std.HashSet Nat := {}
+  let remember := fun (acc : Std.HashSet Nat) (id : Nat) =>
+    if 0 < id then acc.insert id else acc
+  for v in jaxpr.constvars ++ jaxpr.invars ++ jaxpr.outvars do
+    present := remember present v.id
+  for eqn in jaxpr.eqns do
+    for v in eqn.invars ++ eqn.outvars do
+      present := remember present v.id
+  return present
+
+private def actionSurfaceUpperBound (jaxpr : LeanJaxpr) : Nat := Id.run do
+  let mut ub : Nat := 0
+  for v in jaxpr.constvars ++ jaxpr.invars ++ jaxpr.outvars do
+    ub := max ub v.id
+  for eqn in jaxpr.eqns do
+    for v in eqn.invars ++ eqn.outvars do
+      ub := max ub v.id
+  return ub
+
+private def producerOpIdsByValueId (jaxpr : LeanJaxpr) : Std.HashMap JVarId OpId := Id.run do
+  let mut out : Std.HashMap JVarId OpId := {}
+  for h : eqnIdx0 in [:jaxpr.eqns.size] do
+    let eqn := jaxpr.eqns[eqnIdx0]
+    let opId := effectiveOpIdAt jaxpr eqnIdx0
+    for outvar in eqn.outvars do
+      out := out.insert outvar.id opId
+  return out
+
+private def hasExplicitActions (jaxpr : LeanJaxpr) : Bool :=
+  !jaxpr.actions.isEmpty
+
+/-- Deterministic fixed action surface, preferring explicit stored bindings when present. -/
+def actionTable (jaxpr : LeanJaxpr) : ActionTable :=
+  if hasExplicitActions jaxpr then
+    jaxpr.actions
+  else
+    let parts := jaxpr.vertexPartitions
+    let inputs :=
+      (jaxpr.constvars ++ jaxpr.invars).foldl (init := ({} : Std.HashSet JVarId)) fun acc v =>
+        acc.insert v.id
+    let outputs :=
+      jaxpr.outvars.foldl (init := ({} : Std.HashSet JVarId)) fun acc v =>
+        acc.insert v.id
+    let eliminable :=
+      parts.eliminable.foldl (init := ({} : Std.HashSet JVarId)) fun acc v =>
+        acc.insert v
+    let present := allPresentPositiveVertices jaxpr
+    let producers := producerOpIdsByValueId jaxpr
+    let ub := actionSurfaceUpperBound jaxpr
+    {
+      bindings := (Array.range ub).map fun action0 =>
+        let vertex1 := action0 + 1
+        let role? :=
+          if outputs.contains vertex1 then
+            some ValueRole.output
+          else if jaxpr.constvars.any (fun v => v.id = vertex1) then
+            some ValueRole.const
+          else if jaxpr.invars.any (fun v => v.id = vertex1) then
+            some ValueRole.input
+          else if present.contains vertex1 then
+            some ValueRole.intermediate
+          else
+            none
+        {
+          action0 := action0
+          vertex1 := vertex1
+          valueId? := if present.contains vertex1 then some vertex1 else none
+          producerOpId? := producers.get? vertex1
+          role? := role?
+          isBoundary := inputs.contains vertex1 || outputs.contains vertex1
+          isEliminable := eliminable.contains vertex1
+        }
+    }
+
+/-- Populate stored partitions/actions and missing value roles from derived graph metadata. -/
+def materializeDerivedMetadata (jaxpr : LeanJaxpr) : LeanJaxpr :=
+  let jaxpr := jaxpr.withInferredValueRoles
+  { jaxpr with
+    partitions := jaxpr.vertexPartitions
+    actions := jaxpr.actionTable }
 
 end LeanJaxpr
 

@@ -97,6 +97,11 @@ def testFromKStmtsUnaryBinary : IO Unit := do
       "Input inference should keep only used-but-never-defined ids"
     LeanTest.assertEqual (jaxpr.outvars.map (fun v => v.id)) #[2]
       "Output inference should keep only defined-but-never-used ids"
+    LeanTest.assertEqual (jaxpr.eqns.map (·.id)) #[1, 2]
+      "Lowered equations should receive deterministic sequential op IDs"
+    LeanTest.assertTrue
+      ((jaxpr.eqns.map (fun eqn => eqn.typedOp.schema)) = #[.unary, .binary])
+      "Lowered equations should carry typed op schemas"
 
 @[test]
 def testFromKStmtsExtendedStructuralSubset : IO Unit := do
@@ -859,6 +864,27 @@ def testLeanJaxprVertexPartitions : IO Unit := do
     "Output partition should preserve declared outputs"
   LeanTest.assertEqual parts.eliminable #[2, 3]
     "Eliminable partition should include non-output eqn results in eqn-topological order"
+
+@[test]
+def testLeanJaxprDerivedActionTable : IO Unit := do
+  let jaxpr : LeanJaxpr := {
+    invars := #[{ id := 0 }, { id := 1 }]
+    eqns := #[
+      { id := 1, op := `test.eqn0, invars := #[{ id := 0 }], outvars := #[{ id := 2 }] },
+      { id := 2, op := `test.eqn1, invars := #[{ id := 2 }, { id := 1 }], outvars := #[{ id := 3 }] }
+    ]
+    outvars := #[{ id := 3 }]
+  }
+  let table := jaxpr.actionTable
+  LeanTest.assertEqual (table.bindings.map (·.vertex1)) #[1, 2, 3]
+    "Derived action surface should stay dense over positive vertex IDs"
+  LeanTest.assertEqual (table.bindings.map (·.isEliminable)) #[false, true, false]
+    "Only intermediate positive vertices should be marked eliminable in the action surface"
+  LeanTest.assertEqual (table.bindings.map (·.producerOpId?)) #[none, some 1, some 2]
+    "Derived action bindings should record the producer op ID for produced values"
+  LeanTest.assertTrue
+    ((table.bindings.map (·.role?)) = #[some .input, some .intermediate, some .output])
+    "Derived action bindings should expose boundary/intermediate roles"
 
 @[test]
 def testValidateTopologicalFailure : IO Unit := do

@@ -67,7 +67,8 @@ private def mergeVarMeta (existing incoming : VarMeta) : VarMeta :=
     shape := existing.shape.orElse (fun _ => incoming.shape)
     dtype := existing.dtype.orElse (fun _ => incoming.dtype)
     sharding := existing.sharding.orElse (fun _ => incoming.sharding)
-    aliasGroup? := existing.aliasGroup?.orElse (fun _ => incoming.aliasGroup?) }
+    aliasGroup? := existing.aliasGroup?.orElse (fun _ => incoming.aliasGroup?)
+    role? := existing.role?.orElse (fun _ => incoming.role?) }
 
 private def upsertVarMeta
     (varMeta : Std.HashMap Nat VarMeta)
@@ -293,8 +294,10 @@ def fromKStmts (stmts : Array KStmt) : Except (Array String) LeanJaxpr := Id.run
         definedSet := definedSet'
         let jsrc := mkJVarFromMeta varMeta src
         let jdst := mkJVarFromMeta varMeta dst
+        let opId := eqns.size + 1
 
         eqns := eqns.push {
+          id := opId
           op := kstmtUnaryOpName op
           invars := #[jsrc]
           outvars := #[jdst]
@@ -302,6 +305,7 @@ def fromKStmts (stmts : Array KStmt) : Except (Array String) LeanJaxpr := Id.run
             OpParam.mkName .kind (atomName "unary"),
             OpParam.mkName .opTag (atomName (kstmtUnaryOpTag op))
           ]
+          typed? := some (TypedOp.unary (atomName (kstmtUnaryOpTag op)))
           source := stmtSourceRef idx0
         }
     | .binary op dst a b =>
@@ -321,8 +325,10 @@ def fromKStmts (stmts : Array KStmt) : Except (Array String) LeanJaxpr := Id.run
         let ja := mkJVarFromMeta varMeta a
         let jb := mkJVarFromMeta varMeta b
         let jdst := mkJVarFromMeta varMeta dst
+        let opId := eqns.size + 1
 
         eqns := eqns.push {
+          id := opId
           op := kstmtBinaryOpName op
           invars := #[ja, jb]
           outvars := #[jdst]
@@ -330,6 +336,7 @@ def fromKStmts (stmts : Array KStmt) : Except (Array String) LeanJaxpr := Id.run
             OpParam.mkName .kind (atomName "binary"),
             OpParam.mkName .opTag (atomName (kstmtBinaryOpTag op))
           ]
+          typed? := some (TypedOp.binary (atomName (kstmtBinaryOpTag op)))
           source := stmtSourceRef idx0
         }
     | .reduce op axis dst src =>
@@ -346,8 +353,10 @@ def fromKStmts (stmts : Array KStmt) : Except (Array String) LeanJaxpr := Id.run
         definedSet := definedSet'
         let jsrc := mkJVarFromMeta varMeta src
         let jdst := mkJVarFromMeta varMeta dst
+        let opId := eqns.size + 1
 
         eqns := eqns.push {
+          id := opId
           op := kstmtReduceOpName op axis
           invars := #[jsrc]
           outvars := #[jdst]
@@ -356,6 +365,9 @@ def fromKStmts (stmts : Array KStmt) : Except (Array String) LeanJaxpr := Id.run
             OpParam.mkName .opTag (atomName (kstmtReduceOpTag op)),
             OpParam.mkName .axis (atomName (kstmtReduceAxisTag axis))
           ]
+          typed? := some (TypedOp.reduce
+            (atomName (kstmtReduceOpTag op))
+            (atomName (kstmtReduceAxisTag axis)))
           source := stmtSourceRef idx0
         }
     | .reduceAccum op axis dst src accum =>
@@ -375,8 +387,10 @@ def fromKStmts (stmts : Array KStmt) : Except (Array String) LeanJaxpr := Id.run
         let jsrc := mkJVarFromMeta varMeta src
         let jaccum := mkJVarFromMeta varMeta accum
         let jdst := mkJVarFromMeta varMeta dst
+        let opId := eqns.size + 1
 
         eqns := eqns.push {
+          id := opId
           op := kstmtReduceAccumOpName op axis
           invars := #[jsrc, jaccum]
           outvars := #[jdst]
@@ -385,6 +399,9 @@ def fromKStmts (stmts : Array KStmt) : Except (Array String) LeanJaxpr := Id.run
             OpParam.mkName .opTag (atomName (kstmtReduceOpTag op)),
             OpParam.mkName .axis (atomName (kstmtReduceAxisTag axis))
           ]
+          typed? := some (TypedOp.reduceAccum
+            (atomName (kstmtReduceOpTag op))
+            (atomName (kstmtReduceAxisTag axis)))
           source := stmtSourceRef idx0
         }
     | .broadcast axis dst vec =>
@@ -401,8 +418,10 @@ def fromKStmts (stmts : Array KStmt) : Except (Array String) LeanJaxpr := Id.run
         definedSet := definedSet'
         let jvec := mkJVarFromMeta varMeta vec
         let jdst := mkJVarFromMeta varMeta dst
+        let opId := eqns.size + 1
 
         eqns := eqns.push {
+          id := opId
           op := kstmtBroadcastOpName axis
           invars := #[jvec]
           outvars := #[jdst]
@@ -410,6 +429,7 @@ def fromKStmts (stmts : Array KStmt) : Except (Array String) LeanJaxpr := Id.run
             OpParam.mkName .kind (atomName "broadcast"),
             OpParam.mkName .axis (atomName (kstmtBroadcastAxisTag axis))
           ]
+          typed? := some (TypedOp.broadcast (atomName (kstmtBroadcastAxisTag axis)))
           source := stmtSourceRef idx0
         }
     | .binaryBroadcast op axis dst tile vec =>
@@ -429,8 +449,10 @@ def fromKStmts (stmts : Array KStmt) : Except (Array String) LeanJaxpr := Id.run
         let jtile := mkJVarFromMeta varMeta tile
         let jvec := mkJVarFromMeta varMeta vec
         let jdst := mkJVarFromMeta varMeta dst
+        let opId := eqns.size + 1
 
         eqns := eqns.push {
+          id := opId
           op := kstmtBinaryBroadcastOpName op axis
           invars := #[jtile, jvec]
           outvars := #[jdst]
@@ -439,6 +461,9 @@ def fromKStmts (stmts : Array KStmt) : Except (Array String) LeanJaxpr := Id.run
             OpParam.mkName .opTag (atomName (kstmtBinaryOpTag op)),
             OpParam.mkName .axis (atomName (kstmtBroadcastAxisTag axis))
           ]
+          typed? := some (TypedOp.binaryBroadcast
+            (atomName (kstmtBinaryOpTag op))
+            (atomName (kstmtBroadcastAxisTag axis)))
           source := stmtSourceRef idx0
         }
     | .transpose dst src =>
@@ -455,14 +480,17 @@ def fromKStmts (stmts : Array KStmt) : Except (Array String) LeanJaxpr := Id.run
         definedSet := definedSet'
         let jsrc := mkJVarFromMeta varMeta src
         let jdst := mkJVarFromMeta varMeta dst
+        let opId := eqns.size + 1
 
         eqns := eqns.push {
+          id := opId
           op := kstmtTransposeOpName
           invars := #[jsrc]
           outvars := #[jdst]
           params := withStmtIdx idx0 #[
             OpParam.mkName .kind (atomName "transpose")
           ]
+          typed? := some TypedOp.transpose
           source := stmtSourceRef idx0
         }
     | .swapLayout dst src =>
@@ -479,14 +507,17 @@ def fromKStmts (stmts : Array KStmt) : Except (Array String) LeanJaxpr := Id.run
         definedSet := definedSet'
         let jsrc := mkJVarFromMeta varMeta src
         let jdst := mkJVarFromMeta varMeta dst
+        let opId := eqns.size + 1
 
         eqns := eqns.push {
+          id := opId
           op := kstmtSwapLayoutOpName
           invars := #[jsrc]
           outvars := #[jdst]
           params := withStmtIdx idx0 #[
             OpParam.mkName .kind (atomName "swapLayout")
           ]
+          typed? := some TypedOp.swapLayout
           source := stmtSourceRef idx0
         }
     | .convert dst src =>
@@ -503,14 +534,17 @@ def fromKStmts (stmts : Array KStmt) : Except (Array String) LeanJaxpr := Id.run
         definedSet := definedSet'
         let jsrc := mkJVarFromMeta varMeta src
         let jdst := mkJVarFromMeta varMeta dst
+        let opId := eqns.size + 1
 
         eqns := eqns.push {
+          id := opId
           op := kstmtConvertOpName
           invars := #[jsrc]
           outvars := #[jdst]
           params := withStmtIdx idx0 #[
             OpParam.mkName .kind (atomName "convert")
           ]
+          typed? := some TypedOp.convert
           source := stmtSourceRef idx0
         }
     | .sliceRows dst src startRow numRows =>
@@ -527,8 +561,10 @@ def fromKStmts (stmts : Array KStmt) : Except (Array String) LeanJaxpr := Id.run
         definedSet := definedSet'
         let jsrc := mkJVarFromMeta varMeta src
         let jdst := mkJVarFromMeta varMeta dst
+        let opId := eqns.size + 1
 
         eqns := eqns.push {
+          id := opId
           op := kstmtSliceRowsOpName
           invars := #[jsrc]
           outvars := #[jdst]
@@ -537,6 +573,7 @@ def fromKStmts (stmts : Array KStmt) : Except (Array String) LeanJaxpr := Id.run
             OpParam.mkNat .startRow startRow,
             OpParam.mkNat .numRows numRows
           ]
+          typed? := some (TypedOp.sliceRows startRow numRows)
           source := stmtSourceRef idx0
         }
     | .sliceCols dst src startCol numCols =>
@@ -553,8 +590,10 @@ def fromKStmts (stmts : Array KStmt) : Except (Array String) LeanJaxpr := Id.run
         definedSet := definedSet'
         let jsrc := mkJVarFromMeta varMeta src
         let jdst := mkJVarFromMeta varMeta dst
+        let opId := eqns.size + 1
 
         eqns := eqns.push {
+          id := opId
           op := kstmtSliceColsOpName
           invars := #[jsrc]
           outvars := #[jdst]
@@ -563,6 +602,7 @@ def fromKStmts (stmts : Array KStmt) : Except (Array String) LeanJaxpr := Id.run
             OpParam.mkNat .startCol startCol,
             OpParam.mkNat .numCols numCols
           ]
+          typed? := some (TypedOp.sliceCols startCol numCols)
           source := stmtSourceRef idx0
         }
     | .concatCols dst left right =>
@@ -582,14 +622,17 @@ def fromKStmts (stmts : Array KStmt) : Except (Array String) LeanJaxpr := Id.run
         let jleft := mkJVarFromMeta varMeta left
         let jright := mkJVarFromMeta varMeta right
         let jdst := mkJVarFromMeta varMeta dst
+        let opId := eqns.size + 1
 
         eqns := eqns.push {
+          id := opId
           op := kstmtConcatColsOpName
           invars := #[jleft, jright]
           outvars := #[jdst]
           params := withStmtIdx idx0 #[
             OpParam.mkName .kind (atomName "concatCols")
           ]
+          typed? := some TypedOp.concatCols
           source := stmtSourceRef idx0
         }
     | .outer dst a b =>
@@ -609,14 +652,17 @@ def fromKStmts (stmts : Array KStmt) : Except (Array String) LeanJaxpr := Id.run
         let ja := mkJVarFromMeta varMeta a
         let jb := mkJVarFromMeta varMeta b
         let jdst := mkJVarFromMeta varMeta dst
+        let opId := eqns.size + 1
 
         eqns := eqns.push {
+          id := opId
           op := kstmtOuterOpName
           invars := #[ja, jb]
           outvars := #[jdst]
           params := withStmtIdx idx0 #[
             OpParam.mkName .kind (atomName "outer")
           ]
+          typed? := some TypedOp.outer
           source := stmtSourceRef idx0
         }
     | .mm trans dst a b =>
@@ -637,20 +683,24 @@ def fromKStmts (stmts : Array KStmt) : Except (Array String) LeanJaxpr := Id.run
         let ja := mkJVarFromMeta varMeta a
         let jb := mkJVarFromMeta varMeta b
         let jdst := mkJVarFromMeta varMeta dst
+        let variant := atomName s!"mm.{toString trans}"
+        let opId := eqns.size + 1
 
         eqns := eqns.push {
+          id := opId
           op := kstmtDotGeneralOpName
           invars := #[ja, jb]
           outvars := #[jdst]
           params := withStmtIdx idx0 #[
             OpParam.mkName .kind (atomName "mm"),
             OpParam.mkName .opTag (atomName (toString trans)),
-            OpParam.mkName .variant (atomName s!"mm.{toString trans}"),
+            OpParam.mkName .variant variant,
             OpParam.mkNats .lhsContract lhsContract,
             OpParam.mkNats .rhsContract rhsContract,
             OpParam.mkNats .lhsBatch #[],
             OpParam.mkNats .rhsBatch #[]
           ]
+          typed? := some (TypedOp.dotGeneral variant lhsContract rhsContract #[] #[])
           source := stmtSourceRef idx0
         }
     | .mma trans dst a b c =>
@@ -673,16 +723,20 @@ def fromKStmts (stmts : Array KStmt) : Except (Array String) LeanJaxpr := Id.run
         let jb := mkJVarFromMeta varMeta b
         let jc := mkJVarFromMeta varMeta c
         let jdst := mkJVarFromMeta varMeta dst
+        let opId := eqns.size + 1
+        let variant := atomName s!"mma.{toString trans}"
 
         eqns := eqns.push {
+          id := opId
           op := kstmtMmaOpName trans
           invars := #[ja, jb, jc]
           outvars := #[jdst]
           params := withStmtIdx idx0 #[
             OpParam.mkName .kind (atomName "mma"),
             OpParam.mkName .opTag (atomName (toString trans)),
-            OpParam.mkName .variant (atomName s!"mma.{toString trans}")
+            OpParam.mkName .variant variant
           ]
+          typed? := some (TypedOp.mma variant)
           source := stmtSourceRef idx0
         }
     | .tcgen05Mma trans dst a b c =>
@@ -705,16 +759,20 @@ def fromKStmts (stmts : Array KStmt) : Except (Array String) LeanJaxpr := Id.run
         let jb := mkJVarFromMeta varMeta b
         let jc := mkJVarFromMeta varMeta c
         let jdst := mkJVarFromMeta varMeta dst
+        let opId := eqns.size + 1
+        let variant := atomName s!"tcgen05Mma.{toString trans}"
 
         eqns := eqns.push {
+          id := opId
           op := kstmtMmaOpName trans
           invars := #[ja, jb, jc]
           outvars := #[jdst]
           params := withStmtIdx idx0 #[
             OpParam.mkName .kind (atomName "tcgen05Mma"),
             OpParam.mkName .opTag (atomName (toString trans)),
-            OpParam.mkName .variant (atomName s!"tcgen05Mma.{toString trans}")
+            OpParam.mkName .variant variant
           ]
+          typed? := some (TypedOp.mma variant)
           source := stmtSourceRef idx0
         }
     | .cumsum axis dst src =>
@@ -731,8 +789,10 @@ def fromKStmts (stmts : Array KStmt) : Except (Array String) LeanJaxpr := Id.run
         definedSet := definedSet'
         let jsrc := mkJVarFromMeta varMeta src
         let jdst := mkJVarFromMeta varMeta dst
+        let opId := eqns.size + 1
 
         eqns := eqns.push {
+          id := opId
           op := kstmtCumsumOpName axis
           invars := #[jsrc]
           outvars := #[jdst]
@@ -740,6 +800,7 @@ def fromKStmts (stmts : Array KStmt) : Except (Array String) LeanJaxpr := Id.run
             OpParam.mkName .kind (atomName "cumsum"),
             OpParam.mkName .axis (atomName (kstmtReduceAxisTag axis))
           ]
+          typed? := some (TypedOp.cumsum (atomName (kstmtReduceAxisTag axis)))
           source := stmtSourceRef idx0
         }
     | .cumprod axis dst src =>
@@ -756,8 +817,10 @@ def fromKStmts (stmts : Array KStmt) : Except (Array String) LeanJaxpr := Id.run
         definedSet := definedSet'
         let jsrc := mkJVarFromMeta varMeta src
         let jdst := mkJVarFromMeta varMeta dst
+        let opId := eqns.size + 1
 
         eqns := eqns.push {
+          id := opId
           op := kstmtCumprodOpName axis
           invars := #[jsrc]
           outvars := #[jdst]
@@ -765,6 +828,7 @@ def fromKStmts (stmts : Array KStmt) : Except (Array String) LeanJaxpr := Id.run
             OpParam.mkName .kind (atomName "cumprod"),
             OpParam.mkName .axis (atomName (kstmtReduceAxisTag axis))
           ]
+          typed? := some (TypedOp.cumprod (atomName (kstmtReduceAxisTag axis)))
           source := stmtSourceRef idx0
         }
     | _ =>
@@ -779,11 +843,11 @@ def fromKStmts (stmts : Array KStmt) : Except (Array String) LeanJaxpr := Id.run
   let outvars := definedOrder.foldl (init := (#[] : Array JVar)) fun acc id =>
     if usedSet.contains id then acc else acc.push (mkJVarById varMeta id)
 
-  return .ok {
+  return .ok <| ({
     constvars := #[]
     invars := invars
     eqns := eqns
     outvars := outvars
-  }
+  } : LeanJaxpr).materializeDerivedMetadata
 
 end Tyr.AD.JaxprLike

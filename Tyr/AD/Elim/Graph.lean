@@ -27,6 +27,8 @@ structure ElimGraph where
   outputs : Array JVarId := #[]
   /-- Eliminable vertices in deterministic forward order. -/
   eliminable : Array JVarId := #[]
+  /-- Fixed action surface (`ActionId0 -> VertexId1`) used by AlphaGrad-style search. -/
+  actionVertices : Array JVarId := #[]
   deriving Repr, Inhabited
 
 private def dedupPreserveOrder (xs : Array JVarId) : Array JVarId := Id.run do
@@ -168,6 +170,13 @@ private def firstDuplicateVertex? (xs : Array JVarId) : Option JVarId := Id.run 
     seen := seen.insert x
   return none
 
+private def positiveVertexUpperBound (g : ElimGraph) : Nat :=
+  (vertices g).foldl (init := 0) max
+
+private def densePositiveActionVertices (g : ElimGraph) : Array JVarId :=
+  let ub := positiveVertexUpperBound g
+  (Array.range ub).map (· + 1)
+
 /--
 Attach explicit graph partitions.
 `inputs` and `outputs` may overlap, but `eliminable` must stay disjoint from both.
@@ -188,12 +197,32 @@ def withPartitions
   | some bad =>
     throw s!"Eliminable partition references boundary vertex {bad}; eliminable vertices must exclude declared inputs/outputs."
   | none =>
-    pure {
+    let g' := {
       g with
       inputs := dedupPreserveOrder inputs
       outputs := dedupPreserveOrder outputs
       eliminable := dedupPreserveOrder eliminable
     }
+    pure {
+      g' with
+      actionVertices :=
+        if g'.actionVertices.isEmpty then densePositiveActionVertices g' else dedupPreserveOrder g'.actionVertices
+    }
+
+/-- Attach an explicit action-space lookup table (`ActionId0 -> VertexId1`). -/
+def withActionVertices
+    (g : ElimGraph)
+    (actionVertices : Array JVarId) :
+    Except String ElimGraph := do
+  if actionVertices.isEmpty then
+    throw "Action-space vertex table must be non-empty."
+  if let some dup := firstDuplicateVertex? actionVertices then
+    throw s!"Action-space vertex table contains duplicate vertex {dup}."
+  match actionVertices.find? (fun v => v = 0) with
+  | some _ =>
+    throw "Action-space vertex table may only contain positive vertex IDs."
+  | none =>
+    pure { g with actionVertices := dedupPreserveOrder actionVertices }
 
 /-- Build elimination graph from local Jacobian edges. -/
 def ofLocalJacEdges (edges : Array LocalJacEdge) : ElimGraph :=
@@ -201,7 +230,8 @@ def ofLocalJacEdges (edges : Array LocalJacEdge) : ElimGraph :=
     edges.foldl (init := ({} : ElimGraph)) fun g e =>
       insertEdge g e.src e.dst e.map
   let inferred := vertices base
-  { base with eliminable := inferred }
+  let g := { base with eliminable := inferred }
+  { g with actionVertices := densePositiveActionVertices g }
 
 /-- Build elimination graph from local Jacobian edges plus explicit partitions. -/
 def ofLocalJacEdgesWithPartitions
@@ -209,5 +239,13 @@ def ofLocalJacEdgesWithPartitions
     (inputs outputs eliminable : Array JVarId) :
     Except String ElimGraph :=
   withPartitions (ofLocalJacEdges edges) inputs outputs eliminable
+
+/-- Build elimination graph from local Jacobian edges plus explicit partitions and action surface. -/
+def ofLocalJacEdgesWithPartitionsAndActions
+    (edges : Array LocalJacEdge)
+    (inputs outputs eliminable actionVertices : Array JVarId) :
+    Except String ElimGraph := do
+  let g ← ofLocalJacEdgesWithPartitions edges inputs outputs eliminable
+  withActionVertices g actionVertices
 
 end Tyr.AD.Elim

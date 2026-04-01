@@ -119,6 +119,9 @@ def validateAlphaGradActionOrder
 private def graphVertexUpperBound (g : ElimGraph) : Nat :=
   (vertices g).foldl (init := 0) max
 
+private def graphActionVertex? (g : ElimGraph) (action : ActionId0) : Option VertexId1 :=
+  g.actionVertices[action]?
+
 private def normalizeHeuristicName (name : String) : String :=
   name.trimAscii.toString.toLower
 
@@ -155,9 +158,17 @@ def validateAlphaGradActionOrderAgainstGraph
     (g : ElimGraph)
     (actions0 : Array ActionId0) :
     Except String Unit := do
-  let numVertices := graphVertexUpperBound g
-  validateAlphaGradActionOrder g.eliminable.size numVertices actions0
-  let order1 := actions0.map (fun action => action + 1)
+  let numActions := g.actionVertices.size
+  validateAlphaGradActionOrder g.eliminable.size numActions actions0
+  let order1 ← Id.run do
+    let mut out : Array VertexId1 := #[]
+    for action in actions0 do
+      match graphActionVertex? g action with
+      | some vertex => out := out.push vertex
+      | none =>
+        return .error
+          s!"Invalid ActionId0 {action}. Expected action ID in [0, {numActions - 1}] for graph action-space size {numActions}."
+    return .ok out
   validateExplicitVertexOrderAgainstEliminable g.eliminable order1
 
 def normalizeOrderPolicyShape
@@ -239,8 +250,10 @@ def normalizeOrderPolicyAgainstGraph
     match validateAlphaGradActionOrderAgainstGraph g actions0 with
     | .error msg => .error msg
     | .ok () =>
+      let order1 := actions0.map fun action =>
+        (graphActionVertex? g action).getD (action + 1)
       .ok {
-        baseOrder1? := some (actions0.map (fun action => action + 1))
+        baseOrder1? := some order1
         constraints := constraints?.getD {}
         source := "alphagrad-action"
       }

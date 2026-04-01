@@ -22,7 +22,13 @@ private def buildPartitionedGraph?
     (edges : Array LocalJacEdge) :
     Except String ElimGraph := do
   let parts := jaxpr.vertexPartitions
-  ofLocalJacEdgesWithPartitions edges parts.inputs parts.outputs parts.eliminable
+  let actionVertices := jaxpr.actionTable.vertices1
+  ofLocalJacEdgesWithPartitionsAndActions
+    edges
+    parts.inputs
+    parts.outputs
+    parts.eliminable
+    actionVertices
 
 private def runGraphWithPolicy
     (graph : ElimGraph)

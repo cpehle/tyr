@@ -200,7 +200,9 @@ def initAlphaGradState?
     Except String AlphaGradState := do
   if numVertices = 0 then
     throw "AlphaGrad state requires at least one eliminable vertex."
-  let actionVertices := actionVertices?.getD (defaultActionVertices numVertices)
+  let defaultVertices :=
+    if graph.actionVertices.isEmpty then defaultActionVertices numVertices else graph.actionVertices
+  let actionVertices := actionVertices?.getD defaultVertices
   if actionVertices.isEmpty then
     throw "AlphaGrad state requires at least one action-space vertex."
   validateVertexIds numVertices actionVertices
