@@ -61,11 +61,35 @@ def actionsToVertices? (numVertices : Nat) (actions0 : Array ActionId0) : Except
       | .error err => return .error err
     return .ok out
 
+def actionsToVerticesInSpace?
+    (actionVertices : Array VertexId1)
+    (actions0 : Array ActionId0) :
+    Except String (Array VertexId1) :=
+  Id.run do
+    let mut out : Array VertexId1 := #[]
+    for action in actions0 do
+      match actionToVertexInSpace? actionVertices action with
+      | .ok vertex => out := out.push vertex
+      | .error err => return .error err
+    return .ok out
+
 def verticesToActions? (numVertices : Nat) (order1 : Array VertexId1) : Except String (Array ActionId0) :=
   Id.run do
     let mut out : Array ActionId0 := #[]
     for vertex in order1 do
       match vertexToAction? numVertices vertex with
+      | .ok action => out := out.push action
+      | .error err => return .error err
+    return .ok out
+
+def verticesToActionsInSpace?
+    (actionVertices : Array VertexId1)
+    (order1 : Array VertexId1) :
+    Except String (Array ActionId0) :=
+  Id.run do
+    let mut out : Array ActionId0 := #[]
+    for vertex in order1 do
+      match vertexToActionInSpace? actionVertices vertex with
       | .ok action => out := out.push action
       | .error err => return .error err
     return .ok out
@@ -94,7 +118,7 @@ def actionFeasibleInSpace
 
 /--
 Normalize an AlphaGrad action sequence into a strict elimination order in vertex space.
-This is the compatibility boundary used before execution in Tyr/Graphax-style eliminators.
+This is the dense full-domain adapter used before execution in order-policy tests.
 -/
 def normalizeAlphaGradOrder
     (expectedEliminable : Nat)

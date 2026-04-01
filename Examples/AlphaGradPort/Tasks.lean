@@ -22,8 +22,10 @@ open Tyr.GPU.Codegen
 structure TaskSpec where
   name : String
   description : String
-  /-- Fixed AlphaGrad-compatible action-slot width. -/
+  /-- Upper bound of the vertex ID domain used by the graph. -/
   numVertices : Nat
+  /-- Fixed action-space width (`ActionId0 -> VertexId1`) used by search/policies. -/
+  numActions : Nat
   /-- Number of eliminable rollout steps under the task graph partitions. -/
   numEliminableVertices : Nat
   edges : Array LocalJacEdge
@@ -509,6 +511,7 @@ private def materializeFromKStmts
             name := name
             description := description
             numVertices := numVertices
+            numActions := graph.actionVertices.size
             numEliminableVertices := graph.eliminable.size
             edges := edges
             graph := graph
@@ -522,6 +525,7 @@ private def taskSpecStatic : TaskName → TaskSpec
       name := "RoeFlux_1d"
       description := "Graphax RoeFlux_1d-inspired elimination graph; first end-to-end AlphaGrad port target."
       numVertices := 35
+      numActions := 35
       numEliminableVertices := 35
       edges := roeFlux1dEdges
       graph := ofLocalJacEdges roeFlux1dEdges

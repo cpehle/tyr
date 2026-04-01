@@ -295,8 +295,8 @@ private def rolloutPPOEpisode
     (net : NetEval actionDim)
     (seed : UInt64) :
     Except String (Array PPORolloutStep × Float × UInt64) := do
-  if actionDim.toNat != task.numVertices then
-    throw s!"Network actionDim={actionDim} does not match task vertices={task.numVertices}."
+  if actionDim.toNat != task.numActions then
+    throw s!"Network actionDim={actionDim} does not match task action surface={task.numActions}."
 
   let s0 ← initAlphaGradState? task.graph task.numVertices
   let mut s := s0
@@ -340,8 +340,8 @@ private def evalGreedyReward?
     (task : TaskSpec)
     (net : NetEval actionDim) :
     Except String Float := do
-  if actionDim.toNat != task.numVertices then
-    throw s!"Network actionDim={actionDim} does not match task vertices={task.numVertices}."
+  if actionDim.toNat != task.numActions then
+    throw s!"Network actionDim={actionDim} does not match task action surface={task.numActions}."
   let s0 ← initAlphaGradState? task.graph task.numVertices
   let mut s := s0
   let maxSteps := task.envCfg.maxEpisodeSteps.getD task.numEliminableVertices
@@ -467,7 +467,7 @@ def trainPPO
     (task : TaskSpec)
     (cfg : PPOTrainConfig := {}) :
     IO (Except String PPOSummary) := do
-  let actionDim : UInt64 := task.numVertices.toUInt64
+  let actionDim : UInt64 := task.numActions.toUInt64
   let net0 ← AlphaGradNet.init actionDim
   let net0 := TensorStruct.makeLeafParams net0
   let opt := Optim.adamw (lr := cfg.learningRate) (weight_decay := cfg.weightDecay)
@@ -480,7 +480,7 @@ def trainPPO
     | .error msg =>
       return .error s!"PPO initial greedy eval failed: {msg}"
 
-  IO.println s!"[AlphaGradPPO] task={task.name} epochs={cfg.epochs} episodes/epoch={cfg.episodesPerEpoch} vertices={task.numVertices} eliminable={task.numEliminableVertices} edges={task.edges.size}"
+  IO.println s!"[AlphaGradPPO] task={task.name} epochs={cfg.epochs} episodes/epoch={cfg.episodesPerEpoch} vertices={task.numVertices} actions={task.numActions} eliminable={task.numEliminableVertices} edges={task.edges.size}"
   IO.println s!"[AlphaGradPPO] initial_greedy_reward={initialGreedyReward}"
 
   let mut net := net0
@@ -607,8 +607,8 @@ private def rolloutAlphaZeroEpisode
     (cfg : AlphaZeroTrainConfig)
     (seed : UInt64) :
     Except String (Array AZSample × Float × UInt64) := do
-  if actionDim.toNat != task.numVertices then
-    throw s!"Network actionDim={actionDim} does not match task vertices={task.numVertices}."
+  if actionDim.toNat != task.numActions then
+    throw s!"Network actionDim={actionDim} does not match task action surface={task.numActions}."
   let s0 ← initAlphaGradState? task.graph task.numVertices
   let searchParams : AZSearchParams actionDim := {
     envCfg := task.envCfg
@@ -742,13 +742,13 @@ def trainAlphaZero
     (task : TaskSpec)
     (cfg : AlphaZeroTrainConfig := {}) :
     IO (Except String AlphaZeroSummary) := do
-  let actionDim : UInt64 := task.numVertices.toUInt64
+  let actionDim : UInt64 := task.numActions.toUInt64
   let net0 ← AlphaGradNet.init actionDim
   let net0 := TensorStruct.makeLeafParams net0
   let opt := Optim.adamw (lr := cfg.learningRate) (weight_decay := cfg.weightDecay)
   let optState0 := opt.init net0
 
-  IO.println s!"[AlphaGradAZ] task={task.name} epochs={cfg.epochs} episodes/epoch={cfg.episodesPerEpoch} sims={cfg.numSimulations} vertices={task.numVertices} eliminable={task.numEliminableVertices} edges={task.edges.size}"
+  IO.println s!"[AlphaGradAZ] task={task.name} epochs={cfg.epochs} episodes/epoch={cfg.episodesPerEpoch} sims={cfg.numSimulations} vertices={task.numVertices} actions={task.numActions} eliminable={task.numEliminableVertices} edges={task.edges.size}"
 
   let mut net := net0
   let mut optState := optState0

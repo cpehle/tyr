@@ -25,6 +25,7 @@ open torch.mctx
 Configurable action-space conventions used by AlphaGrad-style policies:
 - `fullVertices`: action space is `[0, numVertices)`, with `vertex = action + 1`.
 - `explicitVertices`: action space is an explicit vertex subset/table.
+- This config is only used by edge-based entrypoints that do not already carry a graph action table.
 -/
 inductive AlphaGradActionSpace where
   | fullVertices
@@ -56,7 +57,7 @@ structure AlphaGradMctxConfig where
   costWeights : CostWeights := {}
   /-- Reward semantics for environment transitions and value heuristics. -/
   rewardMode : AlphaGradRewardMode := .tyrHeuristic
-  /-- Action-space convention for AlphaGrad compatibility paths. -/
+  /-- Action-space convention used only by edge-based entrypoints lacking stored graph metadata. -/
   actionSpace : AlphaGradActionSpace := .fullVertices
   /-- Search discount used by recurrent dynamics. -/
   discount : Float := 1.0
@@ -200,9 +201,14 @@ def initAlphaGradState?
     Except String AlphaGradState := do
   if numVertices = 0 then
     throw "AlphaGrad state requires at least one eliminable vertex."
-  let defaultVertices :=
-    if graph.actionVertices.isEmpty then defaultActionVertices numVertices else graph.actionVertices
-  let actionVertices := actionVertices?.getD defaultVertices
+  let actionVertices ←
+    match actionVertices? with
+    | some vertices => pure vertices
+    | none =>
+      if graph.actionVertices.isEmpty then
+        throw "AlphaGrad state requires an explicit action-space vertex table on the graph or at initialization."
+      else
+        pure graph.actionVertices
   if actionVertices.isEmpty then
     throw "AlphaGrad state requires at least one action-space vertex."
   validateVertexIds numVertices actionVertices
@@ -980,8 +986,7 @@ def searchEpisodeFromGraph?
     (numVertices : Nat)
     (actionPrefix : Array ActionId0 := #[]) :
     Except String AlphaGradEpisodeResult := do
-  let actionVertices ← resolveActionVertices? envCfg numVertices
-  let s0 ← initAlphaGradState? graph numVertices actionPrefix (some actionVertices)
+  let s0 ← initAlphaGradState? graph numVertices actionPrefix
   searchEpisode? envCfg mctsCfg rngKey s0
 
 /-- Policy-selectable DAG-backed convenience entrypoint from local Jacobian edges. -/
@@ -1008,8 +1013,7 @@ def searchEpisodeDagWithPolicyFromGraph?
     (numVertices : Nat)
     (actionPrefix : Array ActionId0 := #[]) :
     Except String AlphaGradEpisodeResult := do
-  let actionVertices ← resolveActionVertices? envCfg numVertices
-  let s0 ← initAlphaGradState? graph numVertices actionPrefix (some actionVertices)
+  let s0 ← initAlphaGradState? graph numVertices actionPrefix
   searchEpisodeDagWithPolicy? policy envCfg mctsCfg rngKey s0
 
 /-- DAG-backed convenience entrypoint from local Jacobian edges. -/

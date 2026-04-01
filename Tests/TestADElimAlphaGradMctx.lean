@@ -570,14 +570,14 @@ def testPartitionedGraphMasksOutputsAndTerminatesOnEliminableCount : IO Unit := 
     | .error msg =>
       LeanTest.fail s!"State init should succeed on partitioned graph, got: {msg}"
     | .ok s0 =>
-      LeanTest.assertEqual s0.numActions 2
-        "Fixed action slots should still cover the full vertex domain."
+      LeanTest.assertEqual s0.numActions 1
+        "Partitioned graphs should expose only the stored eliminable action surface."
       LeanTest.assertEqual s0.numEliminableActions 1
         "Only the declared eliminable vertex should count toward rollout length."
-      LeanTest.assertEqual s0.outputActionMask #[false, true]
-        "Output slot should be marked in the output-action mask."
-      LeanTest.assertEqual (invalidActionMask {} s0) #[false, true]
-        "Output vertex should be invalid from the root mask in fixed-slot compatibility mode."
+      LeanTest.assertEqual s0.outputActionMask #[false]
+        "Output vertices should not occupy action slots on the explicit action surface."
+      LeanTest.assertEqual (invalidActionMask {} s0) #[false]
+        "Only the stored eliminable action should appear in the root mask."
 
       let t := transition {} s0 0
       LeanTest.assertTrue t.done
@@ -587,10 +587,10 @@ def testPartitionedGraphMasksOutputsAndTerminatesOnEliminableCount : IO Unit := 
       LeanTest.assertEqual t.nextState.vertexTrace #[1]
         "Vertex trace should record the eliminable vertex."
       LeanTest.assertTrue (t.nextState.violation?.isNone)
-        "Partitioned fixed-slot transition should not stamp a violation."
+        "Partitioned explicit-action transition should not stamp a violation."
 
 @[test]
-def testExplicitActionSpaceSubsetCompatibility : IO Unit := do
+def testExplicitActionSpaceSubset : IO Unit := do
   let edges : Array LocalJacEdge := #[(mkEdge 1 2 "m12"), (mkEdge 2 4 "m24")]
   let cfg : AlphaGradMctxConfig := {
     actionSpace := .explicitVertices #[2, 4]

@@ -74,8 +74,12 @@ def testKStmtLoweredTasksUseSemanticMaterialization : IO Unit := do
 
     LeanTest.assertTrue (task.numVertices > 0)
       s!"{task.name} should expose at least one vertex after KStmt lowering."
+    LeanTest.assertTrue (task.numActions > 0)
+      s!"{task.name} should expose at least one action after KStmt lowering."
     LeanTest.assertTrue (task.numEliminableVertices > 0)
       s!"{task.name} should expose at least one eliminable vertex after KStmt lowering."
+    LeanTest.assertEqual task.numActions task.graph.actionVertices.size
+      s!"{task.name} should size task action width from the graph action table."
     LeanTest.assertTrue (!task.edges.isEmpty)
       s!"{task.name} should expose non-empty local-Jac edges after KStmt lowering."
     assertSemanticEdges task.name task.edges
@@ -89,6 +93,8 @@ def testAllAlphaGradTasksMaterialize : IO Unit := do
       | .ok task => pure task
     LeanTest.assertTrue (task.numVertices > 0)
       s!"{task.name} should report a positive vertex count."
+    LeanTest.assertTrue (task.numActions > 0)
+      s!"{task.name} should report a positive action count."
     LeanTest.assertTrue (task.numEliminableVertices > 0)
       s!"{task.name} should report a positive eliminable vertex count."
 
