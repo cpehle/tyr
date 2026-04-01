@@ -10,7 +10,6 @@ jobs:
   build-and-test:
     env:
       LIBTORCH_VERSION: 2.9.1
-      MACOSX_DEPLOYMENT_TARGET: 14.0
     strategy:
       fail-fast: false
       matrix:
