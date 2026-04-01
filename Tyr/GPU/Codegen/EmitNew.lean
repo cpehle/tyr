@@ -62,6 +62,8 @@ private structure TileInfo where
   kind : TileKind
   rows : Nat
   cols : Nat
+  dtype : GpuFloat
+  layout : TileLayout := .Row
   deriving Repr, BEq, Inhabited
 
 private def addRvLayout (st : RVLayoutState) (v : VarId) (layout : RVLayout) : RVLayoutState :=
@@ -85,9 +87,9 @@ private def collectRtLayoutsStmt (acc : Std.HashMap VarId TileLayout) : KStmt â†
   | _ => acc
 
 private def collectTileInfoStmt (acc : Std.HashMap VarId TileInfo) : KStmt â†’ Std.HashMap VarId TileInfo
-  | .declRT v _ rows cols _ => acc.insert v { kind := .RT, rows := rows, cols := cols }
-  | .declST v _ rows cols _ => acc.insert v { kind := .ST, rows := rows, cols := cols }
-  | .declTT v _ rows cols => acc.insert v { kind := .TT, rows := rows, cols := cols }
+  | .declRT v dtype rows cols layout => acc.insert v { kind := .RT, rows := rows, cols := cols, dtype := dtype, layout := layout }
+  | .declST v dtype rows cols layout => acc.insert v { kind := .ST, rows := rows, cols := cols, dtype := dtype, layout := layout }
+  | .declTT v dtype rows cols => acc.insert v { kind := .TT, rows := rows, cols := cols, dtype := dtype }
   | .forLoop _ _ _ body => body.foldl collectTileInfoStmt acc
   | .forLoopVal _ _ _ body => body.foldl collectTileInfoStmt acc
   | .forLoopRev _ _ _ body => body.foldl collectTileInfoStmt acc
@@ -444,6 +446,10 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout)
   | .ternary op dst a b c =>
     s!"{indent}warp::{op.toCpp}({dst.toIdent}, {a.toIdent}, {b.toIdent}, {c.toIdent});\n"
 
+  -- Element-wise comparison masks
+  | .eqMask dst a b =>
+    s!"{indent}tk_eq_mask({dst.toIdent}, {a.toIdent}, {b.toIdent});\n"
+
   -- Scalar operations
   | .scalarMul dst src scalar =>
     if dst == src then
@@ -543,6 +549,20 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout)
         s!"{indent}auto _tk_src_sub = {src.toIdent}.template subtile<{numRows}, {srcInfo.cols}>(make_int2({startRow}, 0));\n" ++
         s!"{indent}kittens::warp::copy({dst.toIdent}, _tk_src_sub);\n" ++
         s!"{indent}}\n"
+      | .RT, .ST =>
+        s!"{indent}\{\n" ++
+        s!"{indent}static_assert({dstInfo.rows} == {numRows}, \"slice rows: dst rows mismatch\");\n" ++
+        s!"{indent}static_assert({srcInfo.cols} == {dstInfo.cols}, \"slice rows: src/dst cols mismatch\");\n" ++
+        s!"{indent}auto _tk_src_sub = {src.toIdent}.template subtile<{numRows}, {srcInfo.cols}>(make_int2({startRow}, 0));\n" ++
+        s!"{indent}kittens::warp::copy({dst.toIdent}, _tk_src_sub);\n" ++
+        s!"{indent}}\n"
+      | .ST, .RT =>
+        s!"{indent}\{\n" ++
+        s!"{indent}static_assert({dstInfo.rows} == {numRows}, \"slice rows: dst rows mismatch\");\n" ++
+        s!"{indent}static_assert({srcInfo.cols} == {dstInfo.cols}, \"slice rows: src/dst cols mismatch\");\n" ++
+        s!"{indent}auto _tk_dst_sub = {dst.toIdent}.template subtile<{numRows}, {dstInfo.cols}>(make_int2({startRow}, 0));\n" ++
+        s!"{indent}kittens::warp::copy(_tk_dst_sub, {src.toIdent});\n" ++
+        s!"{indent}}\n"
       | _, _ =>
         s!"{indent}static_assert(false, \"unsupported sliceRows between non-matching tile kinds\");\n"
     | _, _ =>
@@ -579,6 +599,20 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout)
         s!"{indent}static_assert({srcInfo.rows} == {dstInfo.rows}, \"slice cols: src/dst rows mismatch\");\n" ++
         s!"{indent}auto _tk_src_sub = {src.toIdent}.template subtile<{srcInfo.rows}, {numCols}>(make_int2(0, {startCol}));\n" ++
         s!"{indent}kittens::warp::copy({dst.toIdent}, _tk_src_sub);\n" ++
+        s!"{indent}}\n"
+      | .RT, .ST =>
+        s!"{indent}\{\n" ++
+        s!"{indent}static_assert({dstInfo.cols} == {numCols}, \"slice cols: dst cols mismatch\");\n" ++
+        s!"{indent}static_assert({srcInfo.rows} == {dstInfo.rows}, \"slice cols: src/dst rows mismatch\");\n" ++
+        s!"{indent}auto _tk_src_sub = {src.toIdent}.template subtile<{srcInfo.rows}, {numCols}>(make_int2(0, {startCol}));\n" ++
+        s!"{indent}kittens::warp::copy({dst.toIdent}, _tk_src_sub);\n" ++
+        s!"{indent}}\n"
+      | .ST, .RT =>
+        s!"{indent}\{\n" ++
+        s!"{indent}static_assert({dstInfo.cols} == {numCols}, \"slice cols: dst cols mismatch\");\n" ++
+        s!"{indent}static_assert({srcInfo.rows} == {dstInfo.rows}, \"slice cols: src/dst rows mismatch\");\n" ++
+        s!"{indent}auto _tk_dst_sub = {dst.toIdent}.template subtile<{dstInfo.rows}, {numCols}>(make_int2(0, {startCol}));\n" ++
+        s!"{indent}kittens::warp::copy(_tk_dst_sub, {src.toIdent});\n" ++
         s!"{indent}}\n"
       | _, _ =>
         s!"{indent}static_assert(false, \"unsupported sliceCols between non-matching tile kinds\");\n"
@@ -623,6 +657,54 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout)
         s!"{indent}auto _tk_dst_right = {dst.toIdent}.template subtile<{dstInfo.rows}, {rightInfo.cols}>(make_int2(0, {leftInfo.cols}));\n" ++
         s!"{indent}kittens::warp::copy(_tk_dst_left, {left.toIdent});\n" ++
         s!"{indent}kittens::warp::copy(_tk_dst_right, {right.toIdent});\n" ++
+        s!"{indent}}\n"
+      | .ST, _, _ =>
+        s!"{indent}\{\n" ++
+        s!"{indent}static_assert({dstInfo.rows} == {leftInfo.rows}, \"concat cols: left rows mismatch\");\n" ++
+        s!"{indent}static_assert({dstInfo.rows} == {rightInfo.rows}, \"concat cols: right rows mismatch\");\n" ++
+        s!"{indent}static_assert({dstInfo.cols} == {leftInfo.cols} + {rightInfo.cols}, \"concat cols: dst cols mismatch\");\n" ++
+        s!"{indent}auto _tk_dst_left = {dst.toIdent}.template subtile<{dstInfo.rows}, {leftInfo.cols}>(make_int2(0, 0));\n" ++
+        s!"{indent}auto _tk_dst_right = {dst.toIdent}.template subtile<{dstInfo.rows}, {rightInfo.cols}>(make_int2(0, {leftInfo.cols}));\n" ++
+        s!"{indent}kittens::warp::copy(_tk_dst_left, {left.toIdent});\n" ++
+        s!"{indent}kittens::warp::copy(_tk_dst_right, {right.toIdent});\n" ++
+        s!"{indent}}\n"
+      | .RT, _, _ =>
+        s!"{indent}\{\n" ++
+        s!"{indent}using _tk_concat_t = typename decltype({dst.toIdent})::T;\n" ++
+        s!"{indent}constexpr int _tk_tile_rows = kittens::TILE_ROW_DIM<_tk_concat_t>;\n" ++
+        s!"{indent}constexpr int _tk_tile_cols = kittens::TILE_COL_DIM<_tk_concat_t>;\n" ++
+        s!"{indent}static_assert({dstInfo.rows} == {leftInfo.rows}, \"concat cols: left rows mismatch\");\n" ++
+        s!"{indent}static_assert({dstInfo.rows} == {rightInfo.rows}, \"concat cols: right rows mismatch\");\n" ++
+        s!"{indent}static_assert({dstInfo.cols} == {leftInfo.cols} + {rightInfo.cols}, \"concat cols: dst cols mismatch\");\n" ++
+        s!"{indent}static_assert({dstInfo.rows} % _tk_tile_rows == 0, \"concat cols: unaligned rows\");\n" ++
+        s!"{indent}static_assert({leftInfo.cols} % _tk_tile_cols == 0, \"concat cols: unaligned left cols\");\n" ++
+        s!"{indent}static_assert({rightInfo.cols} % _tk_tile_cols == 0, \"concat cols: unaligned right cols\");\n" ++
+        s!"{indent}constexpr int _tk_row_tiles = {dstInfo.rows} / _tk_tile_rows;\n" ++
+        s!"{indent}constexpr int _tk_left_tiles = {leftInfo.cols} / _tk_tile_cols;\n" ++
+        s!"{indent}constexpr int _tk_right_tiles = {rightInfo.cols} / _tk_tile_cols;\n" ++
+        (if leftInfo.kind == .ST then
+          s!"{indent}rt<{dstInfo.dtype.toCpp}, {leftInfo.rows}, {leftInfo.cols}, {dstInfo.layout.toCpp}> _tk_left_rt;\n" ++
+          s!"{indent}auto _tk_left_sub = {left.toIdent}.template subtile<{leftInfo.rows}, {leftInfo.cols}>(make_int2(0, 0));\n" ++
+          s!"{indent}kittens::warp::copy(_tk_left_rt, _tk_left_sub);\n"
+         else "") ++
+        (if rightInfo.kind == .ST then
+          s!"{indent}rt<{dstInfo.dtype.toCpp}, {rightInfo.rows}, {rightInfo.cols}, {dstInfo.layout.toCpp}> _tk_right_rt;\n" ++
+          s!"{indent}auto _tk_right_sub = {right.toIdent}.template subtile<{rightInfo.rows}, {rightInfo.cols}>(make_int2(0, 0));\n" ++
+          s!"{indent}kittens::warp::copy(_tk_right_rt, _tk_right_sub);\n"
+         else "") ++
+        s!"{indent}#pragma unroll\n" ++
+        s!"{indent}for (int _tk_i = 0; _tk_i < _tk_row_tiles; _tk_i++) \{\n" ++
+        s!"{indent}  #pragma unroll\n" ++
+        s!"{indent}  for (int _tk_j = 0; _tk_j < _tk_left_tiles; _tk_j++) \{\n" ++
+        s!"{indent}    {dst.toIdent}.tiles[_tk_i][_tk_j] = " ++
+          (if leftInfo.kind == .ST then "_tk_left_rt" else left.toIdent) ++ s!".tiles[_tk_i][_tk_j];\n" ++
+        s!"{indent}  }\n" ++
+        s!"{indent}  #pragma unroll\n" ++
+        s!"{indent}  for (int _tk_j = 0; _tk_j < _tk_right_tiles; _tk_j++) \{\n" ++
+        s!"{indent}    {dst.toIdent}.tiles[_tk_i][_tk_left_tiles + _tk_j] = " ++
+          (if rightInfo.kind == .ST then "_tk_right_rt" else right.toIdent) ++ s!".tiles[_tk_i][_tk_j];\n" ++
+        s!"{indent}  }\n" ++
+        s!"{indent}}\n" ++
         s!"{indent}}\n"
       | _, _, _ =>
         s!"{indent}static_assert(false, \"unsupported concatCols between non-matching tile kinds\");\n"
@@ -794,6 +876,11 @@ private def usesOuter (k : Kernel) : Bool :=
     | .outer .. => true
     | _ => false) k.body
 
+private def usesEqMask (k : Kernel) : Bool :=
+  bodyUses (fun s => match s with
+    | .eqMask .. => true
+    | _ => false) k.body
+
 private def storeAddHelpers : String :=
   "template<typename Dst, typename Src>\n" ++
   "__device__ inline void store_add(Dst &dst, const Src &src) {\n" ++
@@ -834,7 +921,7 @@ private def sliceHelpers : String :=
   "        dst.tiles[i][j] = src.tiles[start_tile + i][j];\n" ++
   "      }\n" ++
   "    }\n" ++
-  "  } else if constexpr (kittens::ducks::st::all<DST> && kittens::ducks::st::all<SRC>) {\n" ++
+  "  } else if constexpr (kittens::ducks::st::all<SRC>) {\n" ++
   "    static_assert(DST::rows == NUM_ROWS, \"slice rows: dst rows mismatch\");\n" ++
   "    auto src_sub = src.template subtile<NUM_ROWS, SRC::cols>(int2{START_ROW, 0});\n" ++
   "    kittens::warp::copy(dst, src_sub);\n" ++
@@ -857,7 +944,7 @@ private def sliceHelpers : String :=
   "        dst.tiles[i][j] = src.tiles[i][start_tile + j];\n" ++
   "      }\n" ++
   "    }\n" ++
-  "  } else if constexpr (kittens::ducks::st::all<DST> && kittens::ducks::st::all<SRC>) {\n" ++
+  "  } else if constexpr (kittens::ducks::st::all<SRC>) {\n" ++
   "    static_assert(DST::cols == NUM_COLS, \"slice cols: dst cols mismatch\");\n" ++
   "    auto src_sub = src.template subtile<SRC::rows, NUM_COLS>(int2{0, START_COL});\n" ++
   "    kittens::warp::copy(dst, src_sub);\n" ++
@@ -882,7 +969,7 @@ private def sliceHelpers : String :=
   "        dst.tiles[i][LEFT::width + j] = right.tiles[i][j];\n" ++
   "      }\n" ++
   "    }\n" ++
-  "  } else if constexpr (kittens::ducks::st::all<DST> && kittens::ducks::st::all<LEFT> && kittens::ducks::st::all<RIGHT>) {\n" ++
+  "  } else if constexpr (kittens::ducks::st::all<DST>) {\n" ++
   "    auto dst_left = dst.template subtile<DST::rows, LEFT::cols>(int2{0, 0});\n" ++
   "    auto dst_right = dst.template subtile<DST::rows, RIGHT::cols>(int2{0, LEFT::cols});\n" ++
   "    kittens::warp::copy(dst_left, left);\n" ++
@@ -900,6 +987,26 @@ private def outerHelpers : String :=
   "  kittens::warp::mul(dst, row_tile, col_tile);\n" ++
   "}\n\n"
 
+private def eqMaskHelpers : String :=
+  "template<ducks::rt::all T>\n" ++
+  "__device__ inline void tk_eq_mask(T &dst, const T &lhs, const T &rhs) {\n" ++
+  "  kittens::warp::copy(dst, lhs);\n" ++
+  "  kittens::warp::sub(dst, dst, rhs);\n" ++
+  "  kittens::warp::abs(dst, dst);\n" ++
+  "  kittens::warp::apply(dst, dst, [] __device__ (int _row, int _col, auto _x) {\n" ++
+  "    return (_x == static_cast<decltype(_x)>(0)) ? static_cast<decltype(_x)>(1) : static_cast<decltype(_x)>(0);\n" ++
+  "  });\n" ++
+  "}\n" ++
+  "template<ducks::rv::all V>\n" ++
+  "__device__ inline void tk_eq_mask(V &dst, const V &lhs, const V &rhs) {\n" ++
+  "  kittens::warp::copy(dst, lhs);\n" ++
+  "  kittens::warp::sub(dst, dst, rhs);\n" ++
+  "  kittens::warp::abs(dst, dst);\n" ++
+  "  kittens::warp::apply(dst, dst, [] __device__ (int _idx, auto _x) {\n" ++
+  "    return (_x == static_cast<decltype(_x)>(0)) ? static_cast<decltype(_x)>(1) : static_cast<decltype(_x)>(0);\n" ++
+  "  });\n" ++
+  "}\n\n"
+
 private def generateHelpers (k : Kernel) : String := Id.run do
   let mut helpers := ""
   if usesStoreAdd k then
@@ -910,6 +1017,8 @@ private def generateHelpers (k : Kernel) : String := Id.run do
     helpers := helpers ++ sliceHelpers
   if usesOuter k then
     helpers := helpers ++ outerHelpers
+  if usesEqMask k then
+    helpers := helpers ++ eqMaskHelpers
   return helpers
 
 private def generateHelpersForKernels (kernels : Array Kernel) : String := Id.run do
@@ -917,6 +1026,7 @@ private def generateHelpersForKernels (kernels : Array Kernel) : String := Id.ru
   let mut needLegacyTma := false
   let mut needSlice := false
   let mut needOuter := false
+  let mut needEqMask := false
   for k in kernels do
     if usesStoreAdd k then
       needStoreAdd := true
@@ -926,6 +1036,8 @@ private def generateHelpersForKernels (kernels : Array Kernel) : String := Id.ru
       needSlice := true
     if usesOuter k then
       needOuter := true
+    if usesEqMask k then
+      needEqMask := true
   let mut helpers := ""
   if needStoreAdd then
     helpers := helpers ++ storeAddHelpers
@@ -935,6 +1047,8 @@ private def generateHelpersForKernels (kernels : Array Kernel) : String := Id.ru
     helpers := helpers ++ sliceHelpers
   if needOuter then
     helpers := helpers ++ outerHelpers
+  if needEqMask then
+    helpers := helpers ++ eqMaskHelpers
   return helpers
 
 /-- Per-kernel emission metadata that can be persisted safely. -/
@@ -949,10 +1063,12 @@ structure KernelEmitInfo where
   needsSlice : Bool
   /-- Whether this kernel needs outer-product helper templates. -/
   needsOuter : Bool
+  /-- Whether this kernel needs equality-mask helper templates. -/
+  needsEqMask : Bool
   deriving Repr, Inhabited
 
 /-- Generate helper template block from precomputed helper flags. -/
-def generateHelpersFromFlags (needStoreAdd needLegacyTma needSlice needOuter : Bool) : String := Id.run do
+def generateHelpersFromFlags (needStoreAdd needLegacyTma needSlice needOuter needEqMask : Bool) : String := Id.run do
   let mut helpers := ""
   if needStoreAdd then
     helpers := helpers ++ storeAddHelpers
@@ -962,6 +1078,8 @@ def generateHelpersFromFlags (needStoreAdd needLegacyTma needSlice needOuter : B
     helpers := helpers ++ sliceHelpers
   if needOuter then
     helpers := helpers ++ outerHelpers
+  if needEqMask then
+    helpers := helpers ++ eqMaskHelpers
   return helpers
 
 private def generateKernelDefinition (k : Kernel) (emitSharedDecl : Bool := false) : String :=
@@ -986,6 +1104,7 @@ def generateKernelEmitInfo (k : Kernel) : KernelEmitInfo :=
     needsLegacyTma := usesLegacyTma k
     needsSlice := usesSlice k
     needsOuter := usesOuter k
+    needsEqMask := usesEqMask k
   }
 
 /-- Generate one or more kernel definitions for inclusion in a single `.cu` translation unit.

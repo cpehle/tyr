@@ -43,6 +43,7 @@ structure RegisteredKernel where
   needsLegacyTma : Bool := false
   needsSlice : Bool := false
   needsOuter : Bool := false
+  needsEqMask : Bool := false
   /-- Materialized C++ launcher wrapper. -/
   cppCode : String
   /-- C++ kernel symbol stem (used by emitted kernel definition + launcher symbol). -/
@@ -449,6 +450,7 @@ def mkRegisteredKernelSpec (moduleName regName : Name) (kernel : Kernel) : Regis
     needsLegacyTma := emitInfo.needsLegacyTma
     needsSlice := emitInfo.needsSlice
     needsOuter := emitInfo.needsOuter
+    needsEqMask := emitInfo.needsEqMask
     cppCode := cppCode
     kernelName := kernel.name
     params := kernel.params

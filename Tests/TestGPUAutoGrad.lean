@@ -205,6 +205,73 @@ def testVJPTanh : IO Unit := do
   -- Should have: t1 = y*y; t1 *= -1; t1 += 1; t2 = dout*t1; din += t2
   LeanTest.assertTrue (vjpStmts.size == 5) s!"Expected 5 VJP stmts for tanh, got {vjpStmts.size}"
 
+@[test]
+def testJVPSin : IO Unit := do
+  let x : VarId := { idx := 0 }
+  let y : VarId := { idx := 1 }
+  let stmt := KStmt.unary .Sin y x
+
+  let (_, state) ← runTraceM (linearizeStmt stmt)
+
+  LeanTest.assertTrue (state.linearTrace.size == 1) s!"Expected 1 linear inst"
+  match state.linearTrace[0]? with
+  | some (LinearInst.sin _ _ primalX) =>
+    LeanTest.assertEqual primalX.idx x.idx "sin JVP should keep the primal input"
+  | _ => throw (IO.userError "Expected linear Sin")
+
+@[test]
+def testVJPSin : IO Unit := do
+  let trace := #[LinearInst.sin { idx := 2 } { idx := 0 } { idx := 1 }]
+  let vjpStmts ← runTranspose trace
+
+  LeanTest.assertTrue (vjpStmts.size == 3) s!"Expected 3 VJP stmts for sin, got {vjpStmts.size}"
+  match vjpStmts[0]?, vjpStmts[1]?, vjpStmts[2]? with
+  | some (KStmt.unary .Cos _ _), some (KStmt.binary .Mul _ _ _), some (KStmt.binary .Add _ _ _) => pure ()
+  | _, _, _ => throw (IO.userError "Expected cos/mul/add pattern for sin backward")
+
+@[test]
+def testJVPSigmoid : IO Unit := do
+  let x : VarId := { idx := 0 }
+  let y : VarId := { idx := 1 }
+  let stmt := KStmt.unary .Sigmoid y x
+
+  let (_, state) ← runTraceM (linearizeStmt stmt)
+
+  LeanTest.assertTrue (state.linearTrace.size == 1) s!"Expected 1 linear inst"
+  match state.linearTrace[0]? with
+  | some (LinearInst.sigmoid _ _ primalY) =>
+    LeanTest.assertEqual primalY.idx y.idx "sigmoid JVP should use the primal output"
+  | _ => throw (IO.userError "Expected linear Sigmoid")
+
+@[test]
+def testVJPSigmoid : IO Unit := do
+  let trace := #[LinearInst.sigmoid { idx := 2 } { idx := 0 } { idx := 1 }]
+  let vjpStmts ← runTranspose trace
+
+  LeanTest.assertTrue (vjpStmts.size == 5) s!"Expected 5 VJP stmts for sigmoid, got {vjpStmts.size}"
+  match vjpStmts[0]?, vjpStmts[1]?, vjpStmts[2]?, vjpStmts[3]?, vjpStmts[4]? with
+  | some (KStmt.scalarMul _ _ _), some (KStmt.scalarAdd _ _ _),
+    some (KStmt.binary .Mul _ _ _), some (KStmt.binary .Mul _ _ _),
+    some (KStmt.binary .Add _ _ _) => pure ()
+  | _, _, _, _, _ => throw (IO.userError "Expected sigmoid backward to form y*(1-y) and accumulate")
+
+@[test]
+def testJVPNeg : IO Unit := do
+  let stmt := KStmt.unary .Neg { idx := 1 } { idx := 0 }
+  let (_, state) ← runTraceM (linearizeStmt stmt)
+  match state.linearTrace[0]? with
+  | some (LinearInst.neg _ _) => pure ()
+  | _ => throw (IO.userError "Expected linear Neg")
+
+@[test]
+def testVJPNeg : IO Unit := do
+  let trace := #[LinearInst.neg { idx := 1 } { idx := 0 }]
+  let vjpStmts ← runTranspose trace
+  LeanTest.assertTrue (vjpStmts.size == 1) s!"Expected 1 VJP stmt for neg, got {vjpStmts.size}"
+  match vjpStmts[0]? with
+  | some (KStmt.binary .Sub _ _ _) => pure ()
+  | _ => throw (IO.userError "Expected subtraction-based neg backward")
+
 /-! ## Binary Operations Tests -/
 
 -- Test Linearization (JVP) for Sub
@@ -272,18 +339,61 @@ def testVJPDiv : IO Unit := do
   | _, _, _, _ => throw (IO.userError "Expected recip/mul/add pattern for div backward")
 
 @[test]
-def testUnsupportedBinaryOpFails : IO Unit := do
+def testJVPMax : IO Unit := do
   let stmt := KStmt.binary .Max { idx := 2 } { idx := 0 } { idx := 1 }
-  let result ← runTraceMResult (linearizeStmt stmt)
-  match result with
-  | .ok _ => LeanTest.fail "linearizeStmt should reject unsupported binary ops"
-  | .error msg =>
-    LeanTest.assertTrue (msg.contains "binary op")
-      s!"Expected unsupported-binary diagnostic, got: {msg}"
+  let (_, state) ← runTraceM (linearizeStmt stmt)
+  LeanTest.assertEqual state.linearTrace.size 1 "Expected one linear inst for max"
+  match state.linearTrace[0]? with
+  | some (LinearInst.max _ _ _ primalY primalA primalB) =>
+    LeanTest.assertEqual primalY.idx 2 "max JVP should retain the primal output"
+    LeanTest.assertEqual primalA.idx 0 "max JVP should retain the left primal input"
+    LeanTest.assertEqual primalB.idx 1 "max JVP should retain the right primal input"
+  | _ => throw (IO.userError "Expected linear Max")
+
+@[test]
+def testVJPMax : IO Unit := do
+  let trace := #[LinearInst.max { idx := 3 } { idx := 0 } { idx := 1 } { idx := 2 } { idx := 4 } { idx := 5 }]
+  let vjpStmts ← runTranspose trace
+  LeanTest.assertEqual vjpStmts.size 9 "Expected 9 VJP stmts for max"
+  match vjpStmts[0]?, vjpStmts[1]?, vjpStmts[2]?, vjpStmts[3]?, vjpStmts[4]?,
+        vjpStmts[5]?, vjpStmts[6]?, vjpStmts[7]?, vjpStmts[8]? with
+  | some (KStmt.eqMask _ _ _), some (KStmt.eqMask _ _ _), some (KStmt.binary .Add _ _ _),
+    some (KStmt.binary .Div _ _ _), some (KStmt.binary .Div _ _ _),
+    some (KStmt.binary .Mul _ _ _), some (KStmt.binary .Add _ _ _),
+    some (KStmt.binary .Mul _ _ _), some (KStmt.binary .Add _ _ _) =>
+      pure ()
+  | _, _, _, _, _, _, _, _, _ =>
+      throw (IO.userError "Expected eqMask/add/div/mul structure for max backward")
+
+@[test]
+def testJVPMin : IO Unit := do
+  let stmt := KStmt.binary .Min { idx := 2 } { idx := 0 } { idx := 1 }
+  let (_, state) ← runTraceM (linearizeStmt stmt)
+  LeanTest.assertEqual state.linearTrace.size 1 "Expected one linear inst for min"
+  match state.linearTrace[0]? with
+  | some (LinearInst.min _ _ _ primalY primalA primalB) =>
+    LeanTest.assertEqual primalY.idx 2 "min JVP should retain the primal output"
+    LeanTest.assertEqual primalA.idx 0 "min JVP should retain the left primal input"
+    LeanTest.assertEqual primalB.idx 1 "min JVP should retain the right primal input"
+  | _ => throw (IO.userError "Expected linear Min")
+
+@[test]
+def testVJPMin : IO Unit := do
+  let trace := #[LinearInst.min { idx := 3 } { idx := 0 } { idx := 1 } { idx := 2 } { idx := 4 } { idx := 5 }]
+  let vjpStmts ← runTranspose trace
+  LeanTest.assertEqual vjpStmts.size 9 "Expected 9 VJP stmts for min"
+  match vjpStmts[0]?, vjpStmts[1]?, vjpStmts[2]?, vjpStmts[3]?, vjpStmts[4]?,
+        vjpStmts[8]? with
+  | some (KStmt.eqMask _ _ _), some (KStmt.eqMask _ _ _), some (KStmt.binary .Add _ _ _),
+    some (KStmt.binary .Div _ _ _), some (KStmt.binary .Div _ _ _),
+    some (KStmt.binary .Add _ _ _) =>
+      pure ()
+  | _, _, _, _, _, _ =>
+      throw (IO.userError "Expected eqMask/add/div structure for min backward")
 
 @[test]
 def testUnsupportedUnaryOpFails : IO Unit := do
-  let stmt := KStmt.unary .Sin { idx := 1 } { idx := 0 }
+  let stmt := KStmt.unary .Gelu { idx := 1 } { idx := 0 }
   let result ← runTraceMResult (linearizeStmt stmt)
   match result with
   | .ok _ => LeanTest.fail "linearizeStmt should reject unsupported unary ops"
@@ -292,13 +402,13 @@ def testUnsupportedUnaryOpFails : IO Unit := do
       s!"Expected unsupported-unary diagnostic, got: {msg}"
 
 @[test]
-def testUnsupportedReductionFails : IO Unit := do
-  let stmt := KStmt.reduce .Prod .Row { idx := 1 } { idx := 0 }
+def testUnsupportedFullReductionFails : IO Unit := do
+  let stmt := KStmt.reduce .Prod .Full { idx := 1 } { idx := 0 }
   let result ← runTraceMResult (linearizeStmt stmt)
   match result with
   | .ok _ => LeanTest.fail "linearizeStmt should reject unsupported reductions"
   | .error msg =>
-    LeanTest.assertTrue (msg.contains "reduction op")
+    LeanTest.assertTrue (msg.contains "full reduction op")
       s!"Expected unsupported-reduction diagnostic, got: {msg}"
 
 @[test]
@@ -375,6 +485,55 @@ def testVJPSumRow : IO Unit := do
   match vjpStmts[0]?, vjpStmts[1]? with
   | some (KStmt.broadcast .Col _ _), some (KStmt.binary .Add _ _ _) => pure ()
   | _, _ => throw (IO.userError "Expected broadcast Col then Add for sum row backward")
+
+@[test]
+def testJVPReduceMaxRow : IO Unit := do
+  let stmt := KStmt.reduce .Max .Row { idx := 1 } { idx := 0 }
+  let (_, state) ← runTraceM (linearizeStmt stmt)
+  LeanTest.assertEqual state.linearTrace.size 1 "Expected one linear inst for row max"
+  match state.linearTrace[0]? with
+  | some (LinearInst.reduceMax .Row _ _ primalY primalX) =>
+    LeanTest.assertEqual primalY.idx 1 "row max JVP should retain the primal output"
+    LeanTest.assertEqual primalX.idx 0 "row max JVP should retain the primal input"
+  | _ => throw (IO.userError "Expected linear reduceMax")
+
+@[test]
+def testVJPReduceMaxRow : IO Unit := do
+  let trace := #[LinearInst.reduceMax .Row { idx := 1 } { idx := 0 } { idx := 2 } { idx := 3 }]
+  let vjpStmts ← runTranspose trace
+  LeanTest.assertEqual vjpStmts.size 8 "Expected 8 VJP stmts for row max"
+  match vjpStmts[0]?, vjpStmts[1]?, vjpStmts[2]?, vjpStmts[3]?,
+        vjpStmts[4]?, vjpStmts[5]?, vjpStmts[6]?, vjpStmts[7]? with
+  | some (KStmt.broadcast .Col _ _), some (KStmt.eqMask _ _ _), some (KStmt.reduce .Sum .Row _ _),
+    some (KStmt.broadcast .Col _ _), some (KStmt.binary .Div _ _ _),
+    some (KStmt.broadcast .Col _ _), some (KStmt.binary .Mul _ _ _),
+    some (KStmt.binary .Add _ _ _) =>
+      pure ()
+  | _, _, _, _, _, _, _, _ =>
+      throw (IO.userError "Expected broadcast/eqMask/reduce/div/mul/add structure for row max backward")
+
+@[test]
+def testJVPReduceProdRow : IO Unit := do
+  let stmt := KStmt.reduce .Prod .Row { idx := 1 } { idx := 0 }
+  let (_, state) ← runTraceM (linearizeStmt stmt)
+  LeanTest.assertEqual state.linearTrace.size 1 "Expected one linear inst for row prod"
+  match state.linearTrace[0]? with
+  | some (LinearInst.reduceProd .Row _ _ primalY primalX) =>
+    LeanTest.assertEqual primalY.idx 1 "row prod JVP should retain the primal output"
+    LeanTest.assertEqual primalX.idx 0 "row prod JVP should retain the primal input"
+  | _ => throw (IO.userError "Expected linear reduceProd")
+
+@[test]
+def testVJPReduceProdRow : IO Unit := do
+  let trace := #[LinearInst.reduceProd .Row { idx := 1 } { idx := 0 } { idx := 2 } { idx := 3 }]
+  let vjpStmts ← runTranspose trace
+  LeanTest.assertEqual vjpStmts.size 22 "Expected 22 VJP stmts for row prod"
+  match vjpStmts[0]?, vjpStmts[3]?, vjpStmts[4]?, vjpStmts[8]?, vjpStmts[14]?, vjpStmts[21]? with
+  | some (KStmt.unary .Zero _ _), some (KStmt.eqMask _ _ _), some (KStmt.reduce .Sum .Row _ _),
+    some (KStmt.reduce .Prod .Row _ _), some (KStmt.binary .Div _ _ _), some (KStmt.binary .Add _ _ _) =>
+      pure ()
+  | _, _, _, _, _, _ =>
+      throw (IO.userError "Expected zero-aware prod backward structure")
 
 -- Test Transposition (VJP) for MMA transpose variants
 @[test]
