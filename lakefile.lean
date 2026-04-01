@@ -212,6 +212,8 @@ def getOmpLibPath : IO FilePath := do
     use Lake's native C++ compilation. -/
 extern_lib libtyr pkg := do
   let tyrCLib := pkg.dir / "cc" / "build" / "libTyrC.a"
+  let gpuIrRoot := pkg.buildDir / "ir" / "Tyr" / "GPU"
+  let gpuKernelSrcRoot := pkg.dir / "Tyr" / "GPU" / "Kernels"
 
   -- Track Makefile plus C/CUDA sources/headers so Lake reruns `make` when FFI changes.
   let makefileJob ← inputTextFile <| pkg.dir / "cc" / "Makefile"
@@ -220,9 +222,14 @@ extern_lib libtyr pkg := do
       p.toString.endsWith ".cu" || p.toString.endsWith ".h"
   let toolJob ← inputDir (pkg.dir / "cc" / "tools") (text := true) fun p =>
     p.toString.endsWith ".py"
-  let gpuIrJob ← inputDir (pkg.buildDir / "ir" / "Tyr" / "GPU") (text := false) fun p =>
+  let gpuKernelSrcJob ← inputDir gpuKernelSrcRoot (text := true) fun p =>
+    p.toString.endsWith ".lean"
+  -- Fresh checkouts do not have the generated GPU IR tree yet.
+  -- Create it so the optional IR scan can track later `.c.o.export` files instead of failing early.
+  IO.FS.createDirAll gpuIrRoot
+  let gpuIrJob ← inputDir gpuIrRoot (text := false) fun p =>
     p.toString.endsWith ".c.o.export"
-  let depJob := makefileJob.mix srcJob |>.mix toolJob |>.mix gpuIrJob
+  let depJob := makefileJob.mix srcJob |>.mix toolJob |>.mix gpuKernelSrcJob |>.mix gpuIrJob
 
   buildFileAfterDep tyrCLib depJob fun _ => do
     let sysroot ← getLeanSysroot
