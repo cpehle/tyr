@@ -46,7 +46,9 @@ def testKittenTTSInitAndForward : IO Unit := do
   let model ← Model.init cfg
   let inputIds : T #[1, 5] ← randint 0 cfg.nToken.toInt64 #[1, 5]
   let refStyle : T #[1, KittenTTSConfig.fullStyleDim cfg] ← randn #[1, KittenTTSConfig.fullStyleDim cfg]
+  torch.manualSeed 12345
   let out ← model.synthesizeIds inputIds refStyle
+  torch.manualSeed 12345
   let debugOut ← model.debugSynthesizeIds inputIds refStyle
 
   LeanTest.assertEqual out.predDurations.size 5 "predicted durations should align with the input token count"
@@ -70,8 +72,18 @@ def testKittenTTSInitAndForward : IO Unit := do
     "debug synthesis audio should match the regular forward path sample count"
   for v in audioVals do
     LeanTest.assertTrue (Float.isFinite v) "audio values should be finite"
+  let mut maxDiff := 0.0
+  let mut sumDiff := 0.0
+  let mut maxIdx := 0
   for i in [:audioVals.size] do
     let dv := debugAudioVals[i]!
     let v := audioVals[i]!
-    LeanTest.assertTrue (Float.abs (dv - v) <= 1e-6)
-      "debug synthesis audio should stay numerically aligned with the normal forward path"
+    let diff := Float.abs (dv - v)
+    sumDiff := sumDiff + diff
+    if diff > maxDiff then
+      maxDiff := diff
+      maxIdx := i
+  let avgDiff := sumDiff / audioVals.size.toFloat
+  LeanTest.assertTrue
+    (maxDiff <= 1e-6)
+    s!"debug synthesis audio should stay numerically aligned with the normal forward path (maxDiff={maxDiff}, avgDiff={avgDiff}, maxIdx={maxIdx})"
