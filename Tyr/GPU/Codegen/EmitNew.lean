@@ -76,6 +76,8 @@ private def collectRtLayoutsStmt (acc : Std.HashMap VarId TileLayout) : KStmt �
   | .declRT v _ _ _ layout => acc.insert v layout
   | .forLoop _ _ _ body => body.foldl collectRtLayoutsStmt acc
   | .forLoopVal _ _ _ body => body.foldl collectRtLayoutsStmt acc
+  | .forLoopRev _ _ _ body => body.foldl collectRtLayoutsStmt acc
+  | .forLoopValRev _ _ _ body => body.foldl collectRtLayoutsStmt acc
   | .ifStmt _ thenBody elseBody =>
       let acc' := thenBody.foldl collectRtLayoutsStmt acc
       elseBody.foldl collectRtLayoutsStmt acc'
@@ -88,6 +90,8 @@ private def collectTileInfoStmt (acc : Std.HashMap VarId TileInfo) : KStmt → S
   | .declTT v _ rows cols => acc.insert v { kind := .TT, rows := rows, cols := cols }
   | .forLoop _ _ _ body => body.foldl collectTileInfoStmt acc
   | .forLoopVal _ _ _ body => body.foldl collectTileInfoStmt acc
+  | .forLoopRev _ _ _ body => body.foldl collectTileInfoStmt acc
+  | .forLoopValRev _ _ _ body => body.foldl collectTileInfoStmt acc
   | .ifStmt _ thenBody elseBody =>
       let acc' := thenBody.foldl collectTileInfoStmt acc
       elseBody.foldl collectTileInfoStmt acc'
@@ -98,6 +102,8 @@ private def collectRvDeclsStmt (acc : Std.HashSet VarId) : KStmt → Std.HashSet
   | .declRV v _ _ => acc.insert v
   | .forLoop _ _ _ body => body.foldl collectRvDeclsStmt acc
   | .forLoopVal _ _ _ body => body.foldl collectRvDeclsStmt acc
+  | .forLoopRev _ _ _ body => body.foldl collectRvDeclsStmt acc
+  | .forLoopValRev _ _ _ body => body.foldl collectRvDeclsStmt acc
   | .ifStmt _ thenBody elseBody =>
       let acc' := thenBody.foldl collectRvDeclsStmt acc
       elseBody.foldl collectRvDeclsStmt acc'
@@ -174,6 +180,8 @@ private def collectRvLayoutsStmt
       unifyRvVars rvVars st dst src
   | .forLoop _ _ _ body => body.foldl (collectRvLayoutsStmt rtLayouts rvVars) st
   | .forLoopVal _ _ _ body => body.foldl (collectRvLayoutsStmt rtLayouts rvVars) st
+  | .forLoopRev _ _ _ body => body.foldl (collectRvLayoutsStmt rtLayouts rvVars) st
+  | .forLoopValRev _ _ _ body => body.foldl (collectRvLayoutsStmt rtLayouts rvVars) st
   | .ifStmt _ thenBody elseBody =>
       let st' := thenBody.foldl (collectRvLayoutsStmt rtLayouts rvVars) st
       elseBody.foldl (collectRvLayoutsStmt rtLayouts rvVars) st'
@@ -536,9 +544,9 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout)
         s!"{indent}kittens::warp::copy({dst.toIdent}, _tk_src_sub);\n" ++
         s!"{indent}}\n"
       | _, _ =>
-        s!"{indent}// unsupported sliceRows between non-matching tile kinds\n"
+        s!"{indent}static_assert(false, \"unsupported sliceRows between non-matching tile kinds\");\n"
     | _, _ =>
-      s!"{indent}// unresolved tile info for sliceRows\n"
+      s!"{indent}static_assert(false, \"unresolved tile info for sliceRows\");\n"
   | .sliceCols dst src startCol numCols =>
     match tileInfo[dst]?, tileInfo[src]? with
     | some dstInfo, some srcInfo =>
@@ -573,9 +581,9 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout)
         s!"{indent}kittens::warp::copy({dst.toIdent}, _tk_src_sub);\n" ++
         s!"{indent}}\n"
       | _, _ =>
-        s!"{indent}// unsupported sliceCols between non-matching tile kinds\n"
+        s!"{indent}static_assert(false, \"unsupported sliceCols between non-matching tile kinds\");\n"
     | _, _ =>
-      s!"{indent}// unresolved tile info for sliceCols\n"
+      s!"{indent}static_assert(false, \"unresolved tile info for sliceCols\");\n"
   | .concatCols dst left right =>
     match tileInfo[dst]?, tileInfo[left]?, tileInfo[right]? with
     | some dstInfo, some leftInfo, some rightInfo =>
@@ -617,9 +625,9 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout)
         s!"{indent}kittens::warp::copy(_tk_dst_right, {right.toIdent});\n" ++
         s!"{indent}}\n"
       | _, _, _ =>
-        s!"{indent}// unsupported concatCols between non-matching tile kinds\n"
+        s!"{indent}static_assert(false, \"unsupported concatCols between non-matching tile kinds\");\n"
     | _, _, _ =>
-      s!"{indent}// unresolved tile info for concatCols\n"
+      s!"{indent}static_assert(false, \"unresolved tile info for concatCols\");\n"
 
   -- Synchronization
   | .sync barrierId => s!"{indent}warp::sync({barrierId});\n"
@@ -663,6 +671,12 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout)
   | .forLoopVal v lo hi body =>
     let bodyStr := body.toList.map (generateStmt rvLayouts rvVars tileInfo (indent ++ "  ")) |>.foldl (· ++ ·) ""
     s!"{indent}for (int {v.toIdent} = {lo}; {v.toIdent} < {hi.toIdent}; {v.toIdent}++) \{\n{bodyStr}{indent}}\n"
+  | .forLoopRev v lo hi body =>
+    let bodyStr := body.toList.map (generateStmt rvLayouts rvVars tileInfo (indent ++ "  ")) |>.foldl (· ++ ·) ""
+    s!"{indent}for (int {v.toIdent} = {hi}; {v.toIdent}-- > {lo}; ) \{\n{bodyStr}{indent}}\n"
+  | .forLoopValRev v lo hi body =>
+    let bodyStr := body.toList.map (generateStmt rvLayouts rvVars tileInfo (indent ++ "  ")) |>.foldl (· ++ ·) ""
+    s!"{indent}for (int {v.toIdent} = {hi.toIdent}; {v.toIdent}-- > {lo}; ) \{\n{bodyStr}{indent}}\n"
   | .ifStmt cond thenBody elseBody =>
     let thenStr := thenBody.toList.map (generateStmt rvLayouts rvVars tileInfo (indent ++ "  ")) |>.foldl (· ++ ·) ""
     let elseStr := elseBody.toList.map (generateStmt rvLayouts rvVars tileInfo (indent ++ "  ")) |>.foldl (· ++ ·) ""
@@ -750,6 +764,8 @@ private partial def stmtUses (p : KStmt → Bool) : KStmt → Bool
       match stmt with
       | .forLoop _ _ _ body => body.any (stmtUses p)
       | .forLoopVal _ _ _ body => body.any (stmtUses p)
+      | .forLoopRev _ _ _ body => body.any (stmtUses p)
+      | .forLoopValRev _ _ _ body => body.any (stmtUses p)
       | .ifStmt _ thenBody elseBody =>
         thenBody.any (stmtUses p) || elseBody.any (stmtUses p)
       | .ifWarpGroup _ body => body.any (stmtUses p)

@@ -30,17 +30,27 @@ def runCoreM (x : CoreM α) : IO α := do
   | .ok value => pure value
   | .error msg => throw (IO.userError msg)
 
+def runTraceMResult (x : TraceM α) : IO (Except String (α × Tyr.GPU.AD.TraceState)) := do
+  runCoreMResult (do
+    let (res, _) ← (x.run {}).run {}
+    return res)
+
 -- Helper to run TraceM
 def runTraceM (x : TraceM α) : IO (α × Tyr.GPU.AD.TraceState) := do
-  runCoreM (do
-    let (res, _) ← (x.run {}).run {}
+  match (← runTraceMResult x) with
+  | .ok value => pure value
+  | .error msg => throw (IO.userError msg)
+
+def runTransposeResult (trace : Array LinearInst) : IO (Except String (Array KStmt)) := do
+  runCoreMResult (do
+    let (res, _) ← (transposeTrace trace).run {}
     return res)
 
 -- Helper to run Transpose
 def runTranspose (trace : Array LinearInst) : IO (Array KStmt) := do
-  runCoreM (do
-    let (res, _) ← (transposeTrace trace).run {}
-    return res)
+  match (← runTransposeResult trace) with
+  | .ok value => pure value
+  | .error msg => throw (IO.userError msg)
 
 -- Test Linearization (JVP) for Add
 @[test]
@@ -260,6 +270,68 @@ def testVJPDiv : IO Unit := do
   | some (KStmt.unary .Recip _ _), some (KStmt.binary .Mul _ _ _),
     some (KStmt.binary .Add _ _ _), some (KStmt.binary .Add _ _ _) => pure ()
   | _, _, _, _ => throw (IO.userError "Expected recip/mul/add pattern for div backward")
+
+@[test]
+def testUnsupportedBinaryOpFails : IO Unit := do
+  let stmt := KStmt.binary .Max { idx := 2 } { idx := 0 } { idx := 1 }
+  let result ← runTraceMResult (linearizeStmt stmt)
+  match result with
+  | .ok _ => LeanTest.fail "linearizeStmt should reject unsupported binary ops"
+  | .error msg =>
+    LeanTest.assertTrue (msg.contains "binary op")
+      s!"Expected unsupported-binary diagnostic, got: {msg}"
+
+@[test]
+def testUnsupportedUnaryOpFails : IO Unit := do
+  let stmt := KStmt.unary .Sin { idx := 1 } { idx := 0 }
+  let result ← runTraceMResult (linearizeStmt stmt)
+  match result with
+  | .ok _ => LeanTest.fail "linearizeStmt should reject unsupported unary ops"
+  | .error msg =>
+    LeanTest.assertTrue (msg.contains "unary op")
+      s!"Expected unsupported-unary diagnostic, got: {msg}"
+
+@[test]
+def testUnsupportedReductionFails : IO Unit := do
+  let stmt := KStmt.reduce .Prod .Row { idx := 1 } { idx := 0 }
+  let result ← runTraceMResult (linearizeStmt stmt)
+  match result with
+  | .ok _ => LeanTest.fail "linearizeStmt should reject unsupported reductions"
+  | .error msg =>
+    LeanTest.assertTrue (msg.contains "reduction op")
+      s!"Expected unsupported-reduction diagnostic, got: {msg}"
+
+@[test]
+def testTransposeLoopUsesReverseLoop : IO Unit := do
+  let trace := #[LinearInst.loop { idx := 7 } 0 4 #[LinearInst.id { idx := 1 } { idx := 0 }]]
+  let vjpStmts ← runTranspose trace
+  LeanTest.assertEqual vjpStmts.size 1 "loop transpose should emit one reverse loop"
+  match vjpStmts[0]? with
+  | some (KStmt.forLoopRev v lo hi body) =>
+    LeanTest.assertEqual v.idx 7 "reverse loop should preserve the induction variable"
+    LeanTest.assertEqual lo 0 "reverse loop should preserve the lower bound"
+    LeanTest.assertEqual hi 4 "reverse loop should preserve the upper bound"
+    LeanTest.assertEqual body.size 1 "reverse loop should keep the transposed body"
+  | some other =>
+    LeanTest.fail s!"Expected reverse loop in transpose output, got {repr other}"
+  | none =>
+    LeanTest.fail "Expected one transposed loop statement"
+
+@[test]
+def testTransposeLoopValUsesReverseLoop : IO Unit := do
+  let trace := #[LinearInst.loopVal { idx := 8 } 2 { idx := 9 } #[LinearInst.id { idx := 3 } { idx := 2 }]]
+  let vjpStmts ← runTranspose trace
+  LeanTest.assertEqual vjpStmts.size 1 "loopVal transpose should emit one reverse loop"
+  match vjpStmts[0]? with
+  | some (KStmt.forLoopValRev v lo hi body) =>
+    LeanTest.assertEqual v.idx 8 "reverse loopVal should preserve the induction variable"
+    LeanTest.assertEqual lo 2 "reverse loopVal should preserve the lower bound"
+    LeanTest.assertEqual hi.idx 9 "reverse loopVal should preserve the upper bound variable"
+    LeanTest.assertEqual body.size 1 "reverse loopVal should keep the transposed body"
+  | some other =>
+    LeanTest.fail s!"Expected reverse loopVal in transpose output, got {repr other}"
+  | none =>
+    LeanTest.fail "Expected one transposed loopVal statement"
 
 /-! ## Broadcast/Reduce Tests -/
 

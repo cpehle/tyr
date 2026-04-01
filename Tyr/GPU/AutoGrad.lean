@@ -55,6 +55,9 @@ def emitLinear (l : LinearInst) : TraceM Unit :=
 def liftADM (m : ADM α) : TraceM α := 
   liftM m
 
+private def unsupportedLinearize {α} (kind detail : String) : TraceM α := do
+  throwError s!"GPU autodiff linearization does not support {kind} `{detail}`"
+
 /-- Linearize a statement -/
 partial def linearizeStmt (s : KStmt) : TraceM Unit := do
   match s with
@@ -113,7 +116,7 @@ partial def linearizeStmt (s : KStmt) : TraceM Unit := do
       | .Sub => emitLinear $ .sub ddst da db
       | .Mul => emitLinear $ .mul ddst da db a b
       | .Div => emitLinear $ .div ddst da db a b
-      | _ => pure ()
+      | _ => unsupportedLinearize "binary op" (reprStr op)
 
   | .unary op dst src =>
     let dsrc ← liftADM $ getGpuTangent src
@@ -132,7 +135,7 @@ partial def linearizeStmt (s : KStmt) : TraceM Unit := do
       | .Exp => emitLinear $ .exp ddst dsrc dst
       | .Log => emitLinear $ .log ddst dsrc src
       | .Tanh => emitLinear $ .tanh ddst dsrc dst
-      | _ => pure ()
+      | _ => unsupportedLinearize "unary op" (reprStr op)
 
   | .broadcast axis dst vec =>
     let dvec ← liftADM $ getGpuTangent vec
@@ -148,7 +151,7 @@ partial def linearizeStmt (s : KStmt) : TraceM Unit := do
     emitPrimal s
     match op with
     | .Sum => emitLinear $ .sum axis ddst dsrc
-    | _ => pure ()
+    | _ => unsupportedLinearize "reduction op" (reprStr op)
 
   | .mma trans dst a b c =>
     let da ← liftADM $ getGpuTangent a
@@ -308,11 +311,11 @@ partial def transposeTrace (trace : Array LinearInst) : ADM (Array KStmt) := do
 
     | .loop v lo hi body =>
       let transBody ← transposeTrace body
-      stmts := stmts.push (.forLoop v lo hi transBody)
+      stmts := stmts.push (.forLoopRev v lo hi transBody)
 
     | .loopVal v lo hi body =>
       let transBody ← transposeTrace body
-      stmts := stmts.push (.forLoopVal v lo hi transBody)
+      stmts := stmts.push (.forLoopValRev v lo hi transBody)
 
     | .custom name dout dins ctx =>
       let rule? ← liftM $ getGpuVJPRule name

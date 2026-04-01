@@ -155,6 +155,32 @@ def testNestedLoops : IO Unit := do
     | _ => fail "Should have inner forLoop"
   | _ => fail "Should have outer forLoop"
 
+@[test]
+def testReverseLoopCodegen : IO Unit := do
+  let kernel : Kernel := {
+    name := "test_reverse_loop"
+    arch := .SM90
+    params := #[]
+    body := #[.forLoopRev { idx := 0 } 0 4 #[.comment "reverse body"]]
+  }
+
+  let code := generateKernel kernel
+  assertTrue (code.containsSubstr "for (int v0 = 4; v0-- > 0; )")
+    "Reverse loops should lower to descending iteration order"
+
+@[test]
+def testReverseLoopValCodegen : IO Unit := do
+  let kernel : Kernel := {
+    name := "test_reverse_loop_val"
+    arch := .SM90
+    params := #[]
+    body := #[.forLoopValRev { idx := 0 } 2 { idx := 1 } #[.comment "reverse body"]]
+  }
+
+  let code := generateKernel kernel
+  assertTrue (code.containsSubstr "for (int v0 = v1; v0-- > 2; )")
+    "Reverse value-bounded loops should lower to descending iteration order"
+
 /-! ## Code Generation Tests -/
 
 /-- Test C++ code generation for declarations -/
@@ -170,6 +196,58 @@ def testCodeGenDeclarations : IO Unit := do
   assertTrue (code.containsSubstr "rt<bf16, 64, 64, row_l>") "Should have RT declaration"
   assertTrue (code.containsSubstr "__shared__ st<float, 32, 64>") "Should have ST declaration"
   assertTrue (code.containsSubstr "rv<float, 64") "Should have RV declaration"
+
+@[test]
+def testUnsupportedSliceRowsCodegenFailsLoudly : IO Unit := do
+  let kernel : Kernel := {
+    name := "test_bad_slice_rows"
+    arch := .SM90
+    params := #[]
+    body := #[
+      .declRT { idx := 0 } .Float32 64 64 .Row,
+      .declST { idx := 1 } .Float32 64 64 .Row,
+      .sliceRows { idx := 0 } { idx := 1 } 0 64
+    ]
+  }
+
+  let code := generateKernel kernel
+  assertTrue (code.containsSubstr "static_assert(false, \"unsupported sliceRows between non-matching tile kinds\")")
+    "Unsupported sliceRows lowering should fail loudly instead of becoming a comment"
+
+@[test]
+def testUnsupportedSliceColsCodegenFailsLoudly : IO Unit := do
+  let kernel : Kernel := {
+    name := "test_bad_slice_cols"
+    arch := .SM90
+    params := #[]
+    body := #[
+      .declRT { idx := 0 } .Float32 64 64 .Row,
+      .declST { idx := 1 } .Float32 64 64 .Row,
+      .sliceCols { idx := 0 } { idx := 1 } 0 64
+    ]
+  }
+
+  let code := generateKernel kernel
+  assertTrue (code.containsSubstr "static_assert(false, \"unsupported sliceCols between non-matching tile kinds\")")
+    "Unsupported sliceCols lowering should fail loudly instead of becoming a comment"
+
+@[test]
+def testUnsupportedConcatColsCodegenFailsLoudly : IO Unit := do
+  let kernel : Kernel := {
+    name := "test_bad_concat_cols"
+    arch := .SM90
+    params := #[]
+    body := #[
+      .declRT { idx := 0 } .Float32 64 128 .Row,
+      .declRT { idx := 1 } .Float32 64 64 .Row,
+      .declST { idx := 2 } .Float32 64 64 .Row,
+      .concatCols { idx := 0 } { idx := 1 } { idx := 2 }
+    ]
+  }
+
+  let code := generateKernel kernel
+  assertTrue (code.containsSubstr "static_assert(false, \"unsupported concatCols between non-matching tile kinds\")")
+    "Unsupported concatCols lowering should fail loudly instead of becoming a comment"
 
 /-- Test C++ code generation for operations -/
 @[test]
@@ -375,7 +453,7 @@ def testFlashAttnStructure : IO Unit := do
   ] do
     let q : Tyr.GPU.Codegen.RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
     let k : Tyr.GPU.Codegen.RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
-    let v : Tyr.GPU.Codegen.RT GpuFloat.BFloat16 64 64 .Col ← allocRT .BFloat16 64 64 .Col
+    let _v : Tyr.GPU.Codegen.RT GpuFloat.BFloat16 64 64 .Col ← allocRT .BFloat16 64 64 .Col
     let s : Tyr.GPU.Codegen.RT GpuFloat.Float32 64 64 ← allocRT .Float32 64 64
     let o : Tyr.GPU.Codegen.RT GpuFloat.Float32 64 64 ← zeroRT .Float32 64 64
 

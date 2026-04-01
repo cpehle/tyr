@@ -196,6 +196,8 @@ inductive KStmt where
   -- Control flow
   | forLoop (v : VarId) (lo hi : Nat) (body : Array KStmt)
   | forLoopVal (v : VarId) (lo : Nat) (hi : VarId) (body : Array KStmt)
+  | forLoopRev (v : VarId) (lo hi : Nat) (body : Array KStmt)
+  | forLoopValRev (v : VarId) (lo : Nat) (hi : VarId) (body : Array KStmt)
   | ifStmt (cond : VarId) (thenBody elseBody : Array KStmt)  -- Conditional
   | ifWarpGroup (wgIdx : Nat) (body : Array KStmt)           -- Execute only in specific warp group
   | comment (text : String)
