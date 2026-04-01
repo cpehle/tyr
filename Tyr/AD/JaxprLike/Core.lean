@@ -1,6 +1,13 @@
 import Std.Data.HashSet
 import Lean.Compiler.IR.Basic
 
+namespace Tyr.AD
+
+/-- Shared 0-based action-space index used across normalized graphs and elimination search. -/
+abbrev ActionId0 := Nat
+
+end Tyr.AD
+
 /-!
 # Tyr.AD.JaxprLike.Core
 
@@ -23,9 +30,6 @@ abbrev OpId := Nat
 
 /-- Region/subgraph ID for nested-control lowering. -/
 abbrev RegionId := Nat
-
-/-- AlphaGrad-style action IDs live in 0-based action space. -/
-abbrev ActionId0 := Nat
 
 /-- Primitive/op identifier, mirroring Graphax's equation-level primitive naming. -/
 abbrev OpName := Name
@@ -407,13 +411,13 @@ structure JVar where
 
 /-- Equation in LeanJaxpr-like IR. -/
 structure JEqn where
-  id : OpId := 0
+  id : OpId
   region : RegionId := 0
   op : OpName
   invars : Array JVar
   outvars : Array JVar
   params : OpParams := #[]
-  typed? : Option TypedOp := none
+  typed : TypedOp
   source : SourceRef := {}
   deriving Repr, Inhabited
 
@@ -427,9 +431,21 @@ def normalizedOpName (eqn : JEqn) : OpName :=
 def sourceOpName (eqn : JEqn) : OpName :=
   (eqn.params.findName? .sourceOp).getD eqn.op
 
-/-- Typed structured op when available, otherwise a generic fallback. -/
+/-- Typed structured op for the normalized equation. -/
 def typedOp (eqn : JEqn) : TypedOp :=
-  eqn.typed?.getD TypedOp.generic
+  eqn.typed
+
+/-- Generic normalized equation helper for hand-authored graphs/tests. -/
+def generic
+    (id : OpId)
+    (op : OpName)
+    (invars outvars : Array JVar)
+    (params : OpParams := #[])
+    (source : SourceRef := {})
+    (region : RegionId := 0) :
+    JEqn :=
+  { id := id, region := region, op := op, invars := invars, outvars := outvars
+    params := params, typed := TypedOp.generic, source := source }
 
 /-- Primary output value ID when the equation has at least one output. -/
 def primaryOutId? (eqn : JEqn) : Option JVarId :=
@@ -477,17 +493,6 @@ private def dedupPreserveOrder (xs : Array JVarId) : Array JVarId := Id.run do
 /-- Graphax-style vertex numbering: equation index -> 1-based vertex ID. -/
 def eqnVertexId1 (eqnIdx0 : Nat) : Nat :=
   eqnIdx0 + 1
-
-/-- Effective op ID: explicit `eqn.id`, or deterministic fallback from equation index. -/
-def effectiveOpIdAt (jaxpr : LeanJaxpr) (eqnIdx0 : Nat) : OpId :=
-  match jaxpr.eqns[eqnIdx0]? with
-  | some eqn =>
-    if eqn.id = 0 then
-      eqnIdx0 + 1
-    else
-      eqn.id
-  | none =>
-    eqnIdx0 + 1
 
 /-- Inverse of `eqnVertexId1` with domain check for 1-based IDs. -/
 def vertexToEqnIdx0? (vertexId1 : Nat) : Option Nat :=
@@ -591,9 +596,8 @@ private def allPresentPositiveVertices (jaxpr : LeanJaxpr) : Std.HashSet Nat := 
 
 private def producerOpIdsByValueId (jaxpr : LeanJaxpr) : Std.HashMap JVarId OpId := Id.run do
   let mut out : Std.HashMap JVarId OpId := {}
-  for h : eqnIdx0 in [:jaxpr.eqns.size] do
-    let eqn := jaxpr.eqns[eqnIdx0]
-    let opId := effectiveOpIdAt jaxpr eqnIdx0
+  for eqn in jaxpr.eqns do
+    let opId := eqn.id
     for outvar in eqn.outvars do
       out := out.insert outvar.id opId
   return out

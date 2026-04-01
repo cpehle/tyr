@@ -30,24 +30,16 @@ def runCoreM (x : CoreM α) : IO α := do
   | .error msg => throw (IO.userError msg)
 
 private def sampleKStmtLoweredJaxpr : LeanJaxpr :=
-  {
+  ({
     invars := #[{ id := 0 }, { id := 1 }]
     eqns := #[
-      {
-        op := kstmtUnaryOpName .Exp
-        invars := #[{ id := 0 }]
-        outvars := #[{ id := 2 }]
-        source := { decl := `test.elim_from_jaxpr, line? := some 10 }
-      },
-      {
-        op := kstmtBinaryOpName .Add
-        invars := #[{ id := 2 }, { id := 1 }]
-        outvars := #[{ id := 3 }]
-        source := { decl := `test.elim_from_jaxpr, line? := some 11 }
-      }
+      JEqn.generic 1 (kstmtUnaryOpName .Exp) #[{ id := 0 }] #[{ id := 2 }] #[]
+        { decl := `test.elim_from_jaxpr, line? := some 10 },
+      JEqn.generic 2 (kstmtBinaryOpName .Add) #[{ id := 2 }, { id := 1 }] #[{ id := 3 }] #[]
+        { decl := `test.elim_from_jaxpr, line? := some 11 }
     ]
     outvars := #[{ id := 3 }]
-  }
+  } : LeanJaxpr).materializeDerivedMetadata
 
 @[test]
 def testRunEliminationOnJaxprRequiresRules : IO Unit := do

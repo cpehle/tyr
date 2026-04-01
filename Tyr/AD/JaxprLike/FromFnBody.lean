@@ -341,7 +341,7 @@ def traverseFnBody (ctx : FromFnBodyCtx) (body : FnBody) : FromFnBodyM Unit := d
                 invars := invars
                 outvars := #[outvar]
                 params := params
-                typed? := some typedOp
+                typed := typedOp
                 source := ctx.source
               }
           }

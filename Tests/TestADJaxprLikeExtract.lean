@@ -67,24 +67,16 @@ private def jaxprFingerprint (jaxpr : LeanJaxpr) : String :=
   reprStr jaxpr
 
 private def sampleKStmtLoweredJaxpr : LeanJaxpr :=
-  {
+  ({
     invars := #[{ id := 0 }, { id := 1 }]
     eqns := #[
-      {
-        op := kstmtUnaryOpName .Exp
-        invars := #[{ id := 0 }]
-        outvars := #[{ id := 2 }]
-        source := { decl := `test.extract, line? := some 10 }
-      },
-      {
-        op := kstmtBinaryOpName .Add
-        invars := #[{ id := 2 }, { id := 1 }]
-        outvars := #[{ id := 3 }]
-        source := { decl := `test.extract, line? := some 11 }
-      }
+      JEqn.generic 1 (kstmtUnaryOpName .Exp) #[{ id := 0 }] #[{ id := 2 }] #[]
+        { decl := `test.extract, line? := some 10 },
+      JEqn.generic 2 (kstmtBinaryOpName .Add) #[{ id := 2 }, { id := 1 }] #[{ id := 3 }] #[]
+        { decl := `test.extract, line? := some 11 }
     ]
     outvars := #[{ id := 3 }]
-  }
+  } : LeanJaxpr).materializeDerivedMetadata
 
 @[test]
 def testBuildFromKStmtsWrapperParityWithManualPath : IO Unit := do
@@ -692,42 +684,22 @@ def testBuildAndExtractFromKStmtsGraphaxAlphaGradSemanticsRules : IO Unit := do
 
 @[test]
 def testExtractNoGradControlRulesStopGradientIotaDevicePutPjit : IO Unit := do
-  let jaxpr : LeanJaxpr := {
+  let jaxpr : LeanJaxpr := ({
     invars := #[{ id := 0 }]
     eqns := #[
-      {
-        op := stopGradientOpName
-        invars := #[{ id := 0 }]
-        outvars := #[{ id := 1 }]
-        source := { decl := `test.no_grad_control, line? := some 40 }
-      },
-      {
-        op := iotaOpName
-        invars := #[]
-        outvars := #[{ id := 2 }]
-        source := { decl := `test.no_grad_control, line? := some 41 }
-      },
-      {
-        op := devicePutOpName
-        invars := #[{ id := 1 }]
-        outvars := #[{ id := 3 }]
-        source := { decl := `test.no_grad_control, line? := some 42 }
-      },
-      {
-        op := pjitOpName
-        invars := #[{ id := 3 }]
-        outvars := #[{ id := 4 }]
-        source := { decl := `test.no_grad_control, line? := some 43 }
-      },
-      {
-        op := kstmtBinaryOpName .Add
-        invars := #[{ id := 4 }, { id := 2 }]
-        outvars := #[{ id := 5 }]
-        source := { decl := `test.no_grad_control, line? := some 44 }
-      }
+      JEqn.generic 1 stopGradientOpName #[{ id := 0 }] #[{ id := 1 }] #[]
+        { decl := `test.no_grad_control, line? := some 40 },
+      JEqn.generic 2 iotaOpName #[] #[{ id := 2 }] #[]
+        { decl := `test.no_grad_control, line? := some 41 },
+      JEqn.generic 3 devicePutOpName #[{ id := 1 }] #[{ id := 3 }] #[]
+        { decl := `test.no_grad_control, line? := some 42 },
+      JEqn.generic 4 pjitOpName #[{ id := 3 }] #[{ id := 4 }] #[]
+        { decl := `test.no_grad_control, line? := some 43 },
+      JEqn.generic 5 (kstmtBinaryOpName .Add) #[{ id := 4 }, { id := 2 }] #[{ id := 5 }] #[]
+        { decl := `test.no_grad_control, line? := some 44 }
     ]
     outvars := #[{ id := 5 }]
-  }
+  } : LeanJaxpr).materializeDerivedMetadata
 
   let res ← runCoreM (do
     registerKStmtGraphaxAlphaGradSemanticsRules
@@ -753,25 +725,21 @@ def testExtractNoGradControlRulesStopGradientIotaDevicePutPjit : IO Unit := do
 
 @[test]
 def testExtractDotGeneralRules : IO Unit := do
-  let jaxpr : LeanJaxpr := {
+  let jaxpr : LeanJaxpr := ({
     invars := #[{ id := 0 }, { id := 1 }]
     eqns := #[
-      {
-        op := kstmtDotGeneralOpName
-        invars := #[{ id := 0 }, { id := 1 }]
-        outvars := #[{ id := 2 }]
-        params := #[
+      JEqn.generic 1 kstmtDotGeneralOpName #[{ id := 0 }, { id := 1 }] #[{ id := 2 }]
+        #[
           OpParam.mkName .variant `matmul,
           OpParam.mkNats .lhsContract #[1],
           OpParam.mkNats .rhsContract #[0],
           OpParam.mkNats .lhsBatch #[],
           OpParam.mkNats .rhsBatch #[]
         ]
-        source := { decl := `test.dot_general, line? := some 60 }
-      }
+        { decl := `test.dot_general, line? := some 60 }
     ]
     outvars := #[{ id := 2 }]
-  }
+  } : LeanJaxpr).materializeDerivedMetadata
 
   let res ← runCoreM (do
     registerGraphaxAlphaGradDotGeneralRules
@@ -811,24 +779,16 @@ def testExtractDotGeneralRules : IO Unit := do
 
 @[test]
 def testExtractCommunicationAliasRules : IO Unit := do
-  let jaxpr : LeanJaxpr := {
+  let jaxpr : LeanJaxpr := ({
     invars := #[{ id := 0 }]
     eqns := #[
-      {
-        op := allGatherOpName
-        invars := #[{ id := 0 }]
-        outvars := #[{ id := 1 }]
-        source := { decl := `test.communication_alias, line? := some 70 }
-      },
-      {
-        op := `jax.lax.reduce_scatter
-        invars := #[{ id := 1 }]
-        outvars := #[{ id := 2 }]
-        source := { decl := `test.communication_alias, line? := some 71 }
-      }
+      JEqn.generic 1 allGatherOpName #[{ id := 0 }] #[{ id := 1 }] #[]
+        { decl := `test.communication_alias, line? := some 70 },
+      JEqn.generic 2 `jax.lax.reduce_scatter #[{ id := 1 }] #[{ id := 2 }] #[]
+        { decl := `test.communication_alias, line? := some 71 }
     ]
     outvars := #[{ id := 2 }]
-  }
+  } : LeanJaxpr).materializeDerivedMetadata
 
   let res ← runCoreM (do
     registerGraphaxAlphaGradCommunicationRules
@@ -853,30 +813,18 @@ def testExtractCommunicationAliasRules : IO Unit := do
 
 @[test]
 def testExtractStructuralAliasRules : IO Unit := do
-  let jaxpr : LeanJaxpr := {
+  let jaxpr : LeanJaxpr := ({
     invars := #[{ id := 0 }, { id := 1 }]
     eqns := #[
-      {
-        op := reshapeAliasOpName
-        invars := #[{ id := 0 }]
-        outvars := #[{ id := 2 }]
-        source := { decl := `test.structural_alias, line? := some 80 }
-      },
-      {
-        op := `jax.lax.slice_in_dim_p
-        invars := #[{ id := 2 }]
-        outvars := #[{ id := 3 }]
-        source := { decl := `test.structural_alias, line? := some 81 }
-      },
-      {
-        op := concatenateAliasOpName
-        invars := #[{ id := 3 }, { id := 1 }]
-        outvars := #[{ id := 4 }]
-        source := { decl := `test.structural_alias, line? := some 82 }
-      }
+      JEqn.generic 1 reshapeAliasOpName #[{ id := 0 }] #[{ id := 2 }] #[]
+        { decl := `test.structural_alias, line? := some 80 },
+      JEqn.generic 2 `jax.lax.slice_in_dim_p #[{ id := 2 }] #[{ id := 3 }] #[]
+        { decl := `test.structural_alias, line? := some 81 },
+      JEqn.generic 3 concatenateAliasOpName #[{ id := 3 }, { id := 1 }] #[{ id := 4 }] #[]
+        { decl := `test.structural_alias, line? := some 82 }
     ]
     outvars := #[{ id := 4 }]
-  }
+  } : LeanJaxpr).materializeDerivedMetadata
 
   let res ← runCoreM (do
     registerGraphaxAlphaGradStructuralAliasRules
@@ -914,52 +862,28 @@ def testExtractStructuralAliasRulesUseShapeAwareSparsePayloads : IO Unit := do
   let sliced : JVar := { id := 6, metaInfo := { shape := some #[2, 2] } }
   let transposed : JVar := { id := 7, metaInfo := { shape := some #[2, 2] } }
   let out : JVar := { id := 8, metaInfo := { shape := some #[2, 4] } }
-  let jaxpr : LeanJaxpr := {
+  let jaxpr : LeanJaxpr := ({
     invars := #[x, y, z]
     eqns := #[
-      {
-        op := reshapeAliasOpName
-        invars := #[x]
-        outvars := #[reshaped]
-        source := { decl := `test.structural_alias_exact, line? := some 90 }
-      },
-      {
-        op := squeezeAliasOpName
-        invars := #[reshaped]
-        outvars := #[squeezed]
-        source := { decl := `test.structural_alias_exact, line? := some 91 }
-      },
-      {
-        op := broadcastInDimAliasOpName
-        invars := #[squeezed]
-        outvars := #[bcast]
-        source := { decl := `test.structural_alias_exact, line? := some 92 }
-      },
-      {
-        op := `jax.lax.slice_in_dim_p
-        invars := #[bcast]
-        outvars := #[sliced]
-        params := #[
+      JEqn.generic 1 reshapeAliasOpName #[x] #[reshaped] #[]
+        { decl := `test.structural_alias_exact, line? := some 90 },
+      JEqn.generic 2 squeezeAliasOpName #[reshaped] #[squeezed] #[]
+        { decl := `test.structural_alias_exact, line? := some 91 },
+      JEqn.generic 3 broadcastInDimAliasOpName #[squeezed] #[bcast] #[]
+        { decl := `test.structural_alias_exact, line? := some 92 },
+      JEqn.generic 4 `jax.lax.slice_in_dim_p #[bcast] #[sliced]
+        #[
           OpParam.mkNat .startCol 1,
           OpParam.mkNat .numCols 2
         ]
-        source := { decl := `test.structural_alias_exact, line? := some 93 }
-      },
-      {
-        op := transposeAliasOpName
-        invars := #[sliced]
-        outvars := #[transposed]
-        source := { decl := `test.structural_alias_exact, line? := some 94 }
-      },
-      {
-        op := concatenateAliasOpName
-        invars := #[transposed, y, z]
-        outvars := #[out]
-        source := { decl := `test.structural_alias_exact, line? := some 95 }
-      }
+        { decl := `test.structural_alias_exact, line? := some 93 },
+      JEqn.generic 5 transposeAliasOpName #[sliced] #[transposed] #[]
+        { decl := `test.structural_alias_exact, line? := some 94 },
+      JEqn.generic 6 concatenateAliasOpName #[transposed, y, z] #[out] #[]
+        { decl := `test.structural_alias_exact, line? := some 95 }
     ]
     outvars := #[out]
-  }
+  } : LeanJaxpr).materializeDerivedMetadata
 
   let res ← runCoreM (do
     registerGraphaxAlphaGradParityRules
@@ -1224,23 +1148,19 @@ def testExtractPadAliasRuleUsesExplicitPadConfigPayloads : IO Unit := do
   let base : JVar := { id := 0, metaInfo := { shape := some #[2] } }
   let padValue : JVar := { id := 1, metaInfo := { shape := some #[1] } }
   let out : JVar := { id := 2, metaInfo := { shape := some #[6] } }
-  let jaxpr : LeanJaxpr := {
+  let jaxpr : LeanJaxpr := ({
     invars := #[base, padValue]
     eqns := #[
-      {
-        op := padAliasOpName
-        invars := #[base, padValue]
-        outvars := #[out]
-        params := #[
+      JEqn.generic 1 padAliasOpName #[base, padValue] #[out]
+        #[
           OpParam.mkNats .padLow #[1],
           OpParam.mkNats .padHigh #[2],
           OpParam.mkNats .padInterior #[1]
         ]
-        source := { decl := `test.pad_alias_exact, line? := some 96 }
-      }
+        { decl := `test.pad_alias_exact, line? := some 96 }
     ]
     outvars := #[out]
-  }
+  } : LeanJaxpr).materializeDerivedMetadata
 
   let res ← runCoreM (do
     registerGraphaxAlphaGradParityRules
@@ -1287,30 +1207,18 @@ def testExtractPadAliasRuleUsesExplicitPadConfigPayloads : IO Unit := do
 
 @[test]
 def testExtractDynamicAliasRules : IO Unit := do
-  let jaxpr : LeanJaxpr := {
+  let jaxpr : LeanJaxpr := ({
     invars := #[{ id := 0 }, { id := 1 }, { id := 2 }]
     eqns := #[
-      {
-        op := dynamicSliceAliasOpName
-        invars := #[{ id := 0 }, { id := 2 }]
-        outvars := #[{ id := 3 }]
-        source := { decl := `test.dynamic_alias, line? := some 90 }
-      },
-      {
-        op := dynamicUpdateSliceAliasOpName
-        invars := #[{ id := 3 }, { id := 1 }, { id := 2 }]
-        outvars := #[{ id := 4 }]
-        source := { decl := `test.dynamic_alias, line? := some 91 }
-      },
-      {
-        op := `jax.lax.dynamic_update_index_in_dim_p
-        invars := #[{ id := 4 }, { id := 1 }, { id := 2 }]
-        outvars := #[{ id := 5 }]
-        source := { decl := `test.dynamic_alias, line? := some 92 }
-      }
+      JEqn.generic 1 dynamicSliceAliasOpName #[{ id := 0 }, { id := 2 }] #[{ id := 3 }] #[]
+        { decl := `test.dynamic_alias, line? := some 90 },
+      JEqn.generic 2 dynamicUpdateSliceAliasOpName #[{ id := 3 }, { id := 1 }, { id := 2 }] #[{ id := 4 }] #[]
+        { decl := `test.dynamic_alias, line? := some 91 },
+      JEqn.generic 3 `jax.lax.dynamic_update_index_in_dim_p #[{ id := 4 }, { id := 1 }, { id := 2 }] #[{ id := 5 }] #[]
+        { decl := `test.dynamic_alias, line? := some 92 }
     ]
     outvars := #[{ id := 5 }]
-  }
+  } : LeanJaxpr).materializeDerivedMetadata
 
   let res ← runCoreM (do
     registerGraphaxAlphaGradDynamicAliasRules
@@ -1341,23 +1249,19 @@ def testExtractDynamicAliasRules : IO Unit := do
 
 @[test]
 def testExtractScanAliasRuleSubjaxprPartition : IO Unit := do
-  let jaxpr : LeanJaxpr := {
+  let jaxpr : LeanJaxpr := ({
     invars := #[{ id := 10 }, { id := 11 }, { id := 14 }]
     eqns := #[
-      {
-        op := scanAliasOpName
-        invars := #[{ id := 10 }, { id := 11 }, { id := 14 }]
-        outvars := #[{ id := 12 }, { id := 13 }]
-        params := #[
+      JEqn.generic 1 scanAliasOpName #[{ id := 10 }, { id := 11 }, { id := 14 }] #[{ id := 12 }, { id := 13 }]
+        #[
           OpParam.mkNat .scanCarryInputCount 1,
           OpParam.mkNat .scanDataInputCount 1,
           OpParam.mkNat .scanCarryOutputCount 1
         ]
-        source := { decl := `test.scan_subjaxpr_partition, line? := some 100 }
-      }
+        { decl := `test.scan_subjaxpr_partition, line? := some 100 }
     ]
     outvars := #[{ id := 12 }, { id := 13 }]
-  }
+  } : LeanJaxpr).materializeDerivedMetadata
 
   let res ← runCoreM (do
     registerGraphaxAlphaGradReductionControlAliasRules
@@ -1396,22 +1300,18 @@ def testExtractScanAliasRuleSubjaxprPartition : IO Unit := do
 
 @[test]
 def testExtractCondAliasRuleSubjaxprPartition : IO Unit := do
-  let jaxpr : LeanJaxpr := {
+  let jaxpr : LeanJaxpr := ({
     invars := #[{ id := 20 }, { id := 21 }, { id := 22 }, { id := 25 }]
     eqns := #[
-      {
-        op := condAliasOpName
-        invars := #[{ id := 20 }, { id := 21 }, { id := 22 }, { id := 25 }]
-        outvars := #[{ id := 23 }, { id := 24 }]
-        params := #[
+      JEqn.generic 1 condAliasOpName #[{ id := 20 }, { id := 21 }, { id := 22 }, { id := 25 }] #[{ id := 23 }, { id := 24 }]
+        #[
           OpParam.mkNat .condPredicateCount 1,
           OpParam.mkNat .condDataInputCount 2
         ]
-        source := { decl := `test.cond_subjaxpr_partition, line? := some 110 }
-      }
+        { decl := `test.cond_subjaxpr_partition, line? := some 110 }
     ]
     outvars := #[{ id := 23 }, { id := 24 }]
-  }
+  } : LeanJaxpr).materializeDerivedMetadata
 
   let res ← runCoreM (do
     registerGraphaxAlphaGradReductionControlAliasRules

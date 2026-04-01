@@ -18,6 +18,7 @@ namespace Examples.AlphaGradPort
 
 open torch
 open torch.mctx
+open Tyr.AD
 open Tyr.AD.Elim
 
 private abbrev OBS_DIM : UInt64 := 8
@@ -48,7 +49,7 @@ private def sampleCategorical?
   let seed' := mix seed
   let u := uniform01 seed'
   let mut cdf := 0.0
-  let mut chosen? : Option Nat := none
+  let mut chosen? : Option ActionId0 := none
 
   for i in [:probs.size] do
     let pRaw := probs.getD i 0.0
@@ -61,7 +62,7 @@ private def sampleCategorical?
     match chosen? with
     | some a => a
     | none => Id.run do
-      let mut best := 0
+      let mut best : ActionId0 := 0
       let mut bestP := probs.getD 0 0.0
       for i in [1:probs.size] do
         let p := probs.getD i 0.0
@@ -231,7 +232,7 @@ private def computeGAE
     let i := n - 1 - k
     let st := steps.getD i {
       features := #[]
-      action := 0
+      action := (0 : ActionId0)
       reward := 0.0
       value := 0.0
       nextValue := 0.0

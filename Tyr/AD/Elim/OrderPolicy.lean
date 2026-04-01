@@ -9,9 +9,6 @@ The intent is to keep ID-space conversions explicit and validated.
 
 namespace Tyr.AD.Elim
 
-/-- AlphaGrad action IDs live in 0-based action space. -/
-abbrev ActionId0 := Nat
-
 /-- Graphax/Tyr elimination vertices live in 1-based space. -/
 abbrev VertexId1 := Nat
 

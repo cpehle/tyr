@@ -8,6 +8,7 @@ import Examples.AlphaGradPort.Tasks
 
 namespace Examples.AlphaGradPort
 
+open Tyr.AD
 open Tyr.AD.Elim
 
 inductive SearchBackend where

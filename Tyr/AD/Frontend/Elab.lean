@@ -169,10 +169,12 @@ unsafe def deriveSinglePrimitiveFrontendRegistration
       let jaxpr : LeanJaxpr := {
         invars := jaxprInvars
         eqns := #[{
+          id := 1
           op := spec.op
           invars := eqnInvars
           outvars := #[outvar]
           params := extraParams
+          typed := TypedOp.generic
           source := { decl := declName }
         }]
         outvars := #[outvar]

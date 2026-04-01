@@ -102,49 +102,29 @@ def testGraphaxAlphaGradOverlapCoverageFromKStmt : IO Unit := do
 
 @[test]
 def testGraphaxAliasCoverageNoGradAndDotGeneral : IO Unit := do
-  let jaxpr : LeanJaxpr := {
+  let jaxpr : LeanJaxpr := ({
     invars := #[{ id := 0 }, { id := 1 }]
     eqns := #[
-      {
-        op := `Graphax.stop_gradient
-        invars := #[{ id := 0 }]
-        outvars := #[{ id := 2 }]
-        source := { decl := `test.graphax_aliases, line? := some 10 }
-      },
-      {
-        op := `Graphax.iota
-        invars := #[]
-        outvars := #[{ id := 3 }]
-        source := { decl := `test.graphax_aliases, line? := some 11 }
-      },
-      {
-        op := `Graphax.device_put
-        invars := #[{ id := 2 }]
-        outvars := #[{ id := 4 }]
-        source := { decl := `test.graphax_aliases, line? := some 12 }
-      },
-      {
-        op := `Graphax.pjit
-        invars := #[{ id := 4 }]
-        outvars := #[{ id := 5 }]
-        source := { decl := `test.graphax_aliases, line? := some 13 }
-      },
-      {
-        op := `Graphax.dot_general
-        invars := #[{ id := 5 }, { id := 3 }]
-        outvars := #[{ id := 6 }]
-        params := #[
+      JEqn.generic 1 `Graphax.stop_gradient #[{ id := 0 }] #[{ id := 2 }] #[]
+        { decl := `test.graphax_aliases, line? := some 10 },
+      JEqn.generic 2 `Graphax.iota #[] #[{ id := 3 }] #[]
+        { decl := `test.graphax_aliases, line? := some 11 },
+      JEqn.generic 3 `Graphax.device_put #[{ id := 2 }] #[{ id := 4 }] #[]
+        { decl := `test.graphax_aliases, line? := some 12 },
+      JEqn.generic 4 `Graphax.pjit #[{ id := 4 }] #[{ id := 5 }] #[]
+        { decl := `test.graphax_aliases, line? := some 13 },
+      JEqn.generic 5 `Graphax.dot_general #[{ id := 5 }, { id := 3 }] #[{ id := 6 }]
+        #[
           OpParam.mkName .variant `matmul,
           OpParam.mkNats .lhsContract #[1],
           OpParam.mkNats .rhsContract #[0],
           OpParam.mkNats .lhsBatch #[],
           OpParam.mkNats .rhsBatch #[]
         ]
-        source := { decl := `test.graphax_aliases, line? := some 14 }
-      }
+        { decl := `test.graphax_aliases, line? := some 14 }
     ]
     outvars := #[{ id := 6 }]
-  }
+  } : LeanJaxpr).materializeDerivedMetadata
 
   let res ← runCoreM (do
     registerGraphaxAlphaGradParityRules
@@ -172,42 +152,22 @@ def testGraphaxAliasCoverageNoGradAndDotGeneral : IO Unit := do
 
 @[test]
 def testGraphaxJaxAliasCoverageExtraAndCommunication : IO Unit := do
-  let jaxpr : LeanJaxpr := {
+  let jaxpr : LeanJaxpr := ({
     invars := #[{ id := 0 }, { id := 1 }]
     eqns := #[
-      {
-        op := `jax.lax.log1p_p
-        invars := #[{ id := 0 }]
-        outvars := #[{ id := 2 }]
-        source := { decl := `test.graphax_jax_aliases, line? := some 20 }
-      },
-      {
-        op := `jax.lax.atan2_p
-        invars := #[{ id := 2 }, { id := 1 }]
-        outvars := #[{ id := 3 }]
-        source := { decl := `test.graphax_jax_aliases, line? := some 21 }
-      },
-      {
-        op := allGatherOpName
-        invars := #[{ id := 3 }]
-        outvars := #[{ id := 4 }]
-        source := { decl := `test.graphax_jax_aliases, line? := some 22 }
-      },
-      {
-        op := `jax.lax.eq
-        invars := #[{ id := 4 }, { id := 1 }]
-        outvars := #[{ id := 5 }]
-        source := { decl := `test.graphax_jax_aliases, line? := some 23 }
-      },
-      {
-        op := `jax.lax.add
-        invars := #[{ id := 4 }, { id := 1 }]
-        outvars := #[{ id := 6 }]
-        source := { decl := `test.graphax_jax_aliases, line? := some 24 }
-      }
+      JEqn.generic 1 `jax.lax.log1p_p #[{ id := 0 }] #[{ id := 2 }] #[]
+        { decl := `test.graphax_jax_aliases, line? := some 20 },
+      JEqn.generic 2 `jax.lax.atan2_p #[{ id := 2 }, { id := 1 }] #[{ id := 3 }] #[]
+        { decl := `test.graphax_jax_aliases, line? := some 21 },
+      JEqn.generic 3 allGatherOpName #[{ id := 3 }] #[{ id := 4 }] #[]
+        { decl := `test.graphax_jax_aliases, line? := some 22 },
+      JEqn.generic 4 `jax.lax.eq #[{ id := 4 }, { id := 1 }] #[{ id := 5 }] #[]
+        { decl := `test.graphax_jax_aliases, line? := some 23 },
+      JEqn.generic 5 `jax.lax.add #[{ id := 4 }, { id := 1 }] #[{ id := 6 }] #[]
+        { decl := `test.graphax_jax_aliases, line? := some 24 }
     ]
     outvars := #[{ id := 5 }, { id := 6 }]
-  }
+  } : LeanJaxpr).materializeDerivedMetadata
 
   let res ← runCoreM (do
     registerGraphaxAlphaGradParityRules
@@ -234,18 +194,14 @@ def testGraphaxJaxAliasCoverageExtraAndCommunication : IO Unit := do
 
 @[test]
 def testGraphaxJaxRsqrtAliasCoverage : IO Unit := do
-  let jaxpr : LeanJaxpr := {
+  let jaxpr : LeanJaxpr := ({
     invars := #[{ id := 0 }]
     eqns := #[
-      {
-        op := `jax.lax.rsqrt_p
-        invars := #[{ id := 0 }]
-        outvars := #[{ id := 1 }]
-        source := { decl := `test.graphax_jax_rsqrt_alias, line? := some 25 }
-      }
+      JEqn.generic 1 `jax.lax.rsqrt_p #[{ id := 0 }] #[{ id := 1 }] #[]
+        { decl := `test.graphax_jax_rsqrt_alias, line? := some 25 }
     ]
     outvars := #[{ id := 1 }]
-  }
+  } : LeanJaxpr).materializeDerivedMetadata
 
   let res ← runCoreM (do
     registerGraphaxAlphaGradParityRules
@@ -267,54 +223,26 @@ def testGraphaxJaxRsqrtAliasCoverage : IO Unit := do
 
 @[test]
 def testGraphaxJaxStructuralAliasCoverage : IO Unit := do
-  let jaxpr : LeanJaxpr := {
+  let jaxpr : LeanJaxpr := ({
     invars := #[{ id := 0 }, { id := 1 }, { id := 2 }]
     eqns := #[
-      {
-        op := reshapeAliasOpName
-        invars := #[{ id := 0 }]
-        outvars := #[{ id := 3 }]
-        source := { decl := `test.graphax_structural_aliases, line? := some 30 }
-      },
-      {
-        op := squeezeAliasOpName
-        invars := #[{ id := 3 }]
-        outvars := #[{ id := 4 }]
-        source := { decl := `test.graphax_structural_aliases, line? := some 31 }
-      },
-      {
-        op := broadcastInDimAliasOpName
-        invars := #[{ id := 4 }]
-        outvars := #[{ id := 5 }]
-        source := { decl := `test.graphax_structural_aliases, line? := some 32 }
-      },
-      {
-        op := sliceAliasOpName
-        invars := #[{ id := 5 }]
-        outvars := #[{ id := 6 }]
-        source := { decl := `test.graphax_structural_aliases, line? := some 33 }
-      },
-      {
-        op := convertElementTypeAliasOpName
-        invars := #[{ id := 6 }]
-        outvars := #[{ id := 7 }]
-        source := { decl := `test.graphax_structural_aliases, line? := some 34 }
-      },
-      {
-        op := transposeAliasOpName
-        invars := #[{ id := 7 }]
-        outvars := #[{ id := 8 }]
-        source := { decl := `test.graphax_structural_aliases, line? := some 35 }
-      },
-      {
-        op := concatenateAliasOpName
-        invars := #[{ id := 8 }, { id := 1 }, { id := 2 }]
-        outvars := #[{ id := 9 }]
-        source := { decl := `test.graphax_structural_aliases, line? := some 36 }
-      }
+      JEqn.generic 1 reshapeAliasOpName #[{ id := 0 }] #[{ id := 3 }] #[]
+        { decl := `test.graphax_structural_aliases, line? := some 30 },
+      JEqn.generic 2 squeezeAliasOpName #[{ id := 3 }] #[{ id := 4 }] #[]
+        { decl := `test.graphax_structural_aliases, line? := some 31 },
+      JEqn.generic 3 broadcastInDimAliasOpName #[{ id := 4 }] #[{ id := 5 }] #[]
+        { decl := `test.graphax_structural_aliases, line? := some 32 },
+      JEqn.generic 4 sliceAliasOpName #[{ id := 5 }] #[{ id := 6 }] #[]
+        { decl := `test.graphax_structural_aliases, line? := some 33 },
+      JEqn.generic 5 convertElementTypeAliasOpName #[{ id := 6 }] #[{ id := 7 }] #[]
+        { decl := `test.graphax_structural_aliases, line? := some 34 },
+      JEqn.generic 6 transposeAliasOpName #[{ id := 7 }] #[{ id := 8 }] #[]
+        { decl := `test.graphax_structural_aliases, line? := some 35 },
+      JEqn.generic 7 concatenateAliasOpName #[{ id := 8 }, { id := 1 }, { id := 2 }] #[{ id := 9 }] #[]
+        { decl := `test.graphax_structural_aliases, line? := some 36 }
     ]
     outvars := #[{ id := 9 }]
-  }
+  } : LeanJaxpr).materializeDerivedMetadata
 
   let res ← runCoreM (do
     registerGraphaxAlphaGradParityRules
@@ -341,30 +269,18 @@ def testGraphaxJaxStructuralAliasCoverage : IO Unit := do
 
 @[test]
 def testGraphaxJaxReductionAndSelectAliasCoverage : IO Unit := do
-  let jaxpr : LeanJaxpr := {
+  let jaxpr : LeanJaxpr := ({
     invars := #[{ id := 0 }, { id := 1 }, { id := 2 }]
     eqns := #[
-      {
-        op := reduceSumAliasOpName
-        invars := #[{ id := 0 }]
-        outvars := #[{ id := 3 }]
-        source := { decl := `test.graphax_reduce_select_aliases, line? := some 40 }
-      },
-      {
-        op := selectNAliasOpName
-        invars := #[{ id := 1 }, { id := 3 }, { id := 2 }]
-        outvars := #[{ id := 4 }]
-        source := { decl := `test.graphax_reduce_select_aliases, line? := some 41 }
-      },
-      {
-        op := `Graphax.reduce_max
-        invars := #[{ id := 4 }]
-        outvars := #[{ id := 5 }]
-        source := { decl := `test.graphax_reduce_select_aliases, line? := some 42 }
-      }
+      JEqn.generic 1 reduceSumAliasOpName #[{ id := 0 }] #[{ id := 3 }] #[]
+        { decl := `test.graphax_reduce_select_aliases, line? := some 40 },
+      JEqn.generic 2 selectNAliasOpName #[{ id := 1 }, { id := 3 }, { id := 2 }] #[{ id := 4 }] #[]
+        { decl := `test.graphax_reduce_select_aliases, line? := some 41 },
+      JEqn.generic 3 `Graphax.reduce_max #[{ id := 4 }] #[{ id := 5 }] #[]
+        { decl := `test.graphax_reduce_select_aliases, line? := some 42 }
     ]
     outvars := #[{ id := 5 }]
-  }
+  } : LeanJaxpr).materializeDerivedMetadata
 
   let res ← runCoreM (do
     registerGraphaxAlphaGradParityRules
@@ -389,36 +305,20 @@ def testGraphaxJaxReductionAndSelectAliasCoverage : IO Unit := do
 
 @[test]
 def testGraphaxJaxDynamicAliasCoverage : IO Unit := do
-  let jaxpr : LeanJaxpr := {
+  let jaxpr : LeanJaxpr := ({
     invars := #[{ id := 0 }, { id := 1 }, { id := 2 }]
     eqns := #[
-      {
-        op := dynamicSliceAliasOpName
-        invars := #[{ id := 0 }, { id := 2 }]
-        outvars := #[{ id := 3 }]
-        source := { decl := `test.graphax_dynamic_aliases, line? := some 50 }
-      },
-      {
-        op := gatherAliasOpName
-        invars := #[{ id := 3 }, { id := 2 }]
-        outvars := #[{ id := 4 }]
-        source := { decl := `test.graphax_dynamic_aliases, line? := some 51 }
-      },
-      {
-        op := dynamicUpdateSliceAliasOpName
-        invars := #[{ id := 4 }, { id := 1 }, { id := 2 }]
-        outvars := #[{ id := 5 }]
-        source := { decl := `test.graphax_dynamic_aliases, line? := some 52 }
-      },
-      {
-        op := scatterAliasOpName
-        invars := #[{ id := 5 }, { id := 1 }, { id := 2 }]
-        outvars := #[{ id := 6 }]
-        source := { decl := `test.graphax_dynamic_aliases, line? := some 53 }
-      }
+      JEqn.generic 1 dynamicSliceAliasOpName #[{ id := 0 }, { id := 2 }] #[{ id := 3 }] #[]
+        { decl := `test.graphax_dynamic_aliases, line? := some 50 },
+      JEqn.generic 2 gatherAliasOpName #[{ id := 3 }, { id := 2 }] #[{ id := 4 }] #[]
+        { decl := `test.graphax_dynamic_aliases, line? := some 51 },
+      JEqn.generic 3 dynamicUpdateSliceAliasOpName #[{ id := 4 }, { id := 1 }, { id := 2 }] #[{ id := 5 }] #[]
+        { decl := `test.graphax_dynamic_aliases, line? := some 52 },
+      JEqn.generic 4 scatterAliasOpName #[{ id := 5 }, { id := 1 }, { id := 2 }] #[{ id := 6 }] #[]
+        { decl := `test.graphax_dynamic_aliases, line? := some 53 }
     ]
     outvars := #[{ id := 6 }]
-  }
+  } : LeanJaxpr).materializeDerivedMetadata
 
   let res ← runCoreM (do
     registerGraphaxAlphaGradParityRules
@@ -449,30 +349,18 @@ def testGraphaxJaxDynamicAliasCoverage : IO Unit := do
 
 @[test]
 def testGraphaxJaxPadSelectAndDynamicUpdateIndexAliasCoverage : IO Unit := do
-  let jaxpr : LeanJaxpr := {
+  let jaxpr : LeanJaxpr := ({
     invars := #[{ id := 0 }, { id := 1 }, { id := 2 }, { id := 3 }]
     eqns := #[
-      {
-        op := `jax.lax.pad_p
-        invars := #[{ id := 0 }, { id := 1 }]
-        outvars := #[{ id := 4 }]
-        source := { decl := `test.graphax_pad_select_dynamic_update_index_aliases, line? := some 60 }
-      },
-      {
-        op := `jax.lax.select_p
-        invars := #[{ id := 2 }, { id := 4 }, { id := 3 }]
-        outvars := #[{ id := 5 }]
-        source := { decl := `test.graphax_pad_select_dynamic_update_index_aliases, line? := some 61 }
-      },
-      {
-        op := `jax.lax.dynamic_update_index_in_dim_p
-        invars := #[{ id := 5 }, { id := 1 }, { id := 2 }]
-        outvars := #[{ id := 6 }]
-        source := { decl := `test.graphax_pad_select_dynamic_update_index_aliases, line? := some 62 }
-      }
+      JEqn.generic 1 `jax.lax.pad_p #[{ id := 0 }, { id := 1 }] #[{ id := 4 }] #[]
+        { decl := `test.graphax_pad_select_dynamic_update_index_aliases, line? := some 60 },
+      JEqn.generic 2 `jax.lax.select_p #[{ id := 2 }, { id := 4 }, { id := 3 }] #[{ id := 5 }] #[]
+        { decl := `test.graphax_pad_select_dynamic_update_index_aliases, line? := some 61 },
+      JEqn.generic 3 `jax.lax.dynamic_update_index_in_dim_p #[{ id := 5 }, { id := 1 }, { id := 2 }] #[{ id := 6 }] #[]
+        { decl := `test.graphax_pad_select_dynamic_update_index_aliases, line? := some 62 }
     ]
     outvars := #[{ id := 6 }]
-  }
+  } : LeanJaxpr).materializeDerivedMetadata
 
   let res ← runCoreM (do
     registerGraphaxAlphaGradParityRules
@@ -597,40 +485,24 @@ def testGraphaxStructuralAliasPayloadParityWithKStmtSubset : IO Unit := do
   let sliced : JVar := { id := 3, metaInfo := { shape := some #[3, 1] } }
   let y : JVar := { id := 4, metaInfo := { shape := some #[3, 1] } }
   let out : JVar := { id := 5, metaInfo := { shape := some #[3, 2] } }
-  let jaxpr : LeanJaxpr := {
+  let jaxpr : LeanJaxpr := ({
     invars := #[x, y]
     eqns := #[
-      {
-        op := broadcastInDimAliasOpName
-        invars := #[x]
-        outvars := #[bcast]
-        source := { decl := `test.graphax_structural_payload_parity, line? := some 70 }
-      },
-      {
-        op := transposeAliasOpName
-        invars := #[bcast]
-        outvars := #[transposed]
-        source := { decl := `test.graphax_structural_payload_parity, line? := some 71 }
-      },
-      {
-        op := `jax.lax.slice_in_dim_p
-        invars := #[transposed]
-        outvars := #[sliced]
-        params := #[
+      JEqn.generic 1 broadcastInDimAliasOpName #[x] #[bcast] #[]
+        { decl := `test.graphax_structural_payload_parity, line? := some 70 },
+      JEqn.generic 2 transposeAliasOpName #[bcast] #[transposed] #[]
+        { decl := `test.graphax_structural_payload_parity, line? := some 71 },
+      JEqn.generic 3 `jax.lax.slice_in_dim_p #[transposed] #[sliced]
+        #[
           OpParam.mkNat .startCol 1,
           OpParam.mkNat .numCols 1
         ]
-        source := { decl := `test.graphax_structural_payload_parity, line? := some 72 }
-      },
-      {
-        op := concatenateAliasOpName
-        invars := #[sliced, y]
-        outvars := #[out]
-        source := { decl := `test.graphax_structural_payload_parity, line? := some 73 }
-      }
+        { decl := `test.graphax_structural_payload_parity, line? := some 72 },
+      JEqn.generic 4 concatenateAliasOpName #[sliced, y] #[out] #[]
+        { decl := `test.graphax_structural_payload_parity, line? := some 73 }
     ]
     outvars := #[out]
-  }
+  } : LeanJaxpr).materializeDerivedMetadata
 
   let jaxEdges ← runCoreM (do
     registerGraphaxAlphaGradParityRules

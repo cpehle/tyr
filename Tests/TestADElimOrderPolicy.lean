@@ -4,6 +4,7 @@ import Tyr.AD.Elim
 namespace Tests.ADElimOrderPolicy
 
 open LeanTest
+open Tyr.AD
 open Tyr.AD.Elim
 open Tyr.AD.JaxprLike
 

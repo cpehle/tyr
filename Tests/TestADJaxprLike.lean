@@ -852,8 +852,8 @@ def testLeanJaxprVertexPartitions : IO Unit := do
     constvars := #[{ id := 7 }]
     invars := #[{ id := 0 }, { id := 1 }]
     eqns := #[
-      { op := `test.eqn0, invars := #[{ id := 0 }], outvars := #[{ id := 2 }] },
-      { op := `test.eqn1, invars := #[{ id := 2 }, { id := 1 }], outvars := #[{ id := 3 }, { id := 4 }] }
+      JEqn.generic 1 `test.eqn0 #[{ id := 0 }] #[{ id := 2 }],
+      JEqn.generic 2 `test.eqn1 #[{ id := 2 }, { id := 1 }] #[{ id := 3 }, { id := 4 }]
     ]
     outvars := #[{ id := 4 }]
   } : LeanJaxpr).materializeDerivedMetadata
@@ -870,8 +870,8 @@ def testLeanJaxprDerivedActionTable : IO Unit := do
   let jaxpr : LeanJaxpr := ({
     invars := #[{ id := 0 }, { id := 1 }]
     eqns := #[
-      { id := 1, op := `test.eqn0, invars := #[{ id := 0 }], outvars := #[{ id := 2 }] },
-      { id := 2, op := `test.eqn1, invars := #[{ id := 2 }, { id := 1 }], outvars := #[{ id := 3 }] }
+      JEqn.generic 1 `test.eqn0 #[{ id := 0 }] #[{ id := 2 }],
+      JEqn.generic 2 `test.eqn1 #[{ id := 2 }, { id := 1 }] #[{ id := 3 }]
     ]
     outvars := #[{ id := 3 }]
   } : LeanJaxpr).materializeDerivedMetadata
@@ -891,8 +891,8 @@ def testValidateTopologicalFailure : IO Unit := do
   let jaxpr : LeanJaxpr := ({
     invars := #[{ id := 0 }]
     eqns := #[
-      { op := `test.eqn0, invars := #[{ id := 2 }], outvars := #[{ id := 3 }] },
-      { op := `test.eqn1, invars := #[{ id := 0 }], outvars := #[{ id := 2 }] }
+      JEqn.generic 1 `test.eqn0 #[{ id := 2 }] #[{ id := 3 }],
+      JEqn.generic 2 `test.eqn1 #[{ id := 0 }] #[{ id := 2 }]
     ]
     outvars := #[{ id := 3 }]
   } : LeanJaxpr).materializeDerivedMetadata
@@ -907,7 +907,7 @@ def testValidateTopologicalFailure : IO Unit := do
 def testValidateOutvarAvailabilityFailure : IO Unit := do
   let jaxpr : LeanJaxpr := ({
     invars := #[{ id := 0 }]
-    eqns := #[{ op := `test.eqn0, invars := #[{ id := 0 }], outvars := #[{ id := 1 }] }]
+    eqns := #[JEqn.generic 1 `test.eqn0 #[{ id := 0 }] #[{ id := 1 }]]
     outvars := #[{ id := 99 }]
   } : LeanJaxpr).materializeDerivedMetadata
   match validate jaxpr with

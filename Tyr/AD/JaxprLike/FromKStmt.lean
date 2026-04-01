@@ -305,7 +305,7 @@ def fromKStmts (stmts : Array KStmt) : Except (Array String) LeanJaxpr := Id.run
             OpParam.mkName .kind (atomName "unary"),
             OpParam.mkName .opTag (atomName (kstmtUnaryOpTag op))
           ]
-          typed? := some (TypedOp.unary (atomName (kstmtUnaryOpTag op)))
+          typed := (TypedOp.unary (atomName (kstmtUnaryOpTag op)))
           source := stmtSourceRef idx0
         }
     | .binary op dst a b =>
@@ -336,7 +336,7 @@ def fromKStmts (stmts : Array KStmt) : Except (Array String) LeanJaxpr := Id.run
             OpParam.mkName .kind (atomName "binary"),
             OpParam.mkName .opTag (atomName (kstmtBinaryOpTag op))
           ]
-          typed? := some (TypedOp.binary (atomName (kstmtBinaryOpTag op)))
+          typed := (TypedOp.binary (atomName (kstmtBinaryOpTag op)))
           source := stmtSourceRef idx0
         }
     | .reduce op axis dst src =>
@@ -365,7 +365,7 @@ def fromKStmts (stmts : Array KStmt) : Except (Array String) LeanJaxpr := Id.run
             OpParam.mkName .opTag (atomName (kstmtReduceOpTag op)),
             OpParam.mkName .axis (atomName (kstmtReduceAxisTag axis))
           ]
-          typed? := some (TypedOp.reduce
+          typed := (TypedOp.reduce
             (atomName (kstmtReduceOpTag op))
             (atomName (kstmtReduceAxisTag axis)))
           source := stmtSourceRef idx0
@@ -399,7 +399,7 @@ def fromKStmts (stmts : Array KStmt) : Except (Array String) LeanJaxpr := Id.run
             OpParam.mkName .opTag (atomName (kstmtReduceOpTag op)),
             OpParam.mkName .axis (atomName (kstmtReduceAxisTag axis))
           ]
-          typed? := some (TypedOp.reduceAccum
+          typed := (TypedOp.reduceAccum
             (atomName (kstmtReduceOpTag op))
             (atomName (kstmtReduceAxisTag axis)))
           source := stmtSourceRef idx0
@@ -429,7 +429,7 @@ def fromKStmts (stmts : Array KStmt) : Except (Array String) LeanJaxpr := Id.run
             OpParam.mkName .kind (atomName "broadcast"),
             OpParam.mkName .axis (atomName (kstmtBroadcastAxisTag axis))
           ]
-          typed? := some (TypedOp.broadcast (atomName (kstmtBroadcastAxisTag axis)))
+          typed := (TypedOp.broadcast (atomName (kstmtBroadcastAxisTag axis)))
           source := stmtSourceRef idx0
         }
     | .binaryBroadcast op axis dst tile vec =>
@@ -461,7 +461,7 @@ def fromKStmts (stmts : Array KStmt) : Except (Array String) LeanJaxpr := Id.run
             OpParam.mkName .opTag (atomName (kstmtBinaryOpTag op)),
             OpParam.mkName .axis (atomName (kstmtBroadcastAxisTag axis))
           ]
-          typed? := some (TypedOp.binaryBroadcast
+          typed := (TypedOp.binaryBroadcast
             (atomName (kstmtBinaryOpTag op))
             (atomName (kstmtBroadcastAxisTag axis)))
           source := stmtSourceRef idx0
@@ -490,7 +490,7 @@ def fromKStmts (stmts : Array KStmt) : Except (Array String) LeanJaxpr := Id.run
           params := withStmtIdx idx0 #[
             OpParam.mkName .kind (atomName "transpose")
           ]
-          typed? := some TypedOp.transpose
+          typed := TypedOp.transpose
           source := stmtSourceRef idx0
         }
     | .swapLayout dst src =>
@@ -517,7 +517,7 @@ def fromKStmts (stmts : Array KStmt) : Except (Array String) LeanJaxpr := Id.run
           params := withStmtIdx idx0 #[
             OpParam.mkName .kind (atomName "swapLayout")
           ]
-          typed? := some TypedOp.swapLayout
+          typed := TypedOp.swapLayout
           source := stmtSourceRef idx0
         }
     | .convert dst src =>
@@ -544,7 +544,7 @@ def fromKStmts (stmts : Array KStmt) : Except (Array String) LeanJaxpr := Id.run
           params := withStmtIdx idx0 #[
             OpParam.mkName .kind (atomName "convert")
           ]
-          typed? := some TypedOp.convert
+          typed := TypedOp.convert
           source := stmtSourceRef idx0
         }
     | .sliceRows dst src startRow numRows =>
@@ -573,7 +573,7 @@ def fromKStmts (stmts : Array KStmt) : Except (Array String) LeanJaxpr := Id.run
             OpParam.mkNat .startRow startRow,
             OpParam.mkNat .numRows numRows
           ]
-          typed? := some (TypedOp.sliceRows startRow numRows)
+          typed := (TypedOp.sliceRows startRow numRows)
           source := stmtSourceRef idx0
         }
     | .sliceCols dst src startCol numCols =>
@@ -602,7 +602,7 @@ def fromKStmts (stmts : Array KStmt) : Except (Array String) LeanJaxpr := Id.run
             OpParam.mkNat .startCol startCol,
             OpParam.mkNat .numCols numCols
           ]
-          typed? := some (TypedOp.sliceCols startCol numCols)
+          typed := (TypedOp.sliceCols startCol numCols)
           source := stmtSourceRef idx0
         }
     | .concatCols dst left right =>
@@ -632,7 +632,7 @@ def fromKStmts (stmts : Array KStmt) : Except (Array String) LeanJaxpr := Id.run
           params := withStmtIdx idx0 #[
             OpParam.mkName .kind (atomName "concatCols")
           ]
-          typed? := some TypedOp.concatCols
+          typed := TypedOp.concatCols
           source := stmtSourceRef idx0
         }
     | .outer dst a b =>
@@ -662,7 +662,7 @@ def fromKStmts (stmts : Array KStmt) : Except (Array String) LeanJaxpr := Id.run
           params := withStmtIdx idx0 #[
             OpParam.mkName .kind (atomName "outer")
           ]
-          typed? := some TypedOp.outer
+          typed := TypedOp.outer
           source := stmtSourceRef idx0
         }
     | .mm trans dst a b =>
@@ -700,7 +700,7 @@ def fromKStmts (stmts : Array KStmt) : Except (Array String) LeanJaxpr := Id.run
             OpParam.mkNats .lhsBatch #[],
             OpParam.mkNats .rhsBatch #[]
           ]
-          typed? := some (TypedOp.dotGeneral variant lhsContract rhsContract #[] #[])
+          typed := (TypedOp.dotGeneral variant lhsContract rhsContract #[] #[])
           source := stmtSourceRef idx0
         }
     | .mma trans dst a b c =>
@@ -736,7 +736,7 @@ def fromKStmts (stmts : Array KStmt) : Except (Array String) LeanJaxpr := Id.run
             OpParam.mkName .opTag (atomName (toString trans)),
             OpParam.mkName .variant variant
           ]
-          typed? := some (TypedOp.mma variant)
+          typed := (TypedOp.mma variant)
           source := stmtSourceRef idx0
         }
     | .tcgen05Mma trans dst a b c =>
@@ -772,7 +772,7 @@ def fromKStmts (stmts : Array KStmt) : Except (Array String) LeanJaxpr := Id.run
             OpParam.mkName .opTag (atomName (toString trans)),
             OpParam.mkName .variant variant
           ]
-          typed? := some (TypedOp.mma variant)
+          typed := (TypedOp.mma variant)
           source := stmtSourceRef idx0
         }
     | .cumsum axis dst src =>
@@ -800,7 +800,7 @@ def fromKStmts (stmts : Array KStmt) : Except (Array String) LeanJaxpr := Id.run
             OpParam.mkName .kind (atomName "cumsum"),
             OpParam.mkName .axis (atomName (kstmtReduceAxisTag axis))
           ]
-          typed? := some (TypedOp.cumsum (atomName (kstmtReduceAxisTag axis)))
+          typed := (TypedOp.cumsum (atomName (kstmtReduceAxisTag axis)))
           source := stmtSourceRef idx0
         }
     | .cumprod axis dst src =>
@@ -828,7 +828,7 @@ def fromKStmts (stmts : Array KStmt) : Except (Array String) LeanJaxpr := Id.run
             OpParam.mkName .kind (atomName "cumprod"),
             OpParam.mkName .axis (atomName (kstmtReduceAxisTag axis))
           ]
-          typed? := some (TypedOp.cumprod (atomName (kstmtReduceAxisTag axis)))
+          typed := (TypedOp.cumprod (atomName (kstmtReduceAxisTag axis)))
           source := stmtSourceRef idx0
         }
     | _ =>

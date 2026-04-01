@@ -31,7 +31,7 @@ def collectDeclaredVarIds (jaxpr : LeanJaxpr) : Array Nat :=
 
 /-- Collect effective op IDs, using deterministic fallback numbering when absent. -/
 def collectEffectiveOpIds (jaxpr : LeanJaxpr) : Array OpId :=
-  (Array.range jaxpr.eqns.size).map (jaxpr.effectiveOpIdAt ·)
+  jaxpr.eqns.map (·.id)
 
 /-- Ensure declaration-site variable IDs are globally unique. -/
 def validateUniqueVarIds (jaxpr : LeanJaxpr) : Except String Unit :=
