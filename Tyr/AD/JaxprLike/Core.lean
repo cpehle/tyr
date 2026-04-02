@@ -251,8 +251,10 @@ structure SourceRef where
 /-- Schema family for typed normalized ops. -/
 inductive OpSchema where
   | generic
+  | nullary
   | unary
   | binary
+  | ternary
   | reduce
   | reduceAccum
   | broadcast
@@ -284,8 +286,10 @@ structure ControlFlowInfo where
 /-- Typed normalized op payload used instead of ad hoc metadata where possible. -/
 inductive OpPayload where
   | none
+  | nullary (tag : Name)
   | unary (tag : Name)
   | binary (tag : Name)
+  | ternary (tag : Name)
   | reduce (tag axis : Name)
   | broadcast (axis : Name)
   | binaryBroadcast (tag axis : Name)
@@ -308,11 +312,17 @@ namespace TypedOp
 
 def generic : TypedOp := {}
 
+def nullary (tag : Name) : TypedOp :=
+  { schema := .nullary, payload := .nullary tag }
+
 def unary (tag : Name) : TypedOp :=
   { schema := .unary, payload := .unary tag }
 
 def binary (tag : Name) : TypedOp :=
   { schema := .binary, payload := .binary tag }
+
+def ternary (tag : Name) : TypedOp :=
+  { schema := .ternary, payload := .ternary tag }
 
 def reduce (tag axis : Name) : TypedOp :=
   { schema := .reduce, payload := .reduce tag axis }

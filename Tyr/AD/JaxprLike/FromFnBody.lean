@@ -243,7 +243,8 @@ private def extraParamsForEqn
 
 private def typedOpForFnBody
     (canonicalOp : OpName)
-    (params : OpParams) : TypedOp :=
+    (params : OpParams)
+    (arity : Nat) : TypedOp :=
   if canonicalOp == kstmtDotGeneralOpName then
     TypedOp.dotGeneral
       ((params.findName? .variant).getD `generic)
@@ -266,8 +267,19 @@ private def typedOpForFnBody
       carryInputCount := (params.findNat? .scanCarryInputCount).getD 0
       carryOutputCount := (params.findNat? .scanCarryOutputCount).getD 0
     }
+  else if canonicalOp == transposeAliasOpName then
+    TypedOp.transpose
+  else if canonicalOp == convertElementTypeAliasOpName then
+    TypedOp.convert
+  else if isReductionUnaryAliasOpName canonicalOp then
+    TypedOp.reduce canonicalOp `unknownAxis
   else
-    TypedOp.generic
+    match arity with
+    | 0 => TypedOp.nullary canonicalOp
+    | 1 => TypedOp.unary canonicalOp
+    | 2 => TypedOp.binary canonicalOp
+    | 3 => TypedOp.ternary canonicalOp
+    | _ => TypedOp.generic
 
 def exprKind : IR.Expr → String
   | .ctor _ _ => "Expr.ctor"
@@ -330,7 +342,7 @@ def traverseFnBody (ctx : FromFnBodyCtx) (body : FnBody) : FromFnBodyM Unit := d
             OpParam.mkName .sourceOp op,
             OpParam.mkNat .fnbodyOutVarIdx outvar.id
           ] ++ extraParams
-        let typedOp := typedOpForFnBody canonicalOp params
+        let typedOp := typedOpForFnBody canonicalOp params args.size
         let opId := (← get).nextOpId
         modify fun st =>
           { st with

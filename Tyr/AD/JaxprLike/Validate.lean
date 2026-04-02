@@ -29,7 +29,7 @@ def collectDeclaredVarIds (jaxpr : LeanJaxpr) : Array Nat :=
     jaxpr.invars.map (·.id) ++
     eqnOutIds
 
-/-- Collect effective op IDs, using deterministic fallback numbering when absent. -/
+/-- Collect normalized op IDs. -/
 def collectEffectiveOpIds (jaxpr : LeanJaxpr) : Array OpId :=
   jaxpr.eqns.map (·.id)
 
@@ -40,12 +40,12 @@ def validateUniqueVarIds (jaxpr : LeanJaxpr) : Except String Unit :=
   else
     .error "LeanJaxpr validation failed: non-unique declared variable IDs detected."
 
-/-- Ensure effective op IDs are globally unique after fallback numbering. -/
+/-- Ensure normalized op IDs are globally unique. -/
 def validateUniqueOpIds (jaxpr : LeanJaxpr) : Except String Unit :=
   if hasNoDuplicates (collectEffectiveOpIds jaxpr) then
     .ok ()
   else
-    .error "LeanJaxpr validation failed: non-unique effective op IDs detected."
+    .error "LeanJaxpr validation failed: non-unique op IDs detected."
 
 /-- Ensure each equation produces at least one output variable. -/
 def validateEqnOutvarsNonEmpty (jaxpr : LeanJaxpr) : Except String Unit :=
@@ -103,6 +103,146 @@ private def collectAvailableValueIds (jaxpr : LeanJaxpr) : Std.HashSet Nat := Id
     for outvar in eqn.outvars do
       available := available.insert outvar.id
   return available
+
+private def typedPayloadCompatible (typed : TypedOp) : Bool :=
+  match typed.schema, typed.payload with
+  | .generic, .none => true
+  | .nullary, .nullary _ => true
+  | .unary, .unary _ => true
+  | .binary, .binary _ => true
+  | .ternary, .ternary _ => true
+  | .reduce, .reduce _ _ => true
+  | .reduceAccum, .reduce _ _ => true
+  | .broadcast, .broadcast _ => true
+  | .binaryBroadcast, .binaryBroadcast _ _ => true
+  | .transpose, .none => true
+  | .swapLayout, .none => true
+  | .convert, .none => true
+  | .sliceRows, .sliceRows _ _ => true
+  | .sliceCols, .sliceCols _ _ => true
+  | .concatCols, .none => true
+  | .outer, .none => true
+  | .dotGeneral, .dotGeneral _ _ _ _ _ => true
+  | .mma, .variant _ => true
+  | .cumsum, .broadcast _ => true
+  | .cumprod, .broadcast _ => true
+  | .controlFlow, .controlFlow _ => true
+  | _, _ => false
+
+private def validateTypedEqnSchema (eqnIdx0 : Nat) (eqn : JEqn) : Except String Unit := do
+  if !typedPayloadCompatible eqn.typed then
+    throw s!"LeanJaxpr validation failed: equation {eqnIdx0} op `{eqn.op}` has inconsistent typed schema/payload {reprStr eqn.typed}."
+  let requireCounts (expectedInputs expectedOutputs : Nat) : Except String Unit := do
+    if eqn.invars.size != expectedInputs then
+      throw s!"LeanJaxpr validation failed: equation {eqnIdx0} op `{eqn.op}` typed as {reprStr eqn.typed.schema} expects {expectedInputs} inputs, got {eqn.invars.size}."
+    if eqn.outvars.size != expectedOutputs then
+      throw s!"LeanJaxpr validation failed: equation {eqnIdx0} op `{eqn.op}` typed as {reprStr eqn.typed.schema} expects {expectedOutputs} outputs, got {eqn.outvars.size}."
+  match eqn.typed.schema with
+  | .generic =>
+    pure ()
+  | .nullary =>
+    requireCounts 0 1
+  | .unary
+  | .reduce
+  | .reduceAccum
+  | .broadcast
+  | .transpose
+  | .swapLayout
+  | .convert
+  | .sliceRows
+  | .sliceCols
+  | .cumsum
+  | .cumprod =>
+    requireCounts 1 1
+  | .binary
+  | .binaryBroadcast
+  | .concatCols
+  | .outer
+  | .dotGeneral =>
+    requireCounts 2 1
+  | .ternary
+  | .mma =>
+    requireCounts 3 1
+  | .controlFlow =>
+    match eqn.typed.payload with
+    | .controlFlow info =>
+      let expectedInputs :=
+        info.staticArgCount + info.predicateCount + info.dataInputCount + info.carryInputCount
+      if eqn.invars.size != expectedInputs then
+        throw s!"LeanJaxpr validation failed: equation {eqnIdx0} control-flow op `{eqn.op}` expects {expectedInputs} inputs from typed metadata, got {eqn.invars.size}."
+      if eqn.outvars.isEmpty then
+        throw s!"LeanJaxpr validation failed: equation {eqnIdx0} control-flow op `{eqn.op}` must produce at least one output."
+      if info.variant == `scan && eqn.outvars.size < info.carryOutputCount then
+        throw s!"LeanJaxpr validation failed: equation {eqnIdx0} scan op `{eqn.op}` declares {info.carryOutputCount} carry outputs, got only {eqn.outvars.size} outputs."
+      if info.variant == `cond && info.predicateCount = 0 then
+        throw s!"LeanJaxpr validation failed: equation {eqnIdx0} cond op `{eqn.op}` must declare at least one predicate input."
+    | _ =>
+      throw s!"LeanJaxpr validation failed: equation {eqnIdx0} op `{eqn.op}` control-flow schema is missing control-flow payload."
+
+private def validateLegacyParamsAgreeWithTypedEqn (eqnIdx0 : Nat) (eqn : JEqn) : Except String Unit := do
+  match eqn.typed.payload with
+  | .dotGeneral variant lhsContract rhsContract lhsBatch rhsBatch =>
+    if (eqn.params.findName? .variant).isSome && (eqn.params.findName? .variant != some variant) then
+      throw s!"LeanJaxpr validation failed: equation {eqnIdx0} op `{eqn.op}` typed dot_general variant disagrees with params."
+    if (eqn.params.findNats? .lhsContract).isSome && (eqn.params.findNats? .lhsContract != some lhsContract) then
+      throw s!"LeanJaxpr validation failed: equation {eqnIdx0} op `{eqn.op}` typed lhsContract disagrees with params."
+    if (eqn.params.findNats? .rhsContract).isSome && (eqn.params.findNats? .rhsContract != some rhsContract) then
+      throw s!"LeanJaxpr validation failed: equation {eqnIdx0} op `{eqn.op}` typed rhsContract disagrees with params."
+    if (eqn.params.findNats? .lhsBatch).isSome && (eqn.params.findNats? .lhsBatch != some lhsBatch) then
+      throw s!"LeanJaxpr validation failed: equation {eqnIdx0} op `{eqn.op}` typed lhsBatch disagrees with params."
+    if (eqn.params.findNats? .rhsBatch).isSome && (eqn.params.findNats? .rhsBatch != some rhsBatch) then
+      throw s!"LeanJaxpr validation failed: equation {eqnIdx0} op `{eqn.op}` typed rhsBatch disagrees with params."
+  | .controlFlow info =>
+    let checkNat (key : OpParamKey) (expected : Nat) (label : String) : Except String Unit := do
+      match eqn.params.findNat? key with
+      | some actual =>
+        if actual != expected then
+          throw s!"LeanJaxpr validation failed: equation {eqnIdx0} op `{eqn.op}` typed {label}={expected} disagrees with params {label}={actual}."
+      | none => pure ()
+    checkNat .controlStaticArgCount info.staticArgCount "controlStaticArgCount"
+    checkNat .condPredicateCount info.predicateCount "condPredicateCount"
+    checkNat .condDataInputCount info.dataInputCount "condDataInputCount"
+    checkNat .scanDataInputCount info.dataInputCount "scanDataInputCount"
+    checkNat .scanCarryInputCount info.carryInputCount "scanCarryInputCount"
+    checkNat .scanCarryOutputCount info.carryOutputCount "scanCarryOutputCount"
+  | _ =>
+    pure ()
+
+private def validateValueRoleMetadata (jaxpr : LeanJaxpr) : Except String Unit := do
+  let checkVar (site : String) (v : JVar) : Except String Unit := do
+    let expected :=
+      if jaxpr.outvars.any (fun outv => outv.id = v.id) then
+        ValueRole.output
+      else if jaxpr.constvars.any (fun constv => constv.id = v.id) then
+        ValueRole.const
+      else if jaxpr.invars.any (fun inv => inv.id = v.id) then
+        ValueRole.input
+      else
+        ValueRole.intermediate
+    match v.metaInfo.role? with
+    | none =>
+      throw s!"LeanJaxpr validation failed: {site} variable {v.id} is missing normalized ValueRole metadata."
+    | some actual =>
+      if actual != expected then
+        throw s!"LeanJaxpr validation failed: {site} variable {v.id} has role {reprStr actual}, expected {reprStr expected}."
+  for v in jaxpr.constvars do
+    checkVar "const" v
+  for v in jaxpr.invars do
+    checkVar "input" v
+  for v in jaxpr.outvars do
+    checkVar "output" v
+  for eqnIdx0 in [:jaxpr.eqns.size] do
+    let eqn := jaxpr.eqns[eqnIdx0]!
+    for v in eqn.invars do
+      checkVar s!"eqn {eqnIdx0} input" v
+    for v in eqn.outvars do
+      checkVar s!"eqn {eqnIdx0} output" v
+
+def validateTypedEqns (jaxpr : LeanJaxpr) : Except String Unit := do
+  for eqnIdx0 in [:jaxpr.eqns.size] do
+    let eqn := jaxpr.eqns[eqnIdx0]!
+    validateTypedEqnSchema eqnIdx0 eqn
+    validateLegacyParamsAgreeWithTypedEqn eqnIdx0 eqn
 
 /-- Normalized graphs must carry the materialized partition metadata explicitly. -/
 def validateStoredPartitions (jaxpr : LeanJaxpr) : Except String Unit :=
@@ -186,6 +326,10 @@ def validate (jaxpr : LeanJaxpr) : Except (Array String) Unit :=
     if let .error msg := validateEqnInputsTopological jaxpr then
       es := es.push msg
     if let .error msg := validateOutvarsAvailable jaxpr then
+      es := es.push msg
+    if let .error msg := validateTypedEqns jaxpr then
+      es := es.push msg
+    if let .error msg := validateValueRoleMetadata jaxpr then
       es := es.push msg
     if let .error msg := validateStoredPartitions jaxpr then
       es := es.push msg

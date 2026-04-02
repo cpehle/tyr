@@ -918,6 +918,33 @@ def testValidateOutvarAvailabilityFailure : IO Unit := do
     LeanTest.assertTrue hasOutErr s!"Expected unavailable-output diagnostic, got: {errs}"
 
 @[test]
+def testValidateTypedEqnArityFailure : IO Unit := do
+  let jaxpr : LeanJaxpr := ({
+    invars := #[
+      { id := 0, metaInfo := { role? := some .input } },
+      { id := 1, metaInfo := { role? := some .input } }
+    ]
+    eqns := #[{
+      id := 1
+      op := `test.bad_unary
+      invars := #[
+        { id := 0, metaInfo := { role? := some .input } },
+        { id := 1, metaInfo := { role? := some .input } }
+      ]
+      outvars := #[{ id := 2, metaInfo := { role? := some .output } }]
+      typed := TypedOp.unary `test.bad_unary
+    }]
+    outvars := #[{ id := 2, metaInfo := { role? := some .output } }]
+  } : LeanJaxpr).materializeDerivedMetadata
+  match validate jaxpr with
+  | .ok () =>
+    LeanTest.fail "Typed-equation validation should fail when schema arity disagrees with equation inputs"
+  | .error errs =>
+    let hasTypedErr := errs.any (fun e => e.contains "expects 1 inputs, got 2")
+    LeanTest.assertTrue hasTypedErr
+      s!"Expected typed-arity diagnostic, got: {errs}"
+
+@[test]
 def testFromFnBodyCanonicalDotGeneralAndControlMetadata : IO Unit := do
   let x0 : Lean.IR.VarId := { idx := 0 }
   let x1 : Lean.IR.VarId := { idx := 1 }
@@ -960,6 +987,8 @@ def testFromFnBodyCanonicalDotGeneralAndControlMetadata : IO Unit := do
       "dot_general default lhs batch should be explicit."
     LeanTest.assertEqual (dotEqn.params.findNats? .rhsBatch) (some #[])
       "dot_general default rhs batch should be explicit."
+    LeanTest.assertTrue (dotEqn.typedOp.schema = .dotGeneral)
+      s!"dot_general lowering should attach dotGeneral typed schema, got {reprStr dotEqn.typedOp.schema}."
 
     LeanTest.assertEqual scanEqn.op scanAliasOpName
       "scan aliases should canonicalize to `scanAliasOpName`."
@@ -973,6 +1002,8 @@ def testFromFnBodyCanonicalDotGeneralAndControlMetadata : IO Unit := do
       "scan lowering should record data-input count."
     LeanTest.assertEqual (scanEqn.params.findNat? .scanCarryOutputCount) (some 1)
       "scan lowering should record carry-output count."
+    LeanTest.assertTrue (scanEqn.typedOp.schema = .controlFlow)
+      s!"scan lowering should attach control-flow typed schema, got {reprStr scanEqn.typedOp.schema}."
 
     LeanTest.assertEqual condEqn.op condAliasOpName
       "cond aliases should canonicalize to `condAliasOpName`."
@@ -984,5 +1015,39 @@ def testFromFnBodyCanonicalDotGeneralAndControlMetadata : IO Unit := do
       "cond lowering should record predicate-input count."
     LeanTest.assertEqual (condEqn.params.findNat? .condDataInputCount) (some 2)
       "cond lowering should record data-input count."
+    LeanTest.assertTrue (condEqn.typedOp.schema = .controlFlow)
+      s!"cond lowering should attach control-flow typed schema, got {reprStr condEqn.typedOp.schema}."
+
+@[test]
+def testFromFnBodyAssignsArityTypedFamilies : IO Unit := do
+  let x0 : Lean.IR.VarId := { idx := 0 }
+  let x1 : Lean.IR.VarId := { idx := 1 }
+  let x2 : Lean.IR.VarId := { idx := 2 }
+  let vIota : Lean.IR.VarId := { idx := 3 }
+  let vPut : Lean.IR.VarId := { idx := 4 }
+  let vAdd : Lean.IR.VarId := { idx := 5 }
+  let vDyn : Lean.IR.VarId := { idx := 6 }
+  let params : Array Param := #[
+    { x := x0, borrow := false, ty := IRType.object },
+    { x := x1, borrow := false, ty := IRType.object },
+    { x := x2, borrow := false, ty := IRType.object }
+  ]
+  let body : FnBody :=
+    .vdecl vIota IRType.object (Expr.fap `Graphax.iota #[]) (
+      .vdecl vPut IRType.object (Expr.fap `Graphax.device_put #[Arg.var x0]) (
+        .vdecl vAdd IRType.object (Expr.fap `jax.lax.add #[Arg.var vPut, Arg.var x1]) (
+          .vdecl vDyn IRType.object (Expr.fap `jax.lax.dynamic_update_index_in_dim_p #[Arg.var vAdd, Arg.var x2, Arg.var x1]) (
+            .ret (.var vDyn)
+          )
+        )
+      )
+    )
+  match fromFnBody `test.arity_typed_families params body with
+  | .error msg =>
+    LeanTest.fail s!"fromFnBody should assign typed families for nullary/unary/binary/ternary ops, got: {msg}"
+  | .ok jaxpr =>
+    LeanTest.assertTrue
+      ((jaxpr.eqns.map (fun eqn => eqn.typedOp.schema)) = #[.nullary, .unary, .binary, .ternary])
+      s!"FnBody lowering should classify known primitive arities into typed op families, got {reprStr (jaxpr.eqns.map (fun eqn => eqn.typedOp.schema))}."
 
 end Tests.ADJaxprLike
