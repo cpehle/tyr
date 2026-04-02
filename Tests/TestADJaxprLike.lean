@@ -945,6 +945,39 @@ def testValidateTypedEqnArityFailure : IO Unit := do
       s!"Expected typed-arity diagnostic, got: {errs}"
 
 @[test]
+def testFromFnBodyAssignsNaryTypedFamily : IO Unit := do
+  let x0 : Lean.IR.VarId := { idx := 0 }
+  let x1 : Lean.IR.VarId := { idx := 1 }
+  let x2 : Lean.IR.VarId := { idx := 2 }
+  let x3 : Lean.IR.VarId := { idx := 3 }
+  let v0 : Lean.IR.VarId := { idx := 4 }
+  let params : Array Param := #[
+    { x := x0, borrow := false, ty := IRType.object },
+    { x := x1, borrow := false, ty := IRType.object },
+    { x := x2, borrow := false, ty := IRType.object },
+    { x := x3, borrow := false, ty := IRType.object }
+  ]
+  let body : FnBody :=
+    .vdecl v0 IRType.object (Expr.fap `test.quaternary #[Arg.var x0, Arg.var x1, Arg.var x2, Arg.var x3]) (
+      .ret (.var v0)
+    )
+  match fromFnBody `test.assigns_nary_typed_family params body with
+  | .error msg =>
+      LeanTest.fail s!"fromFnBody should lower unknown 4-ary ops into the n-ary typed family, got: {msg}"
+  | .ok jaxpr =>
+      let eqn := jaxpr.eqns[0]!
+      LeanTest.assertTrue (eqn.typedOp.schema = .nary)
+        s!"Expected a n-ary typed family for unknown 4-ary op lowering, got {reprStr eqn.typedOp.schema}."
+      match eqn.typedOp.payload with
+      | .nary tag arity =>
+          LeanTest.assertEqual tag `test.quaternary
+            "N-ary typed lowering should preserve the canonical op tag."
+          LeanTest.assertEqual arity 4
+            "N-ary typed lowering should preserve the operand arity."
+      | payload =>
+          LeanTest.fail s!"Expected n-ary payload for unknown 4-ary lowering, got {reprStr payload}"
+
+@[test]
 def testFromFnBodyCanonicalDotGeneralAndControlMetadata : IO Unit := do
   let x0 : Lean.IR.VarId := { idx := 0 }
   let x1 : Lean.IR.VarId := { idx := 1 }

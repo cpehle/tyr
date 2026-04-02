@@ -83,10 +83,10 @@ def buildFromDecl
   let frontend? ← getRegisteredFrontendRegistration? declName
   let jaxpr ←
     match frontend? with
-    | some reg => pure <| (reg.jaxpr.withDefaultSourceDecl declName).materializeDerivedMetadata
+    | some reg => pure <| reg.jaxpr.withDefaultSourceDecl declName
     | none =>
       match (← LowerFnBody.runDecl { decl := decl }) with
-      | .ok j => pure j.materializeDerivedMetadata
+      | .ok j => pure j
       | .error err => return .error (.conversion (toString err))
 
   match frontend?.bind (·.signature) with
@@ -113,7 +113,7 @@ def buildFromFnBody
     CoreM (Except BuildError LeanJaxpr) := do
   let jaxpr ←
     match LowerFnBody.run { declName := declName, params := params, body := body, hints := hints } with
-    | .ok j => pure j.materializeDerivedMetadata
+    | .ok j => pure j
     | .error err => return .error (.conversion (toString err))
 
   match runValidation jaxpr with
@@ -130,7 +130,7 @@ def buildFromKStmts
     CoreM (Except BuildError LeanJaxpr) := do
   let jaxpr ←
     match LowerKStmt.run { stmts := stmts } with
-    | .ok j => pure j.materializeDerivedMetadata
+    | .ok j => pure j
     | .error err =>
       return .error (.conversion (toString err))
 

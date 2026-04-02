@@ -279,7 +279,7 @@ private def typedOpForFnBody
     | 1 => TypedOp.unary canonicalOp
     | 2 => TypedOp.binary canonicalOp
     | 3 => TypedOp.ternary canonicalOp
-    | _ => TypedOp.generic
+    | _ => TypedOp.nary canonicalOp arity
 
 def exprKind : IR.Expr → String
   | .ctor _ _ => "Expr.ctor"
@@ -434,12 +434,7 @@ def fromFnBodyWithHints
   if st.outvars.isEmpty then
     return .error s!"FnBody -> LeanJaxpr conversion failed: no terminal `ret` output found for `{declName}`."
 
-  return .ok <| ({
-    constvars := #[]
-    invars := invars
-    eqns := st.eqns
-    outvars := st.outvars
-  } : LeanJaxpr).materializeDerivedMetadata
+  return .ok <| LeanJaxpr.mkNormalized #[] invars st.eqns st.outvars
 
 /-- Convert a function body to `LeanJaxpr` using a conservative lowering strategy. -/
 def fromFnBody

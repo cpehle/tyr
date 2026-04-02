@@ -843,11 +843,6 @@ def fromKStmts (stmts : Array KStmt) : Except (Array String) LeanJaxpr := Id.run
   let outvars := definedOrder.foldl (init := (#[] : Array JVar)) fun acc id =>
     if usedSet.contains id then acc else acc.push (mkJVarById varMeta id)
 
-  return .ok <| ({
-    constvars := #[]
-    invars := invars
-    eqns := eqns
-    outvars := outvars
-  } : LeanJaxpr).materializeDerivedMetadata
+  return .ok <| LeanJaxpr.mkNormalized #[] invars eqns outvars
 
 end Tyr.AD.JaxprLike

@@ -255,6 +255,7 @@ inductive OpSchema where
   | unary
   | binary
   | ternary
+  | nary
   | reduce
   | reduceAccum
   | broadcast
@@ -290,6 +291,7 @@ inductive OpPayload where
   | unary (tag : Name)
   | binary (tag : Name)
   | ternary (tag : Name)
+  | nary (tag : Name) (arity : Nat)
   | reduce (tag axis : Name)
   | broadcast (axis : Name)
   | binaryBroadcast (tag axis : Name)
@@ -323,6 +325,9 @@ def binary (tag : Name) : TypedOp :=
 
 def ternary (tag : Name) : TypedOp :=
   { schema := .ternary, payload := .ternary tag }
+
+def nary (tag : Name) (arity : Nat) : TypedOp :=
+  { schema := .nary, payload := .nary tag arity }
 
 def reduce (tag axis : Name) : TypedOp :=
   { schema := .reduce, payload := .reduce tag axis }
@@ -634,12 +639,27 @@ def inferActionTable (jaxpr : LeanJaxpr) : ActionTable :=
 def actionTable (jaxpr : LeanJaxpr) : ActionTable :=
   jaxpr.actions
 
-/-- Populate stored partitions/actions and missing value roles from derived graph metadata. -/
-def materializeDerivedMetadata (jaxpr : LeanJaxpr) : LeanJaxpr :=
+/-- Construct a normalized LeanJaxpr directly from boundary variables and equations. -/
+def mkNormalized
+    (constvars : Array JVar := #[])
+    (invars : Array JVar := #[])
+    (eqns : Array JEqn := #[])
+    (outvars : Array JVar := #[]) :
+    LeanJaxpr :=
+  let jaxpr : LeanJaxpr := {
+    constvars := constvars
+    invars := invars
+    eqns := eqns
+    outvars := outvars
+  }
   let jaxpr := jaxpr.withInferredValueRoles
   { jaxpr with
     partitions := jaxpr.inferVertexPartitions
     actions := jaxpr.inferActionTable }
+
+/-- Convenience normalization helper for hand-authored graphs/tests. -/
+def materializeDerivedMetadata (jaxpr : LeanJaxpr) : LeanJaxpr :=
+  mkNormalized jaxpr.constvars jaxpr.invars jaxpr.eqns jaxpr.outvars
 
 end LeanJaxpr
 

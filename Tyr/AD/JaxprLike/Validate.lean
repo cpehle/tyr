@@ -111,6 +111,7 @@ private def typedPayloadCompatible (typed : TypedOp) : Bool :=
   | .unary, .unary _ => true
   | .binary, .binary _ => true
   | .ternary, .ternary _ => true
+  | .nary, .nary _ _ => true
   | .reduce, .reduce _ _ => true
   | .reduceAccum, .reduce _ _ => true
   | .broadcast, .broadcast _ => true
@@ -142,6 +143,12 @@ private def validateTypedEqnSchema (eqnIdx0 : Nat) (eqn : JEqn) : Except String 
     pure ()
   | .nullary =>
     requireCounts 0 1
+  | .nary =>
+    match eqn.typed.payload with
+    | .nary _ arity =>
+      requireCounts arity 1
+    | _ =>
+      throw s!"LeanJaxpr validation failed: equation {eqnIdx0} op `{eqn.op}` n-ary schema is missing arity payload."
   | .unary
   | .reduce
   | .reduceAccum
@@ -249,14 +256,14 @@ def validateStoredPartitions (jaxpr : LeanJaxpr) : Except String Unit :=
   if jaxpr.partitions == LeanJaxpr.inferVertexPartitions jaxpr then
     .ok ()
   else
-    .error "LeanJaxpr validation failed: stored graph partitions are missing or stale; re-run materializeDerivedMetadata."
+    .error "LeanJaxpr validation failed: stored graph partitions are missing or stale; construct a normalized LeanJaxpr."
 
 /-- Normalized graphs must carry the materialized action table explicitly. -/
 def validateStoredActionTable (jaxpr : LeanJaxpr) : Except String Unit :=
   if jaxpr.actions == LeanJaxpr.inferActionTable jaxpr then
     .ok ()
   else
-    .error "LeanJaxpr validation failed: stored action table is missing or stale; re-run materializeDerivedMetadata."
+    .error "LeanJaxpr validation failed: stored action table is missing or stale; construct a normalized LeanJaxpr."
 
 /-- Validate explicit partition metadata when it is present on the graph. -/
 def validateExplicitPartitions (jaxpr : LeanJaxpr) : Except String Unit := do
