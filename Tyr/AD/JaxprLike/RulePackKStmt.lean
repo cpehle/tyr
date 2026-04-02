@@ -945,26 +945,35 @@ private def binaryBroadcastStructuralRule (op : BinaryOp) (axis : BroadcastAxis)
       { src := vec.id, dst := outv.id, map := vecMap }
     ]
 
-private def transposeStructuralRule : LocalJacRule :=
+private def transposeRule : LocalJacRule :=
   fun eqn _ctx => do
-    let (inv, outv) ← requireUnaryShape kstmtTransposeOpName eqn
-    let tag : Tyr.AD.Sparse.SparseMapTag := .semantic (.transpose .x .permute)
-    let map :=
-      match shapeRowsCols? inv, varFlatDim? inv, varFlatDim? outv with
-      | some (rows, cols), some inDim, some outDim =>
-        if inDim = 0 || outDim = 0 || inDim != outDim || inDim != rows * cols then
-          unaryJacMapForVars inv outv tag 1.0
-        else
-          buildSparseMap tag inDim outDim (transposeEntries rows cols)
-      | _, _, _ =>
-        unaryJacMapForVars inv outv tag 1.0
+    let (inv, outv) ← requireUnaryShape eqn.op eqn
+    let semanticOp := eqn.sourceOpName
+    let tag : Tyr.AD.Sparse.SparseMapTag :=
+      if semanticOp == kstmtTransposeOpName then
+        .semantic (.transpose .x .permute)
+      else
+        .semantic (.unary semanticOp .x .permute)
+    let map := exactUnaryMapOrFallback inv outv tag (transposeAliasEntries? inv outv)
     .ok #[{ src := inv.id, dst := outv.id, map := map }]
 
 private def swapLayoutStructuralRule : LocalJacRule :=
   unarySymbolicRule kstmtSwapLayoutOpName (.semantic (.swapLayout .x .layoutPermute))
 
-private def convertStructuralRule : LocalJacRule :=
-  unarySymbolicRule kstmtConvertOpName (.semantic (.convert .x .cast))
+private def convertRule : LocalJacRule :=
+  fun eqn _ctx => do
+    let (inv, outv) ← requireUnaryShape eqn.op eqn
+    let semanticOp := eqn.sourceOpName
+    let tag : Tyr.AD.Sparse.SparseMapTag :=
+      if semanticOp == kstmtConvertOpName then
+        .semantic (.convert .x .cast)
+      else
+        .semantic (.unary semanticOp .x .cast)
+    .ok #[{
+      src := inv.id
+      dst := outv.id
+      map := unaryJacMapForVars inv outv tag 1.0
+    }]
 
 private def sliceRowsStructuralRule : LocalJacRule :=
   fun eqn _ctx => do
@@ -1028,9 +1037,9 @@ private def outerStructuralRule : LocalJacRule :=
     (.semantic (.outer .a .kronOther), 1.0)
     (.semantic (.outer .b .kronOther), 1.0)
 
-private def dotGeneralRule (opName : OpName) : LocalJacRule :=
+private def dotGeneralRule : LocalJacRule :=
   fun eqn _ctx => do
-    let (a, b, outv) ← requireBinaryShape opName eqn
+    let (a, b, outv) ← requireBinaryShape eqn.op eqn
     let lhsContract := (eqn.params.findNats? .lhsContract).getD #[]
     let rhsContract := (eqn.params.findNats? .rhsContract).getD #[]
     let lhsBatch := (eqn.params.findNats? .lhsBatch).getD #[]
@@ -1237,10 +1246,10 @@ private def sliceWindow {α} (xs : Array α) (start count : Nat) : Array α :=
   let hi := min (lo + count) xs.size
   xs.extract lo hi
 
-private def condAliasRule (opName : OpName) : LocalJacRule :=
+private def condAliasRule : LocalJacRule :=
   fun eqn _ctx => do
     if eqn.outvars.isEmpty then
-      .error (.malformedEqn s!"Control-flow rule `{opName}` expects at least one output variable, got 0.")
+      .error (.malformedEqn s!"Control-flow rule `{eqn.op}` expects at least one output variable, got 0.")
     else
       let semanticOp := eqn.sourceOpName
       let predDefault := if eqn.invars.isEmpty then 0 else 1
@@ -1260,10 +1269,10 @@ private def condAliasRule (opName : OpName) : LocalJacRule :=
           }
       .ok edges
 
-private def scanAliasRule (opName : OpName) : LocalJacRule :=
+private def scanAliasRule : LocalJacRule :=
   fun eqn _ctx => do
     if eqn.outvars.isEmpty then
-      .error (.malformedEqn s!"Control-flow rule `{opName}` expects at least one output variable, got 0.")
+      .error (.malformedEqn s!"Control-flow rule `{eqn.op}` expects at least one output variable, got 0.")
     else
       let semanticOp := eqn.sourceOpName
       let carryDefault := if eqn.invars.isEmpty then 0 else 1
@@ -1533,14 +1542,14 @@ Register structural local-Jacobian rules for non-unary/binary KStmt ops lowered
 by `FromKStmt`.
 -/
 def registerKStmtStructuralSemanticsRules : Lean.CoreM Unit := do
-  registerLocalJacRule kstmtTransposeOpName transposeStructuralRule
+  registerLocalJacRule kstmtTransposeOpName transposeRule
   registerLocalJacRule kstmtSwapLayoutOpName swapLayoutStructuralRule
-  registerLocalJacRule kstmtConvertOpName convertStructuralRule
+  registerLocalJacRule kstmtConvertOpName convertRule
   registerLocalJacRule kstmtSliceRowsOpName sliceRowsStructuralRule
   registerLocalJacRule kstmtSliceColsOpName sliceColsStructuralRule
   registerLocalJacRule kstmtConcatColsOpName concatColsStructuralRule
   registerLocalJacRule kstmtOuterOpName outerStructuralRule
-  registerLocalJacRule kstmtDotGeneralOpName (dotGeneralRule kstmtDotGeneralOpName)
+  registerLocalJacRule kstmtDotGeneralOpName dotGeneralRule
   for trans in allKStmtMMATransposes do
     registerLocalJacRule (kstmtMmaOpName trans) (mmaRule trans)
 
@@ -1647,7 +1656,12 @@ do not flow through the current KStmt constructor set.
 -/
 def registerGraphaxAlphaGradStructuralAliasRules : Lean.CoreM Unit := do
   for entry in graphaxStructuralUnaryAliasSpecs do
-    registerAliasWithLaxPrimVariant entry.1 (structuralUnaryAliasRule entry.1 entry.2)
+    if entry.1 == transposeAliasOpName || entry.1 == `Graphax.transpose then
+      registerAliasWithLaxPrimVariant entry.1 transposeRule
+    else if entry.1 == convertElementTypeAliasOpName || entry.1 == `Graphax.convert_element_type then
+      registerAliasWithLaxPrimVariant entry.1 convertRule
+    else
+      registerAliasWithLaxPrimVariant entry.1 (structuralUnaryAliasRule entry.1 entry.2)
   for op in allPadAliasOpNames do
     registerLocalJacRule op (padAliasRule op)
   for op in allConcatLikeAliasOpNames do
@@ -1666,9 +1680,9 @@ def registerGraphaxAlphaGradReductionControlAliasRules : Lean.CoreM Unit := do
   for op in allSelectNAliasOpNames do
     registerLocalJacRule op (selectNAliasRule op)
   for op in allScanAliasOpNames do
-    registerLocalJacRule op (scanAliasRule op)
+    registerLocalJacRule op scanAliasRule
   for op in allCondAliasOpNames do
-    registerLocalJacRule op (condAliasRule op)
+    registerLocalJacRule op condAliasRule
 
 /--
 Register dynamic/update structural aliases from Graphax/JAX source paths.
@@ -1683,7 +1697,7 @@ def registerGraphaxAlphaGradDynamicAliasRules : Lean.CoreM Unit := do
 /-- Register dedicated dot-general local-Jacobian semantics (not outer-only approximation). -/
 def registerGraphaxAlphaGradDotGeneralRules : Lean.CoreM Unit := do
   for op in allDotGeneralOpNames do
-    registerLocalJacRule op (dotGeneralRule op)
+    registerLocalJacRule op dotGeneralRule
 
 /--
 Register a parity-oriented semantic pack aligned with Graphax/AlphaGrad overlap:

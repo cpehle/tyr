@@ -104,7 +104,7 @@ def checkRuleCoverage (jaxpr : LeanJaxpr) : Lean.CoreM (Array CoverageError) := 
   let mut errors : Array CoverageError := #[]
   for h : i in [:jaxpr.eqns.size] do
     let eqn := jaxpr.eqns[i]
-    if (← getLocalJacRule? eqn.op).isNone then
+    if (← getLocalJacRuleForEqn? eqn).isNone then
       errors := errors.push {
         op := eqn.op
         eqnIndex0 := i

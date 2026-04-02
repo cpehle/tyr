@@ -22,17 +22,6 @@ namespace Tyr.AD.Elim
 open torch.mctx
 
 /--
-Configurable action-space conventions used by AlphaGrad-style policies:
-- `fullVertices`: action space is `[0, numVertices)`, with `vertex = action + 1`.
-- `explicitVertices`: action space is an explicit vertex subset/table.
-- This config is only used by edge-based entrypoints that do not already carry a graph action table.
--/
-inductive AlphaGradActionSpace where
-  | fullVertices
-  | explicitVertices (vertices1 : Array VertexId1)
-  deriving Repr, Inhabited
-
-/--
 Reward semantics used by AlphaGrad-style elimination search:
 - `tyrHeuristic`: current Tyr-native weighted objective with soft constraints.
 - `alphaGradNops`: exact AlphaGrad base-env step reward `-nops`.
@@ -57,8 +46,11 @@ structure AlphaGradMctxConfig where
   costWeights : CostWeights := {}
   /-- Reward semantics for environment transitions and value heuristics. -/
   rewardMode : AlphaGradRewardMode := .tyrHeuristic
-  /-- Action-space convention used only by edge-based entrypoints lacking stored graph metadata. -/
-  actionSpace : AlphaGradActionSpace := .fullVertices
+  /--
+  Optional override for the edge-based action surface.
+  When omitted, edge-based entrypoints use the graph's stored `actionVertices`.
+  -/
+  actionVerticesOverride? : Option (Array VertexId1) := none
   /-- Search discount used by recurrent dynamics. -/
   discount : Float := 1.0
   /-- Reward applied when an invalid/infeasible action is selected. -/
@@ -176,17 +168,15 @@ private def noDuplicateActions (actions0 : Array ActionId0) : Bool :=
 private def noDuplicateVertices (vertices1 : Array VertexId1) : Bool :=
   hasNoDuplicates vertices1
 
-/-- Resolve and validate the configured action-space vertex table. -/
+/-- Resolve and validate the active action-space vertex table. -/
 def resolveActionVertices?
     (cfg : AlphaGradMctxConfig)
+    (graph : ElimGraph)
     (numVertices : Nat) :
     Except String (Array VertexId1) := do
-  let actionVertices :=
-    match cfg.actionSpace with
-    | .fullVertices => defaultActionVertices numVertices
-    | .explicitVertices vertices1 => vertices1
+  let actionVertices := cfg.actionVerticesOverride?.getD graph.actionVertices
   if actionVertices.isEmpty then
-    throw "AlphaGrad action-space vertex table must be non-empty."
+    throw "AlphaGrad action-space vertex table must be stored on the graph or supplied explicitly in the config."
   validateVertexIds numVertices actionVertices
   if !noDuplicateVertices actionVertices then
     throw "AlphaGrad action-space vertex table contains duplicate vertex IDs."
@@ -973,8 +963,9 @@ def searchEpisodeFromEdges?
     (numVertices : Nat)
     (actionPrefix : Array ActionId0 := #[]) :
     Except String AlphaGradEpisodeResult := do
-  let actionVertices ← resolveActionVertices? envCfg numVertices
-  let s0 ← initAlphaGradStateFromEdges? edges numVertices actionPrefix (some actionVertices)
+  let graph := ofLocalJacEdges edges
+  let actionVertices ← resolveActionVertices? envCfg graph numVertices
+  let s0 ← initAlphaGradState? graph numVertices actionPrefix (some actionVertices)
   searchEpisode? envCfg mctsCfg rngKey s0
 
 /-- Convenience entrypoint from a pre-partitioned elimination graph. -/
@@ -999,8 +990,9 @@ def searchEpisodeDagWithPolicyFromEdges?
     (numVertices : Nat)
     (actionPrefix : Array ActionId0 := #[]) :
     Except String AlphaGradEpisodeResult := do
-  let actionVertices ← resolveActionVertices? envCfg numVertices
-  let s0 ← initAlphaGradStateFromEdges? edges numVertices actionPrefix (some actionVertices)
+  let graph := ofLocalJacEdges edges
+  let actionVertices ← resolveActionVertices? envCfg graph numVertices
+  let s0 ← initAlphaGradState? graph numVertices actionPrefix (some actionVertices)
   searchEpisodeDagWithPolicy? policy envCfg mctsCfg rngKey s0
 
 /-- Policy-selectable DAG-backed convenience entrypoint from a partitioned graph. -/

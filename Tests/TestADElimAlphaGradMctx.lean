@@ -593,7 +593,7 @@ def testPartitionedGraphMasksOutputsAndTerminatesOnEliminableCount : IO Unit := 
 def testExplicitActionSpaceSubset : IO Unit := do
   let edges : Array LocalJacEdge := #[(mkEdge 1 2 "m12"), (mkEdge 2 4 "m24")]
   let cfg : AlphaGradMctxConfig := {
-    actionSpace := .explicitVertices #[2, 4]
+    actionVerticesOverride? := some #[2, 4]
   }
 
   match initAlphaGradStateFromEdges? edges 4 #[] (some #[2, 4]) with
