@@ -1,5 +1,6 @@
 import Tyr.AD.JaxprLike.Core
 import Tyr.AD.JaxprLike.KStmtNames
+import Tyr.AD.JaxprLike.TypedOps
 
 /-!
 # Tyr.AD.JaxprLike.FromFnBody
@@ -247,41 +248,7 @@ private def typedOpForFnBody
     (canonicalOp : OpName)
     (params : OpParams)
     (arity : Nat) : TypedOp :=
-  if canonicalOp == kstmtDotGeneralOpName then
-    TypedOp.dotGeneral
-      ((params.findName? .variant).getD `generic)
-      ((params.findNats? .lhsContract).getD #[])
-      ((params.findNats? .rhsContract).getD #[])
-      ((params.findNats? .lhsBatch).getD #[])
-      ((params.findNats? .rhsBatch).getD #[])
-  else if isCondAliasOpName canonicalOp then
-    TypedOp.controlFlow {
-      variant := `cond
-      staticArgCount := (params.findNat? .controlStaticArgCount).getD 0
-      predicateCount := (params.findNat? .condPredicateCount).getD 0
-      dataInputCount := (params.findNat? .condDataInputCount).getD 0
-    }
-  else if isScanAliasOpName canonicalOp then
-    TypedOp.controlFlow {
-      variant := `scan
-      staticArgCount := (params.findNat? .controlStaticArgCount).getD 0
-      dataInputCount := (params.findNat? .scanDataInputCount).getD 0
-      carryInputCount := (params.findNat? .scanCarryInputCount).getD 0
-      carryOutputCount := (params.findNat? .scanCarryOutputCount).getD 0
-    }
-  else if canonicalOp == transposeAliasOpName then
-    TypedOp.transpose
-  else if canonicalOp == convertElementTypeAliasOpName then
-    TypedOp.convert
-  else if isReductionUnaryAliasOpName canonicalOp then
-    TypedOp.reduce canonicalOp `unknownAxis
-  else
-    match arity with
-    | 0 => TypedOp.nullary canonicalOp
-    | 1 => TypedOp.unary canonicalOp
-    | 2 => TypedOp.binary canonicalOp
-    | 3 => TypedOp.ternary canonicalOp
-    | _ => TypedOp.nary canonicalOp arity
+  typedOpForNormalizedOp canonicalOp params arity 1
 
 private def controlRegionRoles
     (variant : Name)

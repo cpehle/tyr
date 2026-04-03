@@ -953,6 +953,29 @@ def testValidateTypedEqnArityFailure : IO Unit := do
       s!"Expected typed-arity diagnostic, got: {errs}"
 
 @[test]
+def testValidateRejectsGenericTypedEqns : IO Unit := do
+  let jaxpr : LeanJaxpr := mkNormalizedJaxpr #[] #[
+    { id := 0, metaInfo := { role? := some .input } }
+  ] #[
+    {
+      id := 1
+      op := `test.generic_eqn
+      invars := #[{ id := 0, metaInfo := { role? := some .input } }]
+      outvars := #[{ id := 1, metaInfo := { role? := some .output } }]
+      typed := TypedOp.generic
+    }
+  ] #[
+    { id := 1, metaInfo := { role? := some .output } }
+  ]
+  match validate jaxpr with
+  | .ok () =>
+    LeanTest.fail "Validation should reject generic typed equations in normalized graphs"
+  | .error errs =>
+    let hasGenericErr := errs.any (fun e => e.contains "still uses the generic typed schema")
+    LeanTest.assertTrue hasGenericErr
+      s!"Expected generic-typed diagnostic, got: {errs}"
+
+@[test]
 def testFromFnBodyAssignsNaryTypedFamily : IO Unit := do
   let x0 : Lean.IR.VarId := { idx := 0 }
   let x1 : Lean.IR.VarId := { idx := 1 }

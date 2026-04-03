@@ -1,3 +1,4 @@
+import Tyr.AD.JaxprLike.TypedOps
 import Tyr.AD.JaxprLike.VertexOrder
 
 /-!
@@ -141,6 +142,14 @@ private def typedPayloadCompatible (typed : TypedOp) : Bool :=
   | .controlFlow, .controlFlow _ => true
   | _, _ => false
 
+private def validateTypedEqnSemantics (eqnIdx0 : Nat) (eqn : JEqn) : Except String Unit := do
+  match typedOpForNormalizedOp? eqn.op eqn.params eqn.invars.size eqn.outvars.size with
+  | some expected =>
+    if eqn.typed != expected then
+      throw s!"LeanJaxpr validation failed: equation {eqnIdx0} op `{eqn.op}` has typed semantics {reprStr eqn.typed}, expected {reprStr expected} from normalized op metadata."
+  | none =>
+    pure ()
+
 private def validateTypedEqnSchema (eqnIdx0 : Nat) (eqn : JEqn) : Except String Unit := do
   if !typedPayloadCompatible eqn.typed then
     throw s!"LeanJaxpr validation failed: equation {eqnIdx0} op `{eqn.op}` has inconsistent typed schema/payload {reprStr eqn.typed}."
@@ -151,7 +160,7 @@ private def validateTypedEqnSchema (eqnIdx0 : Nat) (eqn : JEqn) : Except String 
       throw s!"LeanJaxpr validation failed: equation {eqnIdx0} op `{eqn.op}` typed as {reprStr eqn.typed.schema} expects {expectedOutputs} outputs, got {eqn.outvars.size}."
   match eqn.typed.schema with
   | .generic =>
-    pure ()
+    throw s!"LeanJaxpr validation failed: equation {eqnIdx0} op `{eqn.op}` still uses the generic typed schema. Construct normalized equations with explicit typed semantics."
   | .nullary =>
     requireCounts 0 1
   | .nary =>
@@ -293,6 +302,7 @@ private def validateValueRoleMetadata (jaxpr : LeanJaxpr) : Except String Unit :
 def validateTypedEqns (jaxpr : LeanJaxpr) : Except String Unit := do
   for eqnIdx0 in [:jaxpr.eqns.size] do
     let eqn := jaxpr.eqns[eqnIdx0]!
+    validateTypedEqnSemantics eqnIdx0 eqn
     validateTypedEqnSchema eqnIdx0 eqn
     validateLegacyParamsAgreeWithTypedEqn eqnIdx0 eqn
 

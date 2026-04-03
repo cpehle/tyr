@@ -1,6 +1,7 @@
 import Lean
 import Tyr.AD.JaxprLike.Elab
 import Tyr.AD.JaxprLike.KStmtNames
+import Tyr.AD.JaxprLike.TypedOps
 
 /-!
 # Tyr.AD.Frontend.Elab
@@ -83,25 +84,7 @@ private def lookupPrimitiveSpec?
 private def typedOpForPrimitive
     (normalizedOp : OpName)
     (arity : Nat) : TypedOp :=
-  if normalizedOp == kstmtDotGeneralOpName then
-    TypedOp.dotGeneral `generic #[] #[] #[] #[]
-  else if isScanAliasOpName normalizedOp then
-    TypedOp.controlFlow { variant := `scan }
-  else if isCondAliasOpName normalizedOp then
-    TypedOp.controlFlow { variant := `cond, predicateCount := 1 }
-  else if normalizedOp == transposeAliasOpName then
-    TypedOp.transpose
-  else if normalizedOp == convertElementTypeAliasOpName then
-    TypedOp.convert
-  else if isReductionUnaryAliasOpName normalizedOp then
-    TypedOp.reduce normalizedOp `unknownAxis
-  else
-    match arity with
-    | 0 => TypedOp.nullary normalizedOp
-    | 1 => TypedOp.unary normalizedOp
-    | 2 => TypedOp.binary normalizedOp
-    | 3 => TypedOp.ternary normalizedOp
-    | _ => TypedOp.nary normalizedOp arity
+  typedOpForNormalizedOp normalizedOp #[] arity 1
 
 private unsafe def buildInvars
     (params : Array Expr) :
