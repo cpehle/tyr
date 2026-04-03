@@ -2,6 +2,8 @@ import LeanTest
 import Examples.AlphaGradPort.A0Train
 import Examples.AlphaGradPort.PolicySweep
 import Examples.AlphaGradPort.PolicyTrain
+import Examples.AlphaGradPort.Replay
+import Examples.AlphaGradPort.Trainer
 
 namespace Tests.AlphaGradPortExamples
 
@@ -130,5 +132,52 @@ def testPolicyTrainAlphaZeroPerceptronTinyRun : IO Unit := do
   let code ← Examples.AlphaGradPort.policyTrainMain ["alphazero", "Perceptron", "1", "1"]
   LeanTest.assertEqual code 0
     "AlphaGradPolicyTrain should complete a tiny AlphaZero/Gumbel run for Perceptron."
+
+@[test]
+def testAlphaGradReplayRoundtrip : IO Unit := do
+  let path : System.FilePath := ⟨s!"/tmp/alphagrad_replay_{← IO.monoMsNow}.json"⟩
+  let buf := ReplayBuffer.empty 4
+  let buf := buf.push {
+    kind := .alphazero
+    features := #[1.0, 2.0]
+    reward := -3.0
+    valueTarget := -2.5
+    policyTarget := #[0.25, 0.75]
+  }
+  saveReplayBuffer path buf
+  let loaded ← loadReplayBuffer path
+  LeanTest.assertEqual loaded.size 1
+    "Replay roundtrip should preserve sample count."
+  LeanTest.assertEqual (loaded.orderedSamples.getD 0 default).policyTarget.size 2
+    "Replay roundtrip should preserve policy targets."
+
+@[test]
+def testAlphaGradTrainerTinyCheckpointCycle : IO Unit := do
+  let runDir := s!"/tmp/alphagrad_trainer_{← IO.monoMsNow}"
+  let trainCode ← Examples.AlphaGradPort.trainerMain [
+    "train", "alphazero", "Perceptron",
+    "--epochs", "1",
+    "--episodes-per-epoch", "2",
+    "--num-envs", "2",
+    "--num-simulations", "2",
+    "--batch-size", "4",
+    "--update-batches", "1",
+    "--checkpoint-every", "1",
+    "--eval-every", "1",
+    "--run-dir", runDir,
+    "--overwrite"
+  ]
+  LeanTest.assertEqual trainCode 0
+    "AlphaGradTrainer should complete a tiny AlphaZero training run."
+  let latestExists ← System.FilePath.pathExists ⟨s!"{runDir}/checkpoints/latest/trainer_state.json"⟩
+  LeanTest.assertTrue latestExists
+    "AlphaGradTrainer should materialize a latest trainer checkpoint."
+  let evalCode ← Examples.AlphaGradPort.trainerMain [
+    "eval", "alphazero", "Perceptron",
+    "--num-simulations", "2",
+    "--run-dir", runDir
+  ]
+  LeanTest.assertEqual evalCode 0
+    "AlphaGradTrainer should load and evaluate the latest checkpoint."
 
 end Tests.AlphaGradPortExamples

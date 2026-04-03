@@ -335,6 +335,12 @@ lean_exe AlphaGradPolicySweep where
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
+/-- Full AlphaGrad trainer with replay, batched collection, and checkpoints. -/
+lean_exe AlphaGradTrainer where
+  root := `Examples.AlphaGradPort.TrainerMain
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
 /-- NanoChat training executable (modded GPT + distributed) -/
 lean_exe TrainNanoChat where
   root := `Examples.NanoChat.TrainNanoChat
