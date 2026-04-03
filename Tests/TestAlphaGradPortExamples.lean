@@ -67,7 +67,7 @@ def testPerceptronSearchParityAcrossPolicies : IO Unit := do
 def testKStmtLoweredTasksUseSemanticMaterialization : IO Unit := do
   let loweredTasks : Array TaskName := #[
     .perceptron, .encoder, .robotArm6DOF, .blackScholesJacobian,
-    .humanHeartDipole, .propaneCombustion
+    .humanHeartDipole, .propaneCombustion, .randomFunctionF, .randomFunctionG
   ]
 
   for taskName in loweredTasks do
