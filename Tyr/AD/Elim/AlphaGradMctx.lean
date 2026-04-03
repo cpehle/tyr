@@ -181,13 +181,37 @@ private def noDuplicateActions (actions0 : Array ActionId0) : Bool :=
 private def noDuplicateVertices (vertices1 : Array VertexId1) : Bool :=
   hasNoDuplicates vertices1
 
+/-- Explicit edge-only action surface derived from the declared vertex domain. -/
+private def defaultActionVertices (numVertices : Nat) : Array VertexId1 :=
+  (Array.range numVertices).map fun idx => idx + 1
+
+/--
+When callers provide only local-Jacobian edges plus `numVertices`, an empty
+graph still needs an explicit action surface. Narrow that synthesis to the
+edge-only case instead of reviving the old global fallback behavior.
+-/
+private def edgeDomainActionVertices?
+    (graph : ElimGraph)
+    (numVertices : Nat) :
+    Option (Array VertexId1) :=
+  if graph.actionVertices.isEmpty &&
+      graph.inputs.isEmpty &&
+      graph.outputs.isEmpty &&
+      graph.eliminable.isEmpty then
+    some (defaultActionVertices numVertices)
+  else
+    none
+
 /-- Resolve and validate the active action-space vertex table. -/
 def resolveActionVertices?
     (cfg : AlphaGradMctxConfig)
     (graph : ElimGraph)
     (numVertices : Nat) :
     Except String (Array VertexId1) := do
-  let actionVertices := cfg.actionVerticesOverride?.getD graph.actionVertices
+  let actionVertices :=
+    match cfg.actionVerticesOverride? with
+    | some vertices => vertices
+    | none => (edgeDomainActionVertices? graph numVertices).getD graph.actionVertices
   if actionVertices.isEmpty then
     throw "AlphaGrad action-space vertex table must be stored on the graph or supplied explicitly in the config."
   validateVertexIds numVertices actionVertices
@@ -245,8 +269,13 @@ def initAlphaGradStateFromEdges?
     (numVertices : Nat)
     (actionPrefix : Array ActionId0 := #[])
     (actionVertices? : Option (Array VertexId1) := none) :
-    Except String AlphaGradState :=
-  initAlphaGradState? (ofLocalJacEdges edges) numVertices actionPrefix actionVertices?
+    Except String AlphaGradState := do
+  let graph := ofLocalJacEdges edges
+  let actionVertices? :=
+    match actionVertices? with
+    | some vertices => some vertices
+    | none => edgeDomainActionVertices? graph numVertices
+  initAlphaGradState? graph numVertices actionPrefix actionVertices?
 
 /-- Convenience initializer from partitioned local Jacobian edges. -/
 def initAlphaGradStateFromPartitionedEdges?
