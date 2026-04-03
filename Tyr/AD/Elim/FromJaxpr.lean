@@ -5,7 +5,7 @@ import Tyr.AD.JaxprLike.Pipeline
 /-!
 # Tyr.AD.Elim.FromJaxpr
 
-End-to-end execution adapters:
+End-to-end execution entrypoints:
 - normalized `LeanJaxpr` -> local-Jac edges -> elimination
 - `KStmt` lowering/build -> local-Jac edges -> elimination
 -/
@@ -20,15 +20,8 @@ private def renderRuleExecutionErrors (errs : Array RuleExecutionError) : String
 private def buildPartitionedGraph?
     (jaxpr : LeanJaxpr)
     (edges : Array LocalJacEdge) :
-    Except String ElimGraph := do
-  let parts := jaxpr.vertexPartitions
-  let actionVertices := jaxpr.actionTable.vertices1
-  ofLocalJacEdgesWithPartitionsAndActions
-    edges
-    parts.inputs
-    parts.outputs
-    parts.eliminable
-    actionVertices
+    Except String ElimGraph :=
+  ofLocalJacEdgesWithJaxpr edges jaxpr
 
 private def runGraphWithPolicy
     (graph : ElimGraph)

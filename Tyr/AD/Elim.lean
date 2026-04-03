@@ -1,5 +1,5 @@
 import Tyr.AD.Elim.OrderPolicy
-import Tyr.AD.Elim.AlphaGradAdapter
+import Tyr.AD.Elim.ActionSpace
 import Tyr.AD.Elim.AlphaGradMctx
 import Tyr.AD.Elim.ConstraintFeasibility
 import Tyr.AD.Elim.CommModel
@@ -13,5 +13,6 @@ import Tyr.AD.Elim.FromJaxpr
 /-!
 # Tyr.AD.Elim
 
-Umbrella import for elimination-order policy modeling and adapters.
+Umbrella import for elimination-order policy modeling, action-space handling,
+and AlphaGrad-style search over elimination graphs.
 -/

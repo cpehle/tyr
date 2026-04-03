@@ -21,7 +21,7 @@ open torch.mctx
 open Tyr.AD
 open Tyr.AD.Elim
 
-private abbrev OBS_DIM : UInt64 := 8
+private abbrev OBS_DIM : UInt64 := 11
 private abbrev HIDDEN_DIM : UInt64 := 64
 
 private def lcgA : UInt64 := 6364136223846793005
@@ -86,6 +86,40 @@ private def feasibleActionCount
   (invalidActionMask cfg s).foldl (init := 0) fun acc isInvalid =>
     if isInvalid then acc else acc + 1
 
+private def producerFamilyCount
+    (s : AlphaGradState)
+    (pred : VertexProducer → Bool) :
+    Nat :=
+  (Array.range s.numActions).foldl (init := 0) fun acc action =>
+    match s.actionToVertex? action with
+    | .error _ => acc
+    | .ok vertex =>
+      if s.isActionEliminated action || !s.isActionEliminable action then
+        acc
+      else
+        match producerInfo? s.graph vertex with
+        | some producer =>
+          if pred producer then acc + 1 else acc
+        | none => acc
+
+private def isLinearKernelProducer (producer : VertexProducer) : Bool :=
+  match producer.typed.schema with
+  | .dotGeneral
+  | .mma
+  | .outer => true
+  | _ => false
+
+private def isReductionLikeProducer (producer : VertexProducer) : Bool :=
+  match producer.typed.schema with
+  | .reduce
+  | .reduceAccum
+  | .cumsum
+  | .cumprod => true
+  | _ => false
+
+private def isControlFlowProducer (producer : VertexProducer) : Bool :=
+  producer.typed.schema == .controlFlow
+
 private def stateFeatures
     (cfg : AlphaGradMctxConfig)
     (s : AlphaGradState) :
@@ -100,6 +134,14 @@ private def stateFeatures
     if nNat = 0 then 1.0 else Float.ofNat (nNat * nNat)
   let unresolvedSoft :=
     unresolvedSoftPenalty cfg.constraints (fun v => s.isVertexEliminated v)
+  let semanticDenom :=
+    if remainingNat = 0 then 1.0 else Float.ofNat remainingNat
+  let linearKernelFrac :=
+    Float.ofNat (producerFamilyCount s isLinearKernelProducer) / semanticDenom
+  let reductionFrac :=
+    Float.ofNat (producerFamilyCount s isReductionLikeProducer) / semanticDenom
+  let controlFlowFrac :=
+    Float.ofNat (producerFamilyCount s isControlFlowProducer) / semanticDenom
   #[
     if nNat = 0 then 0.0 else Float.ofNat s.stepCount / n,
     if nNat = 0 then 0.0 else remaining / n,
@@ -108,6 +150,9 @@ private def stateFeatures
     unresolvedSoft,
     s.cumulativeReward,
     if s.violation?.isSome then 1.0 else 0.0,
+    linearKernelFrac,
+    reductionFrac,
+    controlFlowFrac,
     1.0
   ]
 

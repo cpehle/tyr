@@ -499,13 +499,9 @@ private def materializeFromKStmts
       | .error msg =>
         return .error s!"{name}: {msg}"
       | .ok numVertices =>
-        match ofLocalJacEdgesWithPartitions
-            edges
-            jaxpr.vertexPartitions.inputs
-            jaxpr.vertexPartitions.outputs
-            jaxpr.vertexPartitions.eliminable with
+        match ofLocalJacEdgesWithJaxpr edges jaxpr with
         | .error msg =>
-          return .error s!"{name}: failed to build partitioned elimination graph: {msg}"
+          return .error s!"{name}: failed to build elimination graph with normalized producer semantics: {msg}"
         | .ok graph =>
           return .ok {
             name := name

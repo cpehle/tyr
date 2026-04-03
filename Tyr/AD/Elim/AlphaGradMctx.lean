@@ -1,6 +1,6 @@
 import Tyr.AD.Elim.Eliminate
 import Tyr.AD.Elim.ConstraintFeasibility
-import Tyr.AD.Elim.AlphaGradAdapter
+import Tyr.AD.Elim.ActionSpace
 import Tyr.AD.Elim.Cost
 import Tyr.Mctx
 import Tyr.MctxDag
@@ -12,7 +12,8 @@ AlphaGrad-style elimination environment and MCTS wrappers built on `Tyr.Mctx`.
 
 Design invariants:
 - Action IDs remain 0-based (`ActionId0`).
-- Elimination vertices remain 1-based (`VertexId1`), crossed only via checked adapters.
+- Elimination vertices remain 1-based (`VertexId1`), crossed only via checked
+  action-space conversion utilities.
 - Constraint feasibility is enforced in action masking and transition checks.
 - No fallback behavior: infeasible constrained states surface deterministic errors.
 -/
@@ -148,6 +149,17 @@ structure AlphaGradDagEdgeKey where
   map : AlphaGradDagMapKey
   deriving Repr, Inhabited, BEq, Hashable
 
+/-- Canonical producer-semantic key for DAG state hashing. -/
+structure AlphaGradDagProducerKey where
+  vertex : VertexId1
+  opId : Nat
+  opTag : String
+  schemaTag : String
+  payloadTag : String
+  sourceDecl : String
+  roleTag? : Option String := none
+  deriving Repr, Inhabited, BEq, Hashable
+
 /-- Canonical DAG state key used by `Tyr.MctxDag` transposition table. -/
 structure AlphaGradDagKey where
   numVertices : Nat
@@ -156,6 +168,7 @@ structure AlphaGradDagKey where
   eliminatedActions : Array Bool
   violation : Bool
   edges : Array AlphaGradDagEdgeKey
+  producers : Array AlphaGradDagProducerKey
   deriving Repr, Inhabited, BEq, Hashable
 
 /-- DAG search tree specialized to AlphaGrad state/key. -/
@@ -394,6 +407,21 @@ def dagEdgeKeys (g : ElimGraph) : Array AlphaGradDagEdgeKey := Id.run do
       out := out.push { src := src, dst := pair.1, map := canonicalMapKey pair.2 }
   return out
 
+/-- Deterministic producer-semantic listing for DAG transposition keys. -/
+def dagProducerKeys (g : ElimGraph) : Array AlphaGradDagProducerKey :=
+  (g.producers.toList.mergeSort (fun a b => a.1 < b.1)).toArray.map fun pair =>
+    let vertex := pair.1
+    let producer := pair.2
+    {
+      vertex := vertex
+      opId := producer.opId
+      opTag := toString producer.op
+      schemaTag := reprStr producer.typed.schema
+      payloadTag := reprStr producer.typed.payload
+      sourceDecl := toString producer.source.decl
+      roleTag? := producer.role?.map reprStr
+    }
+
 /-- Canonical key used by `MctxDag` to merge transposition-equivalent states. -/
 def dagStateKey (s : AlphaGradState) : AlphaGradDagKey :=
   {
@@ -403,6 +431,7 @@ def dagStateKey (s : AlphaGradState) : AlphaGradDagKey :=
     eliminatedActions := s.eliminatedActions
     violation := s.violation?.isSome
     edges := dagEdgeKeys s.graph
+    producers := dagProducerKeys s.graph
   }
 
 /-- Soft precedence penalty paid when selecting `candidate` before its preferred predecessors. -/

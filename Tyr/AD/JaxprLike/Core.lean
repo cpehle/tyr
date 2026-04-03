@@ -243,7 +243,7 @@ structure SourceRef where
   decl : Name := .anonymous
   line? : Option Nat := none
   col? : Option Nat := none
-  deriving Repr, Inhabited
+  deriving Repr, Inhabited, BEq
 
 /-- Schema family for typed normalized ops. -/
 inductive OpSchema where

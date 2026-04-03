@@ -15,6 +15,19 @@ open Tyr.AD.JaxprLike
 abbrev AdjRow := Std.HashMap JVarId SparseLinearMap
 abbrev AdjMap := Std.HashMap JVarId AdjRow
 
+/--
+Producer-side semantic metadata for a graph value vertex.
+This lets AlphaGrad consume the normalized op contract carried by `LeanJaxpr`,
+not just anonymous edge topology.
+-/
+structure VertexProducer where
+  opId : OpId
+  op : OpName
+  typed : TypedOp := {}
+  source : SourceRef := {}
+  role? : Option ValueRole := none
+  deriving Repr, Inhabited, BEq
+
 /-- Bidirectional adjacency for elimination over local Jacobian edges. -/
 structure ElimGraph where
   /-- Forward adjacency: `src -> (dst -> map)`. -/
@@ -29,6 +42,8 @@ structure ElimGraph where
   eliminable : Array JVarId := #[]
   /-- Fixed action surface (`ActionId0 -> VertexId1`) used by AlphaGrad-style search. -/
   actionVertices : Array JVarId := #[]
+  /-- Producer-side semantics keyed by produced value vertex. -/
+  producers : Std.HashMap JVarId VertexProducer := {}
   deriving Repr, Inhabited
 
 private def dedupPreserveOrder (xs : Array JVarId) : Array JVarId := Id.run do
@@ -70,6 +85,10 @@ def inNeighbors (g : ElimGraph) (dst : JVarId) : Array (JVarId × SparseLinearMa
   match g.backward.get? dst with
   | none => #[]
   | some row => sortedPairs row
+
+/-- Producer-side semantic metadata for a value vertex, when known. -/
+def producerInfo? (g : ElimGraph) (vertex : JVarId) : Option VertexProducer :=
+  g.producers.get? vertex
 
 /-- Insert or replace `src -> dst`. Keeps forward/backward adjacency in sync. -/
 def insertEdge (g : ElimGraph) (src dst : JVarId) (map : SparseLinearMap) : ElimGraph :=
@@ -118,6 +137,7 @@ def eraseVertexEdges (g : ElimGraph) (v : JVarId) : ElimGraph :=
     inputs := g''.inputs.filter (· != v)
     outputs := g''.outputs.filter (· != v)
     eliminable := g''.eliminable.filter (· != v)
+    producers := g''.producers.erase v
   }
 
 /-- Vertex is present iff it has at least one incoming or outgoing edge. -/
@@ -169,6 +189,39 @@ private def firstDuplicateVertex? (xs : Array JVarId) : Option JVarId := Id.run 
       return some x
     seen := seen.insert x
   return none
+
+private def producerBindingsOfJaxpr (jaxpr : LeanJaxpr) : Array (JVarId × VertexProducer) := Id.run do
+  let mut out : Array (JVarId × VertexProducer) := #[]
+  for eqn in jaxpr.eqns do
+    for outvar in eqn.outvars do
+      out := out.push (
+        outvar.id,
+        {
+          opId := eqn.id
+          op := eqn.op
+          typed := eqn.typedOp
+          source := eqn.source
+          role? := outvar.metaInfo.role?
+        }
+      )
+  return out
+
+/-- Attach producer-side semantic metadata extracted from a normalized `LeanJaxpr`. -/
+def withJaxprProducers
+    (g : ElimGraph)
+    (jaxpr : LeanJaxpr) :
+    Except String ElimGraph := Id.run do
+  let mut producers := g.producers
+  for binding in producerBindingsOfJaxpr jaxpr do
+    let vertex := binding.1
+    let info := binding.2
+    match producers.get? vertex with
+    | some existing =>
+      if existing != info then
+        return .error s!"Conflicting producer metadata attached to vertex {vertex}."
+    | none =>
+      producers := producers.insert vertex info
+  return .ok { g with producers := producers }
 
 /--
 Attach explicit graph partitions.
@@ -240,5 +293,21 @@ def ofLocalJacEdgesWithPartitionsAndActions
     Except String ElimGraph := do
   let g ← ofLocalJacEdgesWithPartitions edges inputs outputs eliminable
   withActionVertices g actionVertices
+
+/--
+Build an elimination graph from local Jacobian edges while preserving the
+normalized producer semantics carried by a source `LeanJaxpr`.
+-/
+def ofLocalJacEdgesWithJaxpr
+    (edges : Array LocalJacEdge)
+    (jaxpr : LeanJaxpr) :
+    Except String ElimGraph := do
+  let g ← ofLocalJacEdgesWithPartitionsAndActions
+    edges
+    jaxpr.vertexPartitions.inputs
+    jaxpr.vertexPartitions.outputs
+    jaxpr.vertexPartitions.eliminable
+    jaxpr.actionTable.vertices1
+  withJaxprProducers g jaxpr
 
 end Tyr.AD.Elim

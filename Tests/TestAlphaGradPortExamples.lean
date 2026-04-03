@@ -82,6 +82,9 @@ def testKStmtLoweredTasksUseSemanticMaterialization : IO Unit := do
       s!"{task.name} should size task action width from the graph action table."
     LeanTest.assertTrue (!task.edges.isEmpty)
       s!"{task.name} should expose non-empty local-Jac edges after KStmt lowering."
+    LeanTest.assertTrue
+      (task.graph.actionVertices.all (fun vertex => (producerInfo? task.graph vertex).isSome))
+      s!"{task.name} should preserve normalized producer semantics on its explicit action surface."
     assertSemanticEdges task.name task.edges
 
 @[test]

@@ -1,9 +1,10 @@
 import Tyr.AD.Elim.OrderPolicy
 
 /-!
-# Tyr.AD.Elim.AlphaGradAdapter
+# Tyr.AD.Elim.ActionSpace
 
-Adapters between AlphaGrad action space (0-based) and elimination vertex space (1-based).
+Checked conversions between the 0-based action space and the 1-based
+elimination-vertex space.
 -/
 
 namespace Tyr.AD.Elim

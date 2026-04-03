@@ -559,6 +559,45 @@ def testDagStateKeyIgnoresMapReprForEquivalentSparseMaps : IO Unit := do
     "DAG state key should ignore sparse-map repr and canonicalize by shape+entries."
 
 @[test]
+def testDagStateKeyTracksProducerSemantics : IO Unit := do
+  let graphA : ElimGraph := {
+    actionVertices := #[1]
+    eliminable := #[1]
+    producers := ({} : Std.HashMap VertexId1 VertexProducer).insert 1 {
+      opId := 1
+      op := `test.exp
+      typed := TypedOp.unary `test.exp
+      source := { decl := `test.dag_key_a }
+      role? := some .intermediate
+    }
+  }
+  let graphB : ElimGraph := {
+    actionVertices := #[1]
+    eliminable := #[1]
+    producers := ({} : Std.HashMap VertexId1 VertexProducer).insert 1 {
+      opId := 1
+      op := `test.log
+      typed := TypedOp.unary `test.log
+      source := { decl := `test.dag_key_b }
+      role? := some .intermediate
+    }
+  }
+  let sA : AlphaGradState := {
+    graph := graphA
+    numVertices := 1
+    actionVertices := #[1]
+    eliminatedActions := #[false]
+  }
+  let sB : AlphaGradState := {
+    graph := graphB
+    numVertices := 1
+    actionVertices := #[1]
+    eliminatedActions := #[false]
+  }
+  LeanTest.assertTrue (dagStateKey sA != dagStateKey sB)
+    "DAG state key should distinguish equal-topology states with different producer semantics."
+
+@[test]
 def testPartitionedGraphMasksOutputsAndTerminatesOnEliminableCount : IO Unit := do
   let edges : Array LocalJacEdge := #[(mkEdge 1 2 "m12")]
   let graphRes := ofLocalJacEdgesWithPartitions edges #[] #[2] #[1]
