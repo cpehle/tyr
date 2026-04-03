@@ -6,6 +6,7 @@ import Tyr.Mctx.ActionSelection
 import Tyr.Mctx.Search
 import Tyr.Mctx.Policies
 import Tyr.Mctx.Batched
+import Tyr.Mctx.BatchedM
 
 /-!
 # Tyr.Mctx
