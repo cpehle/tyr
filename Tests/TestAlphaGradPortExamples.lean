@@ -1,6 +1,7 @@
 import LeanTest
 import Examples.AlphaGradPort.A0Train
 import Examples.AlphaGradPort.PolicySweep
+import Examples.AlphaGradPort.PolicyTrain
 
 namespace Tests.AlphaGradPortExamples
 
@@ -106,5 +107,28 @@ def testPolicySweepPPOPerceptronTinyRun : IO Unit := do
   let code ← Examples.AlphaGradPort.policySweepMain ["ppo", "Perceptron", "1", "1"]
   LeanTest.assertEqual code 0
     "AlphaGradPolicySweep should complete a tiny PPO run for Perceptron."
+
+@[test]
+def testAlphaGradObservationExportMatchesTaskShape : IO Unit := do
+  let task ←
+    match (← materializeTask .perceptron) with
+    | .error msg => LeanTest.fail s!"Perceptron materialization failed: {msg}"
+    | .ok task => pure task
+
+  let s0 ←
+    match initAlphaGradState? task.graph task.numVertices with
+    | .error msg => LeanTest.fail s!"Perceptron state init failed: {msg}"
+    | .ok s => pure s
+
+  let flat := exportObservationFlat task.envCfg s0
+  let expected := task.numVertices * observationTokenDim task.graph task.numVertices
+  LeanTest.assertEqual flat.size expected
+    "AlphaGrad observation export should match (numVertices * tokenDim)."
+
+@[test]
+def testPolicyTrainAlphaZeroPerceptronTinyRun : IO Unit := do
+  let code ← Examples.AlphaGradPort.policyTrainMain ["alphazero", "Perceptron", "1", "1"]
+  LeanTest.assertEqual code 0
+    "AlphaGradPolicyTrain should complete a tiny AlphaZero/Gumbel run for Perceptron."
 
 end Tests.AlphaGradPortExamples

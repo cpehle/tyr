@@ -1,5 +1,4 @@
-import Examples.AlphaGradPort.Tasks
-import Tyr.Module.Linear
+import Examples.AlphaGradPort.Model
 import Tyr.Optim
 import Tyr.Mctx
 
@@ -10,7 +9,7 @@ import Tyr.Mctx
   - PPO actor-critic training
   - AlphaZero-style MCTS self-play training
 
-  Both paths use real trainable neural parameters (`Linear` layers),
+  Both paths use real trainable neural parameters,
   autograd backprop, and `Optim.adamw` updates.
 -/
 
@@ -20,9 +19,6 @@ open torch
 open torch.mctx
 open Tyr.AD
 open Tyr.AD.Elim
-
-private abbrev OBS_DIM : UInt64 := 11
-private abbrev HIDDEN_DIM : UInt64 := 64
 
 private def lcgA : UInt64 := 6364136223846793005
 private def lcgC : UInt64 := 1442695040888963407
@@ -34,10 +30,6 @@ private def uniform01 (x : UInt64) : Float :=
   let mant := (x >>> 11).toNat
   let denom : Float := Float.ofNat (Nat.pow 2 53)
   Float.ofNat mant / denom
-
-private def maskInvalidLogits (logits : Array Float) (invalid : Array Bool) : Array Float :=
-  (Array.range logits.size).map fun i =>
-    if invalid.getD i false then -1.0e30 else logits.getD i (-1.0e30)
 
 private def sampleCategorical?
     (probs : Array Float)
@@ -73,187 +65,57 @@ private def sampleCategorical?
 
   pure (chosen, mix (seed' + 0x9e3779b97f4a7c15))
 
-private def graphEdgeCount (g : ElimGraph) : Nat := Id.run do
-  let mut total := 0
-  for v in vertices g do
-    total := total + (outNeighbors g v).size
-  return total
+private def taskVertexDim (task : TaskSpec) : UInt64 :=
+  task.numVertices.toUInt64
 
-private def feasibleActionCount
-    (cfg : AlphaGradMctxConfig)
-    (s : AlphaGradState) :
-    Nat :=
-  (invalidActionMask cfg s).foldl (init := 0) fun acc isInvalid =>
-    if isInvalid then acc else acc + 1
+private def taskTokenDim (task : TaskSpec) : UInt64 :=
+  (observationTokenDim task.graph task.numVertices).toUInt64
 
-private def producerFamilyCount
-    (s : AlphaGradState)
-    (pred : VertexProducer → Bool) :
-    Nat :=
-  (Array.range s.numActions).foldl (init := 0) fun acc action =>
-    match s.actionToVertex? action with
-    | .error _ => acc
-    | .ok vertex =>
-      if s.isActionEliminated action || !s.isActionEliminable action then
-        acc
-      else
-        match producerInfo? s.graph vertex with
-        | some producer =>
-          if pred producer then acc + 1 else acc
-        | none => acc
+inductive AlphaGradValueTransform where
+  | id
+  | log
+  | default
+  deriving Repr, Inhabited, BEq
 
-private def isLinearKernelProducer (producer : VertexProducer) : Bool :=
-  match producer.typed.schema with
-  | .dotGeneral
-  | .mma
-  | .outer => true
-  | _ => false
-
-private def isReductionLikeProducer (producer : VertexProducer) : Bool :=
-  match producer.typed.schema with
-  | .reduce
-  | .reduceAccum
-  | .cumsum
-  | .cumprod => true
-  | _ => false
-
-private def isControlFlowProducer (producer : VertexProducer) : Bool :=
-  producer.typed.schema == .controlFlow
-
-private def stateFeatures
-    (cfg : AlphaGradMctxConfig)
-    (s : AlphaGradState) :
-    Array Float :=
-  let nNat := s.numVertices
-  let n := Float.ofNat nNat
-  let remainingNat := s.numEliminableActions - s.eliminatedEliminableCount
-  let remaining := Float.ofNat remainingNat
-  let feasible := Float.ofNat (feasibleActionCount cfg s)
-  let edgeCount := Float.ofNat (graphEdgeCount s.graph)
-  let denomEdges :=
-    if nNat = 0 then 1.0 else Float.ofNat (nNat * nNat)
-  let unresolvedSoft :=
-    unresolvedSoftPenalty cfg.constraints (fun v => s.isVertexEliminated v)
-  let semanticDenom :=
-    if remainingNat = 0 then 1.0 else Float.ofNat remainingNat
-  let linearKernelFrac :=
-    Float.ofNat (producerFamilyCount s isLinearKernelProducer) / semanticDenom
-  let reductionFrac :=
-    Float.ofNat (producerFamilyCount s isReductionLikeProducer) / semanticDenom
-  let controlFlowFrac :=
-    Float.ofNat (producerFamilyCount s isControlFlowProducer) / semanticDenom
-  #[
-    if nNat = 0 then 0.0 else Float.ofNat s.stepCount / n,
-    if nNat = 0 then 0.0 else remaining / n,
-    if nNat = 0 then 0.0 else feasible / n,
-    edgeCount / denomEdges,
-    unresolvedSoft,
-    s.cumulativeReward,
-    if s.violation?.isSome then 1.0 else 0.0,
-    linearKernelFrac,
-    reductionFrac,
-    controlFlowFrac,
+private def floatSign (x : Float) : Float :=
+  if x < 0.0 then
+    -1.0
+  else if x > 0.0 then
     1.0
-  ]
+  else
+    0.0
 
-structure AlphaGradNet (actionDim : UInt64) where
-  fc1 : Linear OBS_DIM HIDDEN_DIM
-  policyHead : Linear HIDDEN_DIM actionDim
-  valueHead : Linear HIDDEN_DIM 1
-  deriving TensorStruct
+private def symlog (x : Float) : Float :=
+  floatSign x * Float.log (Float.abs x + 1.0)
 
-namespace AlphaGradNet
+private def symexp (x : Float) : Float :=
+  floatSign x * (Float.exp (Float.abs x) - 1.0)
 
-def init (actionDim : UInt64) : IO (AlphaGradNet actionDim) := do
-  let fc1 ← Linear.init OBS_DIM HIDDEN_DIM true
-  let policyHead ← Linear.init HIDDEN_DIM actionDim true
-  let valueHead ← Linear.init HIDDEN_DIM 1 true
-  pure { fc1, policyHead, valueHead }
+private def defaultValueTransform (x : Float) (eps : Float := 0.001) : Float :=
+  floatSign x * (Float.sqrt (Float.abs x + 1.0) - 1.0) + eps * x
 
-def forward {batch actionDim : UInt64}
-    (net : AlphaGradNet actionDim)
-    (x : T #[batch, OBS_DIM]) :
-    T #[batch, actionDim] × T #[batch, 1] :=
-  let h := nn.relu (Linear.forward2d net.fc1 x)
-  let logits := Linear.forward2d net.policyHead h
-  let value := Linear.forward2d net.valueHead h
-  (logits, value)
+private def defaultInverseValueTransform (x : Float) (eps : Float := 0.001) : Float :=
+  let numer := Float.sqrt (1.0 + 4.0 * eps * (Float.abs x + 1.0 + eps)) - 1.0
+  let core := numer / (2.0 * eps)
+  floatSign x * (core * core - 1.0)
 
-end AlphaGradNet
+private def applyValueTransform
+    (kind : AlphaGradValueTransform)
+    (x : Float) :
+    Float :=
+  match kind with
+  | .id => x
+  | .log => symlog x
+  | .default => defaultValueTransform x
 
-private structure NetEval (actionDim : UInt64) where
-  fc1Weight : Array Float
-  fc1Bias : Array Float
-  policyWeight : Array Float
-  policyBias : Array Float
-  valueWeight : Array Float
-  valueBias : Float
-  deriving Repr
-
-private def extractBiasOrZeros
-    {n : UInt64}
-    (b? : Option (T #[n])) :
-    IO (Array Float) := do
-  match b? with
-  | some b => data.tensorToFloatArray' (nn.eraseShape b)
-  | none => pure (Array.replicate n.toNat 0.0)
-
-private def buildEvalNet
-    {actionDim : UInt64}
-    (net : AlphaGradNet actionDim) :
-    IO (NetEval actionDim) := do
-  let fc1Weight ← data.tensorToFloatArray' (nn.eraseShape net.fc1.weight)
-  let fc1Bias ← extractBiasOrZeros net.fc1.bias
-  let policyWeight ← data.tensorToFloatArray' (nn.eraseShape net.policyHead.weight)
-  let policyBias ← extractBiasOrZeros net.policyHead.bias
-  let valueWeight ← data.tensorToFloatArray' (nn.eraseShape net.valueHead.weight)
-  let valueBiasArr ← extractBiasOrZeros net.valueHead.bias
-  let valueBias := valueBiasArr.getD 0 0.0
-  pure {
-    fc1Weight := fc1Weight
-    fc1Bias := fc1Bias
-    policyWeight := policyWeight
-    policyBias := policyBias
-    valueWeight := valueWeight
-    valueBias := valueBias
-  }
-
-private def evalStatePolicyValue
-    {actionDim : UInt64}
-    (net : NetEval actionDim)
-    (envCfg : AlphaGradMctxConfig)
-    (s : AlphaGradState) :
-    Array Float × Float :=
-  Id.run do
-    let feats := stateFeatures envCfg s
-    let obsNat := OBS_DIM.toNat
-    let hiddenNat := HIDDEN_DIM.toNat
-    let actionNat := actionDim.toNat
-
-    let mut hidden : Array Float := Array.replicate hiddenNat 0.0
-    for j in [:hiddenNat] do
-      let mut acc := net.fc1Bias.getD j 0.0
-      for i in [:obsNat] do
-        let w := net.fc1Weight.getD (j * obsNat + i) 0.0
-        acc := acc + w * feats.getD i 0.0
-      hidden := hidden.set! j (if acc > 0.0 then acc else 0.0)
-
-    let mut rawLogits : Array Float := Array.replicate actionNat 0.0
-    for a in [:actionNat] do
-      let mut acc := net.policyBias.getD a 0.0
-      for j in [:hiddenNat] do
-        let w := net.policyWeight.getD (a * hiddenNat + j) 0.0
-        acc := acc + w * hidden.getD j 0.0
-      rawLogits := rawLogits.set! a acc
-
-    let mut value := net.valueBias
-    for j in [:hiddenNat] do
-      let w := net.valueWeight.getD j 0.0
-      value := value + w * hidden.getD j 0.0
-
-    let invalid := invalidActionMask envCfg s
-    let logits := maskInvalidLogits rawLogits invalid
-    return (logits, value)
+private def invertValueTransform
+    (kind : AlphaGradValueTransform)
+    (x : Float) :
+    Float :=
+  match kind with
+  | .id => x
+  | .log => symexp x
+  | .default => defaultInverseValueTransform x
 
 private structure PPORolloutStep where
   features : Array Float
@@ -316,32 +178,16 @@ private def normalizeArray (xs : Array Float) : Array Float :=
     let s := stdArray xs
     xs.map (fun x => (x - m) / s)
 
-private def rowsToTensor?
-    (rows : Array (Array Float))
-    (cols : UInt64) :
-    Except String (Σ n : UInt64, T #[n, cols]) := do
-  let colsNat := cols.toNat
-  for i in [:rows.size] do
-    let row := rows.getD i #[]
-    if row.size != colsNat then
-      throw s!"Row {i} width mismatch: expected {colsNat}, got {row.size}."
-  let mut flat : Array Float := #[]
-  for row in rows do
-    for x in row do
-      flat := flat.push x
-  let n : UInt64 := rows.size.toUInt64
-  let tDyn := data.fromFloatArray flat
-  let t : T #[n, cols] := reshape tDyn #[n, cols]
-  pure ⟨n, t⟩
-
 private def rolloutPPOEpisode
-    {actionDim : UInt64}
+    {vertexDim tokenDim : UInt64}
     (task : TaskSpec)
-    (net : NetEval actionDim)
+    (net : EvalNet vertexDim tokenDim)
     (seed : UInt64) :
     Except String (Array PPORolloutStep × Float × UInt64) := do
-  if actionDim.toNat != task.numActions then
-    throw s!"Network actionDim={actionDim} does not match task action surface={task.numActions}."
+  if vertexDim != taskVertexDim task then
+    throw s!"Network vertexDim={vertexDim} does not match task vertex domain={task.numVertices}."
+  if tokenDim != taskTokenDim task then
+    throw s!"Network tokenDim={tokenDim} does not match task observation width={taskTokenDim task}."
 
   let s0 ← initAlphaGradState? task.graph task.numVertices
   let mut s := s0
@@ -351,7 +197,7 @@ private def rolloutPPOEpisode
   let mut iters := 0
 
   while iters < maxSteps && !(isTerminal task.envCfg s) do
-    let features := stateFeatures task.envCfg s
+    let features := exportObservationFlat task.envCfg s
     let (logits, value) := evalStatePolicyValue net task.envCfg s
     let probs := softmax logits
     let (action, key') ← sampleCategorical? probs key
@@ -381,12 +227,14 @@ private def rolloutPPOEpisode
   pure (steps, s.cumulativeReward, key)
 
 private def evalGreedyReward?
-    {actionDim : UInt64}
+    {vertexDim tokenDim : UInt64}
     (task : TaskSpec)
-    (net : NetEval actionDim) :
+    (net : EvalNet vertexDim tokenDim) :
     Except String Float := do
-  if actionDim.toNat != task.numActions then
-    throw s!"Network actionDim={actionDim} does not match task action surface={task.numActions}."
+  if vertexDim != taskVertexDim task then
+    throw s!"Network vertexDim={vertexDim} does not match task vertex domain={task.numVertices}."
+  if tokenDim != taskTokenDim task then
+    throw s!"Network tokenDim={tokenDim} does not match task observation width={taskTokenDim task}."
   let s0 ← initAlphaGradState? task.graph task.numVertices
   let mut s := s0
   let maxSteps := task.envCfg.maxEpisodeSteps.getD task.numEliminableVertices
@@ -426,13 +274,14 @@ structure PPOSummary where
   deriving Repr
 
 private def ppoUpdate
-    {actionDim : UInt64}
-    (net : AlphaGradNet actionDim)
-    (optState : Optim.AdamWState (AlphaGradNet actionDim))
+    {vertexDim tokenDim : UInt64}
+    (task : TaskSpec)
+    (net : AlphaGradNet vertexDim tokenDim)
+    (optState : Optim.AdamWState (AlphaGradNet vertexDim tokenDim))
     (steps : Array PPORolloutStep)
     (cfg : PPOTrainConfig) :
     IO (Except String
-      (AlphaGradNet actionDim × Optim.AdamWState (AlphaGradNet actionDim) × Float × Float × Float)) := do
+      (AlphaGradNet vertexDim tokenDim × Optim.AdamWState (AlphaGradNet vertexDim tokenDim) × Float × Float × Float)) := do
   if steps.isEmpty then
     return .error "PPO update received an empty rollout batch."
 
@@ -442,7 +291,7 @@ private def ppoUpdate
   let (advantagesRaw, returnsRaw) := computeGAE steps cfg.gamma cfg.gaeLambda
   let advantages := normalizeArray advantagesRaw
 
-  match rowsToTensor? rows OBS_DIM with
+  match obsRowsToTensor3d? rows vertexDim tokenDim with
   | .error msg =>
     return .error msg
   | .ok ⟨n, obs⟩ =>
@@ -454,6 +303,22 @@ private def ppoUpdate
     let actionDyn := data.fromInt64Array actions
     let actionT0 : T #[n, 1] := reshape actionDyn #[n, 1]
     let actionT : T #[n, 1] := data.toLong actionT0
+    let attnMaskT ←
+      match attentionMaskTensor? rows vertexDim tokenDim with
+      | .error msg =>
+        return .error msg
+      | .ok ⟨nMask, mask⟩ =>
+        if nMask != n then
+          return .error s!"Attention mask batch mismatch: expected {n}, got {nMask}."
+        pure mask
+    let actionIndexT ←
+      match actionIndexTensor n task.graph.actionVertices with
+      | .error msg =>
+        return .error msg
+      | .ok ⟨actionDim, idxs⟩ =>
+        if actionDim.toNat != task.numActions then
+          return .error s!"Action-surface width mismatch: expected {task.numActions}, got {actionDim}."
+        pure idxs
 
     let oldLogDyn := data.fromFloatArray oldLogProbs
     let oldLogT : T #[n, 1] := reshape oldLogDyn #[n, 1]
@@ -470,7 +335,8 @@ private def ppoUpdate
 
     for _ in [:cfg.updateEpochs] do
       let working := TensorStruct.zeroGrads (TensorStruct.makeLeafParams netCur)
-      let (logits, values) := AlphaGradNet.forward working obs
+      let (vertexLogits, values) := AlphaGradNet.forward working obs (some attnMaskT)
+      let logits : T #[n, task.numActions.toUInt64] := gather vertexLogits (1 : Int64) actionIndexT
       let logProbsAll := nn.log_softmax logits (-1)
       let selectedLogProbs : T #[n, 1] := gather logProbsAll (1 : Int64) actionT
 
@@ -512,8 +378,9 @@ def trainPPO
     (task : TaskSpec)
     (cfg : PPOTrainConfig := {}) :
     IO (Except String PPOSummary) := do
-  let actionDim : UInt64 := task.numActions.toUInt64
-  let net0 ← AlphaGradNet.init actionDim
+  let vertexDim := taskVertexDim task
+  let tokenDim := taskTokenDim task
+  let net0 ← AlphaGradNet.init vertexDim tokenDim
   let net0 := TensorStruct.makeLeafParams net0
   let opt := Optim.adamw (lr := cfg.learningRate) (weight_decay := cfg.weightDecay)
   let optState0 := opt.init net0
@@ -557,7 +424,7 @@ def trainPPO
     if avgRollout > bestAvgRollout then
       bestAvgRollout := avgRollout
 
-    match (← ppoUpdate net optState allSteps cfg) with
+    match (← ppoUpdate task net optState allSteps cfg) with
     | .error msg =>
       return .error s!"PPO update failed at epoch {epoch + 1}: {msg}"
     | .ok (net', optState', policyLoss, valueLoss, entropy) =>
@@ -591,16 +458,18 @@ def trainPPO
   IO.println s!"[AlphaGradPPO] summary={reprStr summary}"
   pure (.ok summary)
 
-private structure AZSearchParams (actionDim : UInt64) where
+private structure AZSearchParams (vertexDim tokenDim : UInt64) where
   envCfg : AlphaGradMctxConfig
-  net : NetEval actionDim
+  net : EvalNet vertexDim tokenDim
+  valueTransform : AlphaGradValueTransform
 
 private def recurrentFromNet
-    {actionDim : UInt64} :
-    RecurrentFn (AZSearchParams actionDim) AlphaGradState :=
+    {vertexDim tokenDim : UInt64} :
+    RecurrentFn (AZSearchParams vertexDim tokenDim) AlphaGradState :=
   fun p _rng action s =>
     let t := transition p.envCfg s action
-    let (priors, value) := evalStatePolicyValue p.net p.envCfg t.nextState
+    let (priors, rawValue) := evalStatePolicyValue p.net p.envCfg t.nextState
+    let value := invertValueTransform p.valueTransform rawValue
     let discount := if t.done then 0.0 else p.envCfg.discount
     ({ reward := t.reward, discount := discount, priorLogits := priors, value := value }, t.nextState)
 
@@ -615,14 +484,16 @@ structure AlphaZeroTrainConfig where
   episodesPerEpoch : Nat := 8
   updateEpochs : Nat := 8
   gamma : Float := 1.0
-  valueCoef : Float := 0.5
+  valueWeight : Float := 10.0
   learningRate : Float := 3.0e-4
   weightDecay : Float := 1.0e-4
   numSimulations : Nat := 48
   maxDepth : Option Nat := none
-  maxNodes : Option Nat := none
-  dirichletFraction : Float := 0.25
-  temperature : Float := 1.0
+  valueTransform : AlphaGradValueTransform := .log
+  qtransformValueScale : Float := 0.01
+  qtransformMaxvisitInit : Float := 25.0
+  qtransformRescaleValues : Bool := true
+  qtransformUseMixedValue : Bool := true
   seed : UInt64 := 991337
   logEvery : Nat := 4
   deriving Repr
@@ -646,18 +517,21 @@ private def discountedReturns (rewards : Array Float) (gamma : Float) : Array Fl
   return out
 
 private def rolloutAlphaZeroEpisode
-    {actionDim : UInt64}
+    {vertexDim tokenDim : UInt64}
     (task : TaskSpec)
-    (net : NetEval actionDim)
+    (net : EvalNet vertexDim tokenDim)
     (cfg : AlphaZeroTrainConfig)
     (seed : UInt64) :
     Except String (Array AZSample × Float × UInt64) := do
-  if actionDim.toNat != task.numActions then
-    throw s!"Network actionDim={actionDim} does not match task action surface={task.numActions}."
+  if vertexDim != taskVertexDim task then
+    throw s!"Network vertexDim={vertexDim} does not match task vertex domain={task.numVertices}."
+  if tokenDim != taskTokenDim task then
+    throw s!"Network tokenDim={tokenDim} does not match task observation width={taskTokenDim task}."
   let s0 ← initAlphaGradState? task.graph task.numVertices
-  let searchParams : AZSearchParams actionDim := {
+  let searchParams : AZSearchParams vertexDim tokenDim := {
     envCfg := task.envCfg
     net := net
+    valueTransform := cfg.valueTransform
   }
 
   let mut s := s0
@@ -665,13 +539,13 @@ private def rolloutAlphaZeroEpisode
   let mut featRows : Array (Array Float) := #[]
   let mut policyTargets : Array (Array Float) := #[]
   let mut rewards : Array Float := #[]
-  let mut tree? : Option (Tree AlphaGradState Unit) := none
   let maxSteps := task.envCfg.maxEpisodeSteps.getD task.numEliminableVertices
   let mut steps : Nat := 0
 
   while steps < maxSteps && !(isTerminal task.envCfg s) do
-    let features := stateFeatures task.envCfg s
-    let (priors, value) := evalStatePolicyValue net task.envCfg s
+    let features := exportObservationFlat task.envCfg s
+    let (priors, rawValue) := evalStatePolicyValue net task.envCfg s
+    let value := invertValueTransform cfg.valueTransform rawValue
     let invalid := invalidActionMask task.envCfg s
     if invalid.all (fun b => b) then
       throw s!"AlphaZero root has no feasible actions at step {s.stepCount}."
@@ -681,18 +555,23 @@ private def rolloutAlphaZeroEpisode
       value := value
       embedding := s
     }
-    let out := alphazeroPolicy
+    let out := gumbelMuZeroPolicy
       (params := searchParams)
       (rngKey := key)
       (root := root)
       (recurrentFn := recurrentFromNet)
       (numSimulations := cfg.numSimulations)
-      (searchTree := tree?)
-      (maxNodes := cfg.maxNodes)
       (invalidActions := some invalid)
       (maxDepth := cfg.maxDepth)
-      (dirichletFraction := cfg.dirichletFraction)
-      (temperature := cfg.temperature)
+      (qtransform := fun tree nodeIndex =>
+        qtransformCompletedByMixValue
+          tree nodeIndex
+          cfg.qtransformValueScale
+          cfg.qtransformMaxvisitInit
+          cfg.qtransformRescaleValues
+          cfg.qtransformUseMixedValue)
+      (maxNumConsideredActions := task.mctsCfg.maxNumConsideredActions)
+      (gumbelScale := task.mctsCfg.gumbelScale)
 
     let t := transition task.envCfg s out.action
     featRows := featRows.push features
@@ -700,11 +579,6 @@ private def rolloutAlphaZeroEpisode
     rewards := rewards.push t.reward
     s := t.nextState
     key := mix (key + UInt64.ofNat (steps + 1))
-    tree? :=
-      if t.done then
-        none
-      else
-        some (getSubtree out.searchTree out.action)
     steps := steps + 1
 
   if !(isTerminal task.envCfg s) then
@@ -721,13 +595,14 @@ private def rolloutAlphaZeroEpisode
   pure (samples, s.cumulativeReward, key)
 
 private def alphaZeroUpdate
-    {actionDim : UInt64}
-    (net : AlphaGradNet actionDim)
-    (optState : Optim.AdamWState (AlphaGradNet actionDim))
+    {vertexDim tokenDim : UInt64}
+    (task : TaskSpec)
+    (net : AlphaGradNet vertexDim tokenDim)
+    (optState : Optim.AdamWState (AlphaGradNet vertexDim tokenDim))
     (samples : Array AZSample)
     (cfg : AlphaZeroTrainConfig) :
     IO (Except String
-      (AlphaGradNet actionDim × Optim.AdamWState (AlphaGradNet actionDim) × Float × Float)) := do
+      (AlphaGradNet vertexDim tokenDim × Optim.AdamWState (AlphaGradNet vertexDim tokenDim) × Float × Float)) := do
   if samples.isEmpty then
     return .error "AlphaZero update received an empty sample batch."
 
@@ -735,13 +610,21 @@ private def alphaZeroUpdate
   let policyRows := samples.map (·.policyTarget)
   let valueTargets := samples.map (·.valueTarget)
 
-  match rowsToTensor? obsRows OBS_DIM with
+  match obsRowsToTensor3d? obsRows vertexDim tokenDim with
   | .error msg =>
     return .error msg
   | .ok ⟨n, obs⟩ =>
+    let attnMaskT ←
+      match attentionMaskTensor? obsRows vertexDim tokenDim with
+      | .error msg =>
+        return .error msg
+      | .ok ⟨nMask, mask⟩ =>
+        if nMask != n then
+          return .error s!"Attention mask batch mismatch: expected {n}, got {nMask}."
+        pure mask
     if policyRows.size != n.toNat then
       return .error s!"AlphaZero policy rows mismatch: expected {n.toNat}, got {policyRows.size}."
-    let actionNat := actionDim.toNat
+    let actionNat := task.numActions
     let mut flatPolicy : Array Float := #[]
     for i in [:policyRows.size] do
       let row := policyRows.getD i #[]
@@ -750,10 +633,19 @@ private def alphaZeroUpdate
       for x in row do
         flatPolicy := flatPolicy.push x
     let policyDyn := data.fromFloatArray flatPolicy
-    let policyT : T #[n, actionDim] := reshape policyDyn #[n, actionDim]
+    let policyT : T #[n, task.numActions.toUInt64] := reshape policyDyn #[n, task.numActions.toUInt64]
+    let actionIndexT ←
+      match actionIndexTensor n task.graph.actionVertices with
+      | .error msg =>
+        return .error msg
+      | .ok ⟨actionDim, idxs⟩ =>
+        if actionDim.toNat != task.numActions then
+          return .error s!"Action-surface width mismatch: expected {task.numActions}, got {actionDim}."
+        pure idxs
 
     if valueTargets.size != n.toNat then
       return .error s!"AlphaZero value targets mismatch: expected {n.toNat}, got {valueTargets.size}."
+    let valueTargets := valueTargets.map (applyValueTransform cfg.valueTransform)
     let valueDyn := data.fromFloatArray valueTargets
     let valueT : T #[n, 1] := reshape valueDyn #[n, 1]
 
@@ -764,13 +656,14 @@ private def alphaZeroUpdate
 
     for _ in [:cfg.updateEpochs] do
       let working := TensorStruct.zeroGrads (TensorStruct.makeLeafParams netCur)
-      let (logits, values) := AlphaGradNet.forward working obs
+      let (vertexLogits, values) := AlphaGradNet.forward working obs (some attnMaskT)
+      let logits : T #[n, task.numActions.toUInt64] := gather vertexLogits (1 : Int64) actionIndexT
       let logProbs := nn.log_softmax logits (-1)
       let policyPer : T #[n] := nn.sumDim (policyT * logProbs) 1 false
       let policyLoss := mul_scalar (nn.meanAll policyPer) (-1.0)
       let valueErr := values - valueT
       let valueLoss := nn.meanAll (valueErr * valueErr)
-      let totalLoss := policyLoss + mul_scalar valueLoss cfg.valueCoef
+      let totalLoss := policyLoss + mul_scalar valueLoss cfg.valueWeight
 
       let _ ← autograd.backwardLoss totalLoss
       let grads := TensorStruct.grads working
@@ -787,8 +680,9 @@ def trainAlphaZero
     (task : TaskSpec)
     (cfg : AlphaZeroTrainConfig := {}) :
     IO (Except String AlphaZeroSummary) := do
-  let actionDim : UInt64 := task.numActions.toUInt64
-  let net0 ← AlphaGradNet.init actionDim
+  let vertexDim := taskVertexDim task
+  let tokenDim := taskTokenDim task
+  let net0 ← AlphaGradNet.init vertexDim tokenDim
   let net0 := TensorStruct.makeLeafParams net0
   let opt := Optim.adamw (lr := cfg.learningRate) (weight_decay := cfg.weightDecay)
   let optState0 := opt.init net0
@@ -821,7 +715,7 @@ def trainAlphaZero
     if avgReward > bestAvgReward then
       bestAvgReward := avgReward
 
-    match (← alphaZeroUpdate net optState samples cfg) with
+    match (← alphaZeroUpdate task net optState samples cfg) with
     | .error msg =>
       return .error s!"AlphaZero update failed at epoch {epoch + 1}: {msg}"
     | .ok (net', optState', policyLoss, valueLoss) =>
