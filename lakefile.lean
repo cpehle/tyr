@@ -281,6 +281,12 @@ lean_exe test_runner_experimental where
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
+/-- Standalone numeric AD/elimination test runner. -/
+lean_exe TestADNumerics where
+  root := `Tests.RunTestADNumerics
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
 /-- Focused LeanTest runner for the Riemannian nanoGPT tests. -/
 lean_exe RunRiemannianNanoGPTTests where
   root := `Tests.RunRiemannianNanoGPTTests

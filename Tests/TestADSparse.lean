@@ -105,4 +105,34 @@ def testComposeIdentityLikeKeepsKnownDimMetadata : IO Unit := do
     LeanTest.assertEqual composed.inDim? (some 3)
       "Identity-like placeholder should preserve known input dimensions from the composed map"
 
+@[test]
+def testApplyAndPullbackExecuteNumerically : IO Unit := do
+  let m := mkMap "eval" 2 3 #[
+    mkEntry 0 0 2.0,
+    mkEntry 1 1 (-1.0),
+    mkEntry 0 2 4.0
+  ]
+  match m.apply #[3.0, 5.0] with
+  | .error msg =>
+    LeanTest.fail s!"Sparse apply should execute numerically, got: {msg}"
+  | .ok out =>
+    LeanTest.assertTrue (out == #[6.0, -5.0, 12.0])
+      s!"Unexpected sparse forward evaluation result: {reprStr out}"
+
+  match m.pullback #[7.0, 11.0, 13.0] with
+  | .error msg =>
+    LeanTest.fail s!"Sparse pullback should execute numerically, got: {msg}"
+  | .ok out =>
+    LeanTest.assertTrue (out == #[66.0, -11.0])
+      s!"Unexpected sparse pullback result: {reprStr out}"
+
+@[test]
+def testApplyRejectsPlaceholderMaps : IO Unit := do
+  match identityLike.apply #[1.0] with
+  | .ok _ =>
+    LeanTest.fail "Sparse apply should reject identity-like placeholders without executable entries"
+  | .error msg =>
+    LeanTest.assertTrue (msg.contains "identity-like placeholder")
+      s!"Unexpected placeholder-evaluation diagnostic: {msg}"
+
 end Tests.ADSparse
