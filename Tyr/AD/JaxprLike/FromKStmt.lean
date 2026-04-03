@@ -305,7 +305,7 @@ def fromKStmts (stmts : Array KStmt) : Except (Array String) LeanJaxpr := Id.run
             OpParam.mkName .kind (atomName "unary"),
             OpParam.mkName .opTag (atomName (kstmtUnaryOpTag op))
           ]
-          typed := (TypedOp.unary (atomName (kstmtUnaryOpTag op)))
+          typed := (TypedOp.unary (kstmtUnaryOpName op))
           source := stmtSourceRef idx0
         }
     | .binary op dst a b =>
@@ -336,7 +336,7 @@ def fromKStmts (stmts : Array KStmt) : Except (Array String) LeanJaxpr := Id.run
             OpParam.mkName .kind (atomName "binary"),
             OpParam.mkName .opTag (atomName (kstmtBinaryOpTag op))
           ]
-          typed := (TypedOp.binary (atomName (kstmtBinaryOpTag op)))
+          typed := (TypedOp.binary (kstmtBinaryOpName op))
           source := stmtSourceRef idx0
         }
     | .reduce op axis dst src =>

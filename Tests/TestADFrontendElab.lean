@@ -117,11 +117,13 @@ unsafe def testDeriveSinglePrimitiveFrontendRegistrationNary : IO Unit := do
   LeanTest.assertTrue (eqn.typedOp.schema = .nary)
     s!"Four-input primitive derivation should use the n-ary typed family, got {reprStr eqn.typedOp.schema}."
   match eqn.typedOp.payload with
-  | .nary tag arity =>
+  | .nary tag inputArity outputArity =>
       LeanTest.assertEqual tag `Tests.ADFrontendElab.frontend_quaternary
         "N-ary typed payload should preserve the normalized op tag."
-      LeanTest.assertEqual arity 4
+      LeanTest.assertEqual inputArity 4
         "N-ary typed payload should preserve the frontend primitive arity."
+      LeanTest.assertEqual outputArity 1
+        "N-ary typed payload should preserve the frontend result arity."
   | payload =>
       LeanTest.fail s!"Expected n-ary typed payload, got {reprStr payload}"
 

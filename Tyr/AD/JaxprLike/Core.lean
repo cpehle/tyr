@@ -57,6 +57,7 @@ inductive OpParamKey where
   | variant
   | sourceOp
   | controlStaticArgCount
+  | controlRegionCount
   | condPredicateCount
   | condDataInputCount
   | scanCarryInputCount
@@ -87,6 +88,7 @@ def OpParamKey.toString : OpParamKey → String
   | .variant => "variant"
   | .sourceOp => "sourceOp"
   | .controlStaticArgCount => "controlStaticArgCount"
+  | .controlRegionCount => "controlRegionCount"
   | .condPredicateCount => "condPredicateCount"
   | .condDataInputCount => "condDataInputCount"
   | .scanCarryInputCount => "scanCarryInputCount"
@@ -278,6 +280,7 @@ inductive OpSchema where
 structure ControlFlowInfo where
   variant : Name
   staticArgCount : Nat := 0
+  regionCount : Nat := 0
   predicateCount : Nat := 0
   dataInputCount : Nat := 0
   carryInputCount : Nat := 0
@@ -292,7 +295,7 @@ inductive OpPayload where
   | unary (tag : Name)
   | binary (tag : Name)
   | ternary (tag : Name)
-  | nary (tag : Name) (arity : Nat)
+  | nary (tag : Name) (inputArity outputArity : Nat)
   | reduce (tag axis : Name)
   | broadcast (axis : Name)
   | binaryBroadcast (tag axis : Name)
@@ -327,8 +330,8 @@ def binary (tag : Name) : TypedOp :=
 def ternary (tag : Name) : TypedOp :=
   { schema := .ternary, payload := .ternary tag }
 
-def nary (tag : Name) (arity : Nat) : TypedOp :=
-  { schema := .nary, payload := .nary tag arity }
+def nary (tag : Name) (inputArity outputArity : Nat) : TypedOp :=
+  { schema := .nary, payload := .nary tag inputArity outputArity }
 
 def reduce (tag axis : Name) : TypedOp :=
   { schema := .reduce, payload := .reduce tag axis }

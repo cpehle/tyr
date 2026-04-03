@@ -933,14 +933,18 @@ def testValidateTypedEqnArityFailure : IO Unit := do
     { id := 0, metaInfo := { role? := some .input } },
     { id := 1, metaInfo := { role? := some .input } }
   ] #[
-    JEqn.ofNormalizedOp 1 `test.bad_unary
-      #[
+    {
+      id := 1
+      op := `test.bad_unary
+      invars := #[
         { id := 0, metaInfo := { role? := some .input } },
         { id := 1, metaInfo := { role? := some .input } }
       ]
-      #[
+      outvars := #[
         { id := 2, metaInfo := { role? := some .output } }
       ]
+      typed := TypedOp.unary `test.bad_unary
+    }
   ] #[
     { id := 2, metaInfo := { role? := some .output } }
   ]
@@ -1000,13 +1004,47 @@ def testFromFnBodyAssignsNaryTypedFamily : IO Unit := do
       LeanTest.assertTrue (eqn.typedOp.schema = .nary)
         s!"Expected a n-ary typed family for unknown 4-ary op lowering, got {reprStr eqn.typedOp.schema}."
       match eqn.typedOp.payload with
-      | .nary tag arity =>
+      | .nary tag inputArity outputArity =>
           LeanTest.assertEqual tag `test.quaternary
             "N-ary typed lowering should preserve the canonical op tag."
-          LeanTest.assertEqual arity 4
+          LeanTest.assertEqual inputArity 4
             "N-ary typed lowering should preserve the operand arity."
+          LeanTest.assertEqual outputArity 1
+            "N-ary typed lowering should preserve the output arity."
       | payload =>
           LeanTest.fail s!"Expected n-ary payload for unknown 4-ary lowering, got {reprStr payload}"
+
+@[test]
+def testNormalizedUnknownMultiResultOpCarriesOutputArity : IO Unit := do
+  let in0 : JVar := { id := 1 }
+  let in1 : JVar := { id := 2 }
+  let in2 : JVar := { id := 3 }
+  let in3 : JVar := { id := 4 }
+  let out0 : JVar := { id := 5 }
+  let out1 : JVar := { id := 6 }
+  let jaxpr :=
+    mkNormalizedJaxpr
+      #[]
+      #[in0, in1, in2, in3]
+      #[JEqn.ofNormalizedOp 1 `test.multi_result_unknown #[in0, in1, in2, in3] #[out0, out1] #[]]
+      #[out0, out1]
+  let eqn := jaxpr.eqns[0]!
+  LeanTest.assertTrue (eqn.typedOp.schema = .nary)
+    s!"Unknown multi-result lowering should still use the n-ary schema, got {reprStr eqn.typedOp.schema}."
+  match eqn.typedOp.payload with
+  | .nary tag inputArity outputArity =>
+      LeanTest.assertEqual tag `test.multi_result_unknown
+        "Multi-result n-ary payload should preserve the normalized op tag."
+      LeanTest.assertEqual inputArity 4
+        "Multi-result n-ary payload should preserve the operand arity."
+      LeanTest.assertEqual outputArity 2
+        "Multi-result n-ary payload should preserve the result arity."
+  | payload =>
+      LeanTest.fail s!"Expected n-ary payload for unknown multi-result lowering, got {reprStr payload}"
+  match validate jaxpr with
+  | .ok () => pure ()
+  | .error errs =>
+      LeanTest.fail s!"Unknown multi-result normalized graphs should validate, got: {errs}"
 
 @[test]
 def testFromFnBodyCanonicalDotGeneralAndControlMetadata : IO Unit := do
@@ -1060,6 +1098,8 @@ def testFromFnBodyCanonicalDotGeneralAndControlMetadata : IO Unit := do
       "scan lowering should preserve the frontend/source primitive."
     LeanTest.assertEqual (scanEqn.params.findNat? .controlStaticArgCount) (some 1)
       "scan lowering should record erased/static control-arg count."
+    LeanTest.assertEqual (scanEqn.params.findNat? .controlRegionCount) (some 1)
+      "scan lowering should track region-handle count separately from static operands."
     LeanTest.assertEqual (scanEqn.params.findNat? .scanCarryInputCount) (some 1)
       "scan lowering should record carry-input count."
     LeanTest.assertEqual (scanEqn.params.findNat? .scanDataInputCount) (some 1)
@@ -1070,6 +1110,8 @@ def testFromFnBodyCanonicalDotGeneralAndControlMetadata : IO Unit := do
       s!"scan lowering should attach control-flow typed schema, got {reprStr scanEqn.typedOp.schema}."
     match scanEqn.typedOp.payload with
     | .controlFlow info =>
+      LeanTest.assertEqual info.regionCount 1
+        "scan lowering should preserve the declared control-flow region count."
       LeanTest.assertEqual info.regionIds.size 1
         "scan lowering should materialize one first-class body region."
       match jaxpr.regionById? (info.regionIds[0]!) with
@@ -1093,6 +1135,8 @@ def testFromFnBodyCanonicalDotGeneralAndControlMetadata : IO Unit := do
       "cond lowering should preserve the frontend/source primitive."
     LeanTest.assertEqual (condEqn.params.findNat? .controlStaticArgCount) (some 2)
       "cond lowering should record erased/static control-arg count."
+    LeanTest.assertEqual (condEqn.params.findNat? .controlRegionCount) (some 2)
+      "cond lowering should record region-handle count separately from static operands."
     LeanTest.assertEqual (condEqn.params.findNat? .condPredicateCount) (some 1)
       "cond lowering should record predicate-input count."
     LeanTest.assertEqual (condEqn.params.findNat? .condDataInputCount) (some 2)
@@ -1101,6 +1145,8 @@ def testFromFnBodyCanonicalDotGeneralAndControlMetadata : IO Unit := do
       s!"cond lowering should attach control-flow typed schema, got {reprStr condEqn.typedOp.schema}."
     match condEqn.typedOp.payload with
     | .controlFlow info =>
+      LeanTest.assertEqual info.regionCount 2
+        "cond lowering should preserve the declared control-flow region count."
       LeanTest.assertEqual info.regionIds.size 2
         "cond lowering should materialize two first-class branch regions."
       let condDataInputs :=
@@ -1129,6 +1175,69 @@ def testFromFnBodyCanonicalDotGeneralAndControlMetadata : IO Unit := do
     | .ok () => pure ()
     | .error errs =>
       LeanTest.fail s!"FnBody control-flow lowering should validate after region materialization, got: {errs}"
+
+@[test]
+def testFromFnBodySeparatesControlRegionCountFromStaticOperands : IO Unit := do
+  let x0 : Lean.IR.VarId := { idx := 0 }
+  let x1 : Lean.IR.VarId := { idx := 1 }
+  let pred : Lean.IR.VarId := { idx := 2 }
+  let vCond : Lean.IR.VarId := { idx := 3 }
+  let params : Array Param := #[
+    { x := x0, borrow := false, ty := IRType.object },
+    { x := x1, borrow := false, ty := IRType.object },
+    { x := pred, borrow := false, ty := IRType.object }
+  ]
+  let body : FnBody :=
+    .vdecl vCond IRType.object
+      (Expr.fap `Graphax.cond #[Arg.var pred, Arg.var x0, Arg.var x1, Arg.erased, Arg.erased, Arg.erased]) (
+        .ret (.var vCond)
+      )
+  match fromFnBody `test.control_region_count params body with
+  | .error msg =>
+      LeanTest.fail s!"fromFnBody should lower cond with extra static operands, got: {msg}"
+  | .ok jaxpr =>
+      let eqn := jaxpr.eqns[0]!
+      LeanTest.assertEqual (eqn.params.findNat? .controlStaticArgCount) (some 3)
+        "cond lowering should retain the full static-operand count."
+      LeanTest.assertEqual (eqn.params.findNat? .controlRegionCount) (some 2)
+        "cond lowering should bound region handles separately from generic static operands."
+      match eqn.typedOp.payload with
+      | .controlFlow info =>
+          LeanTest.assertEqual info.staticArgCount 3
+            "Typed control-flow info should preserve the total static-operand count."
+          LeanTest.assertEqual info.regionCount 2
+            "Typed control-flow info should preserve the declared region-handle count."
+          LeanTest.assertEqual info.regionIds.size 2
+            "Only the actual branch regions should be materialized."
+      | payload =>
+          LeanTest.fail s!"Expected control-flow payload for cond lowering, got {reprStr payload}"
+      match validate jaxpr with
+      | .ok () => pure ()
+      | .error errs =>
+          LeanTest.fail s!"Cond lowering with extra static operands should validate, got: {errs}"
+
+@[test]
+def testValidateRejectsInvalidNestedRegionBody : IO Unit := do
+  let innerIn : JVar := { id := 1 }
+  let innerOut : JVar := { id := 2 }
+  let badEqn := JEqn.ofNormalizedOp 17 `test.inner #[{ id := 99 }] #[innerOut] #[]
+  let badRegion : RegionDef :=
+    {
+      id := 1
+      role := `lambda.body
+      invars := #[innerIn]
+      outvars := #[innerOut]
+      eqns := #[badEqn]
+      isOpaque := false
+    }
+  let jaxpr := LeanJaxpr.mkNormalized #[] #[] #[] #[] #[badRegion]
+  match validate jaxpr with
+  | .ok () =>
+      LeanTest.fail "Validation should reject nested region bodies that reference unavailable values."
+  | .error errs =>
+      let hasRegionErr := errs.any (fun e => e.contains "region 1 (`lambda.body`) equation 0 input 0 references unavailable variable ID 99")
+      LeanTest.assertTrue hasRegionErr
+        s!"Expected nested-region validation diagnostic, got: {errs}"
 
 @[test]
 def testFromFnBodyAssignsArityTypedFamilies : IO Unit := do

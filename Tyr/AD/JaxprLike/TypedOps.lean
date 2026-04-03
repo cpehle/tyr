@@ -15,6 +15,19 @@ private def atomName (value : String) : Lean.Name :=
 private def unknownAxisName : Lean.Name :=
   atomName "unknownAxis"
 
+private def defaultControlRegionCount
+    (variant : Lean.Name)
+    (staticArgCount : Nat) :
+    Nat :=
+  if staticArgCount = 0 then
+    0
+  else if variant == `scan then
+    min 1 staticArgCount
+  else if variant == `cond then
+    min 2 staticArgCount
+  else
+    staticArgCount
+
 private def findUnaryKStmt? (opName : OpName) : Option Tyr.GPU.Codegen.UnaryOp :=
   allKStmtUnaryOps.find? (fun op => kstmtUnaryOpName op == opName)
 
@@ -63,23 +76,27 @@ private def controlFlowInfo?
     (inputCount outputCount : Nat) :
     Option ControlFlowInfo :=
   if isCondAliasOpName opName || (params.findNat? .condPredicateCount).isSome then
+    let staticArgCount := (params.findNat? .controlStaticArgCount).getD 0
     let predicateDefault := if inputCount = 0 then 0 else 1
     let predicateCount := (params.findNat? .condPredicateCount).getD predicateDefault
     let maxData := inputCount - predicateCount
     some {
       variant := `cond
-      staticArgCount := (params.findNat? .controlStaticArgCount).getD 0
+      staticArgCount := staticArgCount
+      regionCount := (params.findNat? .controlRegionCount).getD (defaultControlRegionCount `cond staticArgCount)
       predicateCount := predicateCount
       dataInputCount := (params.findNat? .condDataInputCount).getD maxData
     }
   else if isScanAliasOpName opName || (params.findNat? .scanCarryInputCount).isSome then
+    let staticArgCount := (params.findNat? .controlStaticArgCount).getD 0
     let carryDefault := if inputCount = 0 then 0 else 1
     let carryInputCount := (params.findNat? .scanCarryInputCount).getD carryDefault
     let maxData := inputCount - carryInputCount
     let carryOutputDefault := min carryInputCount outputCount
     some {
       variant := `scan
-      staticArgCount := (params.findNat? .controlStaticArgCount).getD 0
+      staticArgCount := staticArgCount
+      regionCount := (params.findNat? .controlRegionCount).getD (defaultControlRegionCount `scan staticArgCount)
       dataInputCount := (params.findNat? .scanDataInputCount).getD maxData
       carryInputCount := carryInputCount
       carryOutputCount := (params.findNat? .scanCarryOutputCount).getD carryOutputDefault
@@ -193,8 +210,7 @@ def typedOpForNormalizedOp
       | 1, 1 => TypedOp.unary opName
       | 2, 1 => TypedOp.binary opName
       | 3, 1 => TypedOp.ternary opName
-      | arity, 1 => TypedOp.nary opName arity
-      | arity, _ => TypedOp.nary opName arity
+      | arity, outArity => TypedOp.nary opName arity outArity
 
 namespace JEqn
 
