@@ -182,6 +182,34 @@ def testAlphaGradTrainerTinyCheckpointCycle : IO Unit := do
     "AlphaGradTrainer should load and evaluate the latest checkpoint."
 
 @[test]
+def testAlphaGradTrainerPureBackendTinyCheckpointCycle : IO Unit := do
+  let runDir := s!"/tmp/alphagrad_trainer_pure_{← IO.monoMsNow}"
+  let trainCode ← Examples.AlphaGradPort.trainerMain [
+    "train", "alphazero", "Perceptron",
+    "--search-backend", "pure",
+    "--epochs", "1",
+    "--episodes-per-epoch", "1",
+    "--num-envs", "1",
+    "--num-simulations", "2",
+    "--batch-size", "4",
+    "--update-batches", "1",
+    "--checkpoint-every", "1",
+    "--eval-every", "1",
+    "--run-dir", runDir,
+    "--overwrite"
+  ]
+  LeanTest.assertEqual trainCode 0
+    "AlphaGradTrainer should complete a tiny pure-backend AlphaZero training run."
+  let evalCode ← Examples.AlphaGradPort.trainerMain [
+    "eval", "alphazero", "Perceptron",
+    "--search-backend", "pure",
+    "--num-simulations", "2",
+    "--run-dir", runDir
+  ]
+  LeanTest.assertEqual evalCode 0
+    "AlphaGradTrainer should evaluate checkpoints through the pure AlphaZero backend."
+
+@[test]
 def testAlphaGradObservationCapsPadAcrossTasks : IO Unit := do
   let taskA ←
     match (← materializeTask .roeFlux1d) with

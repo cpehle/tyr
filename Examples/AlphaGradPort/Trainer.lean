@@ -135,6 +135,29 @@ private def capsVertexDim (caps : ObservationCaps) : UInt64 :=
 private def capsTokenDim (caps : ObservationCaps) : UInt64 :=
   caps.tokenDim.toUInt64
 
+inductive AlphaGradSearchBackend where
+  | pure
+  | tensorized
+  deriving Repr, Inhabited, BEq
+
+instance : ToJson AlphaGradSearchBackend where
+  toJson
+    | .pure => Json.str "pure"
+    | .tensorized => Json.str "tensorized"
+
+instance : ToString AlphaGradSearchBackend where
+  toString
+    | .pure => "pure"
+    | .tensorized => "tensorized"
+
+instance : FromJson AlphaGradSearchBackend where
+  fromJson?
+    | .str "pure" => pure .pure
+    | .str "tensorized" => pure .tensorized
+    | .str "monadic" => pure .tensorized
+    | .str s => throw s!"Unknown AlphaGrad search backend '{s}'."
+    | _ => throw "Expected AlphaGrad search backend as JSON string."
+
 private def evalGreedyReward?
     {vertexDim tokenDim : UInt64}
     (task : TaskSpec)
@@ -165,6 +188,7 @@ private def evalGreedyReward?
 structure AlphaGradTrainerConfig where
   mode : TrainMode := .alphazero
   task : TaskName := .perceptron
+  searchBackend : AlphaGradSearchBackend := .tensorized
   epochs : Nat := 64
   episodesPerEpoch : Nat := 16
   numEnvs : Nat := 8
@@ -288,6 +312,35 @@ private def evalStatesPolicyValueTensorIO
   | .error msg => throw <| IO.userError msg
   | .ok out => pure out
 
+private def evalStatesPolicyValuePure
+    {vertexDim tokenDim : UInt64}
+    (net : EvalNet vertexDim tokenDim)
+    (envCfg : AlphaGradMctxConfig)
+    (caps : ObservationCaps)
+    (states : Array AlphaGradState) :
+    Array (Array Float) × Array Float :=
+  (states.map (fun s => (evalStatePolicyValueWithCaps net envCfg s caps).1),
+   states.map (fun s => (evalStatePolicyValueWithCaps net envCfg s caps).2))
+
+private structure BatchedAZSearchParamsPure (vertexDim tokenDim : UInt64) where
+  caps : ObservationCaps
+  envCfg : AlphaGradMctxConfig
+  net : EvalNet vertexDim tokenDim
+  valueTransform : AlphaGradValueTransform
+
+private def batchedRecurrentFromEvalNet
+    {vertexDim tokenDim : UInt64} :
+    BatchedRecurrentFn (BatchedAZSearchParamsPure vertexDim tokenDim) AlphaGradState :=
+  fun p _rng actions states =>
+    let transitions := (List.range states.size).toArray.map fun i =>
+      transition p.envCfg (states.getD i default) (actions.getD i 0)
+    let nextStates := transitions.map (·.nextState)
+    let (priors, rawValues) := evalStatesPolicyValuePure p.net p.envCfg p.caps nextStates
+    let values := rawValues.map (invertValueTransform p.valueTransform)
+    let rewards := transitions.map (·.reward)
+    let discounts := transitions.map (fun t => if t.done then 0.0 else p.envCfg.discount)
+    ({ reward := rewards, discount := discounts, priorLogits := priors, value := values }, nextStates)
+
 private structure BatchedAZSearchParams (vertexDim tokenDim : UInt64) where
   task : TaskSpec
   caps : ObservationCaps
@@ -312,11 +365,11 @@ private def batchedRecurrentFromNetM
       value := values
     }, nextStates)
 
-private def collectAlphaZeroEpisodeBatch
+private def collectAlphaZeroEpisodeBatchPure
     {vertexDim tokenDim : UInt64}
     (task : TaskSpec)
     (caps : ObservationCaps)
-    (net : AlphaGradNet vertexDim tokenDim)
+    (net : EvalNet vertexDim tokenDim)
     (cfg : AlphaGradTrainerConfig)
     (batchSize : Nat)
     (seed : UInt64) :
@@ -327,9 +380,9 @@ private def collectAlphaZeroEpisodeBatch
     match initAlphaGradState? task.graph task.numVertices with
     | .error msg => return .error msg
     | .ok s0 => pure s0
-  let searchParams : BatchedAZSearchParams vertexDim tokenDim := {
-    task := task
+  let searchParams : BatchedAZSearchParamsPure vertexDim tokenDim := {
     caps := caps
+    envCfg := task.envCfg
     net := net
     valueTransform := cfg.valueTransform
   }
@@ -342,48 +395,44 @@ private def collectAlphaZeroEpisodeBatch
   let mut step := 0
   while !active.isEmpty && step < maxSteps do
     let activeStates := active.map (fun idx => states.getD idx s0)
-    let evalOut ←
-      try
-        evalStatesPolicyValueTensorIO net task caps activeStates
-      catch e =>
-        return .error e.toString
+    let (priors, rawValues) := evalStatesPolicyValuePure net task.envCfg caps activeStates
     let invalids := activeStates.map (invalidActionMask task.envCfg)
     if invalids.any (fun row => row.all (fun b => b)) then
       return .error s!"AlphaZero batched root has no feasible actions at step {step}."
     let root : BatchedRootFnOutput AlphaGradState := {
-      priorLogits := evalOut.actionLogits
-      value := evalOut.values.map (invertValueTransform cfg.valueTransform)
+      priorLogits := priors
+      value := rawValues.map (invertValueTransform cfg.valueTransform)
       embedding := activeStates
     }
-    let out ←
-      try
-        gumbelMuZeroPolicyBatchedM
-          (params := searchParams)
-          (rngKey := key)
-          (root := root)
-          (recurrentFn := batchedRecurrentFromNetM)
-          (numSimulations := cfg.numSimulations)
-          (invalidActions := some invalids)
-          (maxDepth := some (cfg.maxDepth.getD task.numEliminableVertices))
-          (qtransform := fun tree nodeIndex =>
-            qtransformCompletedByMixValue
-              tree nodeIndex
-              cfg.qtransformValueScale
-              cfg.qtransformMaxvisitInit
-              cfg.qtransformRescaleValues
-              cfg.qtransformUseMixedValue)
-          (maxNumConsideredActions := task.mctsCfg.maxNumConsideredActions)
-          (gumbelScale := task.mctsCfg.gumbelScale)
-      catch e =>
-        return .error e.toString
+    let out := gumbelMuZeroPolicyBatched
+      (params := searchParams)
+      (rngKey := key)
+      (root := root)
+      (recurrentFn := batchedRecurrentFromEvalNet)
+      (numSimulations := cfg.numSimulations)
+      (invalidActions := some invalids)
+      (maxDepth := some (cfg.maxDepth.getD task.numEliminableVertices))
+      (qtransform := fun tree nodeIndex =>
+        qtransformCompletedByMixValue
+          tree nodeIndex
+          cfg.qtransformValueScale
+          cfg.qtransformMaxvisitInit
+          cfg.qtransformRescaleValues
+          cfg.qtransformUseMixedValue)
+      (maxNumConsideredActions := task.mctsCfg.maxNumConsideredActions)
+      (gumbelScale := task.mctsCfg.gumbelScale)
     let mut newActive : Array Nat := #[]
     for idx in [:active.size] do
       let global := active.getD idx 0
       let state := activeStates.getD idx s0
       let t := transition task.envCfg state (out.action.getD idx 0)
+      let features ←
+        match exportObservationFlatWithCaps? task.envCfg state caps with
+        | .error msg => return .error msg
+        | .ok row => pure row
       let currentPending := pending.getD global #[]
       pending := pending.set! global (currentPending.push {
-        features := evalOut.observations.getD idx #[]
+        features := features
         policyTarget := out.actionWeights.getD idx #[]
         reward := t.reward
       })
@@ -411,6 +460,115 @@ private def collectAlphaZeroEpisodeBatch
         done := i + 1 = envSteps.size
       }
   pure (.ok (samples, totals, key))
+
+private def collectAlphaZeroEpisodeBatch
+    {vertexDim tokenDim : UInt64}
+    (task : TaskSpec)
+    (caps : ObservationCaps)
+    (net : AlphaGradNet vertexDim tokenDim)
+    (cfg : AlphaGradTrainerConfig)
+    (batchSize : Nat)
+    (seed : UInt64)
+    (evalNet? : Option (EvalNet vertexDim tokenDim) := none) :
+    IO (Except String (Array ReplaySample × Array Float × UInt64)) := do
+  match cfg.searchBackend with
+  | .pure =>
+    let evalNet ←
+      match evalNet? with
+      | some evalNet => pure evalNet
+      | none => buildEvalNet (TensorStruct.detach net)
+    collectAlphaZeroEpisodeBatchPure task caps evalNet cfg batchSize seed
+  | .tensorized => do
+    if batchSize = 0 then
+      return .error "AlphaGrad batch collector requires batchSize > 0."
+    let s0 ←
+      match initAlphaGradState? task.graph task.numVertices with
+      | .error msg => return .error msg
+      | .ok s0 => pure s0
+    let searchParams : BatchedAZSearchParams vertexDim tokenDim := {
+      task := task
+      caps := caps
+      net := net
+      valueTransform := cfg.valueTransform
+    }
+    let maxSteps := task.envCfg.maxEpisodeSteps.getD task.numEliminableVertices
+    let mut states := Array.replicate batchSize s0
+    let mut active : Array Nat := (List.range batchSize).toArray
+    let mut pending : Array (Array PendingAZStep) := Array.replicate batchSize #[]
+    let mut totals : Array Float := Array.replicate batchSize 0.0
+    let mut key := seed
+    let mut step := 0
+    while !active.isEmpty && step < maxSteps do
+      let activeStates := active.map (fun idx => states.getD idx s0)
+      let evalOut ←
+        try
+          evalStatesPolicyValueTensorIO net task caps activeStates
+        catch e =>
+          return .error e.toString
+      let invalids := activeStates.map (invalidActionMask task.envCfg)
+      if invalids.any (fun row => row.all (fun b => b)) then
+        return .error s!"AlphaZero batched root has no feasible actions at step {step}."
+      let root : BatchedRootFnOutput AlphaGradState := {
+        priorLogits := evalOut.actionLogits
+        value := evalOut.values.map (invertValueTransform cfg.valueTransform)
+        embedding := activeStates
+      }
+      let out ←
+        try
+          gumbelMuZeroPolicyBatchedM
+            (params := searchParams)
+            (rngKey := key)
+            (root := root)
+            (recurrentFn := batchedRecurrentFromNetM)
+            (numSimulations := cfg.numSimulations)
+            (invalidActions := some invalids)
+            (maxDepth := some (cfg.maxDepth.getD task.numEliminableVertices))
+            (qtransform := fun tree nodeIndex =>
+              qtransformCompletedByMixValue
+                tree nodeIndex
+                cfg.qtransformValueScale
+                cfg.qtransformMaxvisitInit
+                cfg.qtransformRescaleValues
+                cfg.qtransformUseMixedValue)
+            (maxNumConsideredActions := task.mctsCfg.maxNumConsideredActions)
+            (gumbelScale := task.mctsCfg.gumbelScale)
+        catch e =>
+          return .error e.toString
+      let mut newActive : Array Nat := #[]
+      for idx in [:active.size] do
+        let global := active.getD idx 0
+        let state := activeStates.getD idx s0
+        let t := transition task.envCfg state (out.action.getD idx 0)
+        let currentPending := pending.getD global #[]
+        pending := pending.set! global (currentPending.push {
+          features := evalOut.observations.getD idx #[]
+          policyTarget := out.actionWeights.getD idx #[]
+          reward := t.reward
+        })
+        totals := totals.set! global (totals.getD global 0.0 + t.reward)
+        states := states.set! global t.nextState
+        if !t.done then
+          newActive := newActive.push global
+      active := newActive
+      key := mix (key + UInt64.ofNat (step + 1))
+      step := step + 1
+    if !active.isEmpty then
+      return .error s!"AlphaZero batched rollout did not terminate within {maxSteps} steps."
+    let mut samples : Array ReplaySample := #[]
+    for envIdx in [:batchSize] do
+      let envSteps := pending.getD envIdx #[]
+      let returns := discountedReturns (envSteps.map (·.reward)) cfg.gamma
+      for i in [:envSteps.size] do
+        let st := envSteps.getD i default
+        samples := samples.push {
+          kind := .alphazero
+          features := st.features
+          reward := st.reward
+          valueTarget := returns.getD i 0.0
+          policyTarget := st.policyTarget
+          done := i + 1 = envSteps.size
+        }
+    pure (.ok (samples, totals, key))
 
 private def collectPPOEpisodeBatch
     {vertexDim tokenDim : UInt64}
@@ -511,6 +669,16 @@ private def collectPPOEpisodeBatch
         done := st.done
       }
   pure (.ok (samples, totals, key))
+
+private def buildSearchEvalNetIfNeeded
+    {vertexDim tokenDim : UInt64}
+    (mode : TrainMode)
+    (searchBackend : AlphaGradSearchBackend)
+    (net : AlphaGradNet vertexDim tokenDim) :
+    IO (Option (EvalNet vertexDim tokenDim)) := do
+  match mode, searchBackend with
+  | .alphazero, .pure => some <$> buildEvalNet (TensorStruct.detach net)
+  | _, _ => pure none
 
 private def ppoUpdateFromReplay
     {vertexDim tokenDim : UInt64}
@@ -748,6 +916,7 @@ private def collectEpochReplay
     (task : TaskSpec)
     (caps : ObservationCaps)
     (net : AlphaGradNet vertexDim tokenDim)
+    (evalNet? : Option (EvalNet vertexDim tokenDim))
     (cfg : AlphaGradTrainerConfig)
     (seed : UInt64) :
     IO (Except String (Array ReplaySample × Float × UInt64)) := do
@@ -765,7 +934,7 @@ private def collectEpochReplay
         | .error msg => return .error msg
         | .ok out => pure out
       | .alphazero =>
-        match (← collectAlphaZeroEpisodeBatch task caps net cfg batch key) with
+        match (← collectAlphaZeroEpisodeBatch task caps net cfg batch key evalNet?) with
         | .error msg => return .error msg
         | .ok out => pure out
     key := key'
@@ -830,6 +999,7 @@ private def evaluateModel
     (task : TaskSpec)
     (caps : ObservationCaps)
     (net : AlphaGradNet vertexDim tokenDim)
+    (evalNet? : Option (EvalNet vertexDim tokenDim))
     (cfg : AlphaGradTrainerConfig)
     (seed : UInt64) :
     IO (Except String (Float × Float × UInt64)) := do
@@ -844,7 +1014,7 @@ private def evaluateModel
       | .error msg => return .error msg
       | .ok out => pure out
     | .alphazero =>
-      match (← collectAlphaZeroEpisodeBatch task caps net cfg 1 seed) with
+      match (← collectAlphaZeroEpisodeBatch task caps net cfg 1 seed evalNet?) with
       | .error msg => return .error msg
       | .ok out => pure out
   let searchReward := rewards.getD 0 greedy
@@ -860,6 +1030,7 @@ private def writeTrainerReport
     "# AlphaGrad Trainer Report",
     "",
     s!"- mode: {toString cfg.mode}",
+    s!"- search_backend: {toString cfg.searchBackend}",
     s!"- task: {toString cfg.task}",
     s!"- run_dir: {artifacts.baseDir}",
     s!"- completed_epochs: {snapshot.completedEpochs}",
@@ -915,8 +1086,9 @@ def trainWithConfig (cfg : AlphaGradTrainerConfig) : IO (Except String TrainerSn
     IO.println s!"[AlphaGradTrainer] mode={toString cfg.mode} task={task.name} run_dir={runDir} epochs={cfg.epochs} episodes/epoch={cfg.episodesPerEpoch} num_envs={cfg.numEnvs} replay_capacity={cfg.replayCapacity}"
     let mut seed := UInt64.ofNat snapshot.nextSeed
     for epoch in [snapshot.completedEpochs:cfg.epochs] do
+      let evalNet? ← buildSearchEvalNetIfNeeded cfg.mode cfg.searchBackend (TensorStruct.detach net)
       let (collected, avgReward, seed') ←
-        match (← collectEpochReplay task caps (TensorStruct.detach net) cfg seed) with
+        match (← collectEpochReplay task caps (TensorStruct.detach net) evalNet? cfg seed) with
         | .error msg => return .error s!"AlphaGrad trainer collection failed at epoch {epoch + 1}: {msg}"
         | .ok out => pure out
       seed := seed'
@@ -944,7 +1116,8 @@ def trainWithConfig (cfg : AlphaGradTrainerConfig) : IO (Except String TrainerSn
           lastEntropy := entropy
         }
       if cfg.evalEvery > 0 && ((epoch + 1) % cfg.evalEvery = 0 || epoch + 1 = cfg.epochs) then
-        match (← evaluateModel task caps (TensorStruct.detach net) cfg seed) with
+        let evalNet? ← buildSearchEvalNetIfNeeded cfg.mode cfg.searchBackend (TensorStruct.detach net)
+        match (← evaluateModel task caps (TensorStruct.detach net) evalNet? cfg seed) with
         | .error msg =>
           return .error s!"AlphaGrad trainer evaluation failed at epoch {epoch + 1}: {msg}"
         | .ok (greedyReward, searchReward, seed') =>
@@ -1001,7 +1174,8 @@ def evalWithConfig
       pure (.error s!"AlphaGrad trainer checkpoint not found at {ckptDir}")
     | some (net, _optState, replay, snapshot) =>
       let evalSeed := UInt64.ofNat (seedOverride?.getD snapshot.nextSeed)
-      match (← evaluateModel task caps (TensorStruct.detach net) cfg evalSeed) with
+      let evalNet? ← buildSearchEvalNetIfNeeded cfg.mode cfg.searchBackend (TensorStruct.detach net)
+      match (← evaluateModel task caps (TensorStruct.detach net) evalNet? cfg evalSeed) with
       | .error msg =>
         pure (.error s!"AlphaGrad trainer eval failed: {msg}")
       | .ok (greedyReward, searchReward, _seed) =>
@@ -1042,6 +1216,7 @@ instance : FromJson CurriculumMode where
 
 structure MultiTaskTrainerConfig where
   mode : TrainMode := .alphazero
+  searchBackend : AlphaGradSearchBackend := .tensorized
   tasks : Array TaskName := taskSequence
   evalTasks : Array TaskName := #[]
   curriculum : CurriculumMode := .roundRobin
@@ -1103,6 +1278,7 @@ private def multiTaskBaseConfig
     AlphaGradTrainerConfig := {
   mode := cfg.mode
   task := task
+  searchBackend := cfg.searchBackend
   epochs := cfg.epochs
   episodesPerEpoch := cfg.episodesPerEpoch
   numEnvs := cfg.numEnvs
@@ -1330,6 +1506,7 @@ private def evaluateMultiTaskModel
     (taskPairs : Array (TaskName × TaskSpec))
     (caps : ObservationCaps)
     (net : AlphaGradNet vertexDim tokenDim)
+    (evalNet? : Option (EvalNet vertexDim tokenDim))
     (cfg : MultiTaskTrainerConfig)
     (seed : UInt64) :
     IO (Except String (Array (TaskName × Float × Float) × UInt64)) := do
@@ -1346,7 +1523,7 @@ private def evaluateMultiTaskModel
         | .error msg => return .error msg
         | .ok task => pure (name, task)
     let baseCfg := multiTaskBaseConfig cfg name
-    match (← evaluateModel taskPair.2 caps (TensorStruct.detach net) baseCfg key) with
+    match (← evaluateModel taskPair.2 caps (TensorStruct.detach net) evalNet? baseCfg key) with
     | .error msg => return .error msg
     | .ok (greedyReward, searchReward, key') =>
       key := key'
@@ -1406,7 +1583,8 @@ def multiTrainWithConfig (cfg : MultiTaskTrainerConfig) : IO (Except String Mult
       let activeName := activePair.1
       let activeTask := activePair.2
       let baseCfg := multiTaskBaseConfig cfg activeName
-      let collectRes ← collectEpochReplay activeTask caps (TensorStruct.detach net) baseCfg seed
+      let evalNet? ← buildSearchEvalNetIfNeeded cfg.mode cfg.searchBackend (TensorStruct.detach net)
+      let collectRes ← collectEpochReplay activeTask caps (TensorStruct.detach net) evalNet? baseCfg seed
       let (collected, avgReward, seedAfterCollect) ←
         match collectRes with
         | .error msg => return .error s!"Multi-task collection failed at epoch {epoch + 1}: {msg}"
@@ -1440,7 +1618,8 @@ def multiTrainWithConfig (cfg : MultiTaskTrainerConfig) : IO (Except String Mult
       }
       let shouldEval := cfg.evalEvery > 0 && ((epoch + 1) % cfg.evalEvery = 0 || epoch + 1 = cfg.epochs)
       if shouldEval then do
-        let evalRes ← evaluateMultiTaskModel taskPairs caps (TensorStruct.detach net) cfg seed
+        let evalNet? ← buildSearchEvalNetIfNeeded cfg.mode cfg.searchBackend (TensorStruct.detach net)
+        let evalRes ← evaluateMultiTaskModel taskPairs caps (TensorStruct.detach net) evalNet? cfg seed
         match evalRes with
         | .error msg => return .error s!"Multi-task evaluation failed at epoch {epoch + 1}: {msg}"
         | .ok (results, seedEval) =>
@@ -1498,7 +1677,8 @@ def multiEvalWithConfig
       pure (.error s!"AlphaGrad multi-task checkpoint not found at {ckptDir}")
     | some (net, _optState, _replays, snapshot) =>
       let evalSeed := UInt64.ofNat (seedOverride?.getD snapshot.nextSeed)
-      match (← evaluateMultiTaskModel taskPairs caps (TensorStruct.detach net) cfg evalSeed) with
+      let evalNet? ← buildSearchEvalNetIfNeeded cfg.mode cfg.searchBackend (TensorStruct.detach net)
+      match (← evaluateMultiTaskModel taskPairs caps (TensorStruct.detach net) evalNet? cfg evalSeed) with
       | .error msg => pure (.error msg)
       | .ok (results, _seed) =>
         let metrics : List (String × Json) :=
@@ -1515,6 +1695,7 @@ structure TrainerArgs where
   command : String := "train"
   mode : TrainMode := .alphazero
   task : TaskName := .perceptron
+  searchBackend : Option AlphaGradSearchBackend := none
   epochs : Option Nat := none
   episodesPerEpoch : Option Nat := none
   numEnvs : Option Nat := none
@@ -1541,6 +1722,14 @@ private def parseMode? (s : String) : Option TrainMode :=
 private def parseNatArg? (s : String) : Option Nat :=
   s.toNat?
 
+private def parseSearchBackend? (s : String) : Option AlphaGradSearchBackend :=
+  match s.trimAscii.toString.toLower with
+  | "pure" => some .pure
+  | "tensorized"
+  | "monadic"
+  | "async" => some .tensorized
+  | _ => none
+
 private def parseTrainerFlags
     (args : List String)
     (st : TrainerArgs) :
@@ -1565,6 +1754,10 @@ private def parseTrainerFlags
     parseTrainerFlags rest { st with evalEvery := parseNatArg? v }
   | "--num-simulations" :: v :: rest =>
     parseTrainerFlags rest { st with numSimulations := parseNatArg? v }
+  | "--search-backend" :: v :: rest =>
+    match parseSearchBackend? v with
+    | some backend => parseTrainerFlags rest { st with searchBackend := some backend }
+    | none => throw s!"Unknown AlphaGrad search backend '{v}'."
   | "--seed" :: v :: rest =>
     parseTrainerFlags rest { st with seed := parseNatArg? v }
   | "--run-dir" :: v :: rest =>
@@ -1595,6 +1788,7 @@ private def usage : String :=
     "  --checkpoint-every <n>",
     "  --eval-every <n>",
     "  --num-simulations <n>",
+    "  --search-backend <pure|tensorized>",
     "  --seed <n>",
     "  --run-dir <dir>",
     "  --checkpoint <dir>",
@@ -1609,6 +1803,7 @@ structure MultiTrainerArgs where
   command : String := "multitrain"
   mode : TrainMode := .alphazero
   tasks : Array TaskName := taskSequence
+  searchBackend : Option AlphaGradSearchBackend := none
   evalTasks : Option (Array TaskName) := none
   curriculum : Option CurriculumMode := none
   curriculumWindow : Option Nat := none
@@ -1681,6 +1876,10 @@ private def parseMultiTrainerFlags
     parseMultiTrainerFlags rest { st with evalEvery := parseNatArg? v }
   | "--num-simulations" :: v :: rest =>
     parseMultiTrainerFlags rest { st with numSimulations := parseNatArg? v }
+  | "--search-backend" :: v :: rest =>
+    match parseSearchBackend? v with
+    | some backend => parseMultiTrainerFlags rest { st with searchBackend := some backend }
+    | none => throw s!"Unknown AlphaGrad search backend '{v}'."
   | "--seed" :: v :: rest =>
     parseMultiTrainerFlags rest { st with seed := parseNatArg? v }
   | "--run-dir" :: v :: rest =>
@@ -1706,6 +1905,7 @@ private def parseMultiTrainerFlags
 
 private def mkMultiTrainerConfig (args : MultiTrainerArgs) : MultiTaskTrainerConfig := {
   mode := args.mode
+  searchBackend := args.searchBackend.getD .tensorized
   tasks := args.tasks
   evalTasks := args.evalTasks.getD #[]
   curriculum := args.curriculum.getD .roundRobin
@@ -1775,6 +1975,7 @@ def multiTrainerMain (args : List String) : IO UInt32 := do
 private def mkTrainerConfig (args : TrainerArgs) : AlphaGradTrainerConfig := {
   mode := args.mode
   task := args.task
+  searchBackend := args.searchBackend.getD .tensorized
   epochs := args.epochs.getD 64
   episodesPerEpoch := args.episodesPerEpoch.getD 16
   numEnvs := args.numEnvs.getD 8

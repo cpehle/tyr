@@ -39,6 +39,20 @@ def nonEmptyTrimmed? (s : String) : Option String :=
   let trimmed := s.trimAscii.toString
   if trimmed.isEmpty then none else some trimmed
 
+/-- Prefer the stable `MacOSX.sdk` symlink when the discovered SDK lives inside
+    Xcode's versioned `SDKs/` directory. This avoids pinning Lake link flags to
+    a transient SDK version path. -/
+def canonicalMacOSSDKRoot (p : String) : IO String := do
+  let sdkPath : FilePath := ⟨p⟩
+  match sdkPath.parent with
+  | some parent =>
+    let stable := parent / "MacOSX.sdk"
+    if ← stable.pathExists then
+      pure stable.toString
+    else
+      pure p
+  | none => pure p
+
 /-- Resolve the macOS SDK root from env or `xcrun` without hard-coded Xcode/CLT paths. -/
 def macOSSDKRoot? : Option String := run_io do
   let envSdk? ← do
@@ -46,7 +60,7 @@ def macOSSDKRoot? : Option String := run_io do
     | some p => pure (some p)
     | none => IO.getEnv "SDKROOT"
   match envSdk?.bind nonEmptyTrimmed? with
-  | some p => pure (some p)
+  | some p => some <$> canonicalMacOSSDKRoot p
   | none =>
     try
       let out ← IO.Process.output {
@@ -54,7 +68,9 @@ def macOSSDKRoot? : Option String := run_io do
         args := #["--sdk", "macosx", "--show-sdk-path"]
       }
       if out.exitCode == 0 then
-        pure (nonEmptyTrimmed? out.stdout)
+        match nonEmptyTrimmed? out.stdout with
+        | some p => some <$> canonicalMacOSSDKRoot p
+        | none => pure none
       else
         pure none
     catch _ =>
