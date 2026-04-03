@@ -1,5 +1,6 @@
 import LeanTest
 import Examples.AlphaGradPort.A0Train
+import Examples.AlphaGradPort.Benchmark
 import Examples.AlphaGradPort.PolicySweep
 import Examples.AlphaGradPort.PolicyTrain
 import Examples.AlphaGradPort.Replay
@@ -179,5 +180,75 @@ def testAlphaGradTrainerTinyCheckpointCycle : IO Unit := do
   ]
   LeanTest.assertEqual evalCode 0
     "AlphaGradTrainer should load and evaluate the latest checkpoint."
+
+@[test]
+def testAlphaGradObservationCapsPadAcrossTasks : IO Unit := do
+  let taskA ←
+    match (← materializeTask .roeFlux1d) with
+    | .error msg => LeanTest.fail s!"RoeFlux_1d materialization failed: {msg}"
+    | .ok task => pure task
+  let taskB ←
+    match (← materializeTask .perceptron) with
+    | .error msg => LeanTest.fail s!"Perceptron materialization failed: {msg}"
+    | .ok task => pure task
+  let caps := taskSetObservationCaps #[taskA, taskB]
+  let s0 ←
+    match initAlphaGradState? taskA.graph taskA.numVertices with
+    | .error msg => LeanTest.fail s!"RoeFlux_1d state init failed: {msg}"
+    | .ok s => pure s
+  let flat ←
+    match exportObservationFlatWithCaps? taskA.envCfg s0 caps with
+    | .error msg => LeanTest.fail s!"Capped observation export failed: {msg}"
+    | .ok flat => pure flat
+  LeanTest.assertEqual flat.size (caps.vertexCap * caps.tokenDim)
+    "Capped observation export should match (vertexCap * tokenDim)."
+  let attnMask := attentionMaskFromObservationFlat flat caps.vertexCap caps.tokenDim
+  LeanTest.assertEqual attnMask.size caps.vertexCap
+    "Capped observation attention mask should match the vertex cap."
+  LeanTest.assertTrue (attnMask.extract taskA.numVertices caps.vertexCap |>.all (fun x => x < 0.5))
+    "Capped observation export should mask padded vertices."
+
+@[test]
+def testAlphaGradMultiTrainerTinyCheckpointCycle : IO Unit := do
+  let runDir := s!"/tmp/alphagrad_multi_trainer_{← IO.monoMsNow}"
+  let trainCode ← Examples.AlphaGradPort.trainerMain [
+    "multitrain", "alphazero", "RoeFlux_1d,Perceptron",
+    "--epochs", "1",
+    "--episodes-per-epoch", "1",
+    "--num-envs", "1",
+    "--num-simulations", "2",
+    "--batch-size", "4",
+    "--update-batches", "1",
+    "--checkpoint-every", "1",
+    "--eval-every", "1",
+    "--run-dir", runDir,
+    "--overwrite"
+  ]
+  LeanTest.assertEqual trainCode 0
+    "AlphaGrad multi-trainer should complete a tiny curriculum run."
+  let latestExists ← System.FilePath.pathExists ⟨s!"{runDir}/checkpoints/latest/multitask_trainer_state.json"⟩
+  LeanTest.assertTrue latestExists
+    "AlphaGrad multi-trainer should materialize a latest multi-task checkpoint."
+  let evalCode ← Examples.AlphaGradPort.trainerMain [
+    "multieval", "alphazero", "RoeFlux_1d,Perceptron",
+    "--num-simulations", "2",
+    "--run-dir", runDir
+  ]
+  LeanTest.assertEqual evalCode 0
+    "AlphaGrad multi-trainer should load and evaluate the latest multi-task checkpoint."
+  let benchmarkCode ← Examples.AlphaGradPort.benchmarkMain [
+    "alphazero", "RoeFlux_1d,Perceptron",
+    "--multitask",
+    "--seeds", "1",
+    "--base-seed", "7",
+    "--num-simulations", "2",
+    "--run-dir", runDir,
+    "--output", s!"{runDir}/benchmark.json"
+  ]
+  LeanTest.assertEqual benchmarkCode 0
+    "AlphaGrad benchmark should evaluate the multi-task checkpoint."
+  let benchmarkExists ← System.FilePath.pathExists ⟨s!"{runDir}/benchmark.json"⟩
+  LeanTest.assertTrue benchmarkExists
+    "AlphaGrad benchmark should materialize a benchmark summary JSON file."
 
 end Tests.AlphaGradPortExamples

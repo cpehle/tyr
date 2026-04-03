@@ -341,6 +341,11 @@ lean_exe AlphaGradTrainer where
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
+lean_exe AlphaGradBenchmark where
+  root := `Examples.AlphaGradPort.BenchmarkMain
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
 /-- NanoChat training executable (modded GPT + distributed) -/
 lean_exe TrainNanoChat where
   root := `Examples.NanoChat.TrainNanoChat

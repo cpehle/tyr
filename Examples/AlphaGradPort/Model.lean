@@ -100,16 +100,47 @@ private def graphRowDim (graph : ElimGraph) (numVertices : Nat) : Nat :=
 def observationTokenDim (graph : ElimGraph) (numVertices : Nat) : Nat :=
   GraphChannels * graphRowDim graph numVertices
 
-private def rowIndexOfVertex?
+structure ObservationCaps where
+  inputCap : Nat
+  vertexCap : Nat
+  deriving Repr, Inhabited, BEq
+
+namespace ObservationCaps
+
+def rowDim (caps : ObservationCaps) : Nat :=
+  1 + caps.inputCap + caps.vertexCap
+
+def tokenDim (caps : ObservationCaps) : Nat :=
+  GraphChannels * caps.rowDim
+
+end ObservationCaps
+
+def stateObservationCaps (s : AlphaGradState) : ObservationCaps :=
+  { inputCap := s.graph.inputs.size, vertexCap := s.numVertices }
+
+def taskObservationCaps (task : TaskSpec) : ObservationCaps :=
+  { inputCap := task.graph.inputs.size, vertexCap := task.numVertices }
+
+def mergeObservationCaps (lhs rhs : ObservationCaps) : ObservationCaps :=
+  {
+    inputCap := max lhs.inputCap rhs.inputCap
+    vertexCap := max lhs.vertexCap rhs.vertexCap
+  }
+
+def taskSetObservationCaps (tasks : Array TaskSpec) : ObservationCaps :=
+  tasks.foldl (init := ({ inputCap := 0, vertexCap := 0 } : ObservationCaps)) fun acc task =>
+    mergeObservationCaps acc (taskObservationCaps task)
+
+private def rowIndexOfVertexWithCaps?
     (graph : ElimGraph)
-    (numVertices : Nat)
+    (caps : ObservationCaps)
     (vertex : VertexId1) :
     Option Nat :=
   match graph.inputs.findIdx? (· = vertex) with
   | some i => some (i + 1)
   | none =>
-    if vertex > 0 && vertex <= numVertices then
-      some (1 + graph.inputs.size + (vertex - 1))
+    if vertex > 0 && vertex <= caps.vertexCap then
+      some (1 + caps.inputCap + (vertex - 1))
     else
       none
 
@@ -124,14 +155,14 @@ private def observationRowDimFromTokenDim (tokenDim : Nat) : Nat :=
   tokenDim / GraphChannels
 
 private def validTokenFromMetadata
-    (isAction isUnavailable isOutput : Float) :
+    (isAction isUnavailable isOutput producerFamily : Float) :
     Float :=
   if isOutput > 0.5 then
     1.0
   else if isAction > 0.5 then
     if isUnavailable > 0.5 then 0.0 else 1.0
   else
-    1.0
+    if producerFamily > 0.5 then 1.0 else 0.0
 
 def attentionMaskFromObservationFlat
     (flat : Array Float)
@@ -144,17 +175,24 @@ def attentionMaskFromObservationFlat
     let isAction := flat.getD (tokenBase + channelOffset rowDim 0) 0.0
     let isUnavailable := flat.getD (tokenBase + channelOffset rowDim 1) 0.0
     let isOutput := flat.getD (tokenBase + channelOffset rowDim 2) 0.0
-    mask := mask.set! col (validTokenFromMetadata isAction isUnavailable isOutput)
+    let producerFamily := flat.getD (tokenBase + channelOffset rowDim 4) 0.0
+    mask := mask.set! col (validTokenFromMetadata isAction isUnavailable isOutput producerFamily)
   return mask
 
-/-- Export a state into a 5-channel AlphaGrad-style token observation. -/
-def exportObservationFlat
+/-- Export a state into a padded 5-channel AlphaGrad-style token observation. -/
+def exportObservationFlatWithCaps?
     (envCfg : AlphaGradMctxConfig)
-    (s : AlphaGradState) :
-    Array Float := Id.run do
-  let vertexDim := s.numVertices
-  let rowDim := graphRowDim s.graph vertexDim
-  let tokenDim := observationTokenDim s.graph vertexDim
+    (s : AlphaGradState)
+    (caps : ObservationCaps) :
+    Except String (Array Float) := do
+  if s.graph.inputs.size > caps.inputCap then
+    throw s!"Observation input cap {caps.inputCap} is smaller than required {s.graph.inputs.size}."
+  if s.numVertices > caps.vertexCap then
+    throw s!"Observation vertex cap {caps.vertexCap} is smaller than required {s.numVertices}."
+  pure <| Id.run do
+  let vertexDim := caps.vertexCap
+  let rowDim := caps.rowDim
+  let tokenDim := caps.tokenDim
   let invalid := invalidActionMask envCfg s
   let orderMap := eliminationOrderMap s.vertexTrace
   let mut flat : Array Float := Array.replicate (vertexDim * tokenDim) 0.0
@@ -169,8 +207,9 @@ def exportObservationFlat
     let tokenBase := col * tokenDim
     let token := flat.extract tokenBase (tokenBase + tokenDim)
     let mut token := token
+    let present := vertex <= s.numVertices
 
-    let isAction := isActionVertex.contains vertex
+    let isAction := present && isActionVertex.contains vertex
     let action? :=
       if isAction then
         match vertexToActionInSpace? s.actionVertices vertex with
@@ -182,22 +221,26 @@ def exportObservationFlat
       match action? with
       | some action =>
         s.isActionEliminated action || invalid.getD action true
-      | none =>
-        true
+      | none => !present
+    let producerFamily :=
+      if present then
+        max 1.0 (producerFamilyCode (producerInfo? s.graph vertex))
+      else
+        0.0
 
     token := setTokenValue token rowDim 0 0 (if isAction then 1.0 else 0.0)
     token := setTokenValue token rowDim 1 0 (if isUnavailable then 1.0 else 0.0)
     token := setTokenValue token rowDim 2 0 (if isOutputVertex.contains vertex then 1.0 else 0.0)
     token := setTokenValue token rowDim 3 0 (Float.ofNat (orderMap.getD vertex 0))
-    token := setTokenValue token rowDim 4 0 (producerFamilyCode (producerInfo? s.graph vertex))
+    token := setTokenValue token rowDim 4 0 producerFamily
 
-    match rowIndexOfVertex? s.graph vertexDim vertex with
+    match rowIndexOfVertexWithCaps? s.graph caps vertex with
     | some diagRow =>
-      token := setTokenValue token rowDim 4 diagRow (producerFamilyCode (producerInfo? s.graph vertex))
+      token := setTokenValue token rowDim 4 diagRow producerFamily
     | none => pure ()
 
     for src in s.graph.inputs do
-      match rowIndexOfVertex? s.graph vertexDim src, findEdge? s.graph src vertex with
+      match rowIndexOfVertexWithCaps? s.graph caps src, findEdge? s.graph src vertex with
       | some row, some edge =>
         token := setTokenValue token rowDim 0 row (sparseEdgeCode edge)
         token := setTokenValue token rowDim 1 row (Float.ofNat (edge.inDim?.getD 0))
@@ -206,8 +249,8 @@ def exportObservationFlat
         token := setTokenValue token rowDim 4 row (sumAbsWeights edge)
       | _, _ => pure ()
 
-    for src in [1:vertexDim + 1] do
-      match rowIndexOfVertex? s.graph vertexDim src, findEdge? s.graph src vertex with
+    for src in [1:s.numVertices + 1] do
+      match rowIndexOfVertexWithCaps? s.graph caps src, findEdge? s.graph src vertex with
       | some row, some edge =>
         token := setTokenValue token rowDim 0 row (sparseEdgeCode edge)
         token := setTokenValue token rowDim 1 row (Float.ofNat (edge.inDim?.getD 0))
@@ -222,6 +265,21 @@ def exportObservationFlat
         flat := flat.set! idx (token.getD i 0.0)
 
   return flat
+
+/-- Export a state into a 5-channel AlphaGrad-style token observation. -/
+def exportObservationFlat
+    (envCfg : AlphaGradMctxConfig)
+    (s : AlphaGradState) :
+    Array Float :=
+  match exportObservationFlatWithCaps? envCfg s (stateObservationCaps s) with
+  | .ok flat => flat
+  | .error _ => #[]
+
+structure BatchedActionEval where
+  observations : Array (Array Float)
+  actionLogits : Array (Array Float)
+  values : Array Float
+  deriving Inhabited
 
 private def geluApprox (x : Float) : Float :=
   let piApprox : Float := 3.141592653589793
@@ -592,13 +650,17 @@ def buildEvalNet
     valueHead := valueHead
   }
 
-def evalStatePolicyValue
+def evalStatePolicyValueWithCaps
     {vertexDim tokenDim : UInt64}
     (net : EvalNet vertexDim tokenDim)
     (envCfg : AlphaGradMctxConfig)
-    (s : AlphaGradState) :
+    (s : AlphaGradState)
+    (caps : ObservationCaps) :
     Array Float × Float := Id.run do
-  let flat := exportObservationFlat envCfg s
+  let flat :=
+    match exportObservationFlatWithCaps? envCfg s caps with
+    | .ok row => row
+    | .error _ => Array.replicate (vertexDim.toNat * tokenDim.toNat) 0.0
   let vertexNat := vertexDim.toNat
   let tokenNat := tokenDim.toNat
   let attnMask := attentionMaskFromObservationFlat flat vertexNat tokenNat
@@ -633,6 +695,14 @@ def evalStatePolicyValue
     (Array.range actionLogits.size).map fun i =>
       if invalid.getD i false then -1.0e30 else actionLogits.getD i (-1.0e30)
   (masked, value)
+
+def evalStatePolicyValue
+    {vertexDim tokenDim : UInt64}
+    (net : EvalNet vertexDim tokenDim)
+    (envCfg : AlphaGradMctxConfig)
+    (s : AlphaGradState) :
+    Array Float × Float :=
+  evalStatePolicyValueWithCaps net envCfg s (stateObservationCaps s)
 
 def obsRowsToTensor3d?
     (rows : Array (Array Float))
@@ -684,5 +754,54 @@ def actionIndexTensor
   let dyn := data.fromInt64Array flat
   let t0 : T #[batchSize, actionDim] := reshape dyn #[batchSize, actionDim]
   pure ⟨actionDim, data.toLong t0⟩
+
+def evalStatesPolicyValueTensor?
+    {vertexDim tokenDim : UInt64}
+    (net : AlphaGradNet vertexDim tokenDim)
+    (task : TaskSpec)
+    (caps : ObservationCaps)
+    (states : Array AlphaGradState) :
+    IO (Except String BatchedActionEval) := do
+  if vertexDim.toNat != caps.vertexCap then
+    return .error s!"Batched eval vertex cap mismatch: net={vertexDim.toNat}, caps={caps.vertexCap}."
+  if tokenDim.toNat != caps.tokenDim then
+    return .error s!"Batched eval token width mismatch: net={tokenDim.toNat}, caps={caps.tokenDim}."
+  let mut rows : Array (Array Float) := #[]
+  for state in states do
+    match exportObservationFlatWithCaps? task.envCfg state caps with
+    | .error msg => return .error msg
+    | .ok row => rows := rows.push row
+  match obsRowsToTensor3d? rows vertexDim tokenDim with
+  | .error msg => return .error msg
+  | .ok ⟨n, obs⟩ =>
+    let attnMaskT ←
+      match attentionMaskTensor? rows vertexDim tokenDim with
+      | .error msg => return .error msg
+      | .ok ⟨nMask, mask⟩ =>
+        if nMask != n then
+          return .error s!"Attention mask batch mismatch: expected {n}, got {nMask}."
+        pure mask
+    let (vertexLogits, valuesT) := AlphaGradNet.forward net obs (some attnMaskT)
+    let actionIndexT ←
+      match actionIndexTensor n task.graph.actionVertices with
+      | .error msg => return .error msg
+      | .ok ⟨actionDim, idxs⟩ =>
+        if actionDim.toNat != task.numActions then
+          return .error s!"Action-surface width mismatch: expected {task.numActions}, got {actionDim.toNat}."
+        pure idxs
+    let logitsT : T #[n, task.numActions.toUInt64] := gather vertexLogits (1 : Int64) actionIndexT
+    let flatLogits ← data.tensorToFloatArray' (nn.eraseShape logitsT)
+    let flatValues ← data.tensorToFloatArray' (nn.eraseShape valuesT)
+    let actionRows :=
+      (Array.range n.toNat).map fun i =>
+        let row0 := flatLogits.extract (i * task.numActions) ((i + 1) * task.numActions)
+        let invalid := invalidActionMask task.envCfg (states.getD i default)
+        (Array.range task.numActions).map fun j =>
+          if invalid.getD j false then -1.0e30 else row0.getD j (-1.0e30)
+    pure (.ok {
+      observations := rows
+      actionLogits := actionRows
+      values := flatValues
+    })
 
 end Examples.AlphaGradPort

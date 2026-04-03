@@ -129,32 +129,38 @@ private def invertValueTransform
   | .log => symexp x
   | .default => defaultInverseValueTransform x
 
-private def taskVertexDim (task : TaskSpec) : UInt64 :=
-  task.numVertices.toUInt64
+private def capsVertexDim (caps : ObservationCaps) : UInt64 :=
+  caps.vertexCap.toUInt64
 
-private def taskTokenDim (task : TaskSpec) : UInt64 :=
-  (observationTokenDim task.graph task.numVertices).toUInt64
+private def capsTokenDim (caps : ObservationCaps) : UInt64 :=
+  caps.tokenDim.toUInt64
 
 private def evalGreedyReward?
     {vertexDim tokenDim : UInt64}
     (task : TaskSpec)
-    (net : EvalNet vertexDim tokenDim) :
-    Except String Float := do
-  if vertexDim != taskVertexDim task then
-    throw s!"Network vertexDim={vertexDim} does not match task vertex domain={task.numVertices}."
-  if tokenDim != taskTokenDim task then
-    throw s!"Network tokenDim={tokenDim} does not match task observation width={taskTokenDim task}."
-  let s0 ← initAlphaGradState? task.graph task.numVertices
-  let mut s := s0
-  let maxSteps := task.envCfg.maxEpisodeSteps.getD task.numEliminableVertices
-  let mut iters := 0
-  while iters < maxSteps && !(isTerminal task.envCfg s) do
-    let (logits, _value) := evalStatePolicyValue net task.envCfg s
-    let action := argmax logits
-    let t := transition task.envCfg s action
-    s := t.nextState
-    iters := iters + 1
-  pure s.cumulativeReward
+    (net : AlphaGradNet vertexDim tokenDim)
+    (caps : ObservationCaps) :
+    IO (Except String Float) := do
+  if vertexDim != capsVertexDim caps then
+    return .error s!"Network vertexDim={vertexDim} does not match observation cap={caps.vertexCap}."
+  if tokenDim != capsTokenDim caps then
+    return .error s!"Network tokenDim={tokenDim} does not match observation token width={caps.tokenDim}."
+  match initAlphaGradState? task.graph task.numVertices with
+  | .error msg => pure (.error msg)
+  | .ok s0 =>
+    let mut s := s0
+    let maxSteps := task.envCfg.maxEpisodeSteps.getD task.numEliminableVertices
+    let mut iters := 0
+    while iters < maxSteps && !(isTerminal task.envCfg s) do
+      match (← evalStatesPolicyValueTensor? net task caps #[s]) with
+      | .error msg => return .error msg
+      | .ok out =>
+        let logits := out.actionLogits.getD 0 #[]
+        let action := argmax logits
+        let t := transition task.envCfg s action
+        s := t.nextState
+        iters := iters + 1
+    pure (.ok s.cumulativeReward)
 
 structure AlphaGradTrainerConfig where
   mode : TrainMode := .alphazero
@@ -274,12 +280,15 @@ private def evalStatesPolicyValue
     {vertexDim tokenDim : UInt64}
     (net : EvalNet vertexDim tokenDim)
     (envCfg : AlphaGradMctxConfig)
+    (caps : ObservationCaps)
     (states : Array AlphaGradState) :
     Array (Array Float) × Array Float :=
-  (states.map (fun s => (evalStatePolicyValue net envCfg s).1),
-   states.map (fun s => (evalStatePolicyValue net envCfg s).2))
+  (states.map (fun s => (evalStatePolicyValueWithCaps net envCfg s caps).1),
+   states.map (fun s => (evalStatePolicyValueWithCaps net envCfg s caps).2))
 
 private structure BatchedAZSearchParams (vertexDim tokenDim : UInt64) where
+  task : TaskSpec
+  caps : ObservationCaps
   envCfg : AlphaGradMctxConfig
   net : EvalNet vertexDim tokenDim
   valueTransform : AlphaGradValueTransform
@@ -291,7 +300,7 @@ private def batchedRecurrentFromNet
     let transitions := (List.range states.size).toArray.map fun i =>
       transition p.envCfg (states.getD i default) (actions.getD i 0)
     let nextStates := transitions.map (·.nextState)
-    let (priors, rawValues) := evalStatesPolicyValue p.net p.envCfg nextStates
+    let (priors, rawValues) := evalStatesPolicyValue p.net p.envCfg p.caps nextStates
     let values := rawValues.map (invertValueTransform p.valueTransform)
     let rewards := transitions.map (·.reward)
     let discounts := transitions.map (fun t => if t.done then 0.0 else p.envCfg.discount)
@@ -300,15 +309,21 @@ private def batchedRecurrentFromNet
 private def collectAlphaZeroEpisodeBatch
     {vertexDim tokenDim : UInt64}
     (task : TaskSpec)
+    (caps : ObservationCaps)
     (net : EvalNet vertexDim tokenDim)
     (cfg : AlphaGradTrainerConfig)
     (batchSize : Nat)
     (seed : UInt64) :
-    Except String (Array ReplaySample × Array Float × UInt64) := do
+    IO (Except String (Array ReplaySample × Array Float × UInt64)) := do
   if batchSize = 0 then
-    throw "AlphaGrad batch collector requires batchSize > 0."
-  let s0 ← initAlphaGradState? task.graph task.numVertices
+    return .error "AlphaGrad batch collector requires batchSize > 0."
+  let s0 ←
+    match initAlphaGradState? task.graph task.numVertices with
+    | .error msg => return .error msg
+    | .ok s0 => pure s0
   let searchParams : BatchedAZSearchParams vertexDim tokenDim := {
+    task := task
+    caps := caps
     envCfg := task.envCfg
     net := net
     valueTransform := cfg.valueTransform
@@ -322,10 +337,10 @@ private def collectAlphaZeroEpisodeBatch
   let mut step := 0
   while !active.isEmpty && step < maxSteps do
     let activeStates := active.map (fun idx => states.getD idx s0)
-    let (priors, rawValues) := evalStatesPolicyValue net task.envCfg activeStates
+    let (priors, rawValues) := evalStatesPolicyValue net task.envCfg caps activeStates
     let invalids := activeStates.map (invalidActionMask task.envCfg)
     if invalids.any (fun row => row.all (fun b => b)) then
-      throw s!"AlphaZero batched root has no feasible actions at step {step}."
+      return .error s!"AlphaZero batched root has no feasible actions at step {step}."
     let root : BatchedRootFnOutput AlphaGradState := {
       priorLogits := priors
       value := rawValues.map (invertValueTransform cfg.valueTransform)
@@ -353,9 +368,13 @@ private def collectAlphaZeroEpisodeBatch
       let global := active.getD idx 0
       let state := activeStates.getD idx s0
       let t := transition task.envCfg state (out.action.getD idx 0)
+      let features ←
+        match exportObservationFlatWithCaps? task.envCfg state caps with
+        | .error msg => return .error msg
+        | .ok row => pure row
       let currentPending := pending.getD global #[]
       pending := pending.set! global (currentPending.push {
-        features := exportObservationFlat task.envCfg state
+        features := features
         policyTarget := out.actionWeights.getD idx #[]
         reward := t.reward
       })
@@ -367,7 +386,7 @@ private def collectAlphaZeroEpisodeBatch
     key := mix (key + UInt64.ofNat (step + 1))
     step := step + 1
   if !active.isEmpty then
-    throw s!"AlphaZero batched rollout did not terminate within {maxSteps} steps."
+    return .error s!"AlphaZero batched rollout did not terminate within {maxSteps} steps."
   let mut samples : Array ReplaySample := #[]
   for envIdx in [:batchSize] do
     let envSteps := pending.getD envIdx #[]
@@ -382,19 +401,23 @@ private def collectAlphaZeroEpisodeBatch
         policyTarget := st.policyTarget
         done := i + 1 = envSteps.size
       }
-  pure (samples, totals, key)
+  pure (.ok (samples, totals, key))
 
 private def collectPPOEpisodeBatch
     {vertexDim tokenDim : UInt64}
     (task : TaskSpec)
-    (net : EvalNet vertexDim tokenDim)
+    (caps : ObservationCaps)
+    (net : AlphaGradNet vertexDim tokenDim)
     (cfg : AlphaGradTrainerConfig)
     (batchSize : Nat)
     (seed : UInt64) :
-    Except String (Array ReplaySample × Array Float × UInt64) := do
+    IO (Except String (Array ReplaySample × Array Float × UInt64)) := do
   if batchSize = 0 then
-    throw "PPO batch collector requires batchSize > 0."
-  let s0 ← initAlphaGradState? task.graph task.numVertices
+    return .error "PPO batch collector requires batchSize > 0."
+  let s0 ←
+    match initAlphaGradState? task.graph task.numVertices with
+    | .error msg => return .error msg
+    | .ok s0 => pure s0
   let maxSteps := task.envCfg.maxEpisodeSteps.getD task.numEliminableVertices
   let mut states := Array.replicate batchSize s0
   let mut active : Array Nat := (List.range batchSize).toArray
@@ -404,14 +427,22 @@ private def collectPPOEpisodeBatch
   let mut step := 0
   while !active.isEmpty && step < maxSteps do
     let activeStates := active.map (fun idx => states.getD idx s0)
-    let (logitsBatch, valuesBatch) := evalStatesPolicyValue net task.envCfg activeStates
+    let evalOut ←
+      match (← evalStatesPolicyValueTensor? net task caps activeStates) with
+      | .error msg => return .error msg
+      | .ok out => pure out
+    let logitsBatch := evalOut.actionLogits
+    let valuesBatch := evalOut.values
     let mut actions : Array ActionId0 := #[]
     let mut logProbs : Array Float := #[]
     let mut keyAfter := key
     for idx in [:active.size] do
       let logits := logitsBatch.getD idx #[]
       let probs := softmax logits
-      let (action, nextKey) ← sampleCategorical? probs (keyAfter + UInt64.ofNat (idx + 1))
+      let (action, nextKey) ←
+        match sampleCategorical? probs (keyAfter + UInt64.ofNat (idx + 1)) with
+        | .error msg => return .error msg
+        | .ok out => pure out
       actions := actions.push action
       logProbs := logProbs.push (logSafe (probs.getD action 0.0))
       keyAfter := nextKey
@@ -420,23 +451,24 @@ private def collectPPOEpisodeBatch
     let aliveLocals := (List.range transitions.size).toArray.filter fun i =>
       !(transitions.getD i default).done
     let aliveStates := aliveLocals.map fun i => (transitions.getD i default).nextState
-    let nextValuesAlive :=
+    let nextValuesAlive ←
       if aliveStates.isEmpty then
-        #[]
+        pure #[]
       else
-        (evalStatesPolicyValue net task.envCfg aliveStates).2
+        match (← evalStatesPolicyValueTensor? net task caps aliveStates) with
+        | .error msg => return .error msg
+        | .ok out => pure out.values
     let mut nextValueMap : Std.HashMap Nat Float := {}
     for i in [:aliveLocals.size] do
       nextValueMap := nextValueMap.insert (aliveLocals.getD i 0) (nextValuesAlive.getD i 0.0)
     let mut newActive : Array Nat := #[]
     for idx in [:active.size] do
       let global := active.getD idx 0
-      let state := activeStates.getD idx s0
       let t := transitions.getD idx default
       let nextValue := if t.done then 0.0 else nextValueMap.getD idx 0.0
       let currentPending := pending.getD global #[]
       pending := pending.set! global (currentPending.push {
-        features := exportObservationFlat task.envCfg state
+        features := evalOut.observations.getD idx #[]
         action := actions.getD idx 0
         reward := t.reward
         value := valuesBatch.getD idx 0.0
@@ -452,7 +484,7 @@ private def collectPPOEpisodeBatch
     key := mix (keyAfter + UInt64.ofNat (step + 1))
     step := step + 1
   if !active.isEmpty then
-    throw s!"PPO batched rollout did not terminate within {maxSteps} steps."
+    return .error s!"PPO batched rollout did not terminate within {maxSteps} steps."
   let mut samples : Array ReplaySample := #[]
   for envIdx in [:batchSize] do
     let envSteps := pending.getD envIdx #[]
@@ -469,7 +501,7 @@ private def collectPPOEpisodeBatch
         advantage := advantages.getD i 0.0
         done := st.done
       }
-  pure (samples, totals, key)
+  pure (.ok (samples, totals, key))
 
 private def ppoUpdateFromReplay
     {vertexDim tokenDim : UInt64}
@@ -705,10 +737,12 @@ private def loadTrainerCheckpoint?
 private def collectEpochReplay
     {vertexDim tokenDim : UInt64}
     (task : TaskSpec)
-    (net : EvalNet vertexDim tokenDim)
+    (caps : ObservationCaps)
+    (net : AlphaGradNet vertexDim tokenDim)
+    (evalNet : EvalNet vertexDim tokenDim)
     (cfg : AlphaGradTrainerConfig)
     (seed : UInt64) :
-    Except String (Array ReplaySample × Float × UInt64) := do
+    IO (Except String (Array ReplaySample × Float × UInt64)) := do
   let mut remaining := cfg.episodesPerEpoch
   let mut key := seed
   let mut samples : Array ReplaySample := #[]
@@ -718,15 +752,21 @@ private def collectEpochReplay
     let batch := Nat.min (Nat.max cfg.numEnvs 1) remaining
     let (batchSamples, batchRewards, key') ←
       match cfg.mode with
-      | .ppo => collectPPOEpisodeBatch task net cfg batch key
-      | .alphazero => collectAlphaZeroEpisodeBatch task net cfg batch key
+      | .ppo =>
+        match (← collectPPOEpisodeBatch task caps net cfg batch key) with
+        | .error msg => return .error msg
+        | .ok out => pure out
+      | .alphazero =>
+        match (← collectAlphaZeroEpisodeBatch task caps evalNet cfg batch key) with
+        | .error msg => return .error msg
+        | .ok out => pure out
     key := key'
     samples := samples ++ batchSamples
     rewardTotal := rewardTotal + batchRewards.foldl (init := 0.0) (· + ·)
     episodesDone := episodesDone + batch
     remaining := remaining - batch
   let avgReward := if episodesDone = 0 then 0.0 else rewardTotal / Float.ofNat episodesDone
-  pure (samples, avgReward, key)
+  pure (.ok (samples, avgReward, key))
 
 private def runTrainUpdates
     {vertexDim tokenDim : UInt64}
@@ -780,18 +820,28 @@ private def runTrainUpdates
 private def evaluateModel
     {vertexDim tokenDim : UInt64}
     (task : TaskSpec)
-    (net : EvalNet vertexDim tokenDim)
+    (caps : ObservationCaps)
+    (net : AlphaGradNet vertexDim tokenDim)
+    (evalNet : EvalNet vertexDim tokenDim)
     (cfg : AlphaGradTrainerConfig)
     (seed : UInt64) :
-    Except String (Float × Float × UInt64) := do
-  let greedy ← evalGreedyReward? task net
-  let (samples, rewards, key) ←
+    IO (Except String (Float × Float × UInt64)) := do
+  let greedy ←
+    match (← evalGreedyReward? task net caps) with
+    | .error msg => return .error msg
+    | .ok value => pure value
+  let (_samples, rewards, key) ←
     match cfg.mode with
-    | .ppo => collectPPOEpisodeBatch task net cfg 1 seed
-    | .alphazero => collectAlphaZeroEpisodeBatch task net cfg 1 seed
-  let _ := samples
+    | .ppo =>
+      match (← collectPPOEpisodeBatch task caps net cfg 1 seed) with
+      | .error msg => return .error msg
+      | .ok out => pure out
+    | .alphazero =>
+      match (← collectAlphaZeroEpisodeBatch task caps evalNet cfg 1 seed) with
+      | .error msg => return .error msg
+      | .ok out => pure out
   let searchReward := rewards.getD 0 greedy
-  pure (greedy, searchReward, key)
+  pure (.ok (greedy, searchReward, key))
 
 private def writeTrainerReport
     (artifacts : RunArtifacts)
@@ -823,8 +873,9 @@ def trainWithConfig (cfg : AlphaGradTrainerConfig) : IO (Except String TrainerSn
   | .error msg =>
     pure (.error s!"AlphaGrad trainer task materialization failed: {msg}")
   | .ok task =>
-    let vertexDim := taskVertexDim task
-    let tokenDim := taskTokenDim task
+    let caps := taskObservationCaps task
+    let vertexDim := capsVertexDim caps
+    let tokenDim := capsTokenDim caps
     let runDir := defaultRunDir cfg
     let artifacts := RunArtifacts.ofBaseDir runDir
     let policy :=
@@ -859,7 +910,7 @@ def trainWithConfig (cfg : AlphaGradTrainerConfig) : IO (Except String TrainerSn
     for epoch in [snapshot.completedEpochs:cfg.epochs] do
       let behavior ← buildEvalNet (TensorStruct.detach net)
       let (collected, avgReward, seed') ←
-        match collectEpochReplay task behavior cfg seed with
+        match (← collectEpochReplay task caps (TensorStruct.detach net) behavior cfg seed) with
         | .error msg => return .error s!"AlphaGrad trainer collection failed at epoch {epoch + 1}: {msg}"
         | .ok out => pure out
       seed := seed'
@@ -888,7 +939,7 @@ def trainWithConfig (cfg : AlphaGradTrainerConfig) : IO (Except String TrainerSn
         }
       if cfg.evalEvery > 0 && ((epoch + 1) % cfg.evalEvery = 0 || epoch + 1 = cfg.epochs) then
         let evalNet ← buildEvalNet (TensorStruct.detach net)
-        match evaluateModel task evalNet cfg seed with
+        match (← evaluateModel task caps (TensorStruct.detach net) evalNet cfg seed) with
         | .error msg =>
           return .error s!"AlphaGrad trainer evaluation failed at epoch {epoch + 1}: {msg}"
         | .ok (greedyReward, searchReward, seed') =>
@@ -926,14 +977,16 @@ def trainWithConfig (cfg : AlphaGradTrainerConfig) : IO (Except String TrainerSn
 
 def evalWithConfig
     (cfg : AlphaGradTrainerConfig)
-    (checkpointDir? : Option String := none) :
+    (checkpointDir? : Option String := none)
+    (seedOverride? : Option Nat := none) :
     IO (Except String (Float × Float)) := do
   match (← materializeTask cfg.task) with
   | .error msg =>
     pure (.error s!"AlphaGrad eval task materialization failed: {msg}")
   | .ok task =>
-    let vertexDim := taskVertexDim task
-    let tokenDim := taskTokenDim task
+    let caps := taskObservationCaps task
+    let vertexDim := capsVertexDim caps
+    let tokenDim := capsTokenDim caps
     let net0 ← AlphaGradNet.init vertexDim tokenDim
     let runDir := defaultRunDir cfg
     let artifacts := RunArtifacts.ofBaseDir runDir
@@ -943,7 +996,8 @@ def evalWithConfig
       pure (.error s!"AlphaGrad trainer checkpoint not found at {ckptDir}")
     | some (net, _optState, replay, snapshot) =>
       let evalNet ← buildEvalNet (TensorStruct.detach net)
-      match evaluateModel task evalNet cfg (UInt64.ofNat snapshot.nextSeed) with
+      let evalSeed := UInt64.ofNat (seedOverride?.getD snapshot.nextSeed)
+      match (← evaluateModel task caps (TensorStruct.detach net) evalNet cfg evalSeed) with
       | .error msg =>
         pure (.error s!"AlphaGrad trainer eval failed: {msg}")
       | .ok (greedyReward, searchReward, _seed) =>
@@ -960,6 +1014,502 @@ def evalWithConfig
         }
         IO.println s!"[AlphaGradTrainer][eval] checkpoint={ckptDir} greedy={greedyReward} search={searchReward} replay={replay.size}"
         pure (.ok (greedyReward, searchReward))
+
+inductive CurriculumMode where
+  | roundRobin
+  | progressive
+  | random
+  deriving Repr, Inhabited, BEq
+
+instance : ToJson CurriculumMode where
+  toJson
+    | .roundRobin => Json.str "round-robin"
+    | .progressive => Json.str "progressive"
+    | .random => Json.str "random"
+
+instance : FromJson CurriculumMode where
+  fromJson?
+    | .str "round-robin" => pure .roundRobin
+    | .str "roundrobin" => pure .roundRobin
+    | .str "progressive" => pure .progressive
+    | .str "random" => pure .random
+    | .str s => throw s!"Unknown curriculum mode '{s}'."
+    | _ => throw "Expected curriculum mode as JSON string."
+
+structure MultiTaskTrainerConfig where
+  mode : TrainMode := .alphazero
+  tasks : Array TaskName := taskSequence
+  evalTasks : Array TaskName := #[]
+  curriculum : CurriculumMode := .roundRobin
+  curriculumWindow : Nat := 4
+  epochs : Nat := 64
+  episodesPerEpoch : Nat := 16
+  numEnvs : Nat := 8
+  replayCapacityPerTask : Nat := 4096
+  sampleBatchSize : Nat := 256
+  updateBatchesPerEpoch : Nat := 4
+  ppoUpdateEpochs : Nat := 4
+  alphaZeroUpdateEpochs : Nat := 8
+  gamma : Float := 1.0
+  gaeLambda : Float := 0.95
+  clipEps : Float := 0.2
+  ppoValueCoef : Float := 0.5
+  entropyCoef : Float := 0.01
+  valueWeight : Float := 10.0
+  learningRate : Float := 3.0e-4
+  weightDecay : Float := 1.0e-4
+  numSimulations : Nat := 48
+  maxDepth : Option Nat := none
+  valueTransform : AlphaGradValueTransform := .log
+  qtransformValueScale : Float := 0.01
+  qtransformMaxvisitInit : Float := 25.0
+  qtransformRescaleValues : Bool := true
+  qtransformUseMixedValue : Bool := true
+  evalEvery : Nat := 1
+  checkpointEvery : Nat := 1
+  runDir : String := ""
+  seed : Nat := 250197
+  resume : Bool := false
+  overwrite : Bool := false
+  deriving Repr, Inhabited, ToJson, FromJson
+
+structure MultiTaskTrainerSnapshot where
+  mode : TrainMode
+  tasks : Array TaskName
+  evalTasks : Array TaskName
+  curriculum : CurriculumMode
+  completedEpochs : Nat := 0
+  globalEpisodes : Nat := 0
+  globalSamples : Nat := 0
+  nextSeed : Nat := 0
+  lastTask : TaskName := .perceptron
+  bestMeanEvalReward : Float := -1.0e30
+  bestMeanSearchReward : Float := -1.0e30
+  lastMeanEvalReward : Float := 0.0
+  lastMeanSearchReward : Float := 0.0
+  lastTrainReward : Float := 0.0
+  lastPolicyLoss : Float := 0.0
+  lastValueLoss : Float := 0.0
+  lastEntropy : Float := 0.0
+  deriving Repr, Inhabited, ToJson, FromJson
+
+private def multiTaskBaseConfig
+    (cfg : MultiTaskTrainerConfig)
+    (task : TaskName) :
+    AlphaGradTrainerConfig := {
+  mode := cfg.mode
+  task := task
+  epochs := cfg.epochs
+  episodesPerEpoch := cfg.episodesPerEpoch
+  numEnvs := cfg.numEnvs
+  replayCapacity := cfg.replayCapacityPerTask
+  sampleBatchSize := cfg.sampleBatchSize
+  updateBatchesPerEpoch := cfg.updateBatchesPerEpoch
+  ppoUpdateEpochs := cfg.ppoUpdateEpochs
+  alphaZeroUpdateEpochs := cfg.alphaZeroUpdateEpochs
+  gamma := cfg.gamma
+  gaeLambda := cfg.gaeLambda
+  clipEps := cfg.clipEps
+  ppoValueCoef := cfg.ppoValueCoef
+  entropyCoef := cfg.entropyCoef
+  valueWeight := cfg.valueWeight
+  learningRate := cfg.learningRate
+  weightDecay := cfg.weightDecay
+  numSimulations := cfg.numSimulations
+  maxDepth := cfg.maxDepth
+  valueTransform := cfg.valueTransform
+  qtransformValueScale := cfg.qtransformValueScale
+  qtransformMaxvisitInit := cfg.qtransformMaxvisitInit
+  qtransformRescaleValues := cfg.qtransformRescaleValues
+  qtransformUseMixedValue := cfg.qtransformUseMixedValue
+  evalEvery := cfg.evalEvery
+  checkpointEvery := cfg.checkpointEvery
+  runDir := cfg.runDir
+  seed := cfg.seed
+  resume := cfg.resume
+  overwrite := cfg.overwrite
+}
+
+private def defaultMultiRunDir (cfg : MultiTaskTrainerConfig) : String :=
+  let explicit := cfg.runDir.trimAscii.toString
+  if explicit.isEmpty then
+    s!"runs/alphagrad/multi/{toString cfg.mode}"
+  else
+    explicit
+
+private def multiTrainerStatePath (dir : String) : System.FilePath :=
+  ⟨s!"{dir}/multitask_trainer_state.json"⟩
+
+private def multiReplayStatePath (dir : String) (task : TaskName) : System.FilePath :=
+  ⟨s!"{dir}/replay_{toString task}.json"⟩
+
+private def materializeTaskPairs
+    (names : Array TaskName) :
+    IO (Except String (Array (TaskName × TaskSpec))) := do
+  let mut out : Array (TaskName × TaskSpec) := #[]
+  for name in names do
+    match (← materializeTask name) with
+    | .error msg => return .error s!"AlphaGrad task materialization failed for {name}: {msg}"
+    | .ok task => out := out.push (name, task)
+  pure (.ok out)
+
+private def eligibleTaskIndices
+    (cfg : MultiTaskTrainerConfig)
+    (numTasks epoch : Nat) :
+    Array Nat :=
+  if numTasks = 0 then
+    #[]
+  else
+    match cfg.curriculum with
+    | .roundRobin
+    | .random => (List.range numTasks).toArray
+    | .progressive =>
+      let window := Nat.max cfg.curriculumWindow 1
+      let count := min numTasks (epoch / window + 1)
+      (List.range count).toArray
+
+private def chooseTaskIndex
+    (cfg : MultiTaskTrainerConfig)
+    (eligible : Array Nat)
+    (epochHint : Nat)
+    (seed : UInt64) :
+    Nat × UInt64 :=
+  if eligible.isEmpty then
+    (0, seed)
+  else
+    match cfg.curriculum with
+    | .random =>
+      let seed' := mix seed
+      let idx := (seed'.toNat % eligible.size)
+      (eligible.getD idx 0, seed')
+    | _ =>
+      let idx := epochHint % eligible.size
+      (eligible.getD idx 0, seed)
+
+private def meanArrayOrZero (xs : Array Float) : Float :=
+  if xs.isEmpty then 0.0 else xs.foldl (init := 0.0) (· + ·) / Float.ofNat xs.size
+
+private def replayAt
+    (buffers : Array ReplayBuffer)
+    (idx capacity : Nat) :
+    ReplayBuffer :=
+  buffers.getD idx (ReplayBuffer.empty capacity)
+
+private def saveMultiTrainerCheckpoint
+    {vertexDim tokenDim : UInt64}
+    (artifacts : RunArtifacts)
+    (name : String)
+    (taskNames : Array TaskName)
+    (net : AlphaGradNet vertexDim tokenDim)
+    (optState : Optim.AdamWState (AlphaGradNet vertexDim tokenDim))
+    (replays : Array ReplayBuffer)
+    (snapshot : MultiTaskTrainerSnapshot) :
+    IO Unit := do
+  let dir := namedCheckpointDir artifacts name
+  IO.FS.createDirAll ⟨dir⟩
+  saveParams (TensorStruct.detach net) dir "model"
+  saveOptimizerState optState.fst.mu optState.fst.nu optState.fst.count dir
+  writeJsonFile (multiTrainerStatePath dir) snapshot
+  for i in [:taskNames.size] do
+    let task := taskNames.getD i .perceptron
+    let replay := replays.getD i (ReplayBuffer.empty 1)
+    saveReplayBuffer (multiReplayStatePath dir task) replay
+  appendCheckpointEvent artifacts {
+    name := name
+    path := dir
+    kind := "alphagrad-multitask-trainer"
+    step := some snapshot.completedEpochs
+    metadata := [
+      metricStr "mode" (toString snapshot.mode),
+      metricNat "globalEpisodes" snapshot.globalEpisodes,
+      metricNat "globalSamples" snapshot.globalSamples
+    ]
+  }
+
+private def loadMultiTrainerCheckpoint?
+    {vertexDim tokenDim : UInt64}
+    (dir : String)
+    (taskNames : Array TaskName)
+    (capacity : Nat)
+    (template : AlphaGradNet vertexDim tokenDim) :
+    IO (Option
+      (AlphaGradNet vertexDim tokenDim ×
+       Optim.AdamWState (AlphaGradNet vertexDim tokenDim) ×
+       Array ReplayBuffer ×
+       MultiTaskTrainerSnapshot)) := do
+  let stateExists ← System.FilePath.pathExists (multiTrainerStatePath dir)
+  if !stateExists then
+    pure none
+  else
+    let net ← loadParams template dir "model"
+    let (mu, nu, count) ← loadOptimizerState template dir
+    let mut replays : Array ReplayBuffer := #[]
+    for task in taskNames do
+      let path := multiReplayStatePath dir task
+      let hasReplay ← System.FilePath.pathExists path
+      let replay ←
+        if hasReplay then
+          loadReplayBuffer path
+        else
+          pure (ReplayBuffer.empty capacity)
+      replays := replays.push replay
+    let snapshot : MultiTaskTrainerSnapshot ← readJsonFile (multiTrainerStatePath dir)
+    let optState : Optim.AdamWState (AlphaGradNet vertexDim tokenDim) := {
+      fst := { count := count, mu := mu, nu := nu }
+      snd := { fst := {}, snd := {} }
+    }
+    pure (some (net, optState, replays, snapshot))
+
+private def runMultiTaskUpdates
+    {vertexDim tokenDim : UInt64}
+    (taskPairs : Array (TaskName × TaskSpec))
+    (eligible : Array Nat)
+    (net : AlphaGradNet vertexDim tokenDim)
+    (optState : Optim.AdamWState (AlphaGradNet vertexDim tokenDim))
+    (replays : Array ReplayBuffer)
+    (cfg : MultiTaskTrainerConfig)
+    (epoch : Nat)
+    (seed : UInt64) :
+    IO (Except String
+      (AlphaGradNet vertexDim tokenDim ×
+       Optim.AdamWState (AlphaGradNet vertexDim tokenDim) ×
+       UInt64 × Float × Float × Float)) := do
+  let modeKind := match cfg.mode with | .ppo => ReplayKind.ppo | .alphazero => .alphazero
+  let candidates := eligible.filter fun idx =>
+    let replay := replayAt replays idx cfg.replayCapacityPerTask
+    !(replay.filterByKind modeKind).isEmpty
+  if candidates.isEmpty then
+    return .error "Multi-task replay banks have no samples for the selected mode."
+  let mut netCur := net
+  let mut optCur := optState
+  let mut key := seed
+  let mut policyLoss := 0.0
+  let mut valueLoss := 0.0
+  let mut entropy := 0.0
+  for updateIdx in [:cfg.updateBatchesPerEpoch] do
+    let (taskIdx, key') := chooseTaskIndex cfg candidates (epoch + updateIdx) key
+    key := key'
+    let taskPair := taskPairs.getD taskIdx (.perceptron, default)
+    let taskName := taskPair.1
+    let task := taskPair.2
+    let replay := replayAt replays taskIdx cfg.replayCapacityPerTask
+    let batchSize := Nat.min (Nat.max cfg.sampleBatchSize 1) (replay.filterByKind modeKind).size
+    let (batch, key'') ←
+      match replay.sampleBatch key batchSize (some modeKind) with
+      | .error msg => return .error msg
+      | .ok out => pure out
+    key := key''
+    let baseCfg := multiTaskBaseConfig cfg taskName
+    match cfg.mode with
+    | .ppo =>
+      match (← ppoUpdateFromReplay task netCur optCur batch baseCfg) with
+      | .error msg => return .error msg
+      | .ok (netNext, optNext, p, v, e) =>
+        netCur := netNext
+        optCur := optNext
+        policyLoss := p
+        valueLoss := v
+        entropy := e
+    | .alphazero =>
+      match (← alphaZeroUpdateFromReplay task netCur optCur batch baseCfg) with
+      | .error msg => return .error msg
+      | .ok (netNext, optNext, p, v) =>
+        netCur := netNext
+        optCur := optNext
+        policyLoss := p
+        valueLoss := v
+        entropy := 0.0
+  pure (.ok (netCur, optCur, key, policyLoss, valueLoss, entropy))
+
+private def evaluateMultiTaskModel
+    {vertexDim tokenDim : UInt64}
+    (taskPairs : Array (TaskName × TaskSpec))
+    (caps : ObservationCaps)
+    (net : AlphaGradNet vertexDim tokenDim)
+    (evalNet : EvalNet vertexDim tokenDim)
+    (cfg : MultiTaskTrainerConfig)
+    (seed : UInt64) :
+    IO (Except String (Array (TaskName × Float × Float) × UInt64)) := do
+  let evalNames := if cfg.evalTasks.isEmpty then cfg.tasks else cfg.evalTasks
+  let mut results : Array (TaskName × Float × Float) := #[]
+  let mut key := seed
+  for name in evalNames do
+    let pair? := taskPairs.find? (fun pair => pair.1 == name)
+    let taskPair ←
+      match pair? with
+      | some pair => pure pair
+      | none =>
+        match (← materializeTask name) with
+        | .error msg => return .error msg
+        | .ok task => pure (name, task)
+    let baseCfg := multiTaskBaseConfig cfg name
+    match (← evaluateModel taskPair.2 caps (TensorStruct.detach net) evalNet baseCfg key) with
+    | .error msg => return .error msg
+    | .ok (greedyReward, searchReward, key') =>
+      key := key'
+      results := results.push (name, greedyReward, searchReward)
+  pure (.ok (results, key))
+
+def multiTrainWithConfig (cfg : MultiTaskTrainerConfig) : IO (Except String MultiTaskTrainerSnapshot) := do
+  if cfg.tasks.isEmpty then
+    return .error "Multi-task trainer requires at least one task."
+  let taskPairsRes ← materializeTaskPairs cfg.tasks
+  match taskPairsRes with
+  | .error msg => pure (.error msg)
+  | .ok taskPairs =>
+    let caps := taskSetObservationCaps (taskPairs.map fun pair => pair.2)
+    let vertexDim := capsVertexDim caps
+    let tokenDim := capsTokenDim caps
+    let runDir := defaultMultiRunDir cfg
+    let artifacts := RunArtifacts.ofBaseDir runDir
+    let policy :=
+      if cfg.resume then ExistingRunPolicy.resume
+      else if cfg.overwrite then ExistingRunPolicy.overwrite
+      else ExistingRunPolicy.failIfExists
+    prepare artifacts cfg policy
+    let net0 ← AlphaGradNet.init vertexDim tokenDim
+    let net0 := TensorStruct.makeLeafParams net0
+    let opt := Optim.adamw (lr := cfg.learningRate) (weight_decay := cfg.weightDecay)
+    let optState0 := opt.init net0
+    let replays0 := Array.replicate taskPairs.size (ReplayBuffer.empty cfg.replayCapacityPerTask)
+    let snapshot0 : MultiTaskTrainerSnapshot := {
+      mode := cfg.mode
+      tasks := cfg.tasks
+      evalTasks := if cfg.evalTasks.isEmpty then cfg.tasks else cfg.evalTasks
+      curriculum := cfg.curriculum
+      nextSeed := cfg.seed
+      lastTask := cfg.tasks.getD 0 .perceptron
+    }
+    let latestDir := latestCheckpointDir artifacts
+    let initialBundle ←
+      if cfg.resume then do
+        match (← loadMultiTrainerCheckpoint? latestDir cfg.tasks cfg.replayCapacityPerTask net0) with
+        | some loaded => pure loaded
+        | none => pure (net0, optState0, replays0, snapshot0)
+      else
+        pure (net0, optState0, replays0, snapshot0)
+    let mut net := initialBundle.1
+    let mut optState := initialBundle.2.1
+    let mut replays := initialBundle.2.2.1
+    let mut snapshot := initialBundle.2.2.2
+    let mut seed := UInt64.ofNat snapshot.nextSeed
+    let taskLabels := String.intercalate "," (cfg.tasks.toList.map toString)
+    IO.println s!"[AlphaGradMulti] mode={toString cfg.mode} tasks={taskLabels} run_dir={runDir} epochs={cfg.epochs}"
+    for epoch in [snapshot.completedEpochs:cfg.epochs] do
+      let eligible := eligibleTaskIndices cfg taskPairs.size epoch
+      let (activeIdx, seedAfterPick) := chooseTaskIndex cfg eligible epoch seed
+      seed := seedAfterPick
+      let activePair := taskPairs.getD activeIdx (.perceptron, default)
+      let activeName := activePair.1
+      let activeTask := activePair.2
+      let baseCfg := multiTaskBaseConfig cfg activeName
+      let behavior ← buildEvalNet (TensorStruct.detach net)
+      let collectRes ← collectEpochReplay activeTask caps (TensorStruct.detach net) behavior baseCfg seed
+      let (collected, avgReward, seedAfterCollect) ←
+        match collectRes with
+        | .error msg => return .error s!"Multi-task collection failed at epoch {epoch + 1}: {msg}"
+        | .ok out => pure out
+      seed := seedAfterCollect
+      let replay := replayAt replays activeIdx cfg.replayCapacityPerTask
+      replays := replays.set! activeIdx (replay.pushBatch collected)
+      snapshot := {
+        snapshot with
+        completedEpochs := epoch + 1
+        globalEpisodes := snapshot.globalEpisodes + cfg.episodesPerEpoch
+        globalSamples := snapshot.globalSamples + collected.size
+        nextSeed := seed.toNat
+        lastTask := activeName
+        lastTrainReward := avgReward
+      }
+      let updateRes ← runMultiTaskUpdates taskPairs eligible net optState replays cfg epoch seed
+      let (netNext, optNext, seedAfterUpdate, policyLoss, valueLoss, entropy) ←
+        match updateRes with
+        | .error msg => return .error s!"Multi-task update failed at epoch {epoch + 1}: {msg}"
+        | .ok out => pure out
+      net := netNext
+      optState := optNext
+      seed := seedAfterUpdate
+      snapshot := {
+        snapshot with
+        nextSeed := seed.toNat
+        lastPolicyLoss := policyLoss
+        lastValueLoss := valueLoss
+        lastEntropy := entropy
+      }
+      let shouldEval := cfg.evalEvery > 0 && ((epoch + 1) % cfg.evalEvery = 0 || epoch + 1 = cfg.epochs)
+      if shouldEval then do
+        let evalNet ← buildEvalNet (TensorStruct.detach net)
+        let evalRes ← evaluateMultiTaskModel taskPairs caps (TensorStruct.detach net) evalNet cfg seed
+        match evalRes with
+        | .error msg => return .error s!"Multi-task evaluation failed at epoch {epoch + 1}: {msg}"
+        | .ok (results, seedEval) =>
+          let meanGreedy := meanArrayOrZero (results.map fun triple => triple.2.1)
+          let meanSearch := meanArrayOrZero (results.map fun triple => triple.2.2)
+          seed := seedEval
+          snapshot := {
+            snapshot with
+            nextSeed := seed.toNat
+            lastMeanEvalReward := meanGreedy
+            lastMeanSearchReward := meanSearch
+            bestMeanEvalReward := max snapshot.bestMeanEvalReward meanGreedy
+            bestMeanSearchReward := max snapshot.bestMeanSearchReward meanSearch
+          }
+          appendMetricEvent artifacts {
+            scope := "multitask-train"
+            step := some (epoch + 1)
+            metrics := [
+              metricStr "mode" (toString cfg.mode),
+              metricStr "activeTask" (toString activeName),
+              metricFloat "avgEpisodeReward" avgReward,
+              metricFloat "policyLoss" snapshot.lastPolicyLoss,
+              metricFloat "valueLoss" snapshot.lastValueLoss,
+              metricFloat "entropy" snapshot.lastEntropy,
+              metricFloat "meanGreedyReward" meanGreedy,
+              metricFloat "meanSearchReward" meanSearch
+            ]
+          }
+          IO.println s!"[AlphaGradMulti] epoch={epoch + 1}/{cfg.epochs} active={activeName} avg_reward={avgReward} mean_greedy={meanGreedy} mean_search={meanSearch}"
+          if meanGreedy >= snapshot.bestMeanEvalReward || meanSearch >= snapshot.bestMeanSearchReward then
+            saveMultiTrainerCheckpoint artifacts "best" cfg.tasks net optState replays snapshot
+      let shouldCheckpoint := cfg.checkpointEvery > 0 && ((epoch + 1) % cfg.checkpointEvery = 0 || epoch + 1 = cfg.epochs)
+      if shouldCheckpoint then do
+        saveMultiTrainerCheckpoint artifacts s!"epoch_{epoch + 1}" cfg.tasks net optState replays snapshot
+        saveMultiTrainerCheckpoint artifacts "latest" cfg.tasks net optState replays snapshot
+    pure (.ok snapshot)
+
+def multiEvalWithConfig
+    (cfg : MultiTaskTrainerConfig)
+    (checkpointDir? : Option String := none)
+    (seedOverride? : Option Nat := none) :
+    IO (Except String (Array (TaskName × Float × Float))) := do
+  match (← materializeTaskPairs cfg.tasks) with
+  | .error msg => pure (.error msg)
+  | .ok taskPairs =>
+    let caps := taskSetObservationCaps (taskPairs.map fun pair => pair.2)
+    let vertexDim := capsVertexDim caps
+    let tokenDim := capsTokenDim caps
+    let net0 ← AlphaGradNet.init vertexDim tokenDim
+    let runDir := defaultMultiRunDir cfg
+    let artifacts := RunArtifacts.ofBaseDir runDir
+    let ckptDir := checkpointDir?.getD (latestCheckpointDir artifacts)
+    match (← loadMultiTrainerCheckpoint? ckptDir cfg.tasks cfg.replayCapacityPerTask net0) with
+    | none =>
+      pure (.error s!"AlphaGrad multi-task checkpoint not found at {ckptDir}")
+    | some (net, _optState, _replays, snapshot) =>
+      let evalNet ← buildEvalNet (TensorStruct.detach net)
+      let evalSeed := UInt64.ofNat (seedOverride?.getD snapshot.nextSeed)
+      match (← evaluateMultiTaskModel taskPairs caps (TensorStruct.detach net) evalNet cfg evalSeed) with
+      | .error msg => pure (.error msg)
+      | .ok (results, _seed) =>
+        let metrics : List (String × Json) :=
+          results.foldl (init := ([] : List (String × Json))) fun acc (name, greedyReward, searchReward) =>
+            acc ++ [metricFloat s!"{toString name}.greedy" greedyReward, metricFloat s!"{toString name}.search" searchReward]
+        appendMetricEvent artifacts {
+          scope := "multitask-eval"
+          step := some snapshot.completedEpochs
+          metrics := metrics
+        }
+        pure (.ok results)
 
 structure TrainerArgs where
   command : String := "train"
@@ -1033,6 +1583,8 @@ private def usage : String :=
     "Usage:",
     "  lake exe AlphaGradTrainer train <mode> <task> [flags]",
     "  lake exe AlphaGradTrainer eval <mode> <task> [flags]",
+    "  lake exe AlphaGradTrainer multitrain <mode> <task1,task2,...|all> [flags]",
+    "  lake exe AlphaGradTrainer multieval <mode> <task1,task2,...|all> [flags]",
     "Flags:",
     "  --epochs <n>",
     "  --episodes-per-epoch <n>",
@@ -1046,9 +1598,179 @@ private def usage : String :=
     "  --seed <n>",
     "  --run-dir <dir>",
     "  --checkpoint <dir>",
+    "  --eval-tasks <task1,task2,...|all>",
+    "  --curriculum <round-robin|progressive|random>",
+    "  --curriculum-window <n>",
     "  --resume",
     "  --overwrite"
   ] : List String)
+
+structure MultiTrainerArgs where
+  command : String := "multitrain"
+  mode : TrainMode := .alphazero
+  tasks : Array TaskName := taskSequence
+  evalTasks : Option (Array TaskName) := none
+  curriculum : Option CurriculumMode := none
+  curriculumWindow : Option Nat := none
+  epochs : Option Nat := none
+  episodesPerEpoch : Option Nat := none
+  numEnvs : Option Nat := none
+  replayCapacityPerTask : Option Nat := none
+  sampleBatchSize : Option Nat := none
+  updateBatchesPerEpoch : Option Nat := none
+  checkpointEvery : Option Nat := none
+  evalEvery : Option Nat := none
+  numSimulations : Option Nat := none
+  seed : Option Nat := none
+  runDir : Option String := none
+  checkpointDir : Option String := none
+  resume : Bool := false
+  overwrite : Bool := false
+  deriving Repr, Inhabited
+
+private def parseTaskListArg?
+    (s : String) :
+    Except String (Array TaskName) := do
+  let trimmed := s.trimAscii.toString
+  if trimmed.isEmpty then
+    throw "Expected non-empty task list."
+  if trimmed = "all" then
+    pure taskSequence
+  else
+    let parts := trimmed.splitOn ","
+    let mut out : Array TaskName := #[]
+    for raw in parts do
+      match parseTaskName? raw with
+      | some task => out := out.push task
+      | none => throw s!"Unknown AlphaGrad task '{raw}'."
+    if out.isEmpty then
+      throw "Expected at least one AlphaGrad task."
+    pure out
+
+private def parseCurriculumMode?
+    (s : String) :
+    Option CurriculumMode :=
+  match s.trimAscii.toString.toLower with
+  | "round-robin"
+  | "roundrobin" => some .roundRobin
+  | "progressive" => some .progressive
+  | "random" => some .random
+  | _ => none
+
+private def parseMultiTrainerFlags
+    (args : List String)
+    (st : MultiTrainerArgs) :
+    Except String MultiTrainerArgs :=
+  match args with
+  | [] => pure st
+  | "--epochs" :: v :: rest =>
+    parseMultiTrainerFlags rest { st with epochs := parseNatArg? v }
+  | "--episodes-per-epoch" :: v :: rest =>
+    parseMultiTrainerFlags rest { st with episodesPerEpoch := parseNatArg? v }
+  | "--num-envs" :: v :: rest =>
+    parseMultiTrainerFlags rest { st with numEnvs := parseNatArg? v }
+  | "--replay-capacity" :: v :: rest =>
+    parseMultiTrainerFlags rest { st with replayCapacityPerTask := parseNatArg? v }
+  | "--batch-size" :: v :: rest =>
+    parseMultiTrainerFlags rest { st with sampleBatchSize := parseNatArg? v }
+  | "--update-batches" :: v :: rest =>
+    parseMultiTrainerFlags rest { st with updateBatchesPerEpoch := parseNatArg? v }
+  | "--checkpoint-every" :: v :: rest =>
+    parseMultiTrainerFlags rest { st with checkpointEvery := parseNatArg? v }
+  | "--eval-every" :: v :: rest =>
+    parseMultiTrainerFlags rest { st with evalEvery := parseNatArg? v }
+  | "--num-simulations" :: v :: rest =>
+    parseMultiTrainerFlags rest { st with numSimulations := parseNatArg? v }
+  | "--seed" :: v :: rest =>
+    parseMultiTrainerFlags rest { st with seed := parseNatArg? v }
+  | "--run-dir" :: v :: rest =>
+    parseMultiTrainerFlags rest { st with runDir := some v }
+  | "--checkpoint" :: v :: rest =>
+    parseMultiTrainerFlags rest { st with checkpointDir := some v }
+  | "--eval-tasks" :: v :: rest =>
+    match parseTaskListArg? v with
+    | .error msg => throw msg
+    | .ok tasks => parseMultiTrainerFlags rest { st with evalTasks := some tasks }
+  | "--curriculum" :: v :: rest =>
+    match parseCurriculumMode? v with
+    | some mode => parseMultiTrainerFlags rest { st with curriculum := some mode }
+    | none => throw s!"Unknown curriculum mode '{v}'."
+  | "--curriculum-window" :: v :: rest =>
+    parseMultiTrainerFlags rest { st with curriculumWindow := parseNatArg? v }
+  | "--resume" :: rest =>
+    parseMultiTrainerFlags rest { st with resume := true }
+  | "--overwrite" :: rest =>
+    parseMultiTrainerFlags rest { st with overwrite := true }
+  | flag :: _ =>
+    throw s!"Unknown AlphaGrad multi-trainer flag '{flag}'."
+
+private def mkMultiTrainerConfig (args : MultiTrainerArgs) : MultiTaskTrainerConfig := {
+  mode := args.mode
+  tasks := args.tasks
+  evalTasks := args.evalTasks.getD #[]
+  curriculum := args.curriculum.getD .roundRobin
+  curriculumWindow := args.curriculumWindow.getD 4
+  epochs := args.epochs.getD 64
+  episodesPerEpoch := args.episodesPerEpoch.getD 16
+  numEnvs := args.numEnvs.getD 8
+  replayCapacityPerTask := args.replayCapacityPerTask.getD 4096
+  sampleBatchSize := args.sampleBatchSize.getD 256
+  updateBatchesPerEpoch := args.updateBatchesPerEpoch.getD 4
+  checkpointEvery := args.checkpointEvery.getD 1
+  evalEvery := args.evalEvery.getD 1
+  numSimulations := args.numSimulations.getD 48
+  runDir := args.runDir.getD ""
+  seed := args.seed.getD 250197
+  resume := args.resume
+  overwrite := args.overwrite
+}
+
+def multiTrainerMain (args : List String) : IO UInt32 := do
+  match args with
+  | command :: modeStr :: tasksStr :: rest =>
+    match parseMode? modeStr, parseTaskListArg? tasksStr with
+    | some mode, .ok tasks =>
+      match parseMultiTrainerFlags rest { command := command, mode := mode, tasks := tasks } with
+      | .error msg =>
+        IO.eprintln msg
+        IO.eprintln usage
+        pure 1
+      | .ok parsed =>
+        let cfg := mkMultiTrainerConfig parsed
+        match command.trimAscii.toString.toLower with
+        | "multitrain" =>
+          match (← multiTrainWithConfig cfg) with
+          | .error msg =>
+            IO.eprintln s!"[AlphaGradMulti][train] failed: {msg}"
+            pure 1
+          | .ok snapshot =>
+            IO.println s!"[AlphaGradMulti][train] completed epochs={snapshot.completedEpochs} best_mean_eval={snapshot.bestMeanEvalReward} best_mean_search={snapshot.bestMeanSearchReward}"
+            pure 0
+        | "multieval" =>
+          match (← multiEvalWithConfig cfg parsed.checkpointDir) with
+          | .error msg =>
+            IO.eprintln s!"[AlphaGradMulti][eval] failed: {msg}"
+            pure 1
+          | .ok results =>
+            let greedyMean := meanArrayOrZero (results.map fun triple => triple.2.1)
+            let searchMean := meanArrayOrZero (results.map fun triple => triple.2.2)
+            IO.println s!"[AlphaGradMulti][eval] tasks={results.size} mean_greedy={greedyMean} mean_search={searchMean}"
+            pure 0
+        | other =>
+          IO.eprintln s!"Unknown AlphaGrad multi-trainer command '{other}'."
+          IO.eprintln usage
+          pure 1
+    | none, _ =>
+      IO.eprintln s!"Invalid AlphaGrad mode '{modeStr}'."
+      IO.eprintln usage
+      pure 1
+    | _, .error msg =>
+      IO.eprintln msg
+      IO.eprintln usage
+      pure 1
+  | _ =>
+    IO.eprintln usage
+    pure 1
 
 private def mkTrainerConfig (args : TrainerArgs) : AlphaGradTrainerConfig := {
   mode := args.mode
@@ -1071,6 +1793,10 @@ private def mkTrainerConfig (args : TrainerArgs) : AlphaGradTrainerConfig := {
 def trainerMain (args : List String) : IO UInt32 := do
   match args with
   | command :: modeStr :: taskStr :: rest =>
+    let commandNorm := command.trimAscii.toString.toLower
+    if commandNorm = "multitrain" || commandNorm = "multieval" then
+      multiTrainerMain args
+    else
     match parseMode? modeStr, parseTaskName? taskStr with
     | some mode, some task =>
       match parseTrainerFlags rest { command := command, mode := mode, task := task } with
