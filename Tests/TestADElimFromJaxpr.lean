@@ -29,17 +29,24 @@ def runCoreM (x : CoreM α) : IO α := do
   | .ok value => pure value
   | .error msg => throw (IO.userError msg)
 
+private def mkNormalizedJaxpr
+    (constvars invars : Array JVar)
+    (eqns : Array JEqn)
+    (outvars : Array JVar) :
+    LeanJaxpr :=
+  LeanJaxpr.mkNormalized constvars invars eqns outvars
+
 private def sampleKStmtLoweredJaxpr : LeanJaxpr :=
-  ({
-    invars := #[{ id := 0 }, { id := 1 }]
-    eqns := #[
-      JEqn.generic 1 (kstmtUnaryOpName .Exp) #[{ id := 0 }] #[{ id := 2 }] #[]
-        { decl := `test.elim_from_jaxpr, line? := some 10 },
-      JEqn.generic 2 (kstmtBinaryOpName .Add) #[{ id := 2 }, { id := 1 }] #[{ id := 3 }] #[]
-        { decl := `test.elim_from_jaxpr, line? := some 11 }
-    ]
-    outvars := #[{ id := 3 }]
-  } : LeanJaxpr).materializeDerivedMetadata
+  mkNormalizedJaxpr #[] #[
+    { id := 0 }, { id := 1 }
+  ] #[
+    JEqn.ofNormalizedOp 1 (kstmtUnaryOpName .Exp) #[{ id := 0 }] #[{ id := 2 }] #[]
+      { decl := `test.elim_from_jaxpr, line? := some 10 },
+    JEqn.ofNormalizedOp 2 (kstmtBinaryOpName .Add) #[{ id := 2 }, { id := 1 }] #[{ id := 3 }] #[]
+      { decl := `test.elim_from_jaxpr, line? := some 11 }
+  ] #[
+    { id := 3 }
+  ]
 
 @[test]
 def testRunEliminationOnJaxprRequiresRules : IO Unit := do

@@ -28,9 +28,6 @@ abbrev JVarId := Nat
 /-- Stable ID for normalized equations/ops. -/
 abbrev OpId := Nat
 
-/-- Region/subgraph ID for nested-control lowering. -/
-abbrev RegionId := Nat
-
 /-- Primitive/op identifier, mirroring Graphax's equation-level primitive naming. -/
 abbrev OpName := Name
 
@@ -427,7 +424,6 @@ structure JVar where
 /-- Equation in LeanJaxpr-like IR. -/
 structure JEqn where
   id : OpId
-  region : RegionId := 0
   op : OpName
   invars : Array JVar
   outvars : Array JVar
@@ -520,17 +516,27 @@ def inferTypedOp (eqn : JEqn) : TypedOp :=
         | 3 => TypedOp.ternary eqn.op
         | arity => TypedOp.nary eqn.op arity
 
-/-- Generic normalized equation helper for hand-authored graphs/tests. -/
-def generic
+/--
+Normalized manual equation helper for tests/fixtures. This computes the typed
+payload eagerly instead of relying on a later post-normalization pass.
+-/
+def ofNormalizedOp
     (id : OpId)
     (op : OpName)
     (invars outvars : Array JVar)
     (params : OpParams := #[])
-    (source : SourceRef := {})
-    (region : RegionId := 0) :
+    (source : SourceRef := {}) :
     JEqn :=
-  { id := id, region := region, op := op, invars := invars, outvars := outvars
-    params := params, typed := TypedOp.generic, source := source }
+  let eqn : JEqn := {
+    id := id
+    op := op
+    invars := invars
+    outvars := outvars
+    params := params
+    typed := TypedOp.generic
+    source := source
+  }
+  { eqn with typed := eqn.inferTypedOp }
 
 /-- Primary output value ID when the equation has at least one output. -/
 def primaryOutId? (eqn : JEqn) : Option JVarId :=
@@ -742,10 +748,6 @@ def mkNormalized
   { jaxpr with
     partitions := jaxpr.inferVertexPartitions
     actions := jaxpr.inferActionTable }
-
-/-- Convenience normalization helper for hand-authored graphs/tests. -/
-def materializeDerivedMetadata (jaxpr : LeanJaxpr) : LeanJaxpr :=
-  mkNormalized jaxpr.constvars jaxpr.invars jaxpr.eqns jaxpr.outvars
 
 end LeanJaxpr
 

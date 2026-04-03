@@ -79,6 +79,13 @@ private def passthroughUnaryRule (op : OpName) : LocalJacRule :=
           }
         }]
 
+private def mkNormalizedJaxpr
+    (constvars : Array JVar := #[])
+    (invars : Array JVar := #[])
+    (eqns : Array JEqn := #[])
+    (outvars : Array JVar := #[]) : LeanJaxpr :=
+  LeanJaxpr.mkNormalized constvars invars eqns outvars
+
 @[test]
 def testFromKStmtsUnaryBinary : IO Unit := do
   let v0 : Tyr.GPU.Codegen.VarId := { idx := 0 }
@@ -848,15 +855,16 @@ def testVertexOrderHelpers : IO Unit := do
 
 @[test]
 def testLeanJaxprVertexPartitions : IO Unit := do
-  let jaxpr : LeanJaxpr := ({
-    constvars := #[{ id := 7 }]
-    invars := #[{ id := 0 }, { id := 1 }]
-    eqns := #[
-      JEqn.generic 1 `test.eqn0 #[{ id := 0 }] #[{ id := 2 }],
-      JEqn.generic 2 `test.eqn1 #[{ id := 2 }, { id := 1 }] #[{ id := 3 }, { id := 4 }]
-    ]
-    outvars := #[{ id := 4 }]
-  } : LeanJaxpr).materializeDerivedMetadata
+  let jaxpr : LeanJaxpr := mkNormalizedJaxpr #[
+    { id := 7 }
+  ] #[
+    { id := 0 }, { id := 1 }
+  ] #[
+    JEqn.ofNormalizedOp 1 `test.eqn0 #[{ id := 0 }] #[{ id := 2 }],
+    JEqn.ofNormalizedOp 2 `test.eqn1 #[{ id := 2 }, { id := 1 }] #[{ id := 3 }, { id := 4 }]
+  ] #[
+    { id := 4 }
+  ]
   let parts := jaxpr.vertexPartitions
   LeanTest.assertEqual parts.inputs #[7, 0, 1]
     "Input partition should preserve constvars/invars declaration order"
@@ -867,14 +875,14 @@ def testLeanJaxprVertexPartitions : IO Unit := do
 
 @[test]
 def testLeanJaxprDerivedActionTable : IO Unit := do
-  let jaxpr : LeanJaxpr := ({
-    invars := #[{ id := 0 }, { id := 1 }]
-    eqns := #[
-      JEqn.generic 1 `test.eqn0 #[{ id := 0 }] #[{ id := 2 }],
-      JEqn.generic 2 `test.eqn1 #[{ id := 2 }, { id := 1 }] #[{ id := 3 }]
-    ]
-    outvars := #[{ id := 3 }]
-  } : LeanJaxpr).materializeDerivedMetadata
+  let jaxpr : LeanJaxpr := mkNormalizedJaxpr #[] #[
+    { id := 0 }, { id := 1 }
+  ] #[
+    JEqn.ofNormalizedOp 1 `test.eqn0 #[{ id := 0 }] #[{ id := 2 }],
+    JEqn.ofNormalizedOp 2 `test.eqn1 #[{ id := 2 }, { id := 1 }] #[{ id := 3 }]
+  ] #[
+    { id := 3 }
+  ]
   let table := jaxpr.actionTable
   LeanTest.assertEqual (table.bindings.map (·.vertex1)) #[2]
     "Derived action surface should track only eliminable intermediate vertices"
@@ -888,14 +896,14 @@ def testLeanJaxprDerivedActionTable : IO Unit := do
 
 @[test]
 def testValidateTopologicalFailure : IO Unit := do
-  let jaxpr : LeanJaxpr := ({
-    invars := #[{ id := 0 }]
-    eqns := #[
-      JEqn.generic 1 `test.eqn0 #[{ id := 2 }] #[{ id := 3 }],
-      JEqn.generic 2 `test.eqn1 #[{ id := 0 }] #[{ id := 2 }]
-    ]
-    outvars := #[{ id := 3 }]
-  } : LeanJaxpr).materializeDerivedMetadata
+  let jaxpr : LeanJaxpr := mkNormalizedJaxpr #[] #[
+    { id := 0 }
+  ] #[
+    JEqn.ofNormalizedOp 1 `test.eqn0 #[{ id := 2 }] #[{ id := 3 }],
+    JEqn.ofNormalizedOp 2 `test.eqn1 #[{ id := 0 }] #[{ id := 2 }]
+  ] #[
+    { id := 3 }
+  ]
   match validate jaxpr with
   | .ok () => LeanTest.fail "Topological validation should fail for forward reference input"
   | .error errs =>
@@ -905,11 +913,13 @@ def testValidateTopologicalFailure : IO Unit := do
 
 @[test]
 def testValidateOutvarAvailabilityFailure : IO Unit := do
-  let jaxpr : LeanJaxpr := ({
-    invars := #[{ id := 0 }]
-    eqns := #[JEqn.generic 1 `test.eqn0 #[{ id := 0 }] #[{ id := 1 }]]
-    outvars := #[{ id := 99 }]
-  } : LeanJaxpr).materializeDerivedMetadata
+  let jaxpr : LeanJaxpr := mkNormalizedJaxpr #[] #[
+    { id := 0 }
+  ] #[
+    JEqn.ofNormalizedOp 1 `test.eqn0 #[{ id := 0 }] #[{ id := 1 }]
+  ] #[
+    { id := 99 }
+  ]
   match validate jaxpr with
   | .ok () => LeanTest.fail "Output availability validation should fail for unknown outvar"
   | .error errs =>
@@ -919,23 +929,21 @@ def testValidateOutvarAvailabilityFailure : IO Unit := do
 
 @[test]
 def testValidateTypedEqnArityFailure : IO Unit := do
-  let jaxpr : LeanJaxpr := ({
-    invars := #[
-      { id := 0, metaInfo := { role? := some .input } },
-      { id := 1, metaInfo := { role? := some .input } }
-    ]
-    eqns := #[{
-      id := 1
-      op := `test.bad_unary
-      invars := #[
+  let jaxpr : LeanJaxpr := mkNormalizedJaxpr #[] #[
+    { id := 0, metaInfo := { role? := some .input } },
+    { id := 1, metaInfo := { role? := some .input } }
+  ] #[
+    JEqn.ofNormalizedOp 1 `test.bad_unary
+      #[
         { id := 0, metaInfo := { role? := some .input } },
         { id := 1, metaInfo := { role? := some .input } }
       ]
-      outvars := #[{ id := 2, metaInfo := { role? := some .output } }]
-      typed := TypedOp.unary `test.bad_unary
-    }]
-    outvars := #[{ id := 2, metaInfo := { role? := some .output } }]
-  } : LeanJaxpr).materializeDerivedMetadata
+      #[
+        { id := 2, metaInfo := { role? := some .output } }
+      ]
+  ] #[
+    { id := 2, metaInfo := { role? := some .output } }
+  ]
   match validate jaxpr with
   | .ok () =>
     LeanTest.fail "Typed-equation validation should fail when schema arity disagrees with equation inputs"

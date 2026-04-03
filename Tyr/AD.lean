@@ -20,7 +20,7 @@ Current contents:
 - A first structured frontend API layer over flat backend callbacks (`call`, `linearize`, `vjp`, scalar `grad`).
 - Restricted definition-site frontend derivation helpers for ordinary Lean defs in the supported subset.
 - LeanJaxpr-like IR scaffolding for elimination-based AD.
-- Order-policy and AlphaGrad compatibility adapters for elimination planning.
+- Order-policy and AlphaGrad search/planning infrastructure over the normalized elimination graph.
 
 This module is intentionally additive and does not alter existing AD behavior.
 -/

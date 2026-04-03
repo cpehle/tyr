@@ -35,45 +35,29 @@ inductive RuleError where
 
 /-- Semantic registry key used for local-Jacobian rule lookup. -/
 inductive RuleKey where
-  | op (op : String)
+  | op (op : OpName)
   | transpose
   | convert
   | dotGeneral
-  | controlFlow (variant : String)
-
-instance : Inhabited RuleKey where
-  default := .op ""
+  | controlFlow (variant : Lean.Name)
+  deriving Repr, Inhabited
 
 instance : BEq RuleKey where
-  beq a b :=
-    match a with
-    | .op x =>
-        match b with
-        | .op y => x == y
-        | _ => false
-    | .transpose =>
-        match b with
-        | .transpose => true
-        | _ => false
-    | .convert =>
-        match b with
-        | .convert => true
-        | _ => false
-    | .dotGeneral =>
-        match b with
-        | .dotGeneral => true
-        | _ => false
-    | .controlFlow x =>
-        match b with
-        | .controlFlow y => x == y
-        | _ => false
+  beq lhs rhs :=
+    match lhs, rhs with
+    | .op op₁, .op op₂ => op₁ == op₂
+    | .transpose, .transpose => true
+    | .convert, .convert => true
+    | .dotGeneral, .dotGeneral => true
+    | .controlFlow v₁, .controlFlow v₂ => v₁ == v₂
+    | _, _ => false
 
 instance : Hashable RuleKey where
   hash
     | .op op => mixHash 0 (hash op)
-    | .transpose => hash 1
-    | .convert => hash 2
-    | .dotGeneral => hash 3
+    | .transpose => mixHash 1 0
+    | .convert => mixHash 2 0
+    | .dotGeneral => mixHash 3 0
     | .controlFlow variant => mixHash 4 (hash variant)
 
 abbrev LocalJacRule :=
@@ -100,11 +84,11 @@ def ruleKeyOfRegisteredOp (op : OpName) : RuleKey :=
   else if isDotGeneralOpName op then
     .dotGeneral
   else if isScanAliasOpName op then
-    .controlFlow "scan"
+    .controlFlow `scan
   else if isCondAliasOpName op then
-    .controlFlow "cond"
+    .controlFlow `cond
   else
-    .op (toString op)
+    .op op
 
 namespace JEqn
 
@@ -114,15 +98,15 @@ def ruleKey (eqn : JEqn) : RuleKey :=
   | .transpose, _ => .transpose
   | .convert, _ => .convert
   | .dotGeneral, _ => .dotGeneral
-  | .controlFlow, .controlFlow info => .controlFlow (toString info.variant)
+  | .controlFlow, .controlFlow info => .controlFlow info.variant
   | .unary, .unary tag =>
       if isTransposeLikeOpName tag then
         .transpose
       else if isConvertLikeOpName tag then
         .convert
       else
-        .op (toString eqn.op)
-  | _, _ => .op (toString eqn.op)
+        .op eqn.op
+  | _, _ => .op eqn.op
 
 end JEqn
 
