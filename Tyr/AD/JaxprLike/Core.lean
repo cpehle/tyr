@@ -450,6 +450,76 @@ def sourceOpName (eqn : JEqn) : OpName :=
 def typedOp (eqn : JEqn) : TypedOp :=
   eqn.typed
 
+private def opNameString (op : OpName) : String :=
+  toString op
+
+private def opNameContains (op : OpName) (needle : String) : Bool :=
+  (opNameString op).contains needle
+
+private def looksLikeDotGeneral (op : OpName) : Bool :=
+  opNameContains op "dot_general"
+
+private def looksLikeTranspose (op : OpName) : Bool :=
+  opNameContains op "transpose"
+
+private def looksLikeConvert (op : OpName) : Bool :=
+  opNameContains op "convert"
+
+private def looksLikeCond (op : OpName) : Bool :=
+  opNameContains op "cond"
+
+private def looksLikeScan (op : OpName) : Bool :=
+  opNameContains op "scan"
+
+private def inferredControlFlowInfo? (eqn : JEqn) : Option ControlFlowInfo :=
+  if looksLikeCond eqn.op || (eqn.params.findNat? .condPredicateCount).isSome then
+    some {
+      variant := `cond
+      staticArgCount := (eqn.params.findNat? .controlStaticArgCount).getD 0
+      predicateCount := (eqn.params.findNat? .condPredicateCount).getD 0
+      dataInputCount := (eqn.params.findNat? .condDataInputCount).getD 0
+    }
+  else if looksLikeScan eqn.op || (eqn.params.findNat? .scanCarryInputCount).isSome then
+    some {
+      variant := `scan
+      staticArgCount := (eqn.params.findNat? .controlStaticArgCount).getD 0
+      dataInputCount := (eqn.params.findNat? .scanDataInputCount).getD 0
+      carryInputCount := (eqn.params.findNat? .scanCarryInputCount).getD 0
+      carryOutputCount := (eqn.params.findNat? .scanCarryOutputCount).getD 0
+    }
+  else
+    none
+
+/--
+Infer a structured typed op for hand-authored/manual equations that were built
+without an explicit typed payload. Production lowerers should still populate
+`typed` directly instead of relying on this normalization pass.
+-/
+def inferTypedOp (eqn : JEqn) : TypedOp :=
+  if looksLikeDotGeneral eqn.op then
+    TypedOp.dotGeneral
+      ((eqn.params.findName? .variant).getD `generic)
+      ((eqn.params.findNats? .lhsContract).getD #[])
+      ((eqn.params.findNats? .rhsContract).getD #[])
+      ((eqn.params.findNats? .lhsBatch).getD #[])
+      ((eqn.params.findNats? .rhsBatch).getD #[])
+  else
+    match inferredControlFlowInfo? eqn with
+    | some info =>
+      TypedOp.controlFlow info
+    | none =>
+      if looksLikeTranspose eqn.op then
+        TypedOp.transpose
+      else if looksLikeConvert eqn.op then
+        TypedOp.convert
+      else
+        match eqn.invars.size with
+        | 0 => TypedOp.nullary eqn.op
+        | 1 => TypedOp.unary eqn.op
+        | 2 => TypedOp.binary eqn.op
+        | 3 => TypedOp.ternary eqn.op
+        | arity => TypedOp.nary eqn.op arity
+
 /-- Generic normalized equation helper for hand-authored graphs/tests. -/
 def generic
     (id : OpId)
@@ -598,6 +668,21 @@ def withInferredValueRoles (jaxpr : LeanJaxpr) : LeanJaxpr :=
       }
   }
 
+/--
+Upgrade generic hand-authored equations to typed normalized equations during
+normalization. This keeps manual tests and fixtures aligned with the stricter
+shared IR contract without weakening runtime rule dispatch.
+-/
+def withInferredTypedEqns (jaxpr : LeanJaxpr) : LeanJaxpr :=
+  {
+    jaxpr with
+    eqns := jaxpr.eqns.map fun eqn =>
+      if eqn.typed.schema == .generic then
+        { eqn with typed := eqn.inferTypedOp }
+      else
+        eqn
+  }
+
 private def allPresentPositiveVertices (jaxpr : LeanJaxpr) : Std.HashSet Nat := Id.run do
   let mut present : Std.HashSet Nat := {}
   let remember := fun (acc : Std.HashSet Nat) (id : Nat) =>
@@ -652,6 +737,7 @@ def mkNormalized
     eqns := eqns
     outvars := outvars
   }
+  let jaxpr := jaxpr.withInferredTypedEqns
   let jaxpr := jaxpr.withInferredValueRoles
   { jaxpr with
     partitions := jaxpr.inferVertexPartitions

@@ -115,6 +115,8 @@ def testPartitionedGraphForwardReverseAndCompleteValidation : IO Unit := do
       "Forward elimination order should preserve explicit eliminable order"
     LeanTest.assertEqual (reverseEliminationOrder g) #[3, 2]
       "Reverse elimination order should reverse the explicit eliminable order"
+    LeanTest.assertEqual g.actionVertices #[2, 3]
+      "Partitioned graphs should default the action surface to the explicit eliminable set"
 
     match validateCompleteEliminationOrder g #[2] with
     | .ok () =>

@@ -198,8 +198,10 @@ def withPartitions
     }
     pure {
       g' with
-      actionVertices :=
-        if g'.actionVertices.isEmpty then g'.eliminable else dedupPreserveOrder g'.actionVertices
+      -- Explicit partitions define a new graph surface; default the action
+      -- table to the explicit eliminable set unless a later `withActionVertices`
+      -- call overrides it.
+      actionVertices := g'.eliminable
     }
 
 /-- Attach an explicit action-space lookup table (`ActionId0 -> VertexId1`). -/

@@ -151,7 +151,6 @@ private def validateTypedEqnSchema (eqnIdx0 : Nat) (eqn : JEqn) : Except String 
       throw s!"LeanJaxpr validation failed: equation {eqnIdx0} op `{eqn.op}` n-ary schema is missing arity payload."
   | .unary
   | .reduce
-  | .reduceAccum
   | .broadcast
   | .transpose
   | .swapLayout
@@ -161,6 +160,8 @@ private def validateTypedEqnSchema (eqnIdx0 : Nat) (eqn : JEqn) : Except String 
   | .cumsum
   | .cumprod =>
     requireCounts 1 1
+  | .reduceAccum =>
+    requireCounts 2 1
   | .binary
   | .binaryBroadcast
   | .concatCols
