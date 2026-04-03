@@ -28,6 +28,9 @@ abbrev JVarId := Nat
 /-- Stable ID for normalized equations/ops. -/
 abbrev OpId := Nat
 
+/-- Stable ID for first-class higher-order regions. -/
+abbrev RegionId := Nat
+
 /-- Primitive/op identifier, mirroring Graphax's equation-level primitive naming. -/
 abbrev OpName := Name
 
@@ -279,6 +282,7 @@ structure ControlFlowInfo where
   dataInputCount : Nat := 0
   carryInputCount : Nat := 0
   carryOutputCount : Nat := 0
+  regionIds : Array RegionId := #[]
   deriving Repr, BEq, Inhabited
 
 /-- Typed normalized op payload used instead of ad hoc metadata where possible. -/
@@ -544,12 +548,51 @@ def primaryOutId? (eqn : JEqn) : Option JVarId :=
 
 end JEqn
 
+/--
+First-class higher-order region referenced by control-flow or future
+lambda-like higher-order ops. Regions may be opaque placeholders or carry a
+small nested equation body when available.
+-/
+structure RegionDef where
+  id : RegionId
+  role : Name := `opaque
+  captures : Array JVar := #[]
+  invars : Array JVar := #[]
+  outvars : Array JVar := #[]
+  eqns : Array JEqn := #[]
+  isOpaque : Bool := false
+  source : SourceRef := {}
+  deriving Repr, Inhabited
+
+namespace RegionDef
+
+/-- Opaque region boundary used for control-flow branches/body handles. -/
+def opaqueSignature
+    (id : RegionId)
+    (role : Name)
+    (invars outvars : Array JVar)
+    (captures : Array JVar := #[])
+    (source : SourceRef := {}) :
+    RegionDef :=
+  {
+    id := id
+    role := role
+    captures := captures
+    invars := invars
+    outvars := outvars
+    isOpaque := true
+    source := source
+  }
+
+end RegionDef
+
 /-- Jaxpr-like normalized IR for elimination-based AD. -/
 structure LeanJaxpr where
   constvars : Array JVar := #[]
   invars : Array JVar := #[]
   eqns : Array JEqn := #[]
   outvars : Array JVar := #[]
+  regions : Array RegionDef := #[]
   partitions : VertexPartitions := {}
   actions : ActionTable := {}
   deriving Repr, Inhabited
@@ -566,8 +609,23 @@ def withDefaultSourceDecl
     (declName : Name) :
     LeanJaxpr :=
   { jaxpr with
+      regions := jaxpr.regions.map fun region =>
+        let regionSource :=
+          if region.source.decl == Name.anonymous then
+            { region.source with decl := declName }
+          else
+            region.source
+        {
+          region with
+          source := regionSource
+          eqns := region.eqns.map fun eqn =>
+            if eqn.source.decl == Name.anonymous then
+              { eqn with source := { eqn.source with decl := declName } }
+            else
+              eqn
+        }
       eqns := jaxpr.eqns.map fun eqn =>
-        if eqn.source.decl == .anonymous then
+        if eqn.source.decl == Name.anonymous then
           { eqn with source := { eqn.source with decl := declName } }
         else
           eqn }
@@ -682,12 +740,25 @@ shared IR contract without weakening runtime rule dispatch.
 def withInferredTypedEqns (jaxpr : LeanJaxpr) : LeanJaxpr :=
   {
     jaxpr with
+    regions := jaxpr.regions.map fun region =>
+      {
+        region with
+        eqns := region.eqns.map fun eqn =>
+          if eqn.typed.schema == .generic then
+            { eqn with typed := eqn.inferTypedOp }
+          else
+            eqn
+      }
     eqns := jaxpr.eqns.map fun eqn =>
       if eqn.typed.schema == .generic then
         { eqn with typed := eqn.inferTypedOp }
       else
         eqn
   }
+
+/-- Lookup a first-class region by stable region ID. -/
+def regionById? (jaxpr : LeanJaxpr) (id : RegionId) : Option RegionDef :=
+  jaxpr.regions.find? (fun region => region.id == id)
 
 private def allPresentPositiveVertices (jaxpr : LeanJaxpr) : Std.HashSet Nat := Id.run do
   let mut present : Std.HashSet Nat := {}
@@ -735,13 +806,15 @@ def mkNormalized
     (constvars : Array JVar := #[])
     (invars : Array JVar := #[])
     (eqns : Array JEqn := #[])
-    (outvars : Array JVar := #[]) :
+    (outvars : Array JVar := #[])
+    (regions : Array RegionDef := #[]) :
     LeanJaxpr :=
   let jaxpr : LeanJaxpr := {
     constvars := constvars
     invars := invars
     eqns := eqns
     outvars := outvars
+    regions := regions
   }
   let jaxpr := jaxpr.withInferredTypedEqns
   let jaxpr := jaxpr.withInferredValueRoles

@@ -33,6 +33,10 @@ def collectDeclaredVarIds (jaxpr : LeanJaxpr) : Array Nat :=
 def collectEffectiveOpIds (jaxpr : LeanJaxpr) : Array OpId :=
   jaxpr.eqns.map (·.id)
 
+/-- Collect explicit higher-order region IDs. -/
+def collectRegionIds (jaxpr : LeanJaxpr) : Array RegionId :=
+  jaxpr.regions.map (·.id)
+
 /-- Ensure declaration-site variable IDs are globally unique. -/
 def validateUniqueVarIds (jaxpr : LeanJaxpr) : Except String Unit :=
   if hasNoDuplicates (collectDeclaredVarIds jaxpr) then
@@ -46,6 +50,13 @@ def validateUniqueOpIds (jaxpr : LeanJaxpr) : Except String Unit :=
     .ok ()
   else
     .error "LeanJaxpr validation failed: non-unique op IDs detected."
+
+/-- Ensure region IDs are globally unique. -/
+def validateUniqueRegionIds (jaxpr : LeanJaxpr) : Except String Unit :=
+  if hasNoDuplicates (collectRegionIds jaxpr) then
+    .ok ()
+  else
+    .error "LeanJaxpr validation failed: non-unique region IDs detected."
 
 /-- Ensure each equation produces at least one output variable. -/
 def validateEqnOutvarsNonEmpty (jaxpr : LeanJaxpr) : Except String Unit :=
@@ -175,7 +186,7 @@ private def validateTypedEqnSchema (eqnIdx0 : Nat) (eqn : JEqn) : Except String 
     match eqn.typed.payload with
     | .controlFlow info =>
       let expectedInputs :=
-        info.staticArgCount + info.predicateCount + info.dataInputCount + info.carryInputCount
+        info.predicateCount + info.dataInputCount + info.carryInputCount
       if eqn.invars.size != expectedInputs then
         throw s!"LeanJaxpr validation failed: equation {eqnIdx0} control-flow op `{eqn.op}` expects {expectedInputs} inputs from typed metadata, got {eqn.invars.size}."
       if eqn.outvars.isEmpty then
@@ -186,6 +197,39 @@ private def validateTypedEqnSchema (eqnIdx0 : Nat) (eqn : JEqn) : Except String 
         throw s!"LeanJaxpr validation failed: equation {eqnIdx0} cond op `{eqn.op}` must declare at least one predicate input."
     | _ =>
       throw s!"LeanJaxpr validation failed: equation {eqnIdx0} op `{eqn.op}` control-flow schema is missing control-flow payload."
+
+private def validateRegions (jaxpr : LeanJaxpr) : Except String Unit := do
+  let regionIdSet :=
+    (collectRegionIds jaxpr).foldl (init := ({} : Std.HashSet RegionId)) fun acc id =>
+      acc.insert id
+  for eqnIdx0 in [:jaxpr.eqns.size] do
+    let eqn := jaxpr.eqns[eqnIdx0]!
+    match eqn.typed.payload with
+    | .controlFlow info =>
+      if !hasNoDuplicates info.regionIds then
+        throw s!"LeanJaxpr validation failed: equation {eqnIdx0} control-flow op `{eqn.op}` references duplicate region IDs."
+      for regionId in info.regionIds do
+        if !regionIdSet.contains regionId then
+          throw s!"LeanJaxpr validation failed: equation {eqnIdx0} control-flow op `{eqn.op}` references unknown region ID {regionId}."
+      if info.variant == `scan && !(info.regionIds.isEmpty || info.regionIds.size = 1) then
+        throw s!"LeanJaxpr validation failed: scan op `{eqn.op}` expects at most one body region, got {info.regionIds.size}."
+      if info.variant == `cond && !(info.regionIds.isEmpty || info.regionIds.size = 2) then
+        throw s!"LeanJaxpr validation failed: cond op `{eqn.op}` expects exactly two branch regions when regions are present, got {info.regionIds.size}."
+      for regionId in info.regionIds do
+        match jaxpr.regionById? regionId with
+        | none =>
+          throw s!"LeanJaxpr validation failed: missing region {regionId} for equation {eqnIdx0}."
+        | some region =>
+          let expectedInputs :=
+            if info.variant == `cond then
+              info.dataInputCount
+            else
+              info.carryInputCount + info.dataInputCount
+          if region.invars.size != expectedInputs then
+            throw s!"LeanJaxpr validation failed: region {regionId} (`{region.role}`) expects {expectedInputs} region inputs from control-flow metadata, got {region.invars.size}."
+          if region.outvars.size != eqn.outvars.size then
+            throw s!"LeanJaxpr validation failed: region {regionId} (`{region.role}`) expects {eqn.outvars.size} outputs to match op `{eqn.op}`, got {region.outvars.size}."
+    | _ => pure ()
 
 private def validateLegacyParamsAgreeWithTypedEqn (eqnIdx0 : Nat) (eqn : JEqn) : Except String Unit := do
   match eqn.typed.payload with
@@ -329,6 +373,8 @@ def validate (jaxpr : LeanJaxpr) : Except (Array String) Unit :=
       es := es.push msg
     if let .error msg := validateUniqueOpIds jaxpr then
       es := es.push msg
+    if let .error msg := validateUniqueRegionIds jaxpr then
+      es := es.push msg
     if let .error msg := validateEqnOutvarsNonEmpty jaxpr then
       es := es.push msg
     if let .error msg := validateEqnInputsTopological jaxpr then
@@ -336,6 +382,8 @@ def validate (jaxpr : LeanJaxpr) : Except (Array String) Unit :=
     if let .error msg := validateOutvarsAvailable jaxpr then
       es := es.push msg
     if let .error msg := validateTypedEqns jaxpr then
+      es := es.push msg
+    if let .error msg := validateRegions jaxpr then
       es := es.push msg
     if let .error msg := validateValueRoleMetadata jaxpr then
       es := es.push msg

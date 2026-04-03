@@ -1045,6 +1045,24 @@ def testFromFnBodyCanonicalDotGeneralAndControlMetadata : IO Unit := do
       "scan lowering should record carry-output count."
     LeanTest.assertTrue (scanEqn.typedOp.schema = .controlFlow)
       s!"scan lowering should attach control-flow typed schema, got {reprStr scanEqn.typedOp.schema}."
+    match scanEqn.typedOp.payload with
+    | .controlFlow info =>
+      LeanTest.assertEqual info.regionIds.size 1
+        "scan lowering should materialize one first-class body region."
+      match jaxpr.regionById? (info.regionIds[0]!) with
+      | some region =>
+        LeanTest.assertEqual region.role `scan.body
+          "scan body region should carry a stable semantic role."
+        LeanTest.assertEqual (region.invars.map (·.id)) (scanEqn.invars.map (·.id))
+          "scan body region signature should preserve the dynamic scan inputs."
+        LeanTest.assertEqual (region.outvars.map (·.id)) (scanEqn.outvars.map (·.id))
+          "scan body region signature should preserve the scan outputs."
+        LeanTest.assertTrue region.isOpaque
+          "FnBody lowering should use opaque region placeholders for higher-order bodies."
+      | none =>
+        LeanTest.fail "scan lowering should reference a materialized region."
+    | _ =>
+      LeanTest.fail "scan lowering should use a control-flow typed payload."
 
     LeanTest.assertEqual condEqn.op condAliasOpName
       "cond aliases should canonicalize to `condAliasOpName`."
@@ -1058,6 +1076,36 @@ def testFromFnBodyCanonicalDotGeneralAndControlMetadata : IO Unit := do
       "cond lowering should record data-input count."
     LeanTest.assertTrue (condEqn.typedOp.schema = .controlFlow)
       s!"cond lowering should attach control-flow typed schema, got {reprStr condEqn.typedOp.schema}."
+    match condEqn.typedOp.payload with
+    | .controlFlow info =>
+      LeanTest.assertEqual info.regionIds.size 2
+        "cond lowering should materialize two first-class branch regions."
+      let condDataInputs :=
+        condEqn.invars.extract info.predicateCount (info.predicateCount + info.dataInputCount)
+      for role in #[`cond.true, `cond.false] do
+        let region? :=
+          info.regionIds.findSome? fun regionId =>
+            match jaxpr.regionById? regionId with
+            | some region =>
+              if region.role == role then some region else none
+            | none => none
+        match region? with
+        | some region =>
+          LeanTest.assertEqual (region.invars.map (·.id)) (condDataInputs.map (·.id))
+            s!"cond branch `{role}` should see only the dynamic data inputs."
+          LeanTest.assertEqual (region.outvars.map (·.id)) (condEqn.outvars.map (·.id))
+            s!"cond branch `{role}` should match the enclosing cond outputs."
+          LeanTest.assertTrue region.isOpaque
+            s!"cond branch `{role}` should currently lower as an opaque region placeholder."
+        | none =>
+          LeanTest.fail s!"cond lowering should materialize a `{role}` region."
+    | _ =>
+      LeanTest.fail "cond lowering should use a control-flow typed payload."
+
+    match validate jaxpr with
+    | .ok () => pure ()
+    | .error errs =>
+      LeanTest.fail s!"FnBody control-flow lowering should validate after region materialization, got: {errs}"
 
 @[test]
 def testFromFnBodyAssignsArityTypedFamilies : IO Unit := do

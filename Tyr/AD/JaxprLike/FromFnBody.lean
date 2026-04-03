@@ -49,7 +49,9 @@ structure FromFnBodyState where
   varEnv : Std.HashMap Nat JVar := {}
   nextId : Nat := 1
   nextOpId : OpId := 1
+  nextRegionId : RegionId := 1
   eqns : Array JEqn := #[]
+  regions : Array RegionDef := #[]
   outvars : Array JVar := #[]
   diagnostics : Array FromFnBodyDiagnostic := #[]
   deriving Inhabited
@@ -281,6 +283,67 @@ private def typedOpForFnBody
     | 3 => TypedOp.ternary canonicalOp
     | _ => TypedOp.nary canonicalOp arity
 
+private def controlRegionRoles
+    (variant : Name)
+    (count : Nat) :
+    Array Name :=
+  if variant == `scan then
+    if count = 0 then
+      #[]
+    else
+      #[`scan.body] ++
+        (Array.range (count - 1)).map fun i =>
+          Name.mkSimple s!"scan.extra.{i}"
+  else if variant == `cond then
+    match count with
+    | 0 => #[]
+    | 1 => #[`cond.true]
+    | n + 2 =>
+      #[`cond.true, `cond.false] ++
+        (Array.range n).map fun i =>
+          Name.mkSimple s!"cond.extra.{i}"
+  else
+    (Array.range count).map fun i =>
+      Name.mkSimple s!"{variant}.region.{i}"
+
+private def regionInputsForControlFlow
+    (info : ControlFlowInfo)
+    (invars : Array JVar) :
+    Array JVar :=
+  if info.variant == `cond then
+    invars.extract info.predicateCount (info.predicateCount + info.dataInputCount)
+  else
+    invars.extract 0 (info.carryInputCount + info.dataInputCount)
+
+private def attachOpaqueControlRegions
+    (ctx : FromFnBodyCtx)
+    (typed : TypedOp)
+    (invars outvars : Array JVar) :
+    FromFnBodyM TypedOp := do
+  match typed.payload with
+  | .controlFlow info =>
+    let roles := controlRegionRoles info.variant info.staticArgCount
+    if roles.isEmpty then
+      pure typed
+    else
+      let regionInputs := regionInputsForControlFlow info invars
+      let st ← get
+      let startId := st.nextRegionId
+      let regionIds :=
+        roles.mapIdx fun idx _ => startId + idx
+      let newRegions :=
+        roles.mapIdx fun idx role =>
+          RegionDef.opaqueSignature (startId + idx) role regionInputs outvars #[] ctx.source
+      modify fun st =>
+        {
+          st with
+          nextRegionId := startId + newRegions.size
+          regions := st.regions ++ newRegions
+        }
+      pure <| TypedOp.controlFlow { info with regionIds := regionIds }
+  | _ =>
+    pure typed
+
 def exprKind : IR.Expr → String
   | .ctor _ _ => "Expr.ctor"
   | .reset _ _ => "Expr.reset"
@@ -342,7 +405,7 @@ def traverseFnBody (ctx : FromFnBodyCtx) (body : FnBody) : FromFnBodyM Unit := d
             OpParam.mkName .sourceOp op,
             OpParam.mkNat .fnbodyOutVarIdx outvar.id
           ] ++ extraParams
-        let typedOp := typedOpForFnBody canonicalOp params args.size
+        let typedOp ← attachOpaqueControlRegions ctx (typedOpForFnBody canonicalOp params args.size) invars #[outvar]
         let opId := (← get).nextOpId
         modify fun st =>
           { st with
@@ -434,7 +497,7 @@ def fromFnBodyWithHints
   if st.outvars.isEmpty then
     return .error s!"FnBody -> LeanJaxpr conversion failed: no terminal `ret` output found for `{declName}`."
 
-  return .ok <| LeanJaxpr.mkNormalized #[] invars st.eqns st.outvars
+  return .ok <| LeanJaxpr.mkNormalized #[] invars st.eqns st.outvars st.regions
 
 /-- Convert a function body to `LeanJaxpr` using a conservative lowering strategy. -/
 def fromFnBody
