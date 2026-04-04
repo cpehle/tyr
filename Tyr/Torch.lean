@@ -265,8 +265,10 @@ end autograd
 --
 --
 --
-class differentiable (α : Type _) where
-    cotangent_space : Type _
+universe u
+
+class differentiable (α : Type u) where
+    cotangent_space : Type u
     grad : α → cotangent_space
 
 instance {s : Shape} : differentiable (torch.T s) := ⟨torch.T s, fun (t : (torch.T s)) => torch.autograd.grad_of t⟩

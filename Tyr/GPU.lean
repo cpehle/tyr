@@ -8,6 +8,7 @@ import Tyr.GPU.Codegen.Monad
 import Tyr.GPU.Codegen.Loop
 import Tyr.GPU.Codegen.GlobalLayout
 import Tyr.GPU.Codegen.EmitNew
+import Tyr.GPU.Codegen.TileIR
 import Tyr.GPU.Kernels
 
 /-!
@@ -114,6 +115,14 @@ export GPU.Codegen (RT ST RV SV GPtr KVal)
 export GPU.Codegen (MMATranspose ReduceOp ReduceAxis UnaryOp BinaryOp
                     BroadcastAxis MaskOp TernaryOp SemaphoreOp)
 export GPU.Codegen (KStmt Kernel KParam KernelM buildKernelM generateKernel)
+export GPU.Codegen.TileIR
+  (ScalarType ShapeDim ElemType TensorViewType PartitionViewType TileType
+   Literal Binding Param Global UnaryOp BinaryOp MemoryOrder Signedness
+   LoopCarry Stmt Entry Module OutputKind Toolchain CompileOptions ArtifactPaths ToolError
+   staticShape scalarTileTy tileTy ptrTy ptrTileTy tensorViewTy partitionViewTy
+   renderType renderModule detectToolchain artifactPaths renderShellCommand
+   buildOptCommand buildTranslateCommand buildTileirasCommand
+   compileModuleAt getRegisteredTileKernels mlirCompanionName)
 -- GlobalLayout types for memory I/O
 export GPU.Codegen (GlobalLayout GL GL2 GL3 GL4 TileCoord RTileCoord)
 -- Global memory operations

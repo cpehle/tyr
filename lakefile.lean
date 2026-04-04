@@ -40,13 +40,31 @@ def nonEmptyTrimmed? (s : String) : Option String :=
   if trimmed.isEmpty then none else some trimmed
 
 /-- Resolve the macOS SDK root from env or `xcrun` without hard-coded Xcode/CLT paths. -/
+def normalizeMacOSSDKRoot (sdk : String) : IO String := do
+  let sdkPath : FilePath := ⟨sdk⟩
+  match sdkPath.parent with
+  | some parent =>
+      let stablePath := parent / "MacOSX.sdk"
+      if ← stablePath.pathExists then
+        pure stablePath.toString
+      else
+        pure sdk
+  | none =>
+      pure sdk
+
+/-- Resolve the macOS SDK root from env or `xcrun` without hard-coded Xcode/CLT paths. -/
 def macOSSDKRoot? : Option String := run_io do
   let envSdk? ← do
     match (← IO.getEnv "TYR_MACOS_SDKROOT") with
     | some p => pure (some p)
     | none => IO.getEnv "SDKROOT"
   match envSdk?.bind nonEmptyTrimmed? with
-  | some p => pure (some p)
+  | some p =>
+      let normalized ← normalizeMacOSSDKRoot p
+      if ← (⟨normalized⟩ : FilePath).pathExists then
+        pure (some normalized)
+      else
+        pure none
   | none =>
     try
       let out ← IO.Process.output {
@@ -54,7 +72,11 @@ def macOSSDKRoot? : Option String := run_io do
         args := #["--sdk", "macosx", "--show-sdk-path"]
       }
       if out.exitCode == 0 then
-        pure (nonEmptyTrimmed? out.stdout)
+        match nonEmptyTrimmed? out.stdout with
+        | some sdk =>
+            pure (some (← normalizeMacOSSDKRoot sdk))
+        | none =>
+            pure none
       else
         pure none
     catch _ =>
@@ -71,7 +93,10 @@ def macOSSDKLinkArgs : Array String :=
   | none => #[]
 
 /-- Resolve macOS deployment target:
-    `TYR_MACOS_DEPLOYMENT_TARGET` > `MACOSX_DEPLOYMENT_TARGET` > active SDK version > `14.0`. -/
+    `TYR_MACOS_DEPLOYMENT_TARGET` > `MACOSX_DEPLOYMENT_TARGET` > `14.0`.
+
+Using the active SDK version here can overshoot the locally supported deployment
+target when Xcode ships a newer SDK than the installed linker/runtime stack. -/
 def macOSDeploymentTarget : String := run_io do
   let envTarget? ← do
     match (← IO.getEnv "TYR_MACOS_DEPLOYMENT_TARGET") with
@@ -79,18 +104,7 @@ def macOSDeploymentTarget : String := run_io do
     | none => IO.getEnv "MACOSX_DEPLOYMENT_TARGET"
   match envTarget?.bind nonEmptyTrimmed? with
   | some t => pure t
-  | none =>
-    try
-      let out ← IO.Process.output {
-        cmd := "xcrun"
-        args := #["--sdk", "macosx", "--show-sdk-version"]
-      }
-      if out.exitCode == 0 then
-        pure ((nonEmptyTrimmed? out.stdout).getD "14.0")
-      else
-        pure "14.0"
-    catch _ =>
-      pure "14.0"
+  | none => pure "14.0"
 
 /-- macOS deployment-target link args to keep linker target aligned with local SDK/libs. -/
 def macOSDeploymentLinkArgs : Array String :=
@@ -282,6 +296,12 @@ lean_exe GenerateGpuKernels where
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
+/-- Compile registered @[tileir_kernel] declarations through NVIDIA TileIR tooling. -/
+lean_exe GenerateTileIRKernels where
+  root := `Tyr.GPU.Codegen.TileIR.GenerateMain
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
 /-- Experimental test runner for unstable/in-progress modules. -/
 lean_exe test_runner_experimental where
   root := `Tests.RunTestsExperimental
@@ -405,6 +425,18 @@ lean_exe TestGPUDSL where
 /-- GPU kernel fixture test executable. -/
 lean_exe TestGPUKernels where
   root := `Tests.TestGPUKernels
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
+/-- NVIDIA TileIR rendering and toolchain driver tests. -/
+lean_exe TestGPUTileIR where
+  root := `Tests.RunTestGPUTileIR
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
+/-- TileIR export driver regression tests. -/
+lean_exe TestTileIRGenerateMain where
+  root := `Tests.RunTestTileIRGenerateMain
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
