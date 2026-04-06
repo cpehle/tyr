@@ -32,6 +32,8 @@ structure KernelState where
   body : Array KStmt := #[]
   /-- Target GPU architecture -/
   arch : GpuArch := .SM90
+  /-- Build/runtime family guard used for emitted kernel availability. -/
+  family : GpuFamily := .Hopper
   /-- Shared memory usage tracking -/
   sharedMemBytes : Nat := 0
   /-- Optional CUDA launch bounds: `(maxThreadsPerBlock, minBlocksPerSM)`. -/
@@ -58,7 +60,11 @@ def comment (text : String) : KernelM Unit := do
 
 /-- Set the target architecture -/
 def setArch (arch : GpuArch) : KernelM Unit := do
-  modify fun s => { s with arch := arch }
+  modify fun s => { s with arch := arch, family := arch.toFamily }
+
+/-- Override the emitted/build family guard without changing the capability floor. -/
+def setFamily (family : GpuFamily) : KernelM Unit := do
+  modify fun s => { s with family := family }
 
 /-- Attach CUDA `__launch_bounds__` metadata to the generated kernel. -/
 def setLaunchBounds (maxThreadsPerBlock minBlocksPerSM : Nat) : KernelM Unit := do
@@ -70,6 +76,7 @@ def buildKernel (name : String) (params : Array KParam := #[]) : KernelM Kernel 
   pure {
     name := name
     arch := s.arch
+    family := s.family
     params := params
     body := s.body
     sharedMemBytes := s.sharedMemBytes
@@ -78,7 +85,7 @@ def buildKernel (name : String) (params : Array KParam := #[]) : KernelM Kernel 
 
 /-- Run the kernel builder and extract the result -/
 def runKernelM (arch : GpuArch := .SM90) (m : KernelM α) : α × KernelState :=
-  m.run { arch := arch }
+  m.run { arch := arch, family := arch.toFamily }
 
 /-- Maximum shared memory in bytes for a runtime `GpuArch` value.
     Mirrors `GpuCapabilities.maxSharedMem` but is usable without a typeclass
@@ -104,10 +111,11 @@ def checkSharedMemBudget (k : Kernel) : Except String Unit :=
 def buildKernelM (name : String) (arch : GpuArch := .SM90)
     (params : Array KParam := #[]) (m : KernelM Unit) : Kernel :=
   -- Start nextId at params.size so freshVar doesn't conflict with parameter VarIds
-  let (_, state) := m.run { arch := arch, nextId := params.size }
+  let (_, state) := m.run { arch := arch, family := arch.toFamily, nextId := params.size }
   let k : Kernel := {
     name := name
     arch := state.arch
+    family := state.family
     params := params
     body := state.body
     sharedMemBytes := state.sharedMemBytes

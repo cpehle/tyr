@@ -31,8 +31,30 @@ def linuxSystemLinkDirs : Array String :=
     "-L/lib/aarch64-linux-gnu",
     "-L/usr/lib/gcc/aarch64-linux-gnu/13",
     "-L/usr/lib/gcc/aarch64-linux-gnu/14",
+    "-L/usr/local/cuda/lib64",
+    "-L/usr/local/cuda/targets/aarch64-linux/lib",
     "-L/usr/lib"
   ]
+
+def linuxArrowLinkArgs : Array String := run_io do
+  let candidates : Array System.FilePath := #[
+    ⟨"/usr/lib/aarch64-linux-gnu/libarrow.so"⟩,
+    ⟨"/usr/lib/x86_64-linux-gnu/libarrow.so"⟩,
+    ⟨"/usr/lib/libarrow.so"⟩,
+    ⟨"/usr/local/lib/libarrow.so"⟩
+  ]
+  let hasArrow ← candidates.anyM (·.pathExists)
+  let parquetCandidates : Array System.FilePath := #[
+      ⟨"/usr/lib/aarch64-linux-gnu/libparquet.so"⟩,
+      ⟨"/usr/lib/x86_64-linux-gnu/libparquet.so"⟩,
+      ⟨"/usr/lib/libparquet.so"⟩,
+      ⟨"/usr/local/lib/libparquet.so"⟩
+    ]
+  let hasParquet ← parquetCandidates.anyM (·.pathExists)
+  if hasArrow && hasParquet then
+    pure #["-larrow", "-lparquet"]
+  else
+    pure #[]
 
 /-- Return `none` for blank strings after trimming whitespace. -/
 def nonEmptyTrimmed? (s : String) : Option String :=
@@ -154,10 +176,11 @@ def packageLinkArgs : Array String :=
     #[
       s!"-L{__dir__ / "external" / "libtorch" / "lib"}",
       "-ltorch", "-ltorch_cpu", "-lc10"
-    ] ++ linuxSystemLinkDirs ++ soxrLinkArgs ++ #[
+    ] ++ linuxSystemLinkDirs ++ soxrLinkArgs ++ linuxArrowLinkArgs ++ #[
       "-l:libgomp.so.1", "-l:libstdc++.so.6",
       "-larrow", "-lparquet",
-      s!"-Wl,-rpath,{linuxTorchLibDir}"
+      s!"-Wl,-rpath,{linuxTorchLibDir}",
+      "-Wl,-rpath,$ORIGIN/../../../external/libtorch/lib"
     ]
 
 def commonLinkArgs : Array String :=
@@ -178,17 +201,17 @@ def commonLinkArgs : Array String :=
       s!"{__dir__ / "cc" / "build" / "libTyrC.a"}",
       s!"-L{__dir__ / "external" / "libtorch" / "lib"}",
       "-ltorch", "-ltorch_cpu", "-lc10"
-    ] ++ linuxSystemLinkDirs ++ soxrLinkArgs ++ #[
+    ] ++ linuxSystemLinkDirs ++ soxrLinkArgs ++ linuxArrowLinkArgs ++ #[
       "-l:libgomp.so.1", "-l:libstdc++.so.6",
       "-larrow", "-lparquet",
-      s!"-Wl,-rpath,{linuxTorchLibDir}"
+      s!"-Wl,-rpath,{linuxTorchLibDir}",
+      "-Wl,-rpath,$ORIGIN/../../../external/libtorch/lib"
     ]
 
 package tyr where
   srcDir := "."
   buildDir := ".lake/build"
   moreServerArgs := #["-Dpp.unicode.fun=true"]
-  -- Link arguments for extern_lib shared library
   moreLinkArgs := packageLinkArgs
 
 require LeanTest from git "https://github.com/cpehle/lean_test.git" @ "b42cd3d78716e5a2de5b640ac82d7fe3f05f2a4c"
@@ -599,13 +622,25 @@ lean_exe TestDiffEqAdjointCore where
 
 /-- GPU DSL regression test executable. -/
 lean_exe TestGPUDSL where
-  root := `Tests.TestGPUDSL
+  root := `Tests.RunTestGPUDSL
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
 /-- GPU kernel fixture test executable. -/
 lean_exe TestGPUKernels where
-  root := `Tests.TestGPUKernels
+  root := `Tests.RunTestGPUKernels
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
+/-- End-to-end GPU parity tests (Tyr vs PyTorch, with optional vendored references). -/
+lean_exe TestGPUE2E where
+  root := `Tests.RunGPUE2E
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
+/-- GB10/Blackwell-specific end-to-end GPU parity tests. -/
+lean_exe TestGPUGB10E2E where
+  root := `Tests.RunGPUGB10E2E
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
@@ -759,6 +794,12 @@ lean_exe RunMhaH100Train where
 /-- End-to-end multi-block `mha_h100` validation (`seq=768`, `d=64`). -/
 lean_exe RunMhaH100Seq768 where
   root := `Examples.GPU.RunMhaH100Seq768
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
+/-- End-to-end Blackwell/B200 BF16 GEMM validation. -/
+lean_exe RunB200Bf16Gemm where
+  root := `Examples.GPU.RunB200Bf16Gemm
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
