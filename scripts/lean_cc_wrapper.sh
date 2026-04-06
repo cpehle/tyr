@@ -113,7 +113,26 @@ if [[ "$is_compile" -eq 0 ]]; then
       if [[ -f "${torch_lib_dir}/libc10_cuda.so" ]]; then
         cuda_link_args+=("-lc10_cuda")
       fi
+      cudart_dir=""
       if compgen -G "${torch_lib_dir}/libcudart*.so*" >/dev/null 2>&1; then
+        cudart_dir="${torch_lib_dir}"
+      else
+        cand_dirs=()
+        while IFS= read -r cand; do
+          cand_dirs+=("$cand")
+        done < <(compgen -G "${torch_lib_dir}/../../nvidia/cu*/lib" || true)
+        cand_dirs+=("${torch_lib_dir}/../../nvidia/cuda_runtime/lib")
+        for cand in "${cand_dirs[@]}"; do
+          if [[ -d "$cand" ]] && compgen -G "${cand}/libcudart*.so*" >/dev/null 2>&1; then
+            cudart_dir="$cand"
+            break
+          fi
+        done
+      fi
+      if [[ -n "$cudart_dir" ]]; then
+        if [[ "$cudart_dir" != "$torch_lib_dir" ]]; then
+          cuda_link_args+=("-L${cudart_dir}" "-Wl,-rpath,${cudart_dir}")
+        fi
         cuda_link_args+=("-lcudart")
       fi
     fi

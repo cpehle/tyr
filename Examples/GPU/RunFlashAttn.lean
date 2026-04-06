@@ -1,12 +1,15 @@
 /- End-to-end FlashAttention validation for 2-block forward + forward-with-LSE. -/
 import Tyr.Torch
 import Tyr.GPU.Kernels.MhaH100
+import Examples.GPU.Parity
 import Examples.GPU.FixtureRunner
 
-namespace Examples.GPU
+namespace Examples.GPU.RunFlashAttn
 
 open torch
 open Tyr.GPU.Kernels
+
+def suiteName : String := "flashattn"
 
 def fixtureSpec : FixtureSpec := {
   dir := ⟨"data/gpu_fixtures/flashattn128x64"⟩
@@ -17,7 +20,7 @@ def fixtureFile (name : String) : System.FilePath :=
   Examples.GPU.fixturePath fixtureSpec name
 
 def generateFixtures : IO Unit := do
-  if !(← torch.cuda_is_available) then
+  if !(← requireCuda suiteName) then
     throw <| IO.userError "CUDA is not available; cannot generate flash attention fixtures."
 
   IO.FS.createDirAll fixtureSpec.dir
@@ -58,8 +61,7 @@ def generateFixtures : IO Unit := do
   IO.println s!"Generated flash attention fixtures in {fixtureSpec.dir} outMean={outMean} lseMean={lseMean}"
 
 def runOnce : IO Bool := do
-  if !(← torch.cuda_is_available) then
-    IO.eprintln "CUDA is not available on this host."
+  if !(← requireCuda suiteName) then
     return false
 
   if !(← fixturesPresent fixtureSpec) then
@@ -81,21 +83,15 @@ def runOnce : IO Bool := do
   tkFlashAttnFwd2BlockLse.launch q k v outFwdLse lseOut 128 64 1 2 1 128 1 1 0 stream
   let _ ← torch.cuda_synchronize
 
-  let outOk := torch.allclose expectedOut outFwd 3e-2 3e-2
-  let outLseKernelOk := torch.allclose expectedOut outFwdLse 3e-2 3e-2
-  let lseOk := torch.allclose expectedLse lseOut 3e-2 3e-2
-
-  let outMae := torch.nn.item (torch.nn.meanAll (torch.nn.abs (outFwd - expectedOut)))
-  let outMaxErr := torch.nn.item (torch.nn.maxAll (torch.nn.abs (outFwd - expectedOut)))
-  let lseMae := torch.nn.item (torch.nn.meanAll (torch.nn.abs (lseOut - expectedLse)))
-  let lseMaxErr := torch.nn.item (torch.nn.maxAll (torch.nn.abs (lseOut - expectedLse)))
-
-  IO.println s!"flashattn2block fwd_ok={outOk} fwd_lse_ok={outLseKernelOk} lse_ok={lseOk} out_mae={outMae} out_max={outMaxErr} lse_mae={lseMae} lse_max={lseMaxErr}"
-  pure (outOk && outLseKernelOk && lseOk)
+  let outCheck := compareTensors "flashattn.forward" expectedOut outFwd 3e-2 3e-2
+  let outLseCheck := compareTensors "flashattn.forward_lse" expectedOut outFwdLse 3e-2 3e-2
+  let lseCheck := compareTensors "flashattn.lse" expectedLse lseOut 3e-2 3e-2
+  logTensorCheck outCheck
+  logTensorCheck outLseCheck
+  logTensorCheck lseCheck
+  pure (outCheck.ok && outLseCheck.ok && lseCheck.ok)
 
 def main (args : List String) : IO UInt32 := do
-  runWithFixtures args fixtureSpec generateFixtures runOnce
+  runWithFixtures args suiteName fixtureSpec generateFixtures runOnce
 
-end Examples.GPU
-
-def main : List String → IO UInt32 := Examples.GPU.main
+end Examples.GPU.RunFlashAttn

@@ -6,13 +6,25 @@
  */
 
 #include <lean/lean.h>
+#include <string>
+
+#if defined(__has_include)
+#if __has_include(<arrow/api.h>) && __has_include(<arrow/io/file.h>) && __has_include(<parquet/arrow/reader.h>) && __has_include(<parquet/file_reader.h>)
+#define TYR_HAS_ARROW 1
+#else
+#define TYR_HAS_ARROW 0
+#endif
+#else
+#define TYR_HAS_ARROW 0
+#endif
+
+#if TYR_HAS_ARROW
 #include <arrow/api.h>
 #include <arrow/io/file.h>
 #include <parquet/arrow/reader.h>
 #include <parquet/file_reader.h>
 #include <filesystem>
 #include <algorithm>
-#include <string>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -538,3 +550,44 @@ lean_object* lean_parquet_read_row_group_as_json(b_lean_obj_arg file_path, uint6
 }
 
 } // extern "C"
+
+#else
+
+extern "C" {
+
+static lean_object* mk_io_error(const std::string& msg) {
+    lean_object* err = lean_mk_io_user_error(lean_mk_string(msg.c_str()));
+    return lean_io_result_mk_error(err);
+}
+
+static lean_object* parquet_unavailable() {
+    return mk_io_error("Parquet support unavailable: build without Arrow/Parquet development headers");
+}
+
+lean_object* lean_parquet_list_files(b_lean_obj_arg, lean_object*) {
+    return parquet_unavailable();
+}
+
+lean_object* lean_parquet_get_metadata(b_lean_obj_arg, lean_object*) {
+    return parquet_unavailable();
+}
+
+lean_object* lean_parquet_read_row_group(b_lean_obj_arg, uint64_t, b_lean_obj_arg, lean_object*) {
+    return parquet_unavailable();
+}
+
+lean_object* lean_parquet_file_exists(b_lean_obj_arg, lean_object*) {
+    return parquet_unavailable();
+}
+
+lean_object* lean_parquet_read_as_json(b_lean_obj_arg, lean_object*) {
+    return parquet_unavailable();
+}
+
+lean_object* lean_parquet_read_row_group_as_json(b_lean_obj_arg, uint64_t, lean_object*) {
+    return parquet_unavailable();
+}
+
+} // extern "C"
+
+#endif

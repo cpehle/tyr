@@ -2,12 +2,15 @@
    generate deterministic input/reference tensors, launch the kernel, compare outputs. -/
 import Tyr.Torch
 import Tyr.GPU.Kernels.Rotary
+import Examples.GPU.Parity
 import Examples.GPU.FixtureRunner
 
-namespace Examples.GPU
+namespace Examples.GPU.RunRotary
 
 open torch
 open Tyr.GPU.Kernels.Rotary
+
+def suiteName : String := "rotary"
 
 def fixtureSpec : FixtureSpec := {
   dir := ⟨"data/gpu_fixtures/rotary64"⟩
@@ -18,7 +21,7 @@ def fixtureFile (name : String) : System.FilePath :=
   Examples.GPU.fixturePath fixtureSpec name
 
 def generateFixtures : IO Unit := do
-  if !(← torch.cuda_is_available) then
+  if !(← requireCuda suiteName) then
     throw <| IO.userError "CUDA is not available; cannot generate rotary fixtures."
 
   IO.FS.createDirAll fixtureSpec.dir
@@ -44,8 +47,7 @@ def generateFixtures : IO Unit := do
   IO.println s!"Generated rotary fixtures in {fixtureSpec.dir} xMean={xMean} expectedMean={eMean}"
 
 def runOnce : IO Bool := do
-  if !(← torch.cuda_is_available) then
-    IO.eprintln "CUDA is not available on this host."
+  if !(← requireCuda suiteName) then
     return false
 
   if !(← fixturesPresent fixtureSpec) then
@@ -63,16 +65,14 @@ def runOnce : IO Bool := do
   rotaryFwd.launch x sin cos output 64 64 1 1 1 128 1 1 0 stream
   let _ ← torch.cuda_synchronize
 
-  let ok := torch.allclose expected output 1e-4 1e-4
-  let mae := torch.nn.item (torch.nn.meanAll (torch.nn.abs (output - expected)))
+  let check := compareTensors "rotary.output" expected output 1e-4 1e-4
   let outMean := torch.nn.item (torch.nn.meanAll output)
   let expMean := torch.nn.item (torch.nn.meanAll expected)
-  IO.println s!"rotary allclose={ok} mae={mae} outMean={outMean} expectedMean={expMean}"
-  pure ok
+  logTensorCheck check
+  IO.println s!"rotary output_mean={outMean} expected_mean={expMean}"
+  pure check.ok
 
 def main (args : List String) : IO UInt32 := do
-  runWithFixtures args fixtureSpec generateFixtures runOnce
+  runWithFixtures args suiteName fixtureSpec generateFixtures runOnce
 
-end Examples.GPU
-
-def main : List String → IO UInt32 := Examples.GPU.main
+end Examples.GPU.RunRotary

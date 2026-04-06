@@ -1,12 +1,15 @@
 /- End-to-end ThunderKittens-style layernorm validation. -/
 import Tyr.Torch
 import Tyr.GPU.Kernels.FusedLayerNorm
+import Examples.GPU.Parity
 import Examples.GPU.FixtureRunner
 
-namespace Examples.GPU
+namespace Examples.GPU.RunLayerNorm
 
 open torch
 open Tyr.GPU.Kernels
+
+def suiteName : String := "layernorm"
 
 def fixtureSpec : FixtureSpec := {
   dir := ⟨"data/gpu_fixtures/layernorm64x1024"⟩
@@ -17,7 +20,7 @@ def fixtureFile (name : String) : System.FilePath :=
   Examples.GPU.fixturePath fixtureSpec name
 
 def generateFixtures : IO Unit := do
-  if !(← torch.cuda_is_available) then
+  if !(← requireCuda suiteName) then
     throw <| IO.userError "CUDA is not available; cannot generate layernorm fixtures."
 
   IO.FS.createDirAll fixtureSpec.dir
@@ -44,9 +47,13 @@ def generateFixtures : IO Unit := do
   IO.println s!"Generated layernorm fixtures in {fixtureSpec.dir} outMean={outMean} residMean={residMean}"
 
 def runOnce : IO Bool := do
-  if !(← torch.cuda_is_available) then
-    IO.eprintln "CUDA is not available on this host."
+  if !(← requireCuda suiteName) then
     return false
+
+  if ← gpuTargetIsAny #["GB10", "B200", "B300"] then
+    IO.println
+      s!"[skip] {suiteName}: tkFusedLayerNormResidual1024 does not have a validated Blackwell-family path yet."
+    return true
 
   if !(← fixturesPresent fixtureSpec) then
     generateFixtures
@@ -67,18 +74,13 @@ def runOnce : IO Bool := do
   tkFusedLayerNormResidual1024.launch x residual weight bias out outResid 1 1 1 32 1 1 0 stream
   let _ ← torch.cuda_synchronize
 
-  let outOk := torch.allclose expectedOut out 5e-3 5e-3
-  let residOk := torch.allclose expectedResid outResid 1e-5 1e-5
-
-  let outMae := torch.nn.item (torch.nn.meanAll (torch.nn.abs (out - expectedOut)))
-  let residMae := torch.nn.item (torch.nn.meanAll (torch.nn.abs (outResid - expectedResid)))
-  let outMax := torch.nn.item (torch.nn.maxAll (torch.nn.abs (out - expectedOut)))
-  IO.println s!"layernorm out_allclose={outOk} resid_allclose={residOk} out_mae={outMae} resid_mae={residMae} out_max={outMax}"
-  pure (outOk && residOk)
+  let outCheck := compareTensors "layernorm.output" expectedOut out 5e-3 5e-3
+  let residCheck := compareTensors "layernorm.residual" expectedResid outResid 1e-5 1e-5
+  logTensorCheck outCheck
+  logTensorCheck residCheck
+  pure (outCheck.ok && residCheck.ok)
 
 def main (args : List String) : IO UInt32 := do
-  runWithFixtures args fixtureSpec generateFixtures runOnce
+  runWithFixtures args suiteName fixtureSpec generateFixtures runOnce
 
-end Examples.GPU
-
-def main : List String → IO UInt32 := Examples.GPU.main
+end Examples.GPU.RunLayerNorm

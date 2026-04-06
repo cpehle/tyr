@@ -17,6 +17,7 @@ private def contractLabel : String := "dq_direct_kv_sweep_store_add"
 private def seqLen : Nat := 768
 private def headDim : Nat := 64
 private def kvTiles : Nat := 12
+private def suiteName : String := "mha_h100_768x64"
 
 def fixtureSpec : FixtureSpec := {
   dir := ⟨"data/gpu_fixtures/mha_h100_768x64"⟩
@@ -170,7 +171,7 @@ def runOnce (dumpPartials : Bool := false) : IO Bool := do
 
 def main (args : List String) : IO UInt32 := do
   let dumpPartials := args.contains "--dump-partials"
-  runWithFixtures args fixtureSpec generateFixtures (runOnce dumpPartials)
+  runWithFixtures args suiteName fixtureSpec generateFixtures (runOnce dumpPartials)
 
 end Examples.GPU
 
