@@ -283,6 +283,7 @@ structure KParam where
 structure Kernel where
   name : String
   arch : GpuArch
+  family : GpuFamily
   params : Array KParam
   body : Array KStmt
   sharedMemBytes : Nat := 0

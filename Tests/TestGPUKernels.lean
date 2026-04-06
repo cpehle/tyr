@@ -12,6 +12,7 @@ import Tyr.GPU.Codegen.Monad
 import Tyr.GPU.Codegen.Primitives
 import Tyr.GPU.Codegen.Loop
 import Tyr.GPU.Codegen.EmitNew
+import Tyr.GPU.Codegen.Attribute
 import LeanTest
 
 namespace Tests.GPUKernels
@@ -19,6 +20,27 @@ namespace Tests.GPUKernels
 open Tyr.GPU
 open Tyr.GPU.Codegen
 open LeanTest
+
+private def mkTestKernel
+    (name : String)
+    (arch : GpuArch)
+    (body : Array KStmt)
+    (params : Array KParam := #[])
+    (sharedMemBytes : Nat := 0) : Kernel := {
+  name := name
+  arch := arch
+  family := arch.toFamily
+  params := params
+  body := body
+  sharedMemBytes := sharedMemBytes
+}
+
+private def assertContainsAll (code : String) (checks : Array (String × String)) : IO Unit := do
+  for (needle, msg) in checks do
+    assertTrue (code.containsSubstr needle) msg
+
+private def assertNotContains (code : String) (needle msg : String) : IO Unit := do
+  assertTrue (!(code.containsSubstr needle)) msg
 
 /-! ## Basic Tile Allocation Tests -/
 
@@ -157,12 +179,10 @@ def testNestedLoops : IO Unit := do
 
 @[test]
 def testReverseLoopCodegen : IO Unit := do
-  let kernel : Kernel := {
-    name := "test_reverse_loop"
-    arch := .SM90
-    params := #[]
-    body := #[.forLoopRev { idx := 0 } 0 4 #[.comment "reverse body"]]
-  }
+  let kernel := mkTestKernel
+    "test_reverse_loop"
+    .SM90
+    #[.forLoopRev { idx := 0 } 0 4 #[.comment "reverse body"]]
 
   let code := generateKernel kernel
   assertTrue (code.containsSubstr "for (int v0 = 4; v0-- > 0; )")
@@ -170,16 +190,71 @@ def testReverseLoopCodegen : IO Unit := do
 
 @[test]
 def testReverseLoopValCodegen : IO Unit := do
-  let kernel : Kernel := {
-    name := "test_reverse_loop_val"
-    arch := .SM90
-    params := #[]
-    body := #[.forLoopValRev { idx := 0 } 2 { idx := 1 } #[.comment "reverse body"]]
-  }
+  let kernel := mkTestKernel
+    "test_reverse_loop_val"
+    .SM90
+    #[.forLoopValRev { idx := 0 } 2 { idx := 1 } #[.comment "reverse body"]]
 
   let code := generateKernel kernel
   assertTrue (code.containsSubstr "for (int v0 = v1; v0-- > 2; )")
     "Reverse value-bounded loops should lower to descending iteration order"
+
+/-! ## Architecture Metadata Tests -/
+
+@[test]
+def testKernelDefaultsFamilyFromArchFloor : IO Unit := do
+  let hopperKernel := buildKernelM "hopper_floor" .SM90 #[] do
+    pure ()
+  let blackwellKernel := buildKernelM "blackwell_floor" .SM100 #[] do
+    pure ()
+
+  assertEqual hopperKernel.arch .SM90 "Kernel floor should stay SM90"
+  assertEqual hopperKernel.family .Hopper "SM90 kernels should default to Hopper family"
+  assertEqual blackwellKernel.arch .SM100 "Kernel floor should stay SM100"
+  assertEqual blackwellKernel.family .Blackwell "SM100 kernels should default to Blackwell family"
+
+@[test]
+def testFamilyOverrideChangesGuardWithoutChangingFloor : IO Unit := do
+  let kernel := buildKernelM "gb10_guard" .SM90 #[] do
+    setFamily .Blackwell
+    let _tile : Tyr.GPU.Codegen.RT GpuFloat.BFloat16 64 64 ← allocRT .BFloat16 64 64
+    pure ()
+
+  assertEqual kernel.arch .SM90 "GB10-compatible kernels should keep an SM90 capability floor"
+  assertEqual kernel.family .Blackwell "GB10-compatible kernels should emit under the Blackwell family guard"
+
+  let code := generateKernel kernel
+  assertContainsAll code #[
+    ("#if defined(KITTENS_BLACKWELL)",
+      "Family override should drive the emitted availability guard")
+  ]
+  assertNotContains code "#if defined(KITTENS_HOPPER)"
+    "Family override should replace the default Hopper guard"
+
+@[test]
+def testSetArchResetsFamilyToArchDefault : IO Unit := do
+  let kernel := buildKernelM "family_reset" .SM90 #[] do
+    setFamily .Blackwell
+    setArch .SM80
+    pure ()
+
+  assertEqual kernel.arch .SM80 "setArch should update the capability floor"
+  assertEqual kernel.family .Ampere "setArch should restore the default family for the new floor"
+
+@[test]
+def testCppLauncherUsesFamilyGuardAndFloorMessage : IO Unit := do
+  let cpp := generateCppLauncherCode
+    "gb10_floor_launcher"
+    .SM90
+    .Blackwell
+    #[{ name := "x", dtype := .BFloat16, isPointer := true }]
+
+  assertContainsAll cpp #[
+    ("#if defined(KITTENS_BLACKWELL)",
+      "Launchers should be guarded by the build family, not the capability floor"),
+    ("requires Blackwell family, SM90 floor",
+      "Unavailable-launcher diagnostics should report both family and floor")
+  ]
 
 /-! ## Code Generation Tests -/
 
@@ -199,16 +274,14 @@ def testCodeGenDeclarations : IO Unit := do
 
 @[test]
 def testUnsupportedSliceRowsCodegenFailsLoudly : IO Unit := do
-  let kernel : Kernel := {
-    name := "test_bad_slice_rows"
-    arch := .SM90
-    params := #[]
-    body := #[
+  let kernel := mkTestKernel
+    "test_bad_slice_rows"
+    .SM90
+    #[
       .declRT { idx := 0 } .Float32 64 64 .Row,
       .declTT { idx := 1 } .Float32 64 64,
       .sliceRows { idx := 0 } { idx := 1 } 0 64
     ]
-  }
 
   let code := generateKernel kernel
   assertTrue (code.containsSubstr "static_assert(false, \"unsupported sliceRows between non-matching tile kinds\")")
@@ -216,16 +289,14 @@ def testUnsupportedSliceRowsCodegenFailsLoudly : IO Unit := do
 
 @[test]
 def testMixedSliceRowsFromSharedToRegisterCodegen : IO Unit := do
-  let kernel : Kernel := {
-    name := "test_slice_rows_mixed"
-    arch := .SM90
-    params := #[]
-    body := #[
+  let kernel := mkTestKernel
+    "test_slice_rows_mixed"
+    .SM90
+    #[
       .declRT { idx := 0 } .Float32 64 64 .Row,
       .declST { idx := 1 } .Float32 64 64 .Row,
       .sliceRows { idx := 0 } { idx := 1 } 0 64
     ]
-  }
 
   let code := generateKernel kernel
   assertTrue (code.containsSubstr "auto _tk_src_sub = v1.template subtile<64, 64>(make_int2(0, 0));")
@@ -235,16 +306,14 @@ def testMixedSliceRowsFromSharedToRegisterCodegen : IO Unit := do
 
 @[test]
 def testMixedSliceRowsFromRegisterToSharedCodegen : IO Unit := do
-  let kernel : Kernel := {
-    name := "test_slice_rows_into_shared_supported"
-    arch := .SM90
-    params := #[]
-    body := #[
+  let kernel := mkTestKernel
+    "test_slice_rows_into_shared_supported"
+    .SM90
+    #[
       .declST { idx := 0 } .Float32 64 64 .Row,
       .declRT { idx := 1 } .Float32 64 64 .Row,
       .sliceRows { idx := 0 } { idx := 1 } 0 64
     ]
-  }
 
   let code := generateKernel kernel
   assertTrue (code.containsSubstr "auto _tk_dst_sub = v0.template subtile<64, 64>(make_int2(0, 0));")
@@ -254,16 +323,14 @@ def testMixedSliceRowsFromRegisterToSharedCodegen : IO Unit := do
 
 @[test]
 def testMixedSliceColsFromSharedToRegisterCodegen : IO Unit := do
-  let kernel : Kernel := {
-    name := "test_slice_cols_mixed"
-    arch := .SM90
-    params := #[]
-    body := #[
+  let kernel := mkTestKernel
+    "test_slice_cols_mixed"
+    .SM90
+    #[
       .declRT { idx := 0 } .Float32 64 64 .Row,
       .declST { idx := 1 } .Float32 64 64 .Row,
       .sliceCols { idx := 0 } { idx := 1 } 0 64
     ]
-  }
 
   let code := generateKernel kernel
   assertTrue (code.containsSubstr "auto _tk_src_sub = v1.template subtile<64, 64>(make_int2(0, 0));")
@@ -273,16 +340,14 @@ def testMixedSliceColsFromSharedToRegisterCodegen : IO Unit := do
 
 @[test]
 def testMixedSliceColsFromRegisterToSharedCodegen : IO Unit := do
-  let kernel : Kernel := {
-    name := "test_slice_cols_into_shared_supported"
-    arch := .SM90
-    params := #[]
-    body := #[
+  let kernel := mkTestKernel
+    "test_slice_cols_into_shared_supported"
+    .SM90
+    #[
       .declST { idx := 0 } .Float32 64 64 .Row,
       .declRT { idx := 1 } .Float32 64 64 .Row,
       .sliceCols { idx := 0 } { idx := 1 } 0 64
     ]
-  }
 
   let code := generateKernel kernel
   assertTrue (code.containsSubstr "auto _tk_dst_sub = v0.template subtile<64, 64>(make_int2(0, 0));")
@@ -292,17 +357,15 @@ def testMixedSliceColsFromRegisterToSharedCodegen : IO Unit := do
 
 @[test]
 def testMixedConcatColsIntoSharedCodegen : IO Unit := do
-  let kernel : Kernel := {
-    name := "test_concat_cols_into_shared"
-    arch := .SM90
-    params := #[]
-    body := #[
+  let kernel := mkTestKernel
+    "test_concat_cols_into_shared"
+    .SM90
+    #[
       .declST { idx := 0 } .Float32 64 128 .Row,
       .declRT { idx := 1 } .Float32 64 64 .Row,
       .declST { idx := 2 } .Float32 64 64 .Row,
       .concatCols { idx := 0 } { idx := 1 } { idx := 2 }
     ]
-  }
 
   let code := generateKernel kernel
   assertTrue (code.containsSubstr "auto _tk_dst_left = v0.template subtile<64, 64>(make_int2(0, 0));")
@@ -316,17 +379,15 @@ def testMixedConcatColsIntoSharedCodegen : IO Unit := do
 
 @[test]
 def testMixedConcatColsIntoRegisterCodegen : IO Unit := do
-  let kernel : Kernel := {
-    name := "test_concat_cols_into_register_supported"
-    arch := .SM90
-    params := #[]
-    body := #[
+  let kernel := mkTestKernel
+    "test_concat_cols_into_register_supported"
+    .SM90
+    #[
       .declRT { idx := 0 } .Float32 64 128 .Row,
       .declRT { idx := 1 } .Float32 64 64 .Row,
       .declST { idx := 2 } .Float32 64 64 .Row,
       .concatCols { idx := 0 } { idx := 1 } { idx := 2 }
     ]
-  }
 
   let code := generateKernel kernel
   assertTrue (code.containsSubstr "rt<float, 64, 64, row_l> _tk_right_rt;")
@@ -338,17 +399,15 @@ def testMixedConcatColsIntoRegisterCodegen : IO Unit := do
 
 @[test]
 def testEqMaskCodegenEmitsHelpers : IO Unit := do
-  let kernel : Kernel := {
-    name := "test_eq_mask"
-    arch := .SM90
-    params := #[]
-    body := #[
+  let kernel := mkTestKernel
+    "test_eq_mask"
+    .SM90
+    #[
       .declRT { idx := 0 } .Float32 64 64 .Row,
       .declRT { idx := 1 } .Float32 64 64 .Row,
       .declRT { idx := 2 } .Float32 64 64 .Row,
       .eqMask { idx := 0 } { idx := 1 } { idx := 2 }
     ]
-  }
 
   let code := generateKernel kernel
   assertTrue (code.containsSubstr "tk_eq_mask(v0, v1, v2);")
@@ -358,16 +417,14 @@ def testEqMaskCodegenEmitsHelpers : IO Unit := do
 
 @[test]
 def testUnsupportedSliceColsCodegenFailsLoudly : IO Unit := do
-  let kernel : Kernel := {
-    name := "test_bad_slice_cols"
-    arch := .SM90
-    params := #[]
-    body := #[
+  let kernel := mkTestKernel
+    "test_bad_slice_cols"
+    .SM90
+    #[
       .declRT { idx := 0 } .Float32 64 64 .Row,
       .declTT { idx := 1 } .Float32 64 64,
       .sliceCols { idx := 0 } { idx := 1 } 0 64
     ]
-  }
 
   let code := generateKernel kernel
   assertTrue (code.containsSubstr "static_assert(false, \"unsupported sliceCols between non-matching tile kinds\")")
@@ -375,17 +432,15 @@ def testUnsupportedSliceColsCodegenFailsLoudly : IO Unit := do
 
 @[test]
 def testUnsupportedConcatColsCodegenFailsLoudly : IO Unit := do
-  let kernel : Kernel := {
-    name := "test_bad_concat_cols"
-    arch := .SM90
-    params := #[]
-    body := #[
+  let kernel := mkTestKernel
+    "test_bad_concat_cols"
+    .SM90
+    #[
       .declTT { idx := 0 } .Float32 64 128,
       .declRT { idx := 1 } .Float32 64 64 .Row,
       .declRT { idx := 2 } .Float32 64 64 .Row,
       .concatCols { idx := 0 } { idx := 1 } { idx := 2 }
     ]
-  }
 
   let code := generateKernel kernel
   assertTrue (code.containsSubstr "static_assert(false, \"unsupported concatCols between non-matching tile kinds\")")

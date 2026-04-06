@@ -177,6 +177,8 @@ private def collectRvLayoutsStmt
       let tileLayout := rtLayoutOf rtLayouts dst
       let st' := addRvLayout st a (colVecLayout tileLayout)
       addRvLayout st' b (rowVecLayout tileLayout)
+  | .convert dst src =>
+      unifyRvVars rvVars st dst src
   | .unary _ dst src =>
       unifyRvVars rvVars st dst src
   | .binary _ dst a b =>
@@ -1465,7 +1467,7 @@ private def generateKernelDefinition (k : Kernel) (emitSharedDecl : Bool := fals
   let rvState := inferRvLayouts k
   let rvVars := inferRvDecls k
   let tileInfo := inferTileInfo k
-  let archGuard := s!"#if defined({k.arch.toGuard})\n"
+  let archGuard := s!"#if defined({k.family.toGuard})\n"
   let paramStr := if k.params.isEmpty then "/* empty parameter list */" else generateParams k
   let launchBounds := match k.launchBounds with
     | some (maxThreads, minBlocks) => s!" __launch_bounds__({maxThreads}, {minBlocks})"

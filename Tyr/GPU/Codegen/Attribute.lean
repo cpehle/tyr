@@ -36,6 +36,8 @@ structure RegisteredKernel where
   name : Name
   /-- Target architecture -/
   arch : GpuArch
+  /-- Emitted/build family guard for runtime availability. -/
+  family : GpuFamily
   /-- Kernel definition body (without shared helper templates). -/
   kernelDef : String
   /-- Helper usage flags for reconstructing per-module helper templates. -/
@@ -90,10 +92,10 @@ initialize gpuKernelDeclTag : TagAttribute ←
 
 /-- Drop duplicate registrations by kernel identity. -/
 private def dedupeKernelSpecs (specs : Array RegisteredKernelSpec) : Array RegisteredKernelSpec := Id.run do
-  let mut seen : Std.HashSet (Name × Name × GpuArch × String) := {}
+  let mut seen : Std.HashSet (Name × Name × GpuArch × GpuFamily × String) := {}
   let mut out : Array RegisteredKernelSpec := #[]
   for spec in specs do
-    let key := (spec.moduleName, spec.name, spec.arch, spec.kernelName)
+    let key := (spec.moduleName, spec.name, spec.arch, spec.family, spec.kernelName)
     if !seen.contains key then
       seen := seen.insert key
       out := out.push spec
@@ -376,8 +378,9 @@ def generatePtrExtractionAttr
 def generateCppLauncherCode (kernel : Kernel) : String :=
   let name := kernel.name.replace "." "_"
   let externName := "lean_launch_" ++ name
-  let archGuard := kernel.arch.toGuard
+  let archGuard := kernel.family.toGuard
   let archMsg := toString kernel.arch
+  let familyMsg := toString kernel.family
   let defaultSharedMem := toString kernel.sharedMemBytes
   let paramTmaTypes := inferGlobalParamTmaTypes kernel
 
@@ -418,7 +421,7 @@ def generateCppLauncherCode (kernel : Kernel) : String :=
   "      return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string(cudaGetErrorString(err))));\n" ++
   "    return lean_io_result_mk_ok(lean_box(0));\n" ++
   "#else\n" ++
-  s!"    return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string(\"Kernel {name} is unavailable in this build (requires {archMsg}).\")));\n" ++
+  s!"    return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string(\"Kernel {name} is unavailable in this build (requires {familyMsg} family, {archMsg} floor).\")));\n" ++
   "#endif\n" ++
   "}\n"
 
@@ -481,6 +484,7 @@ def mkRegisteredKernelSpec (moduleName regName : Name) (kernel : Kernel) : Regis
     moduleName := moduleName
     name := regName
     arch := kernel.arch
+    family := kernel.family
     kernelDef := emitInfo.definition
     needsStoreAdd := emitInfo.needsStoreAdd
     needsLegacyTma := emitInfo.needsLegacyTma

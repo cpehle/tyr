@@ -970,7 +970,7 @@ __global__ void fused_gemm(/* TODO: params */) {
 
 -- computeLaunchConfig returns correct grid/block for problem sizes
 private def dummyKernelForLaunch : Kernel :=
-  { name := "dummy", arch := .SM90, params := #[], body := #[], sharedMemBytes := 49152 }
+  { name := "dummy", arch := .SM90, family := .Hopper, params := #[], body := #[], sharedMemBytes := 49152 }
 
 #guard (computeLaunchConfig dummyKernelForLaunch 4096 4096 64 64).grid.x = 64
 #guard (computeLaunchConfig dummyKernelForLaunch 4096 4096 64 64).grid.y = 64

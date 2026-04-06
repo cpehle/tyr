@@ -112,6 +112,31 @@ def GpuArch.toNvccArch : GpuArch → String
   | .SM90 => "sm_90a"
   | .SM100 => "sm_100a"
 
+/-- GPU family used for emitted guard selection and build-family dispatch. -/
+inductive GpuFamily where
+  | Ampere
+  | Hopper
+  | Blackwell
+  deriving Repr, BEq, Hashable, Inhabited, DecidableEq, Lean.ToExpr
+
+instance : ToString GpuFamily where
+  toString
+    | .Ampere => "Ampere"
+    | .Hopper => "Hopper"
+    | .Blackwell => "Blackwell"
+
+/-- Convert a family to the C++ preprocessor guard used by the runtime build. -/
+def GpuFamily.toGuard : GpuFamily → String
+  | .Ampere => "KITTENS_AMPERE"
+  | .Hopper => "KITTENS_HOPPER"
+  | .Blackwell => "KITTENS_BLACKWELL"
+
+/-- Default emitted/build family for a capability floor. -/
+def GpuArch.toFamily : GpuArch → GpuFamily
+  | .SM80 => .Ampere
+  | .SM90 => .Hopper
+  | .SM100 => .Blackwell
+
 /-- Shared memory swizzle mode for bank conflict avoidance -/
 inductive SwizzleMode where
   | None
