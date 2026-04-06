@@ -5,6 +5,7 @@ source ./load_modules.sh
 
 export LEAN_CC="$PWD/scripts/lean_cc_wrapper.sh"
 export LEAN_CC_FAST=1
+export TYR_GPU_VENDORED_REF_RUNNER="${TYR_GPU_VENDORED_REF_RUNNER:-$PWD/scripts/gpu/run_vendored_reference.sh}"
 export LD_LIBRARY_PATH="$PWD/external/libtorch/lib:$PWD/cc/build:${EBROOTGCCCORE:+${EBROOTGCCCORE}/lib64:}${LD_LIBRARY_PATH:-}"
 LEAN_BIN="${TYR_LEAN_BIN:-$HOME/.elan/bin/lean}"
 if [[ ! -x "$LEAN_BIN" ]]; then
@@ -23,16 +24,6 @@ cpu_count() {
   fi
   if command -v getconf >/dev/null 2>&1; then
     count="$(getconf _NPROCESSORS_ONLN 2>/dev/null || true)"
-    if [[ "$count" =~ ^[0-9]+$ ]] && [[ "$count" -gt 0 ]]; then
-      echo "$count"
-      return
-    fi
-  fi
-  if command -v sysctl >/dev/null 2>&1; then
-    count="$(sysctl -n hw.logicalcpu 2>/dev/null || true)"
-    if ! [[ "$count" =~ ^[0-9]+$ ]] || [[ "$count" -lt 1 ]]; then
-      count="$(sysctl -n hw.ncpu 2>/dev/null || true)"
-    fi
     if [[ "$count" =~ ^[0-9]+$ ]] && [[ "$count" -gt 0 ]]; then
       echo "$count"
       return
@@ -72,6 +63,9 @@ detect_gpu_family() {
   fi
   case "$(detect_gpu_target)" in
     GB10)
+      # Default to Hopper compatibility on GB10 because the current suite still
+      # exercises Hopper-authored kernels. Override with TYR_GPU_FAMILY=BLACKWELL
+      # when validating true SM100 surfaces.
       echo "HOPPER"
       ;;
     B200|B300) echo "BLACKWELL" ;;
@@ -85,17 +79,64 @@ gpu_family="$(detect_gpu_family)"
 export TYR_GPU_TARGET="${TYR_GPU_TARGET:-${gpu_target}}"
 export TYR_GPU_FAMILY="${TYR_GPU_FAMILY:-${gpu_family}}"
 
-echo "[1/5] Build Lean targets"
-lake -R --quiet build +Tyr.GPU.Codegen.GenerateMain +Tyr.GPU.Kernels.MhaH100
+extract_test_filter() {
+  local prev=""
+  for arg in "$@"; do
+    if [[ "${prev}" == "--filter" ]]; then
+      echo "${arg}"
+      return
+    fi
+    prev="${arg}"
+  done
+}
 
-echo "[2/5] Generate CUDA translation unit"
-lake -R env "$LEAN_BIN" --run Tyr/GPU/Codegen/GenerateMain.lean Tyr.GPU.Kernels.MhaH100 --out-dir cc/src/generated
+select_modules_from_filter() {
+  local filter="$1"
+  local selected=()
+  if [[ -z "${filter}" ]]; then
+    printf '%s\n' \
+      Tyr.GPU.Kernels.Copy \
+      Tyr.GPU.Kernels.Rotary \
+      Tyr.GPU.Kernels.FusedLayerNorm \
+      Tyr.GPU.Kernels.MhaH100
+    return
+  fi
+  [[ "${filter}" == *copy* ]] && selected+=(Tyr.GPU.Kernels.Copy)
+  [[ "${filter}" == *rotary* ]] && selected+=(Tyr.GPU.Kernels.Rotary)
+  [[ "${filter}" == *layernorm* ]] && selected+=(Tyr.GPU.Kernels.FusedLayerNorm)
+  if [[ "${filter}" == *flashattn* || "${filter}" == *mha_h100* ]]; then
+    selected+=(Tyr.GPU.Kernels.MhaH100)
+  fi
+  if [[ "${#selected[@]}" -eq 0 ]]; then
+    printf '%s\n' \
+      Tyr.GPU.Kernels.Copy \
+      Tyr.GPU.Kernels.Rotary \
+      Tyr.GPU.Kernels.FusedLayerNorm \
+      Tyr.GPU.Kernels.MhaH100
+    return
+  fi
+  printf '%s\n' "${selected[@]}"
+}
+
+test_filter="$(extract_test_filter "$@")"
+mapfile -t modules < <(select_modules_from_filter "${test_filter}")
+generator_targets=(+Tyr.GPU.Codegen.GenerateMain)
+for module in "${modules[@]}"; do
+  generator_targets+=("+${module}")
+done
+
+echo "[1/5] Build Lean kernel generator inputs"
+lake -R --quiet build "${generator_targets[@]}"
+
+echo "[2/5] Generate CUDA translation units"
+lake -R env "$LEAN_BIN" --run Tyr/GPU/Codegen/GenerateMain.lean "${modules[@]}" --out-dir cc/src/generated
 
 echo "[3/5] Build C++/CUDA runtime library (GPU=${TYR_GPU_TARGET}, family=${TYR_GPU_FAMILY})"
 invalidate_generated_gpu_objects
 make -C cc -j"$(cpu_count)" GPU="${TYR_GPU_TARGET}" GPU_FAMILY="${TYR_GPU_FAMILY}"
 
-echo "[4/5] Use Lean source runner (Examples/GPU/RunMhaH100Train.lean)"
+echo "[4/5] Build LeanTest GPU executable"
+lake -R --quiet build TestGPUE2E
 
-echo "[5/5] Run benchmark"
-lake -R env "$LEAN_BIN" --run Examples/GPU/RunMhaH100Train.lean --benchmark --warmup 20 --bench-iters 500 --lr 200.0 --noise 0.5 "$@"
+echo "[5/5] Run LeanTest GPU suite"
+lake -R env ./.lake/build/bin/TestGPUE2E "$@"

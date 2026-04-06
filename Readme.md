@@ -185,6 +185,31 @@ Notes:
 - Override launcher path with `TORCHRUN_BIN=/path/to/torchrun`.
 - Override process counts in the benchmark script with `SIZES="2 4"` (or any space-separated list).
 
+### GPU Kernel Parity
+
+The ThunderKittens-style GPU coverage now has a reusable end-to-end parity path
+centered on seeded fixture generation plus hardware-backed validation:
+
+```bash
+# Run the current GPU parity suite
+./scripts/gpu/test_parity_suite.sh
+
+# Add randomized MHA trials on top of the deterministic suite
+RANDOMIZED_MHA_TRIALS=10 ./scripts/gpu/test_parity_suite.sh
+```
+
+Notes:
+- The suite currently covers `copy`, `rotary`, `layernorm`, `flashattn`, and
+  `mha_h100` entrypoints through the executables declared in `lakefile.lean`.
+- PyTorch is the default numerical oracle for fixture generation and parity.
+- If you have a local vendored ThunderKittens reference runner, set
+  `TYR_GPU_VENDORED_REF_RUNNER=/path/to/runner`. It will be called as
+  `runner <suite-name> <fixture-dir>` after each suite and should exit nonzero
+  on mismatch.
+- This checkout may have an empty `thirdparty/ThunderKittens` directory; the
+  vendored hook is optional and exists so parity can start paying off before the
+  submodule/runtime reference path is fully wired.
+
 ## Key Concepts
 
 ### Shape-Indexed Tensors

@@ -17,7 +17,6 @@ TORCH_INC_FLAGS=-I$(TORCHDIR)/include -I$(TORCHDIR)/include/torch/csrc/api/inclu
 TORCH_LIBPATH=$(TORCHDIR)/lib
 TKDIR=../thirdparty/ThunderKittens
 TK_INC_FLAGS=-I$(TKDIR)/include -I$(TKDIR)/prototype
-PYTHON_INC_FLAGS ?= $(shell python3-config --includes 2>/dev/null)
 SOXR_DIR=../external/soxr
 SOXR_BUILD_DIR=build/soxr
 SOXR_INC_FLAGS=-I$(SOXR_DIR)/src -I$(SOXR_BUILD_DIR)
@@ -45,8 +44,22 @@ else
     # Linux
     ARROW_PREFIX := /usr
 endif
-ARROW_INC_FLAGS := -I$(ARROW_PREFIX)/include
 ARROW_LIBPATH := $(ARROW_PREFIX)/lib
+HAS_ARROW := 0
+ifneq ($(wildcard $(ARROW_PREFIX)/include/arrow/api.h),)
+ifneq ($(wildcard $(ARROW_LIBPATH)/libarrow.*),)
+ifneq ($(wildcard $(ARROW_LIBPATH)/libparquet.*),)
+HAS_ARROW := 1
+endif
+endif
+endif
+ifeq ($(HAS_ARROW),1)
+ARROW_INC_FLAGS := -I$(ARROW_PREFIX)/include
+ARROW_LINK_FLAGS := -L$(ARROW_LIBPATH) -larrow -lparquet
+else
+ARROW_INC_FLAGS :=
+ARROW_LINK_FLAGS :=
+endif
 
 
 
@@ -60,6 +73,31 @@ CC := gcc
 CXX := c++
 NVCC ?= nvcc
 HAS_NVCC := $(shell command -v $(NVCC) >/dev/null 2>&1 && echo 1 || echo 0)
+CUDA_MAJOR_VERSION := $(shell $(NVCC) --version 2>/dev/null | sed -n 's/.*release \([0-9][0-9]*\)\..*/\1/p' | head -n1)
+CUDA_HOME ?= $(patsubst %/bin/nvcc,%,$(shell command -v $(NVCC) 2>/dev/null))
+ifeq ($(strip $(CUDA_HOME)),)
+CUDA_HOME := /usr/local/cuda
+endif
+CUDA_INC_FLAGS :=
+ifneq ($(wildcard $(CUDA_HOME)/include/cuda_runtime.h),)
+CUDA_INC_FLAGS += -I$(CUDA_HOME)/include
+endif
+CUDA_LIB_FLAGS :=
+ifneq ($(wildcard $(CUDA_HOME)/lib64),)
+CUDA_LIB_FLAGS += -L$(CUDA_HOME)/lib64
+endif
+ifneq ($(wildcard $(CUDA_HOME)/targets/aarch64-linux/lib),)
+CUDA_LIB_FLAGS += -L$(CUDA_HOME)/targets/aarch64-linux/lib
+endif
+NCCL_ROOT ?= $(firstword $(wildcard ../.venv-gpu/lib/python*/site-packages/nvidia/nccl))
+NCCL_INC_FLAGS :=
+ifneq ($(wildcard $(NCCL_ROOT)/include/nccl.h),)
+NCCL_INC_FLAGS += -I$(NCCL_ROOT)/include
+endif
+NCCL_LIB_FLAGS :=
+ifneq ($(wildcard $(NCCL_ROOT)/lib),)
+NCCL_LIB_FLAGS += -L$(NCCL_ROOT)/lib
+endif
 CXX_STD ?= c++20
 CXX_STD_FLAG := --std=$(CXX_STD)
 EXTRA_CXX_FLAGS := -fPIC -O3 -Wall -Wno-sign-compare \
@@ -68,34 +106,97 @@ NVCCFLAGS := -std=c++20 -O3 --use_fast_math --expt-extended-lambda --expt-relaxe
 NVCCFLAGS += -lineinfo -Xcompiler -fPIC
 NVCCFLAGS += -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__
 NVCCFLAGS += -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__
-GPU ?= H100
-ifeq ($(GPU),B300)
-NVCCFLAGS += -DKITTENS_BLACKWELL -gencode arch=compute_103a,code=sm_103a
-else ifeq ($(GPU),B200)
-NVCCFLAGS += -DKITTENS_BLACKWELL -gencode arch=compute_100a,code=sm_100a
-else ifeq ($(GPU),A100)
-NVCCFLAGS += -DKITTENS_AMPERE -gencode arch=compute_80a,code=sm_80a
-else
-NVCCFLAGS += -DKITTENS_HOPPER -gencode arch=compute_90a,code=sm_90a
+# CUDA 12.1 headers do not expose cudaLaunchAttributePreferredClusterDimension.
+ifneq ($(strip $(CUDA_MAJOR_VERSION)),)
+ifeq ($(shell [ "$(CUDA_MAJOR_VERSION)" -lt 13 ] && echo 1 || echo 0),1)
+NVCCFLAGS += -DcudaLaunchAttributePreferredClusterDimension=cudaLaunchAttributeClusterDimension
+endif
 endif
 
+# Physical GPU target (controls generated SASS) and logical kernel family
+# (controls which ThunderKittens/Tyr arch guards are enabled) are split so
+# newer Blackwell-family devices such as GB10 can still build Hopper-authored
+# kernels while also supporting true Blackwell surfaces when requested.
+GPU ?= H100
+GPU_FAMILY ?=
+GPU_COMPUTE ?=
+GPU_CODE ?=
+
+ifeq ($(GPU),GB10)
+ifeq ($(strip $(GPU_FAMILY)),)
+GPU_FAMILY := HOPPER
+endif
+ifeq ($(strip $(GPU_COMPUTE)),)
+GPU_COMPUTE := compute_121
+endif
+ifeq ($(strip $(GPU_CODE)),)
+GPU_CODE := sm_121
+endif
+else ifeq ($(GPU),B300)
+ifeq ($(strip $(GPU_FAMILY)),)
+GPU_FAMILY := BLACKWELL
+endif
+ifeq ($(strip $(GPU_COMPUTE)),)
+GPU_COMPUTE := compute_103a
+endif
+ifeq ($(strip $(GPU_CODE)),)
+GPU_CODE := sm_103a
+endif
+else ifeq ($(GPU),B200)
+ifeq ($(strip $(GPU_FAMILY)),)
+GPU_FAMILY := BLACKWELL
+endif
+ifeq ($(strip $(GPU_COMPUTE)),)
+GPU_COMPUTE := compute_100a
+endif
+ifeq ($(strip $(GPU_CODE)),)
+GPU_CODE := sm_100a
+endif
+else ifeq ($(GPU),A100)
+ifeq ($(strip $(GPU_FAMILY)),)
+GPU_FAMILY := AMPERE
+endif
+ifeq ($(strip $(GPU_COMPUTE)),)
+GPU_COMPUTE := compute_80a
+endif
+ifeq ($(strip $(GPU_CODE)),)
+GPU_CODE := sm_80a
+endif
+else ifeq ($(GPU),H100)
+ifeq ($(strip $(GPU_FAMILY)),)
+GPU_FAMILY := HOPPER
+endif
+ifeq ($(strip $(GPU_COMPUTE)),)
+GPU_COMPUTE := compute_90a
+endif
+ifeq ($(strip $(GPU_CODE)),)
+GPU_CODE := sm_90a
+endif
+else
+$(error Unsupported GPU: $(GPU). Please set GPU to A100, H100, B200, B300, or GB10)
+endif
+
+ifeq ($(GPU_FAMILY),BLACKWELL)
+NVCCFLAGS += -DKITTENS_BLACKWELL
+else ifeq ($(GPU_FAMILY),AMPERE)
+NVCCFLAGS += -DKITTENS_AMPERE
+else ifeq ($(GPU_FAMILY),HOPPER)
+NVCCFLAGS += -DKITTENS_HOPPER
+else
+$(error Unsupported GPU_FAMILY: $(GPU_FAMILY). Please set GPU_FAMILY to AMPERE, HOPPER, or BLACKWELL)
+endif
+
+NVCCFLAGS += -gencode arch=$(GPU_COMPUTE),code=$(GPU_CODE)
+
+# Optional distributed backend toggles based on available LibTorch artifacts.
+ifneq ($(wildcard $(TORCHDIR)/include/torch/csrc/distributed/c10d/ProcessGroupNCCL.hpp),)
 ifneq ($(wildcard $(TORCH_LIBPATH)/libtorch_cuda.*),)
 ifneq ($(wildcard $(TORCH_LIBPATH)/libc10_cuda.*),)
+ifneq ($(strip $(NCCL_INC_FLAGS)),)
+EXTRA_CXX_FLAGS += -DUSE_C10D_NCCL
 TORCH_CUDA_LINK_FLAGS := -ltorch_cuda -lc10_cuda
 endif
 endif
-
-CUDA_RUNTIME_LINK_FLAGS :=
-ifeq ($(HAS_NVCC),1)
-CUDA_RUNTIME_LINK_FLAGS += -lcudart -lcuda
-endif
-
-# Optional distributed backend toggles. Keep CUDA enabled whenever LibTorch has
-# the CUDA libs, but only enable NCCL-specific code when an NCCL module is
-# actually loaded into the environment.
-ifneq ($(wildcard $(TORCHDIR)/include/torch/csrc/distributed/c10d/ProcessGroupNCCL.hpp),)
-ifneq ($(strip $(EBROOTNCCL)),)
-EXTRA_CXX_FLAGS += -DUSE_C10D_NCCL
 endif
 endif
 
@@ -146,8 +247,8 @@ APPLE_FRAMEWORK_FLAGS := \
 else
 APPLE_FRAMEWORK_FLAGS :=
 endif
-GPU_CODEGEN_MODULES := $(strip $(TYR_GPU_CODEGEN_MODULE))
 STATIC_CU_SRCS := $(SRC_DIR)/tk_vendor_mha_h100.cu
+GPU_CODEGEN_MODULES := $(strip $(TYR_GPU_CODEGEN_MODULE))
 ifeq ($(GPU_CODEGEN_MODULES),)
 CU_SRCS := $(STATIC_CU_SRCS) $(wildcard $(SRC_DIR)/generated/*.cu)
 else ifeq ($(GPU_CODEGEN_MODULES),all)
@@ -187,12 +288,11 @@ LEAN_LIB := $(LEAN_HOME)/lib/lean
 # Shared library link flags
 DYLIB_LINK_FLAGS := -L$(LEAN_LIB) -lleanshared \
 	-L$(TORCH_LIBPATH) -ltorch -ltorch_cpu -lc10 $(TORCH_CUDA_LINK_FLAGS) \
-	$(CUDA_RUNTIME_LINK_FLAGS) \
-	-L$(ARROW_LIBPATH) -larrow -lparquet \
+	$(ARROW_LINK_FLAGS) \
 	-L$(SOXR_LIBPATH) -lsoxr \
+	$(CUDA_LIB_FLAGS) $(NCCL_LIB_FLAGS) \
 	-Wl,-rpath,$(LEAN_LIB) \
 	-Wl,-rpath,$(abspath $(TORCH_LIBPATH)) \
-	-Wl,-rpath,$(ARROW_LIBPATH) \
 	$(APPLE_FRAMEWORK_FLAGS)
 
 # Build Rules
@@ -275,19 +375,19 @@ $(OUT_DIR)/$(DYLIB) : $(OBJ_FILES) | check-submodules $(OUT_DIR)
 
 $(BENCH_FLASH_ATTN): $(TOOLS_DIR)/bench_flash_attn.cpp $(OUT_DIR)/$(DYLIB) | check-submodules $(OUT_DIR)
 	@mkdir -p $(dir $@)
-	$(CXX) $(CXX_STD_FLAG) -o $@ $< -I$(HDR_DIR) -I$(LEAN_INCLUDE) $(TORCH_INC_FLAGS) $(XLA_INC_FLAGS) $(ARROW_INC_FLAGS) $(SOXR_INC_FLAGS) $(EXTRA_CXX_FLAGS) -L$(OUT_DIR) -l$(LIB_NAME) $(DYLIB_LINK_FLAGS) -Wl,-rpath,$(abspath $(OUT_DIR))
+	$(CXX) $(CXX_STD_FLAG) -o $@ $< -I$(HDR_DIR) -I$(LEAN_INCLUDE) $(TORCH_INC_FLAGS) $(CUDA_INC_FLAGS) $(NCCL_INC_FLAGS) $(XLA_INC_FLAGS) $(ARROW_INC_FLAGS) $(SOXR_INC_FLAGS) $(EXTRA_CXX_FLAGS) -L$(OUT_DIR) -l$(LIB_NAME) $(DYLIB_LINK_FLAGS) -Wl,-rpath,$(abspath $(OUT_DIR))
 
 $(OUT_DIR)/%.o : $(SRC_DIR)/%.cpp $(HDR_FILES) | check-submodules $(OUT_DIR)
 	@mkdir -p $(dir $@)
-	$(CXX) $(CXX_STD_FLAG) -o $@ -c $< -I$(HDR_DIR) -I$(LEAN_INCLUDE) $(TORCH_INC_FLAGS) $(ARROW_INC_FLAGS) $(SOXR_INC_FLAGS) $(EXTRA_CXX_FLAGS) -fPIC
+	$(CXX) $(CXX_STD_FLAG) -o $@ -c $< -I$(HDR_DIR) -I$(LEAN_INCLUDE) $(TORCH_INC_FLAGS) $(CUDA_INC_FLAGS) $(NCCL_INC_FLAGS) $(XLA_INC_FLAGS) $(ARROW_INC_FLAGS) $(SOXR_INC_FLAGS) $(EXTRA_CXX_FLAGS) -fPIC
 
 $(OUT_DIR)/%.o : $(SRC_DIR)/%.mm $(HDR_FILES) | check-submodules $(OUT_DIR)
 	@mkdir -p $(dir $@)
-	$(CXX) -x objective-c++ $(CXX_STD_FLAG) -o $@ -c $< -I$(HDR_DIR) -I$(LEAN_INCLUDE) $(TORCH_INC_FLAGS) $(ARROW_INC_FLAGS) $(SOXR_INC_FLAGS) $(EXTRA_CXX_FLAGS) -fPIC -fobjc-arc
+	$(CXX) -x objective-c++ $(CXX_STD_FLAG) -o $@ -c $< -I$(HDR_DIR) -I$(LEAN_INCLUDE) $(TORCH_INC_FLAGS) $(CUDA_INC_FLAGS) $(NCCL_INC_FLAGS) $(XLA_INC_FLAGS) $(ARROW_INC_FLAGS) $(SOXR_INC_FLAGS) $(EXTRA_CXX_FLAGS) -fPIC -fobjc-arc
 
 $(OUT_DIR)/%.o : $(SRC_DIR)/%.cu $(HDR_FILES) | check-submodules $(OUT_DIR)
 	@mkdir -p $(dir $@)
-	$(NVCC) -o $@ -c $< -I$(HDR_DIR) -I$(LEAN_INCLUDE) $(TORCH_INC_FLAGS) $(TK_INC_FLAGS) $(PYTHON_INC_FLAGS) $(NVCCFLAGS)
+	$(NVCC) -o $@ -c $< -I$(HDR_DIR) -I$(LEAN_INCLUDE) $(TORCH_INC_FLAGS) $(CUDA_INC_FLAGS) $(TK_INC_FLAGS) $(NVCCFLAGS)
 
 $(GPU_STUB_SRC): $(GPU_STUB_SCRIPT)
 	$(MKPATH) $(dir $@)
