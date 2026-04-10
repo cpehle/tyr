@@ -798,6 +798,21 @@ opaque loadVideoPatchified
     (frameStride : UInt64)
     : IO (T #[])
 
+/-- Apple-only image preprocessing for Gemma 4 multimodal inputs.
+    Returns a shape-erased tensor with runtime shape
+    `[patchRows, patchCols, 3 * patchSize * patchSize]`, where `patchRows` and
+    `patchCols` are chosen to fit the requested visual token budget after
+    `poolingKernelSize x poolingKernelSize` pooling.
+    Requires macOS system media frameworks at build/runtime. -/
+@[extern "lean_torch_media_load_image_patch_grid_gemma4"]
+opaque loadGemma4ImagePatchGrid
+    (path : @& String)
+    (patchSize : UInt64)
+    (poolingKernelSize : UInt64)
+    (maxSoftTokens : UInt64)
+    (rescaleFactor : Float := 1.0 / 255.0)
+    : IO (T #[])
+
 /-- Resample mono waveform samples with libsoxr high-quality mode.
     Mirrors librosa default `res_type=\"soxr_hq\"` behavior for 1D audio. -/
 @[extern "lean_torch_resample_soxr_hq"]
@@ -1136,6 +1151,22 @@ opaque scaledDotProductAttentionGQAMask
     (is_causal : Bool := true)
     (enable_gqa : Bool := false)
     : T #[batch, n_head, seq, head_dim]
+
+/-- Scaled dot-product attention with GQA and an explicit query/key mask.
+    Q: [batch, n_head, q_seq, head_dim]
+    K, V: [batch, n_kv_head, kv_seq, head_dim]
+    attn_mask: [batch, q_seq, kv_seq] with 1 for allowed attention edges and 0 for masked edges.
+    When enable_gqa=true, K/V heads are automatically repeated to match Q heads. -/
+@[extern "lean_torch_sdpa_gqa_mask_qkv"]
+opaque scaledDotProductAttentionGQAMaskQKV
+    {batch n_head n_kv_head q_seq kv_seq head_dim : UInt64}
+    (query : @& T #[batch, n_head, q_seq, head_dim])
+    (key : @& T #[batch, n_kv_head, kv_seq, head_dim])
+    (value : @& T #[batch, n_kv_head, kv_seq, head_dim])
+    (attn_mask : @& T #[batch, q_seq, kv_seq])
+    (dropout_p : Float := 0.0)
+    (enable_gqa : Bool := false)
+    : T #[batch, n_head, q_seq, head_dim]
 
 /-- RMSNorm without learnable parameters: x / sqrt(mean(x^2) + eps)
     Normalizes over the last dimension. -/

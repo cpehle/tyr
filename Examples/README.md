@@ -196,6 +196,73 @@ Useful flags:
 - `--batch-size <n>` prompts per decode batch
 - `--max-new-tokens <n>` number of generated tokens
 
+## Gemma4RunHF
+
+Run Gemma 4 generation from either a local model directory or a Hugging Face repo ID. Tyr resolves local HF snapshots when present, otherwise downloads `config.json`, `processor_config.json`, tokenizer files, and either `model.safetensors` or the sharded safetensors set into cache.
+
+Supported repo coverage:
+- Public Gemma 4 text checkpoints explicitly covered as of 2026-04-02:
+  `google/gemma-4-E2B`, `google/gemma-4-E2B-it`, `google/gemma-4-E4B`, `google/gemma-4-E4B-it`,
+  `google/gemma-4-26B-A4B`, `google/gemma-4-26B-A4B-it`, `google/gemma-4-31B`, `google/gemma-4-31B-it`.
+- Tyr supports the Gemma 4 text branch plus the image-conditioned multimodal path:
+  Gemma 4 vision patch embedder, 2D RoPE vision encoder, spatial pooler, multimodal projector, repeated image placeholders, multi-image prompt injection, and the larger-model vision bidirectional prefill mask.
+- The text path covers hybrid sliding/full attention, small-model per-layer input blocks, E2B shared-layer double-wide MLPs, and the 26B-A4B MoE text branch.
+
+```bash
+lake build Gemma4RunHF
+
+# Official Gemma 4 E4B
+lake exe Gemma4RunHF --source google/gemma-4-E4B \
+  --prompt "Summarize dependent types."
+
+# Small E2B variant
+lake exe Gemma4RunHF --source google/gemma-4-E2B \
+  --prompt "Write one sentence about Lean."
+
+# Larger dense checkpoint
+lake exe Gemma4RunHF --source google/gemma-4-31B \
+  --prompt "Summarize dependent types."
+
+# Streaming decode
+lake exe Gemma4RunHF --source google/gemma-4-E4B \
+  --prompt "Write one sentence about Lean." --stream
+
+# Batched prompts
+lake exe Gemma4RunHF --source google/gemma-4-E4B \
+  --prompt-file prompts.txt --batch-size 4
+
+# Single-image captioning
+lake exe Gemma4RunHF --source google/gemma-4-E2B-it \
+  --image thirdparty/ThunderKittens/assets/kittens.png \
+  --prompt "Describe this image."
+
+# Multiple images with explicit placeholders
+lake exe Gemma4RunHF --source google/gemma-4-E2B-it \
+  --image thirdparty/ThunderKittens/assets/kittens.png \
+  --image thirdparty/ThunderKittens/assets/attn.png \
+  --prompt "Image A: <|image|> Image B: <|image|> Compare them briefly."
+
+# Larger multimodal checkpoint
+lake exe Gemma4RunHF --source google/gemma-4-26B-A4B-it \
+  --image thirdparty/ThunderKittens/assets/kittens.png \
+  --prompt "Describe this image."
+```
+
+Useful flags:
+- `--device <auto|cpu|mps|cuda[:n]>` execution device (default: `auto`; falls back to CPU if unavailable)
+- `--revision <rev>` HF branch/tag/commit (default: `main`)
+- `--cache-dir <path>` override model download cache directory
+- `--prompt-file <path>` one prompt per line (batched decode input)
+- `--image <path>` add an image input; repeat the flag for multiple images
+- `--batch-size <n>` prompts per decode batch
+- `--max-new-tokens <n>` number of generated tokens
+- `--stream` stream tokens as they are decoded
+- `--multimodal` force multimodal model load even before `--image` is parsed
+- Use literal `<|image|>` markers in the prompt to place images explicitly; if omitted, images are prefixed in input order
+- `--enable-thinking` use the Gemma 4 thinking-enabled chat template
+- `--debug-ids` print generated token ids alongside decoded text
+- On macOS 26 with the current vendored libtorch, PyTorch can incorrectly report MPS unavailable unless the process is launched with `SYSTEM_VERSION_COMPAT=1`, e.g. `SYSTEM_VERSION_COMPAT=1 lake exe Gemma4RunHF --device mps ...`
+
 ## BranchingFlows
 
 Combinatorial branching flow sampler -- a port of branching flow networks to Lean. Includes continuous, discrete, and mixed training demos. No external data needed.

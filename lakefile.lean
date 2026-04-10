@@ -477,6 +477,12 @@ lean_exe Qwen25OmniRunHF where
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
+/-- Gemma 4 text loader/generation demo with HF repo-id resolution. -/
+lean_exe Gemma4RunHF where
+  root := `Examples.Gemma4.RunHF
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
 /-- Flux debug harness (saves intermediate tensors) -/
 lean_exe FluxDebug where
   root := `Examples.Flux.FluxDebug
