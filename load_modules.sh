@@ -2,6 +2,11 @@
 # Load required modules for ThunderKittens development
 # Uses GCCcore/12.3.0 to match locally compiled Lean 4
 
+if ! type module >/dev/null 2>&1; then
+  echo "Environment modules unavailable; assuming dependencies are already on PATH." >&2
+  return 0 2>/dev/null || exit 0
+fi
+
 module purge
 module load EB5
 module load EB5Modules

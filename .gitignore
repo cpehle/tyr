@@ -23,6 +23,7 @@ output.ppm
 # Python
 .mypy_cache/
 .venv*/
+__pycache__/
 scripts/__pycache__/
 
 # Bazel
@@ -36,3 +37,4 @@ data/
 cc/src/generated/
 .model-cache/
 .claude/
+.runpod-state/
