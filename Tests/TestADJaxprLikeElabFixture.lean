@@ -8,33 +8,28 @@ open Tyr.AD.Frontend
 open Tyr.AD.JaxprLike
 
 def directPadFrontend : FrontendRegistration := {
-  jaxpr := {
-    invars := #[
-      { id := 1, ty := Lean.IR.IRType.object, metaInfo := { shape := some #[2] } },
-      { id := 2, ty := Lean.IR.IRType.object, metaInfo := { shape := some #[1] } }
-    ]
-    eqns := #[
-      {
-        op := Tyr.AD.JaxprLike.padAliasOpName
-        invars := #[
-          { id := 1, ty := Lean.IR.IRType.object, metaInfo := { shape := some #[2] } },
-          { id := 2, ty := Lean.IR.IRType.object, metaInfo := { shape := some #[1] } }
-        ]
-        outvars := #[
-          { id := 3, ty := Lean.IR.IRType.object, metaInfo := { shape := some #[6] } }
-        ]
-        params := #[
-          Tyr.AD.JaxprLike.OpParam.mkNats .padLow #[1],
-          Tyr.AD.JaxprLike.OpParam.mkNats .padHigh #[2],
-          Tyr.AD.JaxprLike.OpParam.mkNats .padInterior #[1],
-          Tyr.AD.JaxprLike.OpParam.mkName .sourceOp `Graphax.pad_p
-        ]
-      }
-    ]
-    outvars := #[
-      { id := 3, ty := Lean.IR.IRType.object, metaInfo := { shape := some #[6] } }
-    ]
-  }
+  jaxpr := LeanJaxpr.mkNormalized #[] #[
+    { id := 1, ty := Lean.IR.IRType.object, metaInfo := { shape := some #[2] } },
+    { id := 2, ty := Lean.IR.IRType.object, metaInfo := { shape := some #[1] } }
+  ] #[
+    JEqn.ofNormalizedOp 1
+      Tyr.AD.JaxprLike.padAliasOpName
+      #[
+        { id := 1, ty := Lean.IR.IRType.object, metaInfo := { shape := some #[2] } },
+        { id := 2, ty := Lean.IR.IRType.object, metaInfo := { shape := some #[1] } }
+      ]
+      #[
+        { id := 3, ty := Lean.IR.IRType.object, metaInfo := { shape := some #[6] } }
+      ]
+      #[
+        Tyr.AD.JaxprLike.OpParam.mkNats .padLow #[1],
+        Tyr.AD.JaxprLike.OpParam.mkNats .padHigh #[2],
+        Tyr.AD.JaxprLike.OpParam.mkNats .padInterior #[1],
+        Tyr.AD.JaxprLike.OpParam.mkName .sourceOp `Graphax.pad_p
+      ]
+  ] #[
+    { id := 3, ty := Lean.IR.IRType.object, metaInfo := { shape := some #[6] } }
+  ]
 }
 
 def directPadStub (_x _padv : Nat) : Nat := 0
@@ -70,33 +65,28 @@ def structuredPadFrontendSig : FrontendADSignature := {
   ]
 }
 
-def structuredPadFrontendJaxpr : LeanJaxpr := {
-  invars := #[
-    { id := 10, ty := Lean.IR.IRType.object, metaInfo := { participation := .diff, shape := some #[2] } },
-    { id := 11, ty := Lean.IR.IRType.object, metaInfo := { participation := .diff, shape := some #[1] } }
-  ]
-  eqns := #[
-    {
-      op := Tyr.AD.JaxprLike.padAliasOpName
-      invars := #[
-        { id := 10, ty := Lean.IR.IRType.object, metaInfo := { participation := .diff, shape := some #[2] } },
-        { id := 11, ty := Lean.IR.IRType.object, metaInfo := { participation := .diff, shape := some #[1] } }
-      ]
-      outvars := #[
-        { id := 12, ty := Lean.IR.IRType.object, metaInfo := { participation := .diff, shape := some #[6] } }
-      ]
-      params := #[
-        Tyr.AD.JaxprLike.OpParam.mkNats .padLow #[1],
-        Tyr.AD.JaxprLike.OpParam.mkNats .padHigh #[2],
-        Tyr.AD.JaxprLike.OpParam.mkNats .padInterior #[1],
-        Tyr.AD.JaxprLike.OpParam.mkName .sourceOp `Graphax.pad_p
-      ]
-    }
-  ]
-  outvars := #[
-    { id := 12, ty := Lean.IR.IRType.object, metaInfo := { participation := .diff, shape := some #[6] } }
-  ]
-}
+def structuredPadFrontendJaxpr : LeanJaxpr := LeanJaxpr.mkNormalized #[] #[
+  { id := 10, ty := Lean.IR.IRType.object, metaInfo := { participation := .diff, shape := some #[2] } },
+  { id := 11, ty := Lean.IR.IRType.object, metaInfo := { participation := .diff, shape := some #[1] } }
+] #[
+  JEqn.ofNormalizedOp 1
+    Tyr.AD.JaxprLike.padAliasOpName
+    #[
+      { id := 10, ty := Lean.IR.IRType.object, metaInfo := { participation := .diff, shape := some #[2] } },
+      { id := 11, ty := Lean.IR.IRType.object, metaInfo := { participation := .diff, shape := some #[1] } }
+    ]
+    #[
+      { id := 12, ty := Lean.IR.IRType.object, metaInfo := { participation := .diff, shape := some #[6] } }
+    ]
+    #[
+      Tyr.AD.JaxprLike.OpParam.mkNats .padLow #[1],
+      Tyr.AD.JaxprLike.OpParam.mkNats .padHigh #[2],
+      Tyr.AD.JaxprLike.OpParam.mkNats .padInterior #[1],
+      Tyr.AD.JaxprLike.OpParam.mkName .sourceOp `Graphax.pad_p
+    ]
+] #[
+  { id := 12, ty := Lean.IR.IRType.object, metaInfo := { participation := .diff, shape := some #[6] } }
+]
 
 def structuredPadFrontend : FrontendRegistration := {
   jaxpr := structuredPadFrontendJaxpr
@@ -160,30 +150,25 @@ def runtimePadFrontendSig : FrontendADSignature := {
   ]
 }
 
-def runtimePadFrontendJaxpr : LeanJaxpr := {
-  invars := #[
-    { id := 20, ty := Lean.IR.IRType.object, metaInfo := { participation := .diff, shape := some #[1] } },
-    { id := 21, ty := Lean.IR.IRType.object, metaInfo := { participation := .diff, shape := some #[2] } }
-  ]
-  eqns := #[
-    {
-      op := `test.runtime_frontend_loss
-      invars := #[
-        { id := 20, ty := Lean.IR.IRType.object, metaInfo := { participation := .diff, shape := some #[1] } },
-        { id := 21, ty := Lean.IR.IRType.object, metaInfo := { participation := .diff, shape := some #[2] } }
-      ]
-      outvars := #[
-        { id := 22, ty := Lean.IR.IRType.object, metaInfo := { participation := .diff, shape := some #[] } }
-      ]
-      params := #[
-        Tyr.AD.JaxprLike.OpParam.mkName .sourceOp `Graphax.runtime_frontend_loss
-      ]
-    }
-  ]
-  outvars := #[
-    { id := 22, ty := Lean.IR.IRType.object, metaInfo := { participation := .diff, shape := some #[] } }
-  ]
-}
+def runtimePadFrontendJaxpr : LeanJaxpr := LeanJaxpr.mkNormalized #[] #[
+  { id := 20, ty := Lean.IR.IRType.object, metaInfo := { participation := .diff, shape := some #[1] } },
+  { id := 21, ty := Lean.IR.IRType.object, metaInfo := { participation := .diff, shape := some #[2] } }
+] #[
+  JEqn.ofNormalizedOp 1
+    `test.runtime_frontend_loss
+    #[
+      { id := 20, ty := Lean.IR.IRType.object, metaInfo := { participation := .diff, shape := some #[1] } },
+      { id := 21, ty := Lean.IR.IRType.object, metaInfo := { participation := .diff, shape := some #[2] } }
+    ]
+    #[
+      { id := 22, ty := Lean.IR.IRType.object, metaInfo := { participation := .diff, shape := some #[] } }
+    ]
+    #[
+      Tyr.AD.JaxprLike.OpParam.mkName .sourceOp `Graphax.runtime_frontend_loss
+    ]
+] #[
+  { id := 22, ty := Lean.IR.IRType.object, metaInfo := { participation := .diff, shape := some #[] } }
+]
 
 def runtimePadFrontendFn : StructuredFrontendFunction RuntimePadParams RuntimePadInput RuntimePadOutput := {
   signature := runtimePadFrontendSig

@@ -1,4 +1,5 @@
 import Tyr.AD.JaxprLike.Core
+import Tyr.AD.JaxprLike.KStmtNames
 import Tyr.AD.Sparse
 
 /-!
@@ -32,8 +33,82 @@ inductive RuleError where
   | internal (msg : String)
   deriving Repr, Inhabited
 
+/-- Semantic registry key used for local-Jacobian rule lookup. -/
+inductive RuleKey where
+  | op (op : OpName)
+  | transpose
+  | convert
+  | dotGeneral
+  | controlFlow (variant : Lean.Name)
+  deriving Repr, Inhabited
+
+instance : BEq RuleKey where
+  beq lhs rhs :=
+    match lhs, rhs with
+    | .op op₁, .op op₂ => op₁ == op₂
+    | .transpose, .transpose => true
+    | .convert, .convert => true
+    | .dotGeneral, .dotGeneral => true
+    | .controlFlow v₁, .controlFlow v₂ => v₁ == v₂
+    | _, _ => false
+
+instance : Hashable RuleKey where
+  hash
+    | .op op => mixHash 0 (hash op)
+    | .transpose => mixHash 1 0
+    | .convert => mixHash 2 0
+    | .dotGeneral => mixHash 3 0
+    | .controlFlow variant => mixHash 4 (hash variant)
+
 abbrev LocalJacRule :=
   JEqn → RuleContext → Except RuleError (Array LocalJacEdge)
+
+private def isTransposeLikeOpName (op : OpName) : Bool :=
+  op == kstmtTransposeOpName ||
+    op == transposeAliasOpName ||
+    op == `jax.lax.transpose_p ||
+    op == `Graphax.transpose
+
+private def isConvertLikeOpName (op : OpName) : Bool :=
+  op == kstmtConvertOpName ||
+    op == convertElementTypeAliasOpName ||
+    op == `jax.lax.convert_element_type_p ||
+    op == `Graphax.convert_element_type
+
+/-- Canonical semantic registry key for a registered normalized/source op name. -/
+def ruleKeyOfRegisteredOp (op : OpName) : RuleKey :=
+  if isTransposeLikeOpName op then
+    .transpose
+  else if isConvertLikeOpName op then
+    .convert
+  else if isDotGeneralOpName op then
+    .dotGeneral
+  else if isScanAliasOpName op then
+    .controlFlow `scan
+  else if isCondAliasOpName op then
+    .controlFlow `cond
+  else
+    .op op
+
+namespace JEqn
+
+/-- Semantic registry key for dispatching local-Jacobian rules from a typed equation. -/
+def ruleKey (eqn : JEqn) : RuleKey :=
+  match eqn.typed.schema, eqn.typed.payload with
+  | .transpose, _ => .transpose
+  | .convert, _ => .convert
+  | .dotGeneral, _ => .dotGeneral
+  | .controlFlow, .controlFlow info => .controlFlow info.variant
+  | .unary, .unary tag =>
+      if isTransposeLikeOpName tag then
+        .transpose
+      else if isConvertLikeOpName tag then
+        .convert
+      else
+        .op eqn.op
+  | _, _ => .op eqn.op
+
+end JEqn
 
 /-- Conservative default rule: one identity-like edge per input to first output. -/
 def defaultPlaceholderRule : LocalJacRule := fun eqn _ctx =>

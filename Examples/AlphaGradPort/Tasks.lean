@@ -22,8 +22,10 @@ open Tyr.GPU.Codegen
 structure TaskSpec where
   name : String
   description : String
-  /-- Fixed AlphaGrad-compatible action-slot width. -/
+  /-- Upper bound of the vertex ID domain used by the graph. -/
   numVertices : Nat
+  /-- Fixed action-space width (`ActionId0 -> VertexId1`) used by search/policies. -/
+  numActions : Nat
   /-- Number of eliminable rollout steps under the task graph partitions. -/
   numEliminableVertices : Nat
   edges : Array LocalJacEdge
@@ -34,43 +36,55 @@ structure TaskSpec where
 
 inductive TaskName where
   | roeFlux1d
+  | roeFlux3d
   | perceptron
   | encoder
   | robotArm6DOF
   | blackScholesJacobian
   | humanHeartDipole
   | propaneCombustion
+  | randomFunctionF
+  | randomFunctionG
   deriving Repr, BEq, Inhabited
 
 instance : ToString TaskName where
   toString
     | .roeFlux1d => "RoeFlux_1d"
+    | .roeFlux3d => "RoeFlux_3d"
     | .perceptron => "Perceptron"
     | .encoder => "Encoder"
     | .robotArm6DOF => "RobotArm_6DOF"
     | .blackScholesJacobian => "BlackScholes_Jacobian"
     | .humanHeartDipole => "HumanHeartDipole"
     | .propaneCombustion => "PropaneCombustion"
+    | .randomFunctionF => "RandomFunction_F"
+    | .randomFunctionG => "RandomFunction_G"
 
 def parseTaskName? (s : String) : Option TaskName :=
   match s.trimAscii.toString with
   | "RoeFlux_1d" => some .roeFlux1d
+  | "RoeFlux_3d" => some .roeFlux3d
   | "Perceptron" => some .perceptron
   | "Encoder" => some .encoder
   | "RobotArm_6DOF" => some .robotArm6DOF
   | "BlackScholes_Jacobian" => some .blackScholesJacobian
   | "HumanHeartDipole" => some .humanHeartDipole
   | "PropaneCombustion" => some .propaneCombustion
+  | "RandomFunction_F" => some .randomFunctionF
+  | "RandomFunction_G" => some .randomFunctionG
   | _ => none
 
 def taskSequence : Array TaskName := #[
   .roeFlux1d,
+  .roeFlux3d,
   .perceptron,
   .encoder,
   .robotArm6DOF,
   .blackScholesJacobian,
   .humanHeartDipole,
-  .propaneCombustion
+  .propaneCombustion,
+  .randomFunctionF,
+  .randomFunctionG
 ]
 
 private def alphaGradParityEnvCfg : AlphaGradMctxConfig :=
@@ -150,6 +164,25 @@ private def roeFlux1dEdges : Array LocalJacEdge := #[
   mkEdge 31 34 "dF1->phi1",
   mkEdge 32 35 "dF2->phi2"
 ]
+
+private def offsetEdges (offset : Nat) (edges : Array LocalJacEdge) : Array LocalJacEdge :=
+  edges.map fun e => { e with src := e.src + offset, dst := e.dst + offset }
+
+private def roeFlux3dEdges : Array LocalJacEdge :=
+  let ex := roeFlux1dEdges
+  let ey := offsetEdges 35 roeFlux1dEdges
+  let ez := offsetEdges 70 roeFlux1dEdges
+  ex ++ ey ++ ez ++ #[
+    mkEdge 33 106 "phi0x->mix0xy", mkEdge 68 106 "phi0y->mix0xy",
+    mkEdge 34 107 "phi1x->mix1xy", mkEdge 69 107 "phi1y->mix1xy",
+    mkEdge 35 108 "phi2x->mix2xy", mkEdge 70 108 "phi2y->mix2xy",
+    mkEdge 106 109 "mix0xy->mix0xyz", mkEdge 103 109 "phi0z->mix0xyz",
+    mkEdge 107 110 "mix1xy->mix1xyz", mkEdge 104 110 "phi1z->mix1xyz",
+    mkEdge 108 111 "mix2xy->mix2xyz", mkEdge 105 111 "phi2z->mix2xyz",
+    mkEdge 109 112 "mix0xyz->flux_xy", mkEdge 110 112 "mix1xyz->flux_xy",
+    mkEdge 110 113 "mix1xyz->flux_yz", mkEdge 111 113 "mix2xyz->flux_yz",
+    mkEdge 112 114 "flux_xy->flux3d", mkEdge 113 114 "flux_yz->flux3d"
+  ]
 
 private def runCoreMResult (x : CoreM α) : IO (Except String α) := do
   let env ← mkEmptyEnvironment
@@ -469,6 +502,70 @@ private def propaneCombustionKStmts : Array KStmt := #[
   KStmt.binary .Add (v 32) (v 30) (v 31)
 ]
 
+private def randomFunctionFKStmts : Array KStmt := #[
+  -- Inputs are v1..v12.
+  KStmt.unary .Exp (v 13) (v 1),
+  KStmt.unary .Log (v 14) (v 2),
+  KStmt.binary .Add (v 15) (v 3) (v 4),
+  KStmt.binary .Mul (v 16) (v 5) (v 6),
+  KStmt.binary .Sub (v 17) (v 7) (v 8),
+  KStmt.outer (v 18) (v 13) (v 15),
+  KStmt.reduce .Sum .Col (v 19) (v 18),
+  KStmt.broadcast .Row (v 20) (v 19),
+  KStmt.binaryBroadcast .Add .Row (v 21) (v 18) (v 19),
+  KStmt.unary .Square (v 22) (v 21),
+  KStmt.reduce .Sum .Row (v 23) (v 22),
+  KStmt.binaryBroadcast .Div .Row (v 24) (v 21) (v 23),
+  KStmt.outer (v 25) (v 24) (v 16),
+  KStmt.reduce .Sum .Col (v 26) (v 25),
+  KStmt.transpose (v 27) (v 25),
+  KStmt.cumsum .Row (v 28) (v 27),
+  KStmt.cumprod .Row (v 29) (v 28),
+  KStmt.reduce .Sum .Full (v 30) (v 29),
+  KStmt.binary .Add (v 31) (v 26) (v 17),
+  KStmt.binary .Mul (v 32) (v 31) (v 30),
+  KStmt.unary .Sigmoid (v 33) (v 32),
+  KStmt.binary .Add (v 34) (v 33) (v 9),
+  KStmt.binary .Div (v 35) (v 34) (v 10),
+  KStmt.unary .Tanh (v 36) (v 35),
+  KStmt.outer (v 37) (v 36) (v 11),
+  KStmt.reduce .Sum .Col (v 38) (v 37),
+  KStmt.binary .Add (v 39) (v 38) (v 12),
+  KStmt.unary .Neg (v 40) (v 39)
+]
+
+private def randomFunctionGKStmts : Array KStmt := #[
+  -- Inputs are v1..v9.
+  KStmt.unary .Sin (v 10) (v 1),
+  KStmt.unary .Cos (v 11) (v 2),
+  KStmt.binary .Mul (v 12) (v 10) (v 11),
+  KStmt.outer (v 13) (v 12) (v 3),
+  KStmt.reduce .Sum .Col (v 14) (v 13),
+  KStmt.broadcast .Row (v 15) (v 14),
+  KStmt.binaryBroadcast .Sub .Row (v 16) (v 13) (v 14),
+  KStmt.unary .Square (v 17) (v 16),
+  KStmt.reduce .Sum .Row (v 18) (v 17),
+  KStmt.unary .Sqrt (v 19) (v 18),
+  KStmt.binaryBroadcast .Div .Row (v 20) (v 16) (v 19),
+  KStmt.outer (v 21) (v 4) (v 20),
+  KStmt.reduce .Sum .Col (v 22) (v 21),
+  KStmt.outer (v 23) (v 5) (v 22),
+  KStmt.reduce .Sum .Col (v 24) (v 23),
+  KStmt.binary .Add (v 25) (v 24) (v 6),
+  KStmt.unary .Silu (v 26) (v 25),
+  KStmt.unary .Exp (v 27) (v 26),
+  KStmt.reduce .Sum .Full (v 28) (v 27),
+  KStmt.binaryBroadcast .Div .Row (v 29) (v 27) (v 28),
+  KStmt.unary .Log (v 30) (v 29),
+  KStmt.binary .Mul (v 31) (v 7) (v 30),
+  KStmt.binary .Max (v 32) (v 31) (v 8),
+  KStmt.binary .Add (v 33) (v 32) (v 9),
+  KStmt.cumsum .Row (v 34) (v 21),
+  KStmt.cumprod .Row (v 35) (v 34),
+  KStmt.reduce .Sum .Full (v 36) (v 35),
+  KStmt.binary .Add (v 37) (v 33) (v 36)
+]
+
 private def materializeFromKStmts
     (name : String)
     (description : String)
@@ -497,18 +594,15 @@ private def materializeFromKStmts
       | .error msg =>
         return .error s!"{name}: {msg}"
       | .ok numVertices =>
-        match ofLocalJacEdgesWithPartitions
-            edges
-            jaxpr.vertexPartitions.inputs
-            jaxpr.vertexPartitions.outputs
-            jaxpr.vertexPartitions.eliminable with
+        match ofLocalJacEdgesWithJaxpr edges jaxpr with
         | .error msg =>
-          return .error s!"{name}: failed to build partitioned elimination graph: {msg}"
+          return .error s!"{name}: failed to build elimination graph with normalized producer semantics: {msg}"
         | .ok graph =>
           return .ok {
             name := name
             description := description
             numVertices := numVertices
+            numActions := graph.actionVertices.size
             numEliminableVertices := graph.eliminable.size
             edges := edges
             graph := graph
@@ -522,11 +616,25 @@ private def taskSpecStatic : TaskName → TaskSpec
       name := "RoeFlux_1d"
       description := "Graphax RoeFlux_1d-inspired elimination graph; first end-to-end AlphaGrad port target."
       numVertices := 35
+      numActions := 35
       numEliminableVertices := 35
       edges := roeFlux1dEdges
       graph := ofLocalJacEdges roeFlux1dEdges
       envCfg := alphaGradParityEnvCfg
       mctsCfg := { numSimulations := 50, maxNumConsideredActions := 5, gumbelScale := 1.0 }
+    }
+  | .roeFlux3d =>
+    let graph := ofLocalJacEdges roeFlux3dEdges
+    {
+      name := "RoeFlux_3d"
+      description := "Coupled 3-direction RoeFlux-style elimination graph with shared flux-composition nodes."
+      numVertices := 114
+      numActions := graph.actionVertices.size
+      numEliminableVertices := graph.eliminable.size
+      edges := roeFlux3dEdges
+      graph := graph
+      envCfg := alphaGradParityEnvCfg
+      mctsCfg := { numSimulations := 64, maxNumConsideredActions := 12, gumbelScale := 1.0 }
     }
   | .perceptron =>
     panic! "Perceptron task is now KStmt-lowered. Use materializeTask instead of taskSpec."
@@ -540,12 +648,30 @@ private def taskSpecStatic : TaskName → TaskSpec
     panic! "HumanHeartDipole task is now KStmt-lowered. Use materializeTask instead of taskSpec."
   | .propaneCombustion =>
     panic! "PropaneCombustion task is now KStmt-lowered. Use materializeTask instead of taskSpec."
+  | .randomFunctionF =>
+    panic! "RandomFunction_F task is now KStmt-lowered. Use materializeTask instead of taskSpec."
+  | .randomFunctionG =>
+    panic! "RandomFunction_G task is now KStmt-lowered. Use materializeTask instead of taskSpec."
 
 /--
 Materialize task spec. Selected benchmark tasks are lowered from `KStmt`
 at call-time; remaining tasks use static in-file specs.
 -/
 def materializeTask : TaskName → IO (Except String TaskSpec)
+  | .randomFunctionF =>
+    materializeFromKStmts
+      "RandomFunction_F"
+      "Deterministic random-function-style graph lowered from Tyr KStmt IR (mixed dense, broadcast, transpose, and cumulative paths)."
+      randomFunctionFKStmts
+      alphaGradParityEnvCfg
+      { numSimulations := 44, maxNumConsideredActions := 8, gumbelScale := 1.0 }
+  | .randomFunctionG =>
+    materializeFromKStmts
+      "RandomFunction_G"
+      "Deterministic random-function-style graph lowered from Tyr KStmt IR (trig, normalization, and cumulative structural paths)."
+      randomFunctionGKStmts
+      alphaGradParityEnvCfg
+      { numSimulations := 44, maxNumConsideredActions := 8, gumbelScale := 1.0 }
   | .perceptron =>
     materializeFromKStmts
       "Perceptron"
@@ -594,7 +720,8 @@ def materializeTask : TaskName → IO (Except String TaskSpec)
 /--
 Static task spec accessor.
 For KStmt-lowered tasks (`Perceptron`, `Encoder`, `RobotArm_6DOF`,
-`BlackScholes_Jacobian`, `HumanHeartDipole`, `PropaneCombustion`)
+`BlackScholes_Jacobian`, `HumanHeartDipole`, `PropaneCombustion`,
+`RandomFunction_F`, `RandomFunction_G`)
 call `materializeTask`.
 -/
 def taskSpec (taskName : TaskName) : TaskSpec :=

@@ -23,6 +23,7 @@ import Tests.TestADGraphaxAlphaGradParity
 import Tests.TestADGraphaxAlphaGradCoverageGate
 import Tests.TestADSparse
 import Tests.TestADElimGraph
+import Tests.TestADElimNumerics
 import Tests.TestADElimOrderPolicy
 import Tests.TestADElimFromJaxpr
 import Tests.TestADElimLowering

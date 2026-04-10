@@ -1,5 +1,7 @@
 import Lean
 import Tyr.AD.JaxprLike.Elab
+import Tyr.AD.JaxprLike.KStmtNames
+import Tyr.AD.JaxprLike.TypedOps
 
 /-!
 # Tyr.AD.Frontend.Elab
@@ -78,6 +80,11 @@ private def lookupPrimitiveSpec?
     (leanConst : Name) :
     Option PrimitiveFrontendSpec :=
   specs.find? (fun spec => spec.leanConst == leanConst)
+
+private def typedOpForPrimitive
+    (normalizedOp : OpName)
+    (arity : Nat) : TypedOp :=
+  typedOpForNormalizedOp normalizedOp #[] arity 1
 
 private unsafe def buildInvars
     (params : Array Expr) :
@@ -166,18 +173,22 @@ unsafe def deriveSinglePrimitiveFrontendRegistration
         match spec.sourceOp with
         | some sourceOp => #[OpParam.mkName .sourceOp sourceOp] ++ spec.fixedParams
         | none => spec.fixedParams
-      let jaxpr : LeanJaxpr := {
-        invars := jaxprInvars
-        eqns := #[{
-          op := spec.op
-          invars := eqnInvars
-          outvars := #[outvar]
-          params := extraParams
-          source := { decl := declName }
-        }]
-        outvars := #[outvar]
-      }
-      pure { jaxpr := jaxpr.withDefaultSourceDecl declName }
+      let jaxpr :=
+        LeanJaxpr.mkNormalized
+          #[]
+          jaxprInvars
+          #[{
+            id := 1
+            op := spec.op
+            invars := eqnInvars
+            outvars := #[outvar]
+            params := extraParams
+            typed := typedOpForPrimitive spec.op eqnInvars.size
+            source := { decl := declName }
+          }]
+          #[outvar]
+      let jaxpr := jaxpr.withDefaultSourceDecl declName
+      pure { jaxpr := jaxpr }
 
 /--
 Derive and register a direct frontend bundle for an ordinary Lean definition in

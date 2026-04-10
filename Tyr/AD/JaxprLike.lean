@@ -1,5 +1,6 @@
 import Tyr.AD.JaxprLike.Core
 import Tyr.AD.JaxprLike.KStmtNames
+import Tyr.AD.JaxprLike.TypedOps
 import Tyr.AD.JaxprLike.VertexOrder
 import Tyr.AD.JaxprLike.Validate
 import Tyr.AD.JaxprLike.FromFnBody

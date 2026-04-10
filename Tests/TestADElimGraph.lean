@@ -115,6 +115,38 @@ def testPartitionedGraphForwardReverseAndCompleteValidation : IO Unit := do
       "Forward elimination order should preserve explicit eliminable order"
     LeanTest.assertEqual (reverseEliminationOrder g) #[3, 2]
       "Reverse elimination order should reverse the explicit eliminable order"
+    LeanTest.assertEqual g.actionVertices #[2, 3]
+      "Partitioned graphs should default the action surface to the explicit eliminable set"
+
+@[test]
+def testGraphPreservesProducerSemanticsFromJaxpr : IO Unit := do
+  let jaxpr : LeanJaxpr := LeanJaxpr.mkNormalized
+    #[]
+    #[{ id := 1 }, { id := 2 }]
+    #[
+      JEqn.ofNormalizedOp 1 `test.exp #[{ id := 1 }] #[{ id := 3 }],
+      JEqn.ofNormalizedOp 2 `test.add #[{ id := 3 }, { id := 2 }] #[{ id := 4 }]
+    ]
+    #[{ id := 4 }]
+  let edges : Array LocalJacEdge := #[
+    mkEdge 1 3 "m13",
+    mkEdge 3 4 "m34",
+    mkEdge 2 4 "m24"
+  ]
+  match ofLocalJacEdgesWithJaxpr edges jaxpr with
+  | .error msg =>
+    LeanTest.fail s!"Graph construction with normalized Jaxpr semantics should succeed, got: {msg}"
+  | .ok g =>
+    match producerInfo? g 3, producerInfo? g 4 with
+    | some p3, some p4 =>
+      LeanTest.assertTrue (p3.typed.schema == OpSchema.unary)
+        "Intermediate producer should preserve unary typed-op metadata."
+      LeanTest.assertTrue (p4.typed.schema == OpSchema.binary)
+        "Output producer should preserve binary typed-op metadata."
+      LeanTest.assertEqual p4.opId 2
+        "Producer metadata should preserve the normalized op ID."
+    | _, _ =>
+      LeanTest.fail "Expected producer metadata on both produced value vertices."
 
     match validateCompleteEliminationOrder g #[2] with
     | .ok () =>

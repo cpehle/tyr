@@ -33,6 +33,21 @@ opaque frontendReshapePrimitive (x : torch.T #[6]) : torch.T #[6]
 def unsupportedCompositeWrapper (base : torch.T #[2]) (padv : torch.T #[1]) : torch.T #[6] :=
   frontendReshapePrimitive (frontendPadPrimitive base padv)
 
+opaque frontendQuaternaryPrimitive
+    (a : torch.T #[2])
+    (b : torch.T #[2])
+    (c : torch.T #[2])
+    (d : torch.T #[2]) :
+    torch.T #[2]
+
+def ordinaryQuaternaryWrapper
+    (a : torch.T #[2])
+    (b : torch.T #[2])
+    (c : torch.T #[2])
+    (d : torch.T #[2]) :
+    torch.T #[2] :=
+  frontendQuaternaryPrimitive a b c d
+
 private def padPrimitiveSpecs : Array PrimitiveFrontendSpec := #[
   {
     leanConst := ``Tests.ADFrontendElab.frontendPadPrimitive
@@ -48,6 +63,11 @@ private def padPrimitiveSpecs : Array PrimitiveFrontendSpec := #[
     leanConst := ``Tests.ADFrontendElab.frontendReshapePrimitive
     op := reshapeAliasOpName
     sourceOp := some `Graphax.reshape_p
+  },
+  {
+    leanConst := ``Tests.ADFrontendElab.frontendQuaternaryPrimitive
+    op := `Tests.ADFrontendElab.frontend_quaternary
+    sourceOp := some `Graphax.frontend_quaternary_p
   }
 ]
 
@@ -76,12 +96,36 @@ unsafe def testDeriveSinglePrimitiveFrontendRegistration : IO Unit := do
     "Derived frontend equation should use the registered normalized frontend op."
   LeanTest.assertEqual eqn.sourceOpName `Graphax.pad_p
     "Derived frontend equation should preserve the higher-level source primitive."
+  LeanTest.assertTrue (eqn.typedOp.schema = .binary)
+    s!"Derived frontend equation should classify the primitive arity into a typed schema, got {reprStr eqn.typedOp.schema}."
   LeanTest.assertEqual (eqn.params.findNats? .padLow) (some #[1])
     "Derived frontend equation should preserve fixed primitive params."
   LeanTest.assertEqual (eqn.params.findNats? .padHigh) (some #[2])
     "Derived frontend equation should preserve fixed primitive params."
   LeanTest.assertEqual (eqn.params.findNats? .padInterior) (some #[1])
     "Derived frontend equation should preserve fixed primitive params."
+  LeanTest.assertEqual jaxpr.vertexPartitions.inputs #[1, 2]
+    "Derived frontend registration should emit stored normalized input partitions."
+  LeanTest.assertTrue jaxpr.actionTable.isEmpty
+    "Single-output boundary graphs should expose an empty eliminable action surface."
+
+@[test]
+unsafe def testDeriveSinglePrimitiveFrontendRegistrationNary : IO Unit := do
+  let registration ← runCoreM <|
+    deriveSinglePrimitiveFrontendRegistration ``Tests.ADFrontendElab.ordinaryQuaternaryWrapper padPrimitiveSpecs
+  let eqn := registration.jaxpr.eqns[0]!
+  LeanTest.assertTrue (eqn.typedOp.schema = .nary)
+    s!"Four-input primitive derivation should use the n-ary typed family, got {reprStr eqn.typedOp.schema}."
+  match eqn.typedOp.payload with
+  | .nary tag inputArity outputArity =>
+      LeanTest.assertEqual tag `Tests.ADFrontendElab.frontend_quaternary
+        "N-ary typed payload should preserve the normalized op tag."
+      LeanTest.assertEqual inputArity 4
+        "N-ary typed payload should preserve the frontend primitive arity."
+      LeanTest.assertEqual outputArity 1
+        "N-ary typed payload should preserve the frontend result arity."
+  | payload =>
+      LeanTest.fail s!"Expected n-ary typed payload, got {reprStr payload}"
 
 /--
 Registration itself currently trips a Lean IR interpreter assertion under

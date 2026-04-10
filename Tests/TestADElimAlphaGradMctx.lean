@@ -4,6 +4,7 @@ import Tyr.AD.Elim
 namespace Tests.ADElimAlphaGradMctx
 
 open LeanTest
+open Tyr.AD
 open Tyr.AD.Elim
 open Tyr.AD.JaxprLike
 open torch.mctxdag
@@ -558,6 +559,45 @@ def testDagStateKeyIgnoresMapReprForEquivalentSparseMaps : IO Unit := do
     "DAG state key should ignore sparse-map repr and canonicalize by shape+entries."
 
 @[test]
+def testDagStateKeyTracksProducerSemantics : IO Unit := do
+  let graphA : ElimGraph := {
+    actionVertices := #[1]
+    eliminable := #[1]
+    producers := ({} : Std.HashMap VertexId1 VertexProducer).insert 1 {
+      opId := 1
+      op := `test.exp
+      typed := TypedOp.unary `test.exp
+      source := { decl := `test.dag_key_a }
+      role? := some .intermediate
+    }
+  }
+  let graphB : ElimGraph := {
+    actionVertices := #[1]
+    eliminable := #[1]
+    producers := ({} : Std.HashMap VertexId1 VertexProducer).insert 1 {
+      opId := 1
+      op := `test.log
+      typed := TypedOp.unary `test.log
+      source := { decl := `test.dag_key_b }
+      role? := some .intermediate
+    }
+  }
+  let sA : AlphaGradState := {
+    graph := graphA
+    numVertices := 1
+    actionVertices := #[1]
+    eliminatedActions := #[false]
+  }
+  let sB : AlphaGradState := {
+    graph := graphB
+    numVertices := 1
+    actionVertices := #[1]
+    eliminatedActions := #[false]
+  }
+  LeanTest.assertTrue (dagStateKey sA != dagStateKey sB)
+    "DAG state key should distinguish equal-topology states with different producer semantics."
+
+@[test]
 def testPartitionedGraphMasksOutputsAndTerminatesOnEliminableCount : IO Unit := do
   let edges : Array LocalJacEdge := #[(mkEdge 1 2 "m12")]
   let graphRes := ofLocalJacEdgesWithPartitions edges #[] #[2] #[1]
@@ -569,14 +609,14 @@ def testPartitionedGraphMasksOutputsAndTerminatesOnEliminableCount : IO Unit := 
     | .error msg =>
       LeanTest.fail s!"State init should succeed on partitioned graph, got: {msg}"
     | .ok s0 =>
-      LeanTest.assertEqual s0.numActions 2
-        "Fixed action slots should still cover the full vertex domain."
+      LeanTest.assertEqual s0.numActions 1
+        "Partitioned graphs should expose only the stored eliminable action surface."
       LeanTest.assertEqual s0.numEliminableActions 1
         "Only the declared eliminable vertex should count toward rollout length."
-      LeanTest.assertEqual s0.outputActionMask #[false, true]
-        "Output slot should be marked in the output-action mask."
-      LeanTest.assertEqual (invalidActionMask {} s0) #[false, true]
-        "Output vertex should be invalid from the root mask in fixed-slot compatibility mode."
+      LeanTest.assertEqual s0.outputActionMask #[false]
+        "Output vertices should not occupy action slots on the explicit action surface."
+      LeanTest.assertEqual (invalidActionMask {} s0) #[false]
+        "Only the stored eliminable action should appear in the root mask."
 
       let t := transition {} s0 0
       LeanTest.assertTrue t.done
@@ -586,13 +626,13 @@ def testPartitionedGraphMasksOutputsAndTerminatesOnEliminableCount : IO Unit := 
       LeanTest.assertEqual t.nextState.vertexTrace #[1]
         "Vertex trace should record the eliminable vertex."
       LeanTest.assertTrue (t.nextState.violation?.isNone)
-        "Partitioned fixed-slot transition should not stamp a violation."
+        "Partitioned explicit-action transition should not stamp a violation."
 
 @[test]
-def testExplicitActionSpaceSubsetCompatibility : IO Unit := do
+def testExplicitActionSpaceSubset : IO Unit := do
   let edges : Array LocalJacEdge := #[(mkEdge 1 2 "m12"), (mkEdge 2 4 "m24")]
   let cfg : AlphaGradMctxConfig := {
-    actionSpace := .explicitVertices #[2, 4]
+    actionVerticesOverride? := some #[2, 4]
   }
 
   match initAlphaGradStateFromEdges? edges 4 #[] (some #[2, 4]) with

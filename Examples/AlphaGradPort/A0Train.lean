@@ -8,6 +8,7 @@ import Examples.AlphaGradPort.Tasks
 
 namespace Examples.AlphaGradPort
 
+open Tyr.AD
 open Tyr.AD.Elim
 
 inductive SearchBackend where
@@ -42,21 +43,13 @@ structure RunSummary where
   deriving Repr
 
 private def forwardOrder1 (task : TaskSpec) : Array VertexId1 :=
-  let order := forwardEliminationOrder task.graph
-  if order.isEmpty then
-    (Array.range task.numEliminableVertices).map (· + 1)
-  else
-    order
+  forwardEliminationOrder task.graph
 
 private def reverseOrder1 (task : TaskSpec) : Array VertexId1 :=
-  let order := reverseEliminationOrder task.graph
-  if order.isEmpty then
-    (Array.range task.numEliminableVertices).reverse.map (· + 1)
-  else
-    order
+  reverseEliminationOrder task.graph
 
 private def evalOrderReward? (task : TaskSpec) (order1 : Array VertexId1) : Except String Float := do
-  let actions0 ← verticesToActions? task.numVertices order1
+  let actions0 ← verticesToActionsInSpace? task.graph.actionVertices order1
   let s0 ← initAlphaGradState? task.graph task.numVertices
   let sf ← replayActions? task.envCfg s0 actions0
   pure sf.cumulativeReward
@@ -90,7 +83,7 @@ def runTask (task : TaskSpec) (cfg : RunConfig := {}) : IO (Except String RunSum
     | .error msg =>
       return .error s!"Failed to evaluate reverse baseline for {task.name}: {msg}"
 
-  IO.println s!"[AlphaGradPort] task={task.name} backend={cfg.backend} episodes={cfg.episodes} vertices={task.numVertices} eliminable={task.numEliminableVertices} edges={task.edges.size} reward_mode={task.envCfg.rewardMode}"
+  IO.println s!"[AlphaGradPort] task={task.name} backend={cfg.backend} vertices={task.numVertices} actions={task.numActions} eliminable={task.numEliminableVertices} episodes={cfg.episodes} edges={task.edges.size} reward_mode={task.envCfg.rewardMode}"
   IO.println s!"[AlphaGradPort] baseline forward={forwardReward}, reverse={reverseReward}"
 
   if cfg.episodes = 0 then

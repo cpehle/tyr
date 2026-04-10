@@ -1,5 +1,6 @@
 import Tyr.AD.JaxprLike.Core
 import Tyr.AD.JaxprLike.KStmtNames
+import Tyr.AD.JaxprLike.TypedOps
 
 /-!
 # Tyr.AD.JaxprLike.FromFnBody
@@ -48,12 +49,22 @@ structure FromFnBodyCtx where
 structure FromFnBodyState where
   varEnv : Std.HashMap Nat JVar := {}
   nextId : Nat := 1
+  nextOpId : OpId := 1
+  nextRegionId : RegionId := 1
   eqns : Array JEqn := #[]
+  regions : Array RegionDef := #[]
   outvars : Array JVar := #[]
   diagnostics : Array FromFnBodyDiagnostic := #[]
   deriving Inhabited
 
 abbrev FromFnBodyM := StateM FromFnBodyState
+
+/-- Lowered argument bundle for one normalized equation. -/
+structure LoweredOpArgs where
+  invars : Array JVar
+  staticCount : Nat := 0
+  regionHandleCount : Nat := 0
+  deriving Inhabited
 
 def addDiagnostic (ctx : FromFnBodyCtx) (message : String) : FromFnBodyM Unit := do
   modify fun st =>
@@ -155,10 +166,24 @@ def argsToJVars? (ctx : FromFnBodyCtx) (args : Array Arg) : FromFnBodyM (Option 
   else
     pure none
 
+private def expectedControlRegionHandleCount
+    (op : OpName)
+    (staticCount : Nat) :
+    Nat :=
+  if staticCount = 0 then
+    0
+  else if isCondAliasOpName op then
+    min 2 staticCount
+  else if isScanAliasOpName op then
+    min 1 staticCount
+  else
+    staticCount
+
 private def controlArgsToJVars?
     (_ctx : FromFnBodyCtx)
+    (op : OpName)
     (args : Array Arg) :
-    FromFnBodyM (Option (Array JVar × Nat)) := do
+    FromFnBodyM (Option LoweredOpArgs) := do
   let mut invars : Array JVar := #[]
   let mut staticCount : Nat := 0
   for i in [:args.size] do
@@ -172,18 +197,22 @@ private def controlArgsToJVars?
     | .erased =>
       -- Erased args are static handles (e.g., branch/body closures).
       staticCount := staticCount + 1
-  pure (some (invars, staticCount))
+  pure (some {
+    invars := invars
+    staticCount := staticCount
+    regionHandleCount := expectedControlRegionHandleCount op staticCount
+  })
 
 private def argsToJVarsForOp?
     (ctx : FromFnBodyCtx)
     (op : OpName)
     (args : Array Arg) :
-    FromFnBodyM (Option (Array JVar × Nat)) := do
+    FromFnBodyM (Option LoweredOpArgs) := do
   if isHigherOrderControlAliasOpName op then
-    controlArgsToJVars? ctx args
+    controlArgsToJVars? ctx op args
   else
     match (← argsToJVars? ctx args) with
-    | some invars => pure (some (invars, 0))
+    | some invars => pure (some { invars := invars })
     | none => pure none
 
 private def dotGeneralDefaultParams (rawOp canonicalOp : OpName) : OpParams :=
@@ -201,12 +230,13 @@ private def dotGeneralDefaultParams (rawOp canonicalOp : OpName) : OpParams :=
 private def controlFlowParams
     (canonicalOp : OpName)
     (invars : Array JVar)
-    (staticCount : Nat) : OpParams :=
+    (staticCount regionHandleCount : Nat) : OpParams :=
   if isCondAliasOpName canonicalOp then
     let predCount := if invars.isEmpty then 0 else 1
     let dataCount := invars.size - predCount
     #[
       OpParam.mkNat .controlStaticArgCount staticCount,
+      OpParam.mkNat .controlRegionCount regionHandleCount,
       OpParam.mkNat .condPredicateCount predCount,
       OpParam.mkNat .condDataInputCount dataCount
     ]
@@ -215,6 +245,7 @@ private def controlFlowParams
     let dataCount := invars.size - carryCount
     #[
       OpParam.mkNat .controlStaticArgCount staticCount,
+      OpParam.mkNat .controlRegionCount regionHandleCount,
       OpParam.mkNat .scanCarryInputCount carryCount,
       OpParam.mkNat .scanDataInputCount dataCount,
       OpParam.mkNat .scanCarryOutputCount carryCount
@@ -233,12 +264,79 @@ private def extraParamsForEqn
     (rawOp canonicalOp : OpName)
     (outIrVar : VarId)
     (invars : Array JVar)
-    (staticCount : Nat) :
+    (staticCount regionHandleCount : Nat) :
     OpParams :=
   let defaults :=
-    controlFlowParams canonicalOp invars staticCount ++
+    controlFlowParams canonicalOp invars staticCount regionHandleCount ++
       dotGeneralDefaultParams rawOp canonicalOp
   OpParams.mergePreferRight defaults (hintedEqnParams ctx outIrVar)
+
+private def typedOpForFnBody
+    (canonicalOp : OpName)
+    (params : OpParams)
+    (arity : Nat) : TypedOp :=
+  typedOpForNormalizedOp canonicalOp params arity 1
+
+private def controlRegionRoles
+    (variant : Name)
+    (count : Nat) :
+    Array Name :=
+  if variant == `scan then
+    if count = 0 then
+      #[]
+    else
+      #[`scan.body] ++
+        (Array.range (count - 1)).map fun i =>
+          Name.mkSimple s!"scan.extra.{i}"
+  else if variant == `cond then
+    match count with
+    | 0 => #[]
+    | 1 => #[`cond.true]
+    | n + 2 =>
+      #[`cond.true, `cond.false] ++
+        (Array.range n).map fun i =>
+          Name.mkSimple s!"cond.extra.{i}"
+  else
+    (Array.range count).map fun i =>
+      Name.mkSimple s!"{variant}.region.{i}"
+
+private def regionInputsForControlFlow
+    (info : ControlFlowInfo)
+    (invars : Array JVar) :
+    Array JVar :=
+  if info.variant == `cond then
+    invars.extract info.predicateCount (info.predicateCount + info.dataInputCount)
+  else
+    invars.extract 0 (info.carryInputCount + info.dataInputCount)
+
+private def attachOpaqueControlRegions
+    (ctx : FromFnBodyCtx)
+    (typed : TypedOp)
+    (invars outvars : Array JVar) :
+    FromFnBodyM TypedOp := do
+  match typed.payload with
+  | .controlFlow info =>
+    let roles := controlRegionRoles info.variant info.regionCount
+    if roles.isEmpty then
+      pure typed
+    else
+      let regionInputs := regionInputsForControlFlow info invars
+      let st ← get
+      let startId := st.nextRegionId
+      let regionIds :=
+        roles.mapIdx fun idx _ => startId + idx
+      let newRegions :=
+        roles.mapIdx fun idx role =>
+          RegionDef.opaqueSignature (startId + idx) role regionInputs outvars #[] ctx.source
+      modify fun st =>
+        {
+          st with
+          nextRegionId := startId + newRegions.size
+          regions := st.regions ++ newRegions
+        }
+      pure <| TypedOp.controlFlow { info with regionIds := regionIds }
+  | _ =>
+    pure typed
 
 def exprKind : IR.Expr → String
   | .ctor _ _ => "Expr.ctor"
@@ -292,20 +390,28 @@ def traverseFnBody (ctx : FromFnBodyCtx) (body : FnBody) : FromFnBodyM Unit := d
       | none => pure ()
       let invars? ← argsToJVarsForOp? ctx canonicalOp args
       match invars? with
-      | some (invars, staticCount) =>
+      | some lowered =>
         let extraParams :=
-          extraParamsForEqn ctx op canonicalOp x invars staticCount
+          extraParamsForEqn ctx op canonicalOp x lowered.invars lowered.staticCount lowered.regionHandleCount
+        let params :=
+          #[
+            OpParam.mkName .loweringKind (loweringKindForOp op),
+            OpParam.mkName .sourceOp op,
+            OpParam.mkNat .fnbodyOutVarIdx outvar.id
+          ] ++ extraParams
+        let typedOp ←
+          attachOpaqueControlRegions ctx (typedOpForFnBody canonicalOp params args.size) lowered.invars #[outvar]
+        let opId := (← get).nextOpId
         modify fun st =>
           { st with
+              nextOpId := opId + 1
               eqns := st.eqns.push {
+                id := opId
                 op := canonicalOp
-                invars := invars
+                invars := lowered.invars
                 outvars := #[outvar]
-                params := #[
-                  OpParam.mkName .loweringKind (loweringKindForOp op),
-                  OpParam.mkName .sourceOp op,
-                  OpParam.mkNat .fnbodyOutVarIdx outvar.id
-                ] ++ extraParams
+                params := params
+                typed := typedOp
                 source := ctx.source
               }
           }
@@ -386,12 +492,7 @@ def fromFnBodyWithHints
   if st.outvars.isEmpty then
     return .error s!"FnBody -> LeanJaxpr conversion failed: no terminal `ret` output found for `{declName}`."
 
-  return .ok {
-    constvars := #[]
-    invars := invars
-    eqns := st.eqns
-    outvars := st.outvars
-  }
+  return .ok <| LeanJaxpr.mkNormalized #[] invars st.eqns st.outvars st.regions
 
 /-- Convert a function body to `LeanJaxpr` using a conservative lowering strategy. -/
 def fromFnBody

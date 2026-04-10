@@ -70,8 +70,16 @@ structure BatchedSearchSummary where
 abbrev RecurrentFn (P S : Type) :=
   P → UInt64 → Action → S → RecurrentFnOutput × S
 
+/-- Monadic recurrent dynamics signature. -/
+abbrev RecurrentFnM (m : Type → Type) (P S : Type) :=
+  P → UInt64 → Action → S → m (RecurrentFnOutput × S)
+
 /-- Batched recurrent dynamics signature. -/
 abbrev BatchedRecurrentFn (P S : Type) :=
   P → UInt64 → Array Action → Array S → BatchedRecurrentFnOutput × Array S
+
+/-- Monadic batched recurrent dynamics signature. -/
+abbrev BatchedRecurrentFnM (m : Type → Type) (P S : Type) :=
+  P → UInt64 → Array Action → Array S → m (BatchedRecurrentFnOutput × Array S)
 
 end torch.mctx

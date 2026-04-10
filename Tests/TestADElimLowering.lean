@@ -33,23 +33,22 @@ def runCoreM (x : CoreM α) : IO α := do
 private def renderErrors (errs : Array String) : String :=
   String.intercalate "\n" errs.toList
 
+private def mkNormalizedJaxpr
+    (constvars invars : Array JVar)
+    (eqns : Array JEqn)
+    (outvars : Array JVar) :
+    LeanJaxpr :=
+  LeanJaxpr.mkNormalized constvars invars eqns outvars
+
 private def arithmeticJaxpr : LeanJaxpr :=
-  {
-    invars := #[{ id := 1 }, { id := 2 }]
-    eqns := #[
-      {
-        op := kstmtUnaryOpName .Exp
-        invars := #[{ id := 1 }]
-        outvars := #[{ id := 3 }]
-      },
-      {
-        op := kstmtBinaryOpName .Add
-        invars := #[{ id := 3 }, { id := 2 }]
-        outvars := #[{ id := 4 }]
-      }
-    ]
-    outvars := #[{ id := 4 }]
-  }
+  mkNormalizedJaxpr #[] #[
+    { id := 1 }, { id := 2 }
+  ] #[
+    JEqn.ofNormalizedOp 1 (kstmtUnaryOpName .Exp) #[{ id := 1 }] #[{ id := 3 }],
+    JEqn.ofNormalizedOp 2 (kstmtBinaryOpName .Add) #[{ id := 3 }, { id := 2 }] #[{ id := 4 }]
+  ] #[
+    { id := 4 }
+  ]
 
 @[test]
 def testKStmtRoundtripArithmeticSubset : IO Unit := do
@@ -77,28 +76,20 @@ def testKStmtRoundtripArithmeticSubset : IO Unit := do
 
 @[test]
 def testLowerToKStmtsDotGeneralAndMma : IO Unit := do
-  let jaxpr : LeanJaxpr := {
-    invars := #[{ id := 1 }, { id := 2 }, { id := 3 }]
-    eqns := #[
-      {
-        op := kstmtDotGeneralOpName
-        invars := #[{ id := 1 }, { id := 2 }]
-        outvars := #[{ id := 4 }]
-        params := #[
-          OpParam.mkNats .lhsContract #[1],
-          OpParam.mkNats .rhsContract #[0],
-          OpParam.mkNats .lhsBatch #[],
-          OpParam.mkNats .rhsBatch #[]
-        ]
-      },
-      {
-        op := kstmtMmaOpName .AB
-        invars := #[{ id := 1 }, { id := 2 }, { id := 3 }]
-        outvars := #[{ id := 5 }]
-      }
-    ]
-    outvars := #[{ id := 5 }]
-  }
+  let jaxpr : LeanJaxpr := mkNormalizedJaxpr #[] #[
+    { id := 1 }, { id := 2 }, { id := 3 }
+  ] #[
+    JEqn.ofNormalizedOp 1 kstmtDotGeneralOpName #[{ id := 1 }, { id := 2 }] #[{ id := 4 }]
+      #[
+        OpParam.mkNats .lhsContract #[1],
+        OpParam.mkNats .rhsContract #[0],
+        OpParam.mkNats .lhsBatch #[],
+        OpParam.mkNats .rhsBatch #[]
+      ],
+    JEqn.ofNormalizedOp 2 (kstmtMmaOpName .AB) #[{ id := 1 }, { id := 2 }, { id := 3 }] #[{ id := 5 }]
+  ] #[
+    { id := 5 }
+  ]
 
   match lowerToKStmts jaxpr with
   | .error errs =>
@@ -118,17 +109,13 @@ def testLowerToKStmtsDotGeneralAndMma : IO Unit := do
 
 @[test]
 def testLowerToKStmtsOuterLikeDotGeneralAlias : IO Unit := do
-  let jaxpr : LeanJaxpr := {
-    invars := #[{ id := 7 }, { id := 8 }]
-    eqns := #[
-      {
-        op := `Graphax.dot_general
-        invars := #[{ id := 7 }, { id := 8 }]
-        outvars := #[{ id := 9 }]
-      }
-    ]
-    outvars := #[{ id := 9 }]
-  }
+  let jaxpr : LeanJaxpr := mkNormalizedJaxpr #[] #[
+    { id := 7 }, { id := 8 }
+  ] #[
+    JEqn.ofNormalizedOp 1 `Graphax.dot_general #[{ id := 7 }, { id := 8 }] #[{ id := 9 }]
+  ] #[
+    { id := 9 }
+  ]
 
   match lowerToKStmts jaxpr with
   | .error errs =>
@@ -145,23 +132,15 @@ def testLowerToKStmtsUnitBatchDotGeneralToMM : IO Unit := do
   let lhs : JVar := { id := 1, metaInfo := { shape := some #[1, 2, 3] } }
   let rhs : JVar := { id := 2, metaInfo := { shape := some #[1, 3, 4] } }
   let out : JVar := { id := 3, metaInfo := { shape := some #[1, 2, 4] } }
-  let jaxpr : LeanJaxpr := {
-    invars := #[lhs, rhs]
-    eqns := #[
-      {
-        op := kstmtDotGeneralOpName
-        invars := #[lhs, rhs]
-        outvars := #[out]
-        params := #[
-          OpParam.mkNats .lhsContract #[2],
-          OpParam.mkNats .rhsContract #[1],
-          OpParam.mkNats .lhsBatch #[0],
-          OpParam.mkNats .rhsBatch #[0]
-        ]
-      }
-    ]
-    outvars := #[out]
-  }
+  let jaxpr : LeanJaxpr := mkNormalizedJaxpr #[] #[lhs, rhs] #[
+    JEqn.ofNormalizedOp 1 kstmtDotGeneralOpName #[lhs, rhs] #[out]
+      #[
+        OpParam.mkNats .lhsContract #[2],
+        OpParam.mkNats .rhsContract #[1],
+        OpParam.mkNats .lhsBatch #[0],
+        OpParam.mkNats .rhsBatch #[0]
+      ]
+  ] #[out]
 
   match lowerToKStmts jaxpr with
   | .error errs =>
@@ -178,23 +157,15 @@ def testLowerToKStmtsMultiLeadingUnitBatchDotGeneralToMM : IO Unit := do
   let lhs : JVar := { id := 1, metaInfo := { shape := some #[1, 1, 2, 3] } }
   let rhs : JVar := { id := 2, metaInfo := { shape := some #[1, 1, 3, 4] } }
   let out : JVar := { id := 3, metaInfo := { shape := some #[1, 1, 2, 4] } }
-  let jaxpr : LeanJaxpr := {
-    invars := #[lhs, rhs]
-    eqns := #[
-      {
-        op := kstmtDotGeneralOpName
-        invars := #[lhs, rhs]
-        outvars := #[out]
-        params := #[
-          OpParam.mkNats .lhsContract #[3],
-          OpParam.mkNats .rhsContract #[2],
-          OpParam.mkNats .lhsBatch #[0, 1],
-          OpParam.mkNats .rhsBatch #[0, 1]
-        ]
-      }
-    ]
-    outvars := #[out]
-  }
+  let jaxpr : LeanJaxpr := mkNormalizedJaxpr #[] #[lhs, rhs] #[
+    JEqn.ofNormalizedOp 1 kstmtDotGeneralOpName #[lhs, rhs] #[out]
+      #[
+        OpParam.mkNats .lhsContract #[3],
+        OpParam.mkNats .rhsContract #[2],
+        OpParam.mkNats .lhsBatch #[0, 1],
+        OpParam.mkNats .rhsBatch #[0, 1]
+      ]
+  ] #[out]
 
   match lowerToKStmts jaxpr with
   | .error errs =>
@@ -211,23 +182,15 @@ def testLowerToKStmtsNonLeadingUnitBatchDotGeneralToMM : IO Unit := do
   let lhs : JVar := { id := 1, metaInfo := { shape := some #[2, 1, 3] } }
   let rhs : JVar := { id := 2, metaInfo := { shape := some #[1, 3, 4] } }
   let out : JVar := { id := 3, metaInfo := { shape := some #[1, 2, 4] } }
-  let jaxpr : LeanJaxpr := {
-    invars := #[lhs, rhs]
-    eqns := #[
-      {
-        op := kstmtDotGeneralOpName
-        invars := #[lhs, rhs]
-        outvars := #[out]
-        params := #[
-          OpParam.mkNats .lhsContract #[2],
-          OpParam.mkNats .rhsContract #[1],
-          OpParam.mkNats .lhsBatch #[1],
-          OpParam.mkNats .rhsBatch #[0]
-        ]
-      }
-    ]
-    outvars := #[out]
-  }
+  let jaxpr : LeanJaxpr := mkNormalizedJaxpr #[] #[lhs, rhs] #[
+    JEqn.ofNormalizedOp 1 kstmtDotGeneralOpName #[lhs, rhs] #[out]
+      #[
+        OpParam.mkNats .lhsContract #[2],
+        OpParam.mkNats .rhsContract #[1],
+        OpParam.mkNats .lhsBatch #[1],
+        OpParam.mkNats .rhsBatch #[0]
+      ]
+  ] #[out]
 
   match lowerToKStmts jaxpr with
   | .error errs =>
@@ -250,45 +213,29 @@ def testLowerToKStmtsUnitBatchDotGeneralTransposeVariants : IO Unit := do
   let lhsAtBt : JVar := { id := 7, metaInfo := { shape := some #[3, 2, 1] } }
   let rhsAtBt : JVar := { id := 8, metaInfo := { shape := some #[4, 1, 3] } }
   let outAtBt : JVar := { id := 9, metaInfo := { shape := some #[1, 2, 4] } }
-  let jaxpr : LeanJaxpr := {
-    invars := #[lhsABt, rhsABt, lhsAtB, rhsAtB, lhsAtBt, rhsAtBt]
-    eqns := #[
-      {
-        op := kstmtDotGeneralOpName
-        invars := #[lhsABt, rhsABt]
-        outvars := #[outABt]
-        params := #[
-          OpParam.mkNats .lhsContract #[2],
-          OpParam.mkNats .rhsContract #[1],
-          OpParam.mkNats .lhsBatch #[1],
-          OpParam.mkNats .rhsBatch #[2]
-        ]
-      },
-      {
-        op := kstmtDotGeneralOpName
-        invars := #[lhsAtB, rhsAtB]
-        outvars := #[outAtB]
-        params := #[
-          OpParam.mkNats .lhsContract #[0],
-          OpParam.mkNats .rhsContract #[1],
-          OpParam.mkNats .lhsBatch #[2],
-          OpParam.mkNats .rhsBatch #[0]
-        ]
-      },
-      {
-        op := kstmtDotGeneralOpName
-        invars := #[lhsAtBt, rhsAtBt]
-        outvars := #[outAtBt]
-        params := #[
-          OpParam.mkNats .lhsContract #[0],
-          OpParam.mkNats .rhsContract #[2],
-          OpParam.mkNats .lhsBatch #[2],
-          OpParam.mkNats .rhsBatch #[1]
-        ]
-      }
-    ]
-    outvars := #[outABt, outAtB, outAtBt]
-  }
+  let jaxpr : LeanJaxpr := mkNormalizedJaxpr #[] #[lhsABt, rhsABt, lhsAtB, rhsAtB, lhsAtBt, rhsAtBt] #[
+    JEqn.ofNormalizedOp 1 kstmtDotGeneralOpName #[lhsABt, rhsABt] #[outABt]
+      #[
+        OpParam.mkNats .lhsContract #[2],
+        OpParam.mkNats .rhsContract #[1],
+        OpParam.mkNats .lhsBatch #[1],
+        OpParam.mkNats .rhsBatch #[2]
+      ],
+    JEqn.ofNormalizedOp 2 kstmtDotGeneralOpName #[lhsAtB, rhsAtB] #[outAtB]
+      #[
+        OpParam.mkNats .lhsContract #[0],
+        OpParam.mkNats .rhsContract #[1],
+        OpParam.mkNats .lhsBatch #[2],
+        OpParam.mkNats .rhsBatch #[0]
+      ],
+    JEqn.ofNormalizedOp 3 kstmtDotGeneralOpName #[lhsAtBt, rhsAtBt] #[outAtBt]
+      #[
+        OpParam.mkNats .lhsContract #[0],
+        OpParam.mkNats .rhsContract #[2],
+        OpParam.mkNats .lhsBatch #[2],
+        OpParam.mkNats .rhsBatch #[1]
+      ]
+  ] #[outABt, outAtB, outAtBt]
 
   match lowerToKStmts jaxpr with
   | .error errs =>
@@ -319,34 +266,22 @@ def testLowerToKStmtsDotGeneralDropsUnitFreeAndContractAxesToMM : IO Unit := do
   let lhsContractUnit : JVar := { id := 4, metaInfo := { shape := some #[2, 1, 3] } }
   let rhsContractUnit : JVar := { id := 5, metaInfo := { shape := some #[1, 3, 4] } }
   let outContractUnit : JVar := { id := 6, metaInfo := { shape := some #[2, 4] } }
-  let jaxpr : LeanJaxpr := {
-    invars := #[lhsFreeUnit, rhsFreeUnit, lhsContractUnit, rhsContractUnit]
-    eqns := #[
-      {
-        op := kstmtDotGeneralOpName
-        invars := #[lhsFreeUnit, rhsFreeUnit]
-        outvars := #[outFreeUnit]
-        params := #[
-          OpParam.mkNats .lhsContract #[2],
-          OpParam.mkNats .rhsContract #[0],
-          OpParam.mkNats .lhsBatch #[],
-          OpParam.mkNats .rhsBatch #[]
-        ]
-      },
-      {
-        op := kstmtDotGeneralOpName
-        invars := #[lhsContractUnit, rhsContractUnit]
-        outvars := #[outContractUnit]
-        params := #[
-          OpParam.mkNats .lhsContract #[1, 2],
-          OpParam.mkNats .rhsContract #[0, 1],
-          OpParam.mkNats .lhsBatch #[],
-          OpParam.mkNats .rhsBatch #[]
-        ]
-      }
-    ]
-    outvars := #[outFreeUnit, outContractUnit]
-  }
+  let jaxpr : LeanJaxpr := mkNormalizedJaxpr #[] #[lhsFreeUnit, rhsFreeUnit, lhsContractUnit, rhsContractUnit] #[
+    JEqn.ofNormalizedOp 1 kstmtDotGeneralOpName #[lhsFreeUnit, rhsFreeUnit] #[outFreeUnit]
+      #[
+        OpParam.mkNats .lhsContract #[2],
+        OpParam.mkNats .rhsContract #[0],
+        OpParam.mkNats .lhsBatch #[],
+        OpParam.mkNats .rhsBatch #[]
+      ],
+    JEqn.ofNormalizedOp 2 kstmtDotGeneralOpName #[lhsContractUnit, rhsContractUnit] #[outContractUnit]
+      #[
+        OpParam.mkNats .lhsContract #[1, 2],
+        OpParam.mkNats .rhsContract #[0, 1],
+        OpParam.mkNats .lhsBatch #[],
+        OpParam.mkNats .rhsBatch #[]
+      ]
+  ] #[outFreeUnit, outContractUnit]
 
   match lowerToKStmts jaxpr with
   | .error errs =>
@@ -370,23 +305,15 @@ def testLowerToKStmtsDotGeneralDropsUnitContractAxesToOuter : IO Unit := do
   let lhs : JVar := { id := 1, metaInfo := { shape := some #[5, 1, 1] } }
   let rhs : JVar := { id := 2, metaInfo := { shape := some #[1, 1, 7] } }
   let out : JVar := { id := 3, metaInfo := { shape := some #[5, 7] } }
-  let jaxpr : LeanJaxpr := {
-    invars := #[lhs, rhs]
-    eqns := #[
-      {
-        op := kstmtDotGeneralOpName
-        invars := #[lhs, rhs]
-        outvars := #[out]
-        params := #[
-          OpParam.mkNats .lhsContract #[1, 2],
-          OpParam.mkNats .rhsContract #[0, 1],
-          OpParam.mkNats .lhsBatch #[],
-          OpParam.mkNats .rhsBatch #[]
-        ]
-      }
-    ]
-    outvars := #[out]
-  }
+  let jaxpr : LeanJaxpr := mkNormalizedJaxpr #[] #[lhs, rhs] #[
+    JEqn.ofNormalizedOp 1 kstmtDotGeneralOpName #[lhs, rhs] #[out]
+      #[
+        OpParam.mkNats .lhsContract #[1, 2],
+        OpParam.mkNats .rhsContract #[0, 1],
+        OpParam.mkNats .lhsBatch #[],
+        OpParam.mkNats .rhsBatch #[]
+      ]
+  ] #[out]
 
   match lowerToKStmts jaxpr with
   | .error errs =>
@@ -403,23 +330,15 @@ def testLowerToKStmtsUnitBatchDotGeneralToOuter : IO Unit := do
   let lhs : JVar := { id := 1, metaInfo := { shape := some #[5, 1] } }
   let rhs : JVar := { id := 2, metaInfo := { shape := some #[1, 7] } }
   let out : JVar := { id := 3, metaInfo := { shape := some #[1, 5, 7] } }
-  let jaxpr : LeanJaxpr := {
-    invars := #[lhs, rhs]
-    eqns := #[
-      {
-        op := `Graphax.dot_general
-        invars := #[lhs, rhs]
-        outvars := #[out]
-        params := #[
-          OpParam.mkNats .lhsContract #[],
-          OpParam.mkNats .rhsContract #[],
-          OpParam.mkNats .lhsBatch #[1],
-          OpParam.mkNats .rhsBatch #[0]
-        ]
-      }
-    ]
-    outvars := #[out]
-  }
+  let jaxpr : LeanJaxpr := mkNormalizedJaxpr #[] #[lhs, rhs] #[
+    JEqn.ofNormalizedOp 1 `Graphax.dot_general #[lhs, rhs] #[out]
+      #[
+        OpParam.mkNats .lhsContract #[],
+        OpParam.mkNats .rhsContract #[],
+        OpParam.mkNats .lhsBatch #[1],
+        OpParam.mkNats .rhsBatch #[0]
+      ]
+  ] #[out]
 
   match lowerToKStmts jaxpr with
   | .error errs =>
@@ -436,23 +355,15 @@ def testLowerToKStmtsUnitBatchDotGeneralRejectsNonCanonicalOutputShape : IO Unit
   let lhs : JVar := { id := 1, metaInfo := { shape := some #[2, 1, 3] } }
   let rhs : JVar := { id := 2, metaInfo := { shape := some #[2, 1, 4] } }
   let out : JVar := { id := 3, metaInfo := { shape := some #[2, 1, 3] } }
-  let jaxpr : LeanJaxpr := {
-    invars := #[lhs, rhs]
-    eqns := #[
-      {
-        op := kstmtDotGeneralOpName
-        invars := #[lhs, rhs]
-        outvars := #[out]
-        params := #[
-          OpParam.mkNats .lhsContract #[2],
-          OpParam.mkNats .rhsContract #[2],
-          OpParam.mkNats .lhsBatch #[1],
-          OpParam.mkNats .rhsBatch #[1]
-        ]
-      }
-    ]
-    outvars := #[out]
-  }
+  let jaxpr : LeanJaxpr := mkNormalizedJaxpr #[] #[lhs, rhs] #[
+    JEqn.ofNormalizedOp 1 kstmtDotGeneralOpName #[lhs, rhs] #[out]
+      #[
+        OpParam.mkNats .lhsContract #[2],
+        OpParam.mkNats .rhsContract #[2],
+        OpParam.mkNats .lhsBatch #[1],
+        OpParam.mkNats .rhsBatch #[1]
+      ]
+  ] #[out]
 
   match lowerToKStmts jaxpr with
   | .ok lowered =>
@@ -467,23 +378,15 @@ def testLowerToKStmtsNonUnitBatchDotGeneralRejects : IO Unit := do
   let lhs : JVar := { id := 1, metaInfo := { shape := some #[2, 2, 3] } }
   let rhs : JVar := { id := 2, metaInfo := { shape := some #[2, 3, 4] } }
   let out : JVar := { id := 3, metaInfo := { shape := some #[2, 2, 4] } }
-  let jaxpr : LeanJaxpr := {
-    invars := #[lhs, rhs]
-    eqns := #[
-      {
-        op := kstmtDotGeneralOpName
-        invars := #[lhs, rhs]
-        outvars := #[out]
-        params := #[
-          OpParam.mkNats .lhsContract #[2],
-          OpParam.mkNats .rhsContract #[1],
-          OpParam.mkNats .lhsBatch #[0],
-          OpParam.mkNats .rhsBatch #[0]
-        ]
-      }
-    ]
-    outvars := #[out]
-  }
+  let jaxpr : LeanJaxpr := mkNormalizedJaxpr #[] #[lhs, rhs] #[
+    JEqn.ofNormalizedOp 1 kstmtDotGeneralOpName #[lhs, rhs] #[out]
+      #[
+        OpParam.mkNats .lhsContract #[2],
+        OpParam.mkNats .rhsContract #[1],
+        OpParam.mkNats .lhsBatch #[0],
+        OpParam.mkNats .rhsBatch #[0]
+      ]
+  ] #[out]
 
   match lowerToKStmts jaxpr with
   | .ok lowered =>

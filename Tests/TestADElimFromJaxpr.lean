@@ -29,25 +29,24 @@ def runCoreM (x : CoreM α) : IO α := do
   | .ok value => pure value
   | .error msg => throw (IO.userError msg)
 
+private def mkNormalizedJaxpr
+    (constvars invars : Array JVar)
+    (eqns : Array JEqn)
+    (outvars : Array JVar) :
+    LeanJaxpr :=
+  LeanJaxpr.mkNormalized constvars invars eqns outvars
+
 private def sampleKStmtLoweredJaxpr : LeanJaxpr :=
-  {
-    invars := #[{ id := 0 }, { id := 1 }]
-    eqns := #[
-      {
-        op := kstmtUnaryOpName .Exp
-        invars := #[{ id := 0 }]
-        outvars := #[{ id := 2 }]
-        source := { decl := `test.elim_from_jaxpr, line? := some 10 }
-      },
-      {
-        op := kstmtBinaryOpName .Add
-        invars := #[{ id := 2 }, { id := 1 }]
-        outvars := #[{ id := 3 }]
-        source := { decl := `test.elim_from_jaxpr, line? := some 11 }
-      }
-    ]
-    outvars := #[{ id := 3 }]
-  }
+  mkNormalizedJaxpr #[] #[
+    { id := 0 }, { id := 1 }
+  ] #[
+    JEqn.ofNormalizedOp 1 (kstmtUnaryOpName .Exp) #[{ id := 0 }] #[{ id := 2 }] #[]
+      { decl := `test.elim_from_jaxpr, line? := some 10 },
+    JEqn.ofNormalizedOp 2 (kstmtBinaryOpName .Add) #[{ id := 2 }, { id := 1 }] #[{ id := 3 }] #[]
+      { decl := `test.elim_from_jaxpr, line? := some 11 }
+  ] #[
+    { id := 3 }
+  ]
 
 @[test]
 def testRunEliminationOnJaxprRequiresRules : IO Unit := do
@@ -91,6 +90,8 @@ def testBuildElimGraphFromJaxprTracksPartitions : IO Unit := do
       "Partitioned graph should keep final outputs as explicit boundary outputs"
     LeanTest.assertEqual g.eliminable #[2]
       "Partitioned graph should expose only non-output intermediates as eliminable vertices"
+    LeanTest.assertEqual g.actionVertices #[2]
+      "Partitioned graph should carry only explicit eliminable action vertices from LeanJaxpr"
 
 @[test]
 def testForwardAndReverseEliminationOnJaxpr : IO Unit := do

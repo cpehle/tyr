@@ -4,6 +4,7 @@ import Tyr.AD.Sparse.Transform
 import Tyr.AD.Sparse.Validate
 import Tyr.AD.Sparse.Add
 import Tyr.AD.Sparse.Compose
+import Tyr.AD.Sparse.Eval
 
 /-!
 # Tyr.AD.Sparse

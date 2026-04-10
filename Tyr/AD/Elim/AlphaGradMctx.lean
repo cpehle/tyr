@@ -1,6 +1,6 @@
 import Tyr.AD.Elim.Eliminate
 import Tyr.AD.Elim.ConstraintFeasibility
-import Tyr.AD.Elim.AlphaGradAdapter
+import Tyr.AD.Elim.ActionSpace
 import Tyr.AD.Elim.Cost
 import Tyr.Mctx
 import Tyr.MctxDag
@@ -12,7 +12,8 @@ AlphaGrad-style elimination environment and MCTS wrappers built on `Tyr.Mctx`.
 
 Design invariants:
 - Action IDs remain 0-based (`ActionId0`).
-- Elimination vertices remain 1-based (`VertexId1`), crossed only via checked adapters.
+- Elimination vertices remain 1-based (`VertexId1`), crossed only via checked
+  action-space conversion utilities.
 - Constraint feasibility is enforced in action masking and transition checks.
 - No fallback behavior: infeasible constrained states surface deterministic errors.
 -/
@@ -20,16 +21,6 @@ Design invariants:
 namespace Tyr.AD.Elim
 
 open torch.mctx
-
-/--
-Configurable action-space conventions used by AlphaGrad-style policies:
-- `fullVertices`: action space is `[0, numVertices)`, with `vertex = action + 1`.
-- `explicitVertices`: action space is an explicit vertex subset/table.
--/
-inductive AlphaGradActionSpace where
-  | fullVertices
-  | explicitVertices (vertices1 : Array VertexId1)
-  deriving Repr, Inhabited
 
 /--
 Reward semantics used by AlphaGrad-style elimination search:
@@ -56,8 +47,11 @@ structure AlphaGradMctxConfig where
   costWeights : CostWeights := {}
   /-- Reward semantics for environment transitions and value heuristics. -/
   rewardMode : AlphaGradRewardMode := .tyrHeuristic
-  /-- Action-space convention for AlphaGrad compatibility paths. -/
-  actionSpace : AlphaGradActionSpace := .fullVertices
+  /--
+  Optional override for the edge-based action surface.
+  When omitted, edge-based entrypoints use the graph's stored `actionVertices`.
+  -/
+  actionVerticesOverride? : Option (Array VertexId1) := none
   /-- Search discount used by recurrent dynamics. -/
   discount : Float := 1.0
   /-- Reward applied when an invalid/infeasible action is selected. -/
@@ -155,6 +149,17 @@ structure AlphaGradDagEdgeKey where
   map : AlphaGradDagMapKey
   deriving Repr, Inhabited, BEq, Hashable
 
+/-- Canonical producer-semantic key for DAG state hashing. -/
+structure AlphaGradDagProducerKey where
+  vertex : VertexId1
+  opId : Nat
+  opTag : String
+  schemaTag : String
+  payloadTag : String
+  sourceDecl : String
+  roleTag? : Option String := none
+  deriving Repr, Inhabited, BEq, Hashable
+
 /-- Canonical DAG state key used by `Tyr.MctxDag` transposition table. -/
 structure AlphaGradDagKey where
   numVertices : Nat
@@ -163,6 +168,7 @@ structure AlphaGradDagKey where
   eliminatedActions : Array Bool
   violation : Bool
   edges : Array AlphaGradDagEdgeKey
+  producers : Array AlphaGradDagProducerKey
   deriving Repr, Inhabited, BEq, Hashable
 
 /-- DAG search tree specialized to AlphaGrad state/key. -/
@@ -175,17 +181,39 @@ private def noDuplicateActions (actions0 : Array ActionId0) : Bool :=
 private def noDuplicateVertices (vertices1 : Array VertexId1) : Bool :=
   hasNoDuplicates vertices1
 
-/-- Resolve and validate the configured action-space vertex table. -/
+/-- Explicit edge-only action surface derived from the declared vertex domain. -/
+private def defaultActionVertices (numVertices : Nat) : Array VertexId1 :=
+  (Array.range numVertices).map fun idx => idx + 1
+
+/--
+When callers provide only local-Jacobian edges plus `numVertices`, an empty
+graph still needs an explicit action surface. Narrow that synthesis to the
+edge-only case instead of reviving the old global fallback behavior.
+-/
+private def edgeDomainActionVertices?
+    (graph : ElimGraph)
+    (numVertices : Nat) :
+    Option (Array VertexId1) :=
+  if graph.actionVertices.isEmpty &&
+      graph.inputs.isEmpty &&
+      graph.outputs.isEmpty &&
+      graph.eliminable.isEmpty then
+    some (defaultActionVertices numVertices)
+  else
+    none
+
+/-- Resolve and validate the active action-space vertex table. -/
 def resolveActionVertices?
     (cfg : AlphaGradMctxConfig)
+    (graph : ElimGraph)
     (numVertices : Nat) :
     Except String (Array VertexId1) := do
   let actionVertices :=
-    match cfg.actionSpace with
-    | .fullVertices => defaultActionVertices numVertices
-    | .explicitVertices vertices1 => vertices1
+    match cfg.actionVerticesOverride? with
+    | some vertices => vertices
+    | none => (edgeDomainActionVertices? graph numVertices).getD graph.actionVertices
   if actionVertices.isEmpty then
-    throw "AlphaGrad action-space vertex table must be non-empty."
+    throw "AlphaGrad action-space vertex table must be stored on the graph or supplied explicitly in the config."
   validateVertexIds numVertices actionVertices
   if !noDuplicateVertices actionVertices then
     throw "AlphaGrad action-space vertex table contains duplicate vertex IDs."
@@ -200,7 +228,14 @@ def initAlphaGradState?
     Except String AlphaGradState := do
   if numVertices = 0 then
     throw "AlphaGrad state requires at least one eliminable vertex."
-  let actionVertices := actionVertices?.getD (defaultActionVertices numVertices)
+  let actionVertices ←
+    match actionVertices? with
+    | some vertices => pure vertices
+    | none =>
+      if graph.actionVertices.isEmpty then
+        throw "AlphaGrad state requires an explicit action-space vertex table on the graph or at initialization."
+      else
+        pure graph.actionVertices
   if actionVertices.isEmpty then
     throw "AlphaGrad state requires at least one action-space vertex."
   validateVertexIds numVertices actionVertices
@@ -234,8 +269,13 @@ def initAlphaGradStateFromEdges?
     (numVertices : Nat)
     (actionPrefix : Array ActionId0 := #[])
     (actionVertices? : Option (Array VertexId1) := none) :
-    Except String AlphaGradState :=
-  initAlphaGradState? (ofLocalJacEdges edges) numVertices actionPrefix actionVertices?
+    Except String AlphaGradState := do
+  let graph := ofLocalJacEdges edges
+  let actionVertices? :=
+    match actionVertices? with
+    | some vertices => some vertices
+    | none => edgeDomainActionVertices? graph numVertices
+  initAlphaGradState? graph numVertices actionPrefix actionVertices?
 
 /-- Convenience initializer from partitioned local Jacobian edges. -/
 def initAlphaGradStateFromPartitionedEdges?
@@ -396,6 +436,21 @@ def dagEdgeKeys (g : ElimGraph) : Array AlphaGradDagEdgeKey := Id.run do
       out := out.push { src := src, dst := pair.1, map := canonicalMapKey pair.2 }
   return out
 
+/-- Deterministic producer-semantic listing for DAG transposition keys. -/
+def dagProducerKeys (g : ElimGraph) : Array AlphaGradDagProducerKey :=
+  (g.producers.toList.mergeSort (fun a b => a.1 < b.1)).toArray.map fun pair =>
+    let vertex := pair.1
+    let producer := pair.2
+    {
+      vertex := vertex
+      opId := producer.opId
+      opTag := toString producer.op
+      schemaTag := reprStr producer.typed.schema
+      payloadTag := reprStr producer.typed.payload
+      sourceDecl := toString producer.source.decl
+      roleTag? := producer.role?.map reprStr
+    }
+
 /-- Canonical key used by `MctxDag` to merge transposition-equivalent states. -/
 def dagStateKey (s : AlphaGradState) : AlphaGradDagKey :=
   {
@@ -405,6 +460,7 @@ def dagStateKey (s : AlphaGradState) : AlphaGradDagKey :=
     eliminatedActions := s.eliminatedActions
     violation := s.violation?.isSome
     edges := dagEdgeKeys s.graph
+    producers := dagProducerKeys s.graph
   }
 
 /-- Soft precedence penalty paid when selecting `candidate` before its preferred predecessors. -/
@@ -965,8 +1021,9 @@ def searchEpisodeFromEdges?
     (numVertices : Nat)
     (actionPrefix : Array ActionId0 := #[]) :
     Except String AlphaGradEpisodeResult := do
-  let actionVertices ← resolveActionVertices? envCfg numVertices
-  let s0 ← initAlphaGradStateFromEdges? edges numVertices actionPrefix (some actionVertices)
+  let graph := ofLocalJacEdges edges
+  let actionVertices ← resolveActionVertices? envCfg graph numVertices
+  let s0 ← initAlphaGradState? graph numVertices actionPrefix (some actionVertices)
   searchEpisode? envCfg mctsCfg rngKey s0
 
 /-- Convenience entrypoint from a pre-partitioned elimination graph. -/
@@ -978,8 +1035,7 @@ def searchEpisodeFromGraph?
     (numVertices : Nat)
     (actionPrefix : Array ActionId0 := #[]) :
     Except String AlphaGradEpisodeResult := do
-  let actionVertices ← resolveActionVertices? envCfg numVertices
-  let s0 ← initAlphaGradState? graph numVertices actionPrefix (some actionVertices)
+  let s0 ← initAlphaGradState? graph numVertices actionPrefix
   searchEpisode? envCfg mctsCfg rngKey s0
 
 /-- Policy-selectable DAG-backed convenience entrypoint from local Jacobian edges. -/
@@ -992,8 +1048,9 @@ def searchEpisodeDagWithPolicyFromEdges?
     (numVertices : Nat)
     (actionPrefix : Array ActionId0 := #[]) :
     Except String AlphaGradEpisodeResult := do
-  let actionVertices ← resolveActionVertices? envCfg numVertices
-  let s0 ← initAlphaGradStateFromEdges? edges numVertices actionPrefix (some actionVertices)
+  let graph := ofLocalJacEdges edges
+  let actionVertices ← resolveActionVertices? envCfg graph numVertices
+  let s0 ← initAlphaGradState? graph numVertices actionPrefix (some actionVertices)
   searchEpisodeDagWithPolicy? policy envCfg mctsCfg rngKey s0
 
 /-- Policy-selectable DAG-backed convenience entrypoint from a partitioned graph. -/
@@ -1006,8 +1063,7 @@ def searchEpisodeDagWithPolicyFromGraph?
     (numVertices : Nat)
     (actionPrefix : Array ActionId0 := #[]) :
     Except String AlphaGradEpisodeResult := do
-  let actionVertices ← resolveActionVertices? envCfg numVertices
-  let s0 ← initAlphaGradState? graph numVertices actionPrefix (some actionVertices)
+  let s0 ← initAlphaGradState? graph numVertices actionPrefix
   searchEpisodeDagWithPolicy? policy envCfg mctsCfg rngKey s0
 
 /-- DAG-backed convenience entrypoint from local Jacobian edges. -/

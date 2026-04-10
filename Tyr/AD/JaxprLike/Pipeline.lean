@@ -83,7 +83,7 @@ def buildFromDecl
   let frontend? ← getRegisteredFrontendRegistration? declName
   let jaxpr ←
     match frontend? with
-    | some reg => pure (reg.jaxpr.withDefaultSourceDecl declName)
+    | some reg => pure <| reg.jaxpr.withDefaultSourceDecl declName
     | none =>
       match (← LowerFnBody.runDecl { decl := decl }) with
       | .ok j => pure j
