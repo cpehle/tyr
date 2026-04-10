@@ -174,6 +174,13 @@ lean_binary(
 )
 
 lean_binary(
+    name = "Gemma4RunHF",
+    srcs = ["Examples/Gemma4/RunHF.lean"],
+    deps = [":Examples"],
+    cc_deps = ["//cc:TyrC"],
+)
+
+lean_binary(
     name = "Qwen3TTSEndToEnd",
     srcs = ["Examples/Qwen3TTS/EndToEnd.lean"],
     deps = [":Examples"],
