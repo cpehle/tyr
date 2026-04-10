@@ -37,4 +37,5 @@ data/
 cc/src/generated/
 .model-cache/
 .claude/
+.codex/
 .runpod-state/
