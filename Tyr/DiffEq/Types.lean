@@ -47,10 +47,15 @@ end DiffEqArithmetic
 class DiffEqSeminorm (α : Type) where
   rms : α → Scalar
 
-instance [TensorStruct α] : DiffEqSpace α where
+instance (priority := 50) [TensorStruct α] : DiffEqSpace α where
   add := TensorStruct.add
   sub := TensorStruct.sub
   scale s x := TensorStruct.scale x s
+
+instance {s : Shape} : DiffEqSpace (T s) where
+  add := torch.add
+  sub := torch.sub
+  scale s x := torch.mul_scalar x s
 
 instance : DiffEqSpace Float where
   add := (· + ·)

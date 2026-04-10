@@ -8,7 +8,8 @@ private def tinyTokens : T #[(2 : UInt64), 3] :=
   reshape (data.fromInt64Array #[0, 1, 2, 3, 4, 0]) #[(2 : UInt64), 3]
 
 private def identityDenoiser : FlowDenoiser 3 5 Unit :=
-  { forward := fun {_batch} _ x _ _ => pure x }
+  { forward := fun {_batch} _ x _ _ => pure x
+    forwardPure := some (fun {_batch} _ x _ _ => x) }
 
 @[test]
 def testFLMOneHotAndCorruptAtDataTime : IO Unit := do
