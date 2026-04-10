@@ -1,14 +1,16 @@
 import Tyr.Torch
 import Tyr.TensorStruct
 import Tyr.Optim
+import Tyr.DiffEq.Solver.Euler
+import Tyr.DiffEq.Integrate
 
 /-!
   Flow language model helpers.
 
   This module ports the core tensor contracts from the sibling FLM repository:
-  continuous one-hot corruption, flow-matching loss, Euler sampling, and the
-  PSD semigroup target used by FMLM. The transformer itself is supplied by the
-  caller through `FlowDenoiser`, which keeps this module independent of any
+  continuous one-hot corruption, flow-matching loss, ODE-based sampling, and
+  the PSD semigroup target used by FMLM. The transformer itself is supplied by
+  the caller through `FlowDenoiser`, which keeps this module independent of any
   particular backbone implementation.
 -/
 
@@ -44,10 +46,15 @@ def TimeMap.identity : TimeMap :=
   `x` has shape `[batch, seq, vocab]`. `tau` is the source time, and
   `tauPrime` is present for flow-map/FMLM denoisers that condition on a target
   time. The returned tensor is raw logits; this module applies softcap and
-  log-softmax before losses or semigroup targets consume it. -/
+  log-softmax before losses or semigroup targets consume it.
+
+  `forwardPure` is required for ODE sampling, because DiffEq vector fields are
+  pure functions. It should be the inference/no-grad equivalent of `forward`. -/
 structure FlowDenoiser (seq vocab : UInt64) (Params : Type) where
   forward : {batch : UInt64} → Params → T #[batch, seq, vocab] → T #[batch]
     → Option (T #[batch]) → IO (T #[batch, seq, vocab])
+  forwardPure : Option ({batch : UInt64} → Params → T #[batch, seq, vocab] → T #[batch]
+    → Option (T #[batch]) → T #[batch, seq, vocab]) := none
   lossWeight : Option ({batch : UInt64} → Params → T #[batch] → Option (T #[batch])
     → IO (T #[batch])) := none
 
@@ -103,6 +110,17 @@ def forwardLogProbs {seq vocab batch : UInt64} {Params : Type}
     : IO (T #[batch, seq, vocab]) := do
   let logits ← model.forward params x tau tauPrime
   pure (cappedLogSoftmax cfg logits)
+
+def forwardLogProbsPure {seq vocab batch : UInt64} {Params : Type}
+    (cfg : FlowConfig)
+    (forwardPure : {batch : UInt64} → Params → T #[batch, seq, vocab] → T #[batch]
+      → Option (T #[batch]) → T #[batch, seq, vocab])
+    (params : Params)
+    (x : T #[batch, seq, vocab])
+    (tau : T #[batch])
+    (tauPrime : Option (T #[batch]) := none)
+    : T #[batch, seq, vocab] :=
+  cappedLogSoftmax cfg (forwardPure params x tau tauPrime)
 
 /-- Per-token cross entropy against a dense one-hot/probability target. -/
 def denseTargetNll {batch seq vocab : UInt64}
@@ -184,17 +202,103 @@ def trainStep {seq vocab batch : UInt64} {Params : Type} [TensorStruct Params]
       numTokens := nn.item ntok }
   pure (params', optState', report)
 
-private def eulerFlowStep {batch seq vocab : UInt64}
-    (cfg : FlowConfig)
-    (z dataPred : T #[batch, seq, vocab])
-    (t dt : T #[batch]) : T #[batch, seq, vocab] :=
-  let t3 := expandTime3 (seq := seq) (vocab := vocab) t
-  let dt3 := expandTime3 (seq := seq) (vocab := vocab) dt
-  let one := torch.ones_like z
-  let v := nn.div (dataPred - z) (one - t3 + cfg.eps)
-  z + dt3 * v
+private def pureForwardOrThrow {seq vocab : UInt64} {Params : Type}
+    (model : FlowDenoiser seq vocab Params)
+    : IO ({batch : UInt64} → Params → T #[batch, seq, vocab] → T #[batch]
+      → Option (T #[batch]) → T #[batch, seq, vocab]) := do
+  match model.forwardPure with
+  | some forwardPure => pure forwardPure
+  | none =>
+      throw (IO.userError
+        "generateFLM requires FlowDenoiser.forwardPure because DiffEq ODE terms are pure")
 
-/-- Generate tokens by Euler integration from Gaussian noise to one-hot data. -/
+private def scalarMappedTime {batch : UInt64} (timeMap : TimeMap) (tau : Float) : Float :=
+  let tauT := torch.full #[batch] tau
+  nn.item (nn.meanAll (timeMap.tauToT tauT))
+
+private def flowVelocityAtT {batch seq vocab : UInt64} {Params : Type}
+    (cfg : FlowConfig)
+    (timeMap : TimeMap)
+    (forwardPure : {batch : UInt64} → Params → T #[batch, seq, vocab] → T #[batch]
+      → Option (T #[batch]) → T #[batch, seq, vocab])
+    (params : Params)
+    (t : DiffEq.Time)
+    (z : T #[batch, seq, vocab])
+    : T #[batch, seq, vocab] :=
+  let tTensor := torch.full #[batch] t
+  let tau := timeMap.tToTau tTensor
+  let logPred := forwardLogProbsPure cfg forwardPure params z tau none
+  let dataPred := nn.exp logPred
+  let t3 := expandTime3 (seq := seq) (vocab := vocab) tTensor
+  let one := torch.ones_like z
+  nn.div (dataPred - z) (one - t3 + cfg.eps)
+
+private def finalFlowProjection {batch seq vocab : UInt64} {Params : Type}
+    (cfg : FlowConfig)
+    (timeMap : TimeMap)
+    (forwardPure : {batch : UInt64} → Params → T #[batch, seq, vocab] → T #[batch]
+      → Option (T #[batch]) → T #[batch, seq, vocab])
+    (params : Params)
+    (t : DiffEq.Time)
+    (z : T #[batch, seq, vocab])
+    : T #[batch, seq, vocab] :=
+  let tTensor := torch.full #[batch] t
+  let tau := timeMap.tToTau tTensor
+  nn.exp (forwardLogProbsPure cfg forwardPure params z tau none)
+
+/-- Generate tokens with a caller-supplied ODE solver over the FLM flow field. -/
+def generateFLMWithSolver {seq vocab batch : UInt64} {Params : Type}
+    (cfg : FlowConfig)
+    (timeMap : TimeMap)
+    (model : FlowDenoiser seq vocab Params)
+    (params : Params)
+    (steps : Nat)
+    (solver : DiffEq.AbstractSolver
+      (DiffEq.ODETerm (T #[batch, seq, vocab]) Unit)
+      (T #[batch, seq, vocab])
+      (T #[batch, seq, vocab])
+      DiffEq.Time
+      Unit)
+    (maxSteps : Nat := 4096)
+    : IO (T #[batch, seq]) := do
+  if steps == 0 then
+    throw (IO.userError "generateFLM requires steps > 0")
+  let forwardPure ← pureForwardOrThrow model
+  let z0 ← torch.randn #[batch, seq, vocab]
+  let t0 := scalarMappedTime (batch := batch) timeMap cfg.tMin
+  let t1 := scalarMappedTime (batch := batch) timeMap cfg.tMax
+  let dt := (t1 - t0) / steps.toFloat
+  let tFinalModel := t0 + dt * (steps - 1).toFloat
+  let zBeforeFinal ←
+    if steps == 1 then
+      pure z0
+    else do
+      let term : DiffEq.ODETerm (T #[batch, seq, vocab]) Unit :=
+        { vectorField := fun t z _ => flowVelocityAtT cfg timeMap forwardPure params t z }
+      let sol :=
+        DiffEq.diffeqsolve
+          (Term := DiffEq.ODETerm (T #[batch, seq, vocab]) Unit)
+          (Y := T #[batch, seq, vocab])
+          (VF := T #[batch, seq, vocab])
+          (Control := DiffEq.Time)
+          (Args := Unit)
+          (Controller := DiffEq.ConstantStepSize)
+          term solver t0 tFinalModel (some dt) z0 () (saveat := { t1 := true })
+          (maxSteps := maxSteps)
+      if sol.result.isFailure then
+        throw (IO.userError s!"generateFLM solve failed: {sol.result.message}")
+      match sol.ys with
+      | some ys =>
+          if ys.size > 0 then
+            pure ys[ys.size - 1]!
+          else
+            throw (IO.userError "generateFLM solve did not save a terminal state")
+      | none =>
+          throw (IO.userError "generateFLM solve did not save a terminal state")
+  let dataPred := finalFlowProjection cfg timeMap forwardPure params tFinalModel zBeforeFinal
+  pure (nn.argmax dataPred 2)
+
+/-- Generate tokens through DiffEq Euler from Gaussian noise to one-hot data. -/
 def generateFLM {seq vocab batch : UInt64} {Params : Type}
     (cfg : FlowConfig)
     (timeMap : TimeMap)
@@ -202,23 +306,13 @@ def generateFLM {seq vocab batch : UInt64} {Params : Type}
     (params : Params)
     (steps : Nat)
     : IO (T #[batch, seq]) := do
-  if steps == 0 then
-    throw (IO.userError "generateFLM requires steps > 0")
-  let mut z ← torch.randn #[batch, seq, vocab]
-  for i in [:steps] do
-    let tauCurrF := cfg.tMin + (cfg.tMax - cfg.tMin) * (i.toFloat / steps.toFloat)
-    let tauNextF := cfg.tMin + (cfg.tMax - cfg.tMin) * ((i + 1).toFloat / steps.toFloat)
-    let tauCurr := torch.full #[batch] tauCurrF
-    let tauNext := torch.full #[batch] tauNextF
-    let tCurr := timeMap.tauToT tauCurr
-    let tNext := timeMap.tauToT tauNext
-    let logPred ← forwardLogProbs cfg model params z tauCurr none
-    let dataPred := nn.exp logPred
-    if i + 1 == steps then
-      z := dataPred
-    else
-      z := eulerFlowStep cfg z dataPred tCurr (tNext - tCurr)
-  pure (nn.argmax z 2)
+  let solver :=
+    DiffEq.Euler.solver
+      (Term := DiffEq.ODETerm (T #[batch, seq, vocab]) Unit)
+      (Y := T #[batch, seq, vocab])
+      (VF := T #[batch, seq, vocab])
+      (Args := Unit)
+  generateFLMWithSolver cfg timeMap model params steps solver
 
 /-- Interpolate from a source state toward a predicted data point. -/
 def flowInterpolate {batch seq vocab : UInt64}
