@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <vector>
 
@@ -212,6 +213,157 @@ static bool patchify_rgb_frames(
   }
 
   return true;
+}
+
+static bool compute_gemma4_target_size(
+    int width,
+    int height,
+    uint64_t patch_size,
+    uint64_t pooling_kernel_size,
+    uint64_t max_soft_tokens,
+    int& target_h,
+    int& target_w,
+    std::string& err) {
+  if (width <= 0 || height <= 0) {
+    err = "image dimensions must be positive";
+    return false;
+  }
+  if (patch_size == 0 || pooling_kernel_size == 0 || max_soft_tokens == 0) {
+    err = "patch_size, pooling_kernel_size, and max_soft_tokens must be > 0";
+    return false;
+  }
+
+  const double total_px = static_cast<double>(width) * static_cast<double>(height);
+  const double target_px =
+      static_cast<double>(max_soft_tokens) * static_cast<double>(patch_size) * static_cast<double>(patch_size) *
+      static_cast<double>(pooling_kernel_size) * static_cast<double>(pooling_kernel_size);
+  const double factor = std::sqrt(target_px / total_px);
+  const double ideal_h = factor * static_cast<double>(height);
+  const double ideal_w = factor * static_cast<double>(width);
+  const uint64_t side_mult = pooling_kernel_size * patch_size;
+
+  target_h = static_cast<int>(std::floor(ideal_h / static_cast<double>(side_mult)) * static_cast<double>(side_mult));
+  target_w = static_cast<int>(std::floor(ideal_w / static_cast<double>(side_mult)) * static_cast<double>(side_mult));
+
+  if (target_h == 0 && target_w == 0) {
+    err = "attempted to resize to 0x0 image";
+    return false;
+  }
+
+  const int max_side_length = static_cast<int>(max_soft_tokens * side_mult);
+  if (target_h == 0) {
+    target_h = static_cast<int>(side_mult);
+    target_w = std::min(
+        static_cast<int>(std::floor(static_cast<double>(width) / static_cast<double>(height)) *
+                         static_cast<double>(side_mult)),
+        max_side_length);
+  } else if (target_w == 0) {
+    target_w = static_cast<int>(side_mult);
+    target_h = std::min(
+        static_cast<int>(std::floor(static_cast<double>(height) / static_cast<double>(width)) *
+                         static_cast<double>(side_mult)),
+        max_side_length);
+  }
+
+  if (target_h <= 0 || target_w <= 0) {
+    err = "computed non-positive target image size";
+    return false;
+  }
+  if (static_cast<uint64_t>(target_h) % side_mult != 0 || static_cast<uint64_t>(target_w) % side_mult != 0) {
+    err = "computed target size is not divisible by pooling_kernel_size * patch_size";
+    return false;
+  }
+  if (static_cast<double>(target_h) * static_cast<double>(target_w) > target_px + 1e-6) {
+    err = "computed target image size exceeds patch budget";
+    return false;
+  }
+  return true;
+}
+
+static void resize_rgb_bilinear(
+    const std::vector<float>& src,
+    int src_w,
+    int src_h,
+    int dst_w,
+    int dst_h,
+    std::vector<float>& dst) {
+  if (src_w == dst_w && src_h == dst_h) {
+    dst = src;
+    return;
+  }
+
+  dst.resize(static_cast<size_t>(dst_w) * static_cast<size_t>(dst_h) * 3);
+  const float scale_x = static_cast<float>(src_w) / static_cast<float>(dst_w);
+  const float scale_y = static_cast<float>(src_h) / static_cast<float>(dst_h);
+
+  for (int y = 0; y < dst_h; ++y) {
+    float src_y = (static_cast<float>(y) + 0.5f) * scale_y - 0.5f;
+    int y0 = static_cast<int>(std::floor(src_y));
+    int y1 = y0 + 1;
+    float ly = src_y - static_cast<float>(y0);
+    y0 = std::max(0, std::min(y0, src_h - 1));
+    y1 = std::max(0, std::min(y1, src_h - 1));
+
+    for (int x = 0; x < dst_w; ++x) {
+      float src_x = (static_cast<float>(x) + 0.5f) * scale_x - 0.5f;
+      int x0 = static_cast<int>(std::floor(src_x));
+      int x1 = x0 + 1;
+      float lx = src_x - static_cast<float>(x0);
+      x0 = std::max(0, std::min(x0, src_w - 1));
+      x1 = std::max(0, std::min(x1, src_w - 1));
+
+      for (int c = 0; c < 3; ++c) {
+        auto sample = [&](int sy, int sx) -> float {
+          size_t idx =
+              (static_cast<size_t>(sy) * static_cast<size_t>(src_w) + static_cast<size_t>(sx)) * 3 +
+              static_cast<size_t>(c);
+          return src[idx];
+        };
+        float v00 = sample(y0, x0);
+        float v01 = sample(y0, x1);
+        float v10 = sample(y1, x0);
+        float v11 = sample(y1, x1);
+        float top = v00 + (v01 - v00) * lx;
+        float bot = v10 + (v11 - v10) * lx;
+        float out = top + (bot - top) * ly;
+        size_t dst_idx =
+            (static_cast<size_t>(y) * static_cast<size_t>(dst_w) + static_cast<size_t>(x)) * 3 +
+            static_cast<size_t>(c);
+        dst[dst_idx] = out;
+      }
+    }
+  }
+}
+
+static void patchify_resized_image(
+    const std::vector<float>& rgb,
+    int width,
+    int height,
+    uint64_t patch_size,
+    std::vector<float>& patches) {
+  uint64_t patch_rows = static_cast<uint64_t>(height) / patch_size;
+  uint64_t patch_cols = static_cast<uint64_t>(width) / patch_size;
+  uint64_t patch_dim = 3 * patch_size * patch_size;
+  patches.clear();
+  patches.resize(static_cast<size_t>(patch_rows) * static_cast<size_t>(patch_cols) * static_cast<size_t>(patch_dim));
+  size_t write = 0;
+
+  for (uint64_t py = 0; py < patch_rows; ++py) {
+    for (uint64_t px = 0; px < patch_cols; ++px) {
+      for (uint64_t c = 0; c < 3; ++c) {
+        for (uint64_t dy = 0; dy < patch_size; ++dy) {
+          for (uint64_t dx = 0; dx < patch_size; ++dx) {
+            uint64_t y = py * patch_size + dy;
+            uint64_t x = px * patch_size + dx;
+            size_t pix =
+                (static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x)) * 3 +
+                static_cast<size_t>(c);
+            patches[write++] = rgb[pix];
+          }
+        }
+      }
+    }
+  }
 }
 
 static bool load_video_patchified_streaming(
@@ -465,6 +617,66 @@ lean_object* lean_torch_media_load_video_patchified(
   auto t = torch::from_blob(
       patches.data(),
       {static_cast<int64_t>(n_patches), static_cast<int64_t>(patch_dim)},
+      torch::TensorOptions().dtype(torch::kFloat32)).clone();
+  return lean_io_result_mk_ok(fromTorchTensor(t));
+}
+
+lean_object* lean_torch_media_load_image_patch_grid_gemma4(
+    b_lean_obj_arg path_obj,
+    uint64_t patch_size,
+    uint64_t pooling_kernel_size,
+    uint64_t max_soft_tokens,
+    double rescale_factor,
+    lean_object* /*w*/) {
+  const char* path_c = lean_string_cstr(path_obj);
+  std::string path(path_c);
+
+  if (patch_size == 0 || pooling_kernel_size == 0 || max_soft_tokens == 0) {
+    return mk_io_error("loadGemma4ImagePatchGrid failed: patch_size, pooling_kernel_size, and max_soft_tokens must be > 0");
+  }
+
+  int width = 0;
+  int height = 0;
+  std::vector<float> rgb;
+  std::string err;
+  if (!load_image_rgb_f32(path, width, height, rgb, err)) {
+    return mk_io_error("loadGemma4ImagePatchGrid failed: " + err);
+  }
+
+  int target_h = 0;
+  int target_w = 0;
+  if (!compute_gemma4_target_size(
+        width, height, patch_size, pooling_kernel_size, max_soft_tokens, target_h, target_w, err)) {
+    return mk_io_error("loadGemma4ImagePatchGrid failed: " + err);
+  }
+
+  uint64_t patch_rows = static_cast<uint64_t>(target_h) / patch_size;
+  uint64_t patch_cols = static_cast<uint64_t>(target_w) / patch_size;
+  if (patch_rows == 0 || patch_cols == 0) {
+    return mk_io_error("loadGemma4ImagePatchGrid failed: computed empty patch grid");
+  }
+
+  std::vector<float> resized;
+  resize_rgb_bilinear(rgb, width, height, target_w, target_h, resized);
+
+  const float rescale = static_cast<float>(rescale_factor * 255.0);
+  if (std::abs(rescale - 1.0f) > 1e-6f) {
+    for (float& v : resized) {
+      v *= rescale;
+    }
+  }
+
+  std::vector<float> patches;
+  patchify_resized_image(resized, target_w, target_h, patch_size, patches);
+
+  uint64_t patch_dim = 3 * patch_size * patch_size;
+  auto t = torch::from_blob(
+      patches.data(),
+      {
+        static_cast<int64_t>(patch_rows),
+        static_cast<int64_t>(patch_cols),
+        static_cast<int64_t>(patch_dim)
+      },
       torch::TensorOptions().dtype(torch::kFloat32)).clone();
   return lean_io_result_mk_ok(fromTorchTensor(t));
 }

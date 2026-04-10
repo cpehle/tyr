@@ -33,5 +33,16 @@ lean_object* lean_torch_media_load_video_patchified(
       lean_mk_string("Apple media path requires macOS build")));
 }
 
+lean_object* lean_torch_media_load_image_patch_grid_gemma4(
+    b_lean_obj_arg /*path_obj*/,
+    uint64_t /*patch_size*/,
+    uint64_t /*pooling_kernel_size*/,
+    uint64_t /*max_soft_tokens*/,
+    double /*rescale_factor*/,
+    lean_object* /*w*/) {
+  return lean_io_result_mk_error(lean_mk_io_user_error(
+      lean_mk_string("Apple media path requires macOS build")));
+}
+
 } // extern "C"
 #endif

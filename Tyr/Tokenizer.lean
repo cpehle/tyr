@@ -7,6 +7,7 @@ import Tyr.Tokenizer.SpecialTokens
 import Tyr.Tokenizer.TokenBytes
 import Tyr.Tokenizer.Training
 import Tyr.Tokenizer.IO
+import Tyr.Tokenizer.Gemma4
 import Tyr.Tokenizer.Qwen3
 
 /-!

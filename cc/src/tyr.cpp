@@ -1907,6 +1907,79 @@ lean_object* lean_torch_masked_scatter(
   return fromTorchTensor(result_);
 }
 
+lean_object* lean_torch_gemma4_text_experts_forward(
+    uint64_t tokens,
+    uint64_t num_experts,
+    uint64_t top_k,
+    uint64_t inter_dim,
+    uint64_t hidden_size,
+    b_lean_obj_arg hidden,
+    b_lean_obj_arg gate_up_proj,
+    b_lean_obj_arg down_proj,
+    b_lean_obj_arg top_vals,
+    b_lean_obj_arg top_idx) {
+  auto hidden_ = borrowTensor(hidden);
+  auto gate_up_proj_ = borrowTensor(gate_up_proj);
+  auto down_proj_ = borrowTensor(down_proj);
+  auto top_vals_ = borrowTensor(top_vals);
+  auto top_idx_ = borrowTensor(top_idx).to(torch::kLong);
+
+  auto result_ = torch::zeros(
+      {static_cast<int64_t>(tokens), static_cast<int64_t>(hidden_size)},
+      hidden_.options());
+
+  auto flat_idx = top_idx_.reshape({static_cast<int64_t>(tokens * top_k)});
+  auto flat_vals = top_vals_.reshape({static_cast<int64_t>(tokens * top_k)});
+  auto token_ids =
+      torch::arange(
+          static_cast<int64_t>(tokens),
+          torch::TensorOptions().dtype(torch::kLong).device(hidden_.device()))
+          .unsqueeze(1)
+          .expand({static_cast<int64_t>(tokens), static_cast<int64_t>(top_k)})
+          .reshape({static_cast<int64_t>(tokens * top_k)});
+
+  auto flat_idx_cpu = flat_idx.to(torch::kCPU, torch::kLong).contiguous();
+  const auto* flat_idx_ptr = flat_idx_cpu.data_ptr<int64_t>();
+  std::vector<uint8_t> seen(num_experts, 0);
+  std::vector<int64_t> used_experts;
+  used_experts.reserve(std::min<uint64_t>(num_experts, tokens * top_k));
+  for (int64_t i = 0; i < static_cast<int64_t>(tokens * top_k); ++i) {
+    auto expert_id = flat_idx_ptr[i];
+    if (expert_id >= 0 && expert_id < static_cast<int64_t>(num_experts) &&
+        !seen[expert_id]) {
+      seen[expert_id] = 1;
+      used_experts.push_back(expert_id);
+    }
+  }
+
+  for (auto expert_id : used_experts) {
+    auto mask = flat_idx.eq(expert_id);
+    auto selected_tokens = token_ids.masked_select(mask);
+    if (selected_tokens.numel() == 0) {
+      continue;
+    }
+
+    auto selected_hidden = torch::index_select(hidden_, 0, selected_tokens);
+    auto selected_weights =
+        flat_vals.masked_select(mask).to(selected_hidden.scalar_type()).unsqueeze(1);
+
+    auto gate_up = gate_up_proj_.select(0, expert_id).contiguous();
+    auto gate_up_out = torch::matmul(selected_hidden, gate_up.transpose(0, 1));
+    auto gate = gate_up_out.slice(1, 0, static_cast<int64_t>(inter_dim));
+    auto up = gate_up_out.slice(
+        1,
+        static_cast<int64_t>(inter_dim),
+        static_cast<int64_t>(2 * inter_dim));
+    auto intermediate = at::gelu(gate) * up;
+
+    auto down = down_proj_.select(0, expert_id).contiguous();
+    auto out = torch::matmul(intermediate, down.transpose(0, 1));
+    result_.index_add_(0, selected_tokens, out * selected_weights);
+  }
+
+  return fromTorchTensor(result_);
+}
+
 lean_object* lean_torch_where(lean_obj_arg /*s*/, b_lean_obj_arg condition, b_lean_obj_arg x, b_lean_obj_arg y) {
   auto condition_ = borrowTensor(condition);
   auto x_ = borrowTensor(x);
@@ -4373,6 +4446,54 @@ lean_object* lean_torch_sdpa_gqa_mask(
     attn_mask,
     dropout_p,
     false  // is_causal=false since we're using explicit mask
+  );
+
+  return fromTorchTensor(result_);
+}
+
+// Scaled dot-product attention with GQA and explicit query/key mask.
+// Q: [batch, n_head, q_seq, head_dim]
+// K, V: [batch, n_kv_head, kv_seq, head_dim]
+// attn_mask: [batch, q_seq, kv_seq] - 1 for allowed attention edges, 0 for masked edges
+lean_object* lean_torch_sdpa_gqa_mask_qkv(
+  uint64_t /*batch*/,
+  uint64_t n_head,
+  uint64_t n_kv_head,
+  uint64_t /*q_seq*/,
+  uint64_t /*kv_seq*/,
+  uint64_t /*head_dim*/,
+  b_lean_obj_arg query,
+  b_lean_obj_arg key,
+  b_lean_obj_arg value,
+  b_lean_obj_arg mask,
+  double dropout_p,
+  uint8_t enable_gqa
+) {
+  auto q = borrowTensor(query);
+  auto k = borrowTensor(key);
+  auto v = borrowTensor(value);
+  auto qk_mask = borrowTensor(mask).to(q.device());  // [batch, q_seq, kv_seq]
+
+  if (enable_gqa) {
+    if (n_head != n_kv_head && n_kv_head > 0) {
+      auto repeat_factor = n_head / n_kv_head;
+      k = k.repeat_interleave(repeat_factor, 1);
+      v = v.repeat_interleave(repeat_factor, 1);
+    }
+  }
+
+  auto expanded_mask = qk_mask.unsqueeze(1);  // [batch, 1, q_seq, kv_seq]
+  auto attn_mask = torch::where(
+    expanded_mask == 0,
+    torch::full(expanded_mask.sizes(), -std::numeric_limits<float>::infinity(), q.options()),
+    torch::zeros(expanded_mask.sizes(), q.options())
+  );
+
+  auto result_ = torch::scaled_dot_product_attention(
+    q, k, v,
+    attn_mask,
+    dropout_p,
+    false  // explicit mask already encodes allowed edges
   );
 
   return fromTorchTensor(result_);
