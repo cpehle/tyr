@@ -62,6 +62,7 @@ import Tests.TestQwen35Pretrained
 import Tests.TestQwen25OmniPretrained
 import Tests.TestSafeTensorsTypeProvider
 import Tests.TestSafeTensorsTypeProviderErrors
+import Tests.TestFLM
 
 -- Note: `Tests.TestBranchingFlows` is currently routed through
 -- `TestsExperimental.lean` until `Tyr/Model/BranchingFlows.lean` is stabilized.
