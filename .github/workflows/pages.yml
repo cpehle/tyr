@@ -67,10 +67,19 @@ jobs:
           unzip -q libtorch.zip -d external/
           rm libtorch.zip
 
+      - name: Resolve doc-gen4 upstream
+        id: doc-gen4
+        run: |
+          repo_url="$(./scripts/resolve_doc_gen4_upstream.sh)"
+          echo "repo_url=${repo_url}" >> "$GITHUB_OUTPUT"
+          echo "Using doc-gen4 upstream ${repo_url}"
+
       - name: Prepare doc-gen4 path dependency
+        env:
+          DOC_GEN4_REF: v4.29.0
         run: |
           rm -rf "$GITHUB_WORKSPACE/.doc-gen4"
-          git clone --branch v4.29.0 --depth 1 https://github.com/leanprover/doc-gen4.git "$GITHUB_WORKSPACE/.doc-gen4"
+          git clone --branch "$DOC_GEN4_REF" --depth 1 "${{ steps.doc-gen4.outputs.repo_url }}" "$GITHUB_WORKSPACE/.doc-gen4"
 
       - name: Create docbuild package
         run: |
