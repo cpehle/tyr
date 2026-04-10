@@ -280,6 +280,20 @@ lean_binary(
 )
 
 lean_binary(
+    name = "TestGPUTileIR",
+    srcs = ["Tests/RunTestGPUTileIR.lean"],
+    deps = [":Tests"],
+    cc_deps = ["//cc:TyrC"],
+)
+
+lean_binary(
+    name = "TestTileIRGenerateMain",
+    srcs = ["Tests/RunTestTileIRGenerateMain.lean"],
+    deps = [":Tests"],
+    cc_deps = ["//cc:TyrC"],
+)
+
+lean_binary(
     name = "RunRiemannianNanoGPTTests",
     srcs = ["Tests/RunRiemannianNanoGPTTests.lean"],
     deps = [":Tests"],
@@ -289,6 +303,13 @@ lean_binary(
 lean_binary(
     name = "GenerateGpuKernels",
     srcs = ["Tyr/GPU/Codegen/GenerateMain.lean"],
+    deps = [":Tyr"],
+    cc_deps = ["//cc:TyrC"],
+)
+
+lean_binary(
+    name = "GenerateTileIRKernels",
+    srcs = ["Tyr/GPU/Codegen/TileIR/GenerateMain.lean"],
     deps = [":Tyr"],
     cc_deps = ["//cc:TyrC"],
 )

@@ -140,6 +140,7 @@ endif
 CU_SRCS :=
 SRCS += generated/tyr_gpu_kernel_stubs.cpp
 endif
+REQUIRES_TK := $(if $(strip $(CU_SRCS)),1,0)
 
 LIB_NAME := TyrC
 LIB := lib${LIB_NAME}.a
@@ -172,15 +173,35 @@ DYLIB_LINK_FLAGS := -L$(LEAN_LIB) -lleanshared \
 
 # Build Rules
 
+.PHONY: check-submodules
+
+check-submodules:
+	@if [ ! -f "$(SOXR_DIR)/CMakeLists.txt" ]; then \
+		echo "Missing populated submodule at $(SOXR_DIR). Run: git submodule update --init --recursive"; \
+		exit 1; \
+	fi
+	@if [ "$(REQUIRES_TK)" = "1" ] && [ ! -d "$(TKDIR)/include" ]; then \
+		echo "Missing populated submodule at $(TKDIR). Run: git submodule update --init --recursive"; \
+		exit 1; \
+	fi
+	@if [ ! -f "$(TORCHDIR)/include/torch/csrc/api/include/torch/torch.h" ]; then \
+		echo "Missing LibTorch headers at $(TORCHDIR). Install external/libtorch (see dependencies_macos.sh or Readme.md)."; \
+		exit 1; \
+	fi
+	@if [ ! -d "$(TORCH_LIBPATH)" ]; then \
+		echo "Missing LibTorch libraries at $(TORCH_LIBPATH). Install external/libtorch (see dependencies_macos.sh or Readme.md)."; \
+		exit 1; \
+	fi
+
 all: lib dylib
 
-lib: soxr $(OUT_DIR)/$(LIB)
+lib: check-submodules soxr $(OUT_DIR)/$(LIB)
 
-dylib: soxr $(OUT_DIR)/$(DYLIB)
+dylib: check-submodules soxr $(OUT_DIR)/$(DYLIB)
 
-soxr: $(SOXR_LIB)
+soxr: check-submodules $(SOXR_LIB)
 
-$(SOXR_LIB): $(SOXR_OBJS)
+$(SOXR_LIB): $(SOXR_OBJS) | check-submodules
 	@if [ ! -f "$(SOXR_DIR)/CMakeLists.txt" ]; then \
 		echo "Missing $(SOXR_DIR). Initialize submodules: git submodule update --init --recursive"; \
 		exit 1; \
@@ -189,7 +210,7 @@ $(SOXR_LIB): $(SOXR_OBJS)
 	$(RMPATH) $@
 	$(AR) rcs $@ $(SOXR_OBJS)
 
-$(SOXR_CONFIG):
+$(SOXR_CONFIG): | check-submodules
 	$(MKPATH) $(SOXR_BUILD_DIR)
 	@printf '%s\n' \
 		'#if !defined soxr_config_included' \
@@ -212,29 +233,29 @@ $(SOXR_CONFIG):
 		'#define WITH_DEV_TRACE 0' \
 		'#endif' > $@
 
-$(SOXR_OBJ_DIR)/%.o: $(SOXR_DIR)/src/%.c $(SOXR_CONFIG)
+$(SOXR_OBJ_DIR)/%.o: $(SOXR_DIR)/src/%.c $(SOXR_CONFIG) | check-submodules
 	$(MKPATH) $(SOXR_OBJ_DIR)
 	$(CC) -o $@ -c $< $(SOXR_CFLAGS)
 
 $(OUT_DIR):
 	$(MKPATH) $@
 
-$(OUT_DIR)/$(LIB) : $(OBJ_FILES) | $(OUT_DIR)
+$(OUT_DIR)/$(LIB) : $(OBJ_FILES) | check-submodules $(OUT_DIR)
 	$(RMPATH) $@
 	${AR} rcs $@ $^
 
-$(OUT_DIR)/$(DYLIB) : $(OBJ_FILES) | $(OUT_DIR)
+$(OUT_DIR)/$(DYLIB) : $(OBJ_FILES) | check-submodules $(OUT_DIR)
 	$(CXX) $(SHARED_FLAG) -o $@ $^ $(DYLIB_LINK_FLAGS)
 
-$(OUT_DIR)/%.o : $(SRC_DIR)/%.cpp $(HDR_FILES) | $(OUT_DIR)
+$(OUT_DIR)/%.o : $(SRC_DIR)/%.cpp $(HDR_FILES) | check-submodules $(OUT_DIR)
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXX_STD_FLAG) -o $@ -c $< -I$(HDR_DIR) -I$(LEAN_INCLUDE) $(TORCH_INC_FLAGS) $(XLA_INC_FLAGS) $(ARROW_INC_FLAGS) $(SOXR_INC_FLAGS) $(EXTRA_CXX_FLAGS) -fPIC
 
-$(OUT_DIR)/%.o : $(SRC_DIR)/%.mm $(HDR_FILES) | $(OUT_DIR)
+$(OUT_DIR)/%.o : $(SRC_DIR)/%.mm $(HDR_FILES) | check-submodules $(OUT_DIR)
 	@mkdir -p $(dir $@)
 	$(CXX) -x objective-c++ $(CXX_STD_FLAG) -o $@ -c $< -I$(HDR_DIR) -I$(LEAN_INCLUDE) $(TORCH_INC_FLAGS) $(XLA_INC_FLAGS) $(ARROW_INC_FLAGS) $(SOXR_INC_FLAGS) $(EXTRA_CXX_FLAGS) -fPIC -fobjc-arc
 
-$(OUT_DIR)/%.o : $(SRC_DIR)/%.cu $(HDR_FILES) | $(OUT_DIR)
+$(OUT_DIR)/%.o : $(SRC_DIR)/%.cu $(HDR_FILES) | check-submodules $(OUT_DIR)
 	@mkdir -p $(dir $@)
 	$(NVCC) -o $@ -c $< -I$(HDR_DIR) -I$(LEAN_INCLUDE) $(TORCH_INC_FLAGS) $(TK_INC_FLAGS) $(NVCCFLAGS)
 
