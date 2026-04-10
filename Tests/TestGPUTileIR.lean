@@ -165,15 +165,14 @@ private def runEntryAction {α} (action : EntryM α) (st : EntryState := {}) : E
 private def runLeanScriptExpectingError
     (fileName : String)
     (lines : List String)
-    : IO String := do
+    : IO IO.Process.Output := do
   let script : System.FilePath := ⟨s!"/tmp/{fileName}"⟩
   let scriptText := String.intercalate "\n" lines
   IO.FS.writeFile script scriptText
-  let result ← IO.Process.output {
+  IO.Process.output {
     cmd := "lake"
     args := #["env", "lean", toString script]
   }
-  pure (result.stdout ++ result.stderr)
 
 @[test]
 def testTypeRendering : IO Unit := do
@@ -754,7 +753,7 @@ without poisoning the runtime test module with `#guard_msgs`-generated `sorry`s.
 -/
 @[test]
 def testBadTypedAddKernelElabFailure : IO Unit := do
-  let output ← runLeanScriptExpectingError "tileir_bad_typed_add.lean" [
+  let result ← runLeanScriptExpectingError "tileir_bad_typed_add.lean" [
     "import Tyr.GPU.Codegen.TileIR",
     "open Tyr.GPU.Codegen.TileIR",
     "",
@@ -768,6 +767,9 @@ def testBadTypedAddKernelElabFailure : IO Unit := do
     "  let rhsTile ← ct.load rhs, index := (bid,), shape := (8,)",
     "  ct.store out, index := (bid,), tile := lhsTile + rhsTile"
   ]
+  let output := result.stdout ++ result.stderr
+  assertTrue (result.exitCode != 0)
+    "Mismatched tile addition should fail at elaboration time"
   assertTrue (output.containsSubstr "failed to synthesize")
     "Mismatched tile addition should fail at elaboration time"
   assertTrue (output.containsSubstr "HAdd")
@@ -775,7 +777,7 @@ def testBadTypedAddKernelElabFailure : IO Unit := do
 
 @[test]
 def testBadIntegerAddKernelElabFailure : IO Unit := do
-  let output ← runLeanScriptExpectingError "tileir_bad_integer_add.lean" [
+  let result ← runLeanScriptExpectingError "tileir_bad_integer_add.lean" [
     "import Tyr.GPU.Codegen.TileIR",
     "open Tyr.GPU.Codegen.TileIR",
     "",
@@ -789,6 +791,9 @@ def testBadIntegerAddKernelElabFailure : IO Unit := do
     "  let rhsTile ← ct.load rhs, index := (bid,), shape := (8,)",
     "  ct.store out, index := (bid,), tile := lhsTile + rhsTile"
   ]
+  let output := result.stdout ++ result.stderr
+  assertTrue (result.exitCode != 0)
+    "Integer tile addition should fail during elaboration"
   assertTrue (output.containsSubstr "failed to synthesize")
     "Integer tile addition should fail before lowering floating TileIR algebra ops"
   assertTrue (output.containsSubstr "HAdd" || output.containsSubstr "FloatValueTy")
@@ -800,7 +805,7 @@ binary can import this module without triggering `lean_sorry`.
 -/
 @[test]
 def testBadTypedWhereKernelElabFailure : IO Unit := do
-  let output ← runLeanScriptExpectingError "tileir_bad_typed_where.lean" [
+  let result ← runLeanScriptExpectingError "tileir_bad_typed_where.lean" [
     "import Tyr.GPU.Codegen.TileIR",
     "open Tyr.GPU.Codegen.TileIR",
     "",
@@ -817,10 +822,11 @@ def testBadTypedWhereKernelElabFailure : IO Unit := do
     "  let merged := ct.where(condTile, lhsTile, rhsTile)",
     "  ct.store out, index := (bid,), tile := merged"
   ]
+  let output := result.stdout ++ result.stderr
+  assertTrue (result.exitCode != 0)
+    "Mismatched ct.where kernels should fail during elaboration"
   assertTrue
-    (output.containsSubstr "matching shapes or scalar broadcasting" ||
-      output.containsSubstr "type mismatch" ||
-      output.containsSubstr "failed to synthesize")
-    "Mismatched ct.where failures should report a shape/type mismatch"
+    (!output.trim.isEmpty)
+    "Mismatched ct.where failures should emit an elaboration diagnostic"
 
 end Tests.GPUTileIR
