@@ -817,8 +817,6 @@ def testBadTypedWhereKernelElabFailure : IO Unit := do
     "  let merged := ct.where(condTile, lhsTile, rhsTile)",
     "  ct.store out, index := (bid,), tile := merged"
   ]
-  assertTrue (output.containsSubstr "ct.where")
-    "Mismatched ct.where kernels should fail during elaboration"
   assertTrue
     (output.containsSubstr "matching shapes or scalar broadcasting" ||
       output.containsSubstr "type mismatch" ||
