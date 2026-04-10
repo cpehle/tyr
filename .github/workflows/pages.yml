@@ -69,8 +69,8 @@ jobs:
 
       - name: Prepare doc-gen4 path dependency
         run: |
-          rm -rf "$GITHUB_WORKSPACE/../doc-gen4"
-          git clone --depth 1 https://github.com/cpehle/doc-gen4.git "$GITHUB_WORKSPACE/../doc-gen4"
+          rm -rf "$GITHUB_WORKSPACE/.doc-gen4"
+          git clone --branch v4.29.0 --depth 1 https://github.com/leanprover/doc-gen4.git "$GITHUB_WORKSPACE/.doc-gen4"
 
       - name: Create docbuild package
         run: |
@@ -92,7 +92,7 @@ jobs:
 
           [[require]]
           name = "doc-gen4"
-          path = "../../doc-gen4"
+          path = "../.doc-gen4"
           EOF
 
       - name: Build docs
