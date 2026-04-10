@@ -73,7 +73,7 @@ def controlFlowDemo (base : f32PtrTile) (pred : i1Scalar) (ptrs : f32PtrVector8)
     else do
       let one ← const_float 1.0 : ct.Scalar ct.f32
       pure one
-    let _acc ← for_tile _iv in (zero to upper, step stepVal) carrying (running := selected) do
+    let _acc ← for_tile _iv in ct.range(zero, upper, stepVal) carrying (running := selected) do
       let next := ct.exp2 running
       continue_tile next
     pure ()
@@ -83,7 +83,7 @@ def mmaLoopDemo (a : f16Tile16x16) (b : f16Tile16x16) (seed : f32Tile16x16) (out
     (zero : i32Scalar) (upper : i32Scalar) (stepVal : i32Scalar) :=
   do
     ct.comment "Iteratively accumulate an MMA tile and clamp it with named tile algebra forms."
-    let acc ← for_tile _k in (zero to upper, step stepVal) carrying (running := seed) do
+    let acc ← for_tile _k in ct.range(zero, upper, stepVal) carrying (running := seed) do
       let product ← ct.mma a, b, running
       let clampedHigh ← ct.max product, running
       let clampedLow ← ct.min clampedHigh, product
@@ -130,7 +130,7 @@ def surfaceControlFlowDemo
   else do
     let one := const_float 1.0 : ct.Scalar ct.f32
     pure one
-  let _acc ← for_tile _iv in (zero to upper, step stepVal) carrying (running := selected) do
+  let _acc ← for_tile _iv in ct.range(zero, upper, stepVal) carrying (running := selected) do
     let next := ct.exp2 running
     continue_tile next
   pure ()

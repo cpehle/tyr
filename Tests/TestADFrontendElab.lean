@@ -52,9 +52,9 @@ private def padPrimitiveSpecs : Array PrimitiveFrontendSpec := #[
 ]
 
 private def hasEntry (entries : Array Tyr.AD.Sparse.SparseEntry) (src dst : Nat) : Bool :=
-  entries.any fun entry =>
-    Tyr.AD.Sparse.SparseEntry.src entry == src &&
-      Tyr.AD.Sparse.SparseEntry.dst entry == dst
+  entries.any fun sparseEntry =>
+    Tyr.AD.Sparse.SparseEntry.src sparseEntry == src &&
+      Tyr.AD.Sparse.SparseEntry.dst sparseEntry == dst
 
 @[test]
 unsafe def testDeriveSinglePrimitiveFrontendRegistration : IO Unit := do

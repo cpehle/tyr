@@ -140,6 +140,7 @@ endif
 CU_SRCS :=
 SRCS += generated/tyr_gpu_kernel_stubs.cpp
 endif
+REQUIRES_TK := $(if $(strip $(CU_SRCS)),1,0)
 
 LIB_NAME := TyrC
 LIB := lib${LIB_NAME}.a
@@ -179,7 +180,7 @@ check-submodules:
 		echo "Missing populated submodule at $(SOXR_DIR). Run: git submodule update --init --recursive"; \
 		exit 1; \
 	fi
-	@if [ ! -d "$(TKDIR)/include" ]; then \
+	@if [ "$(REQUIRES_TK)" = "1" ] && [ ! -d "$(TKDIR)/include" ]; then \
 		echo "Missing populated submodule at $(TKDIR). Run: git submodule update --init --recursive"; \
 		exit 1; \
 	fi

@@ -27,9 +27,6 @@ open Lean.Parser.Term
 declare_syntax_cat tileirBinder
 syntax "(" ident " : " term ")" : tileirBinder
 
-declare_syntax_cat tileirLoopRange
-syntax "(" term " to " term "," " step " term ")" : tileirLoopRange
-
 declare_syntax_cat tileirLoopCarry
 syntax "(" ident " := " term ")" : tileirLoopCarry
 
@@ -48,30 +45,30 @@ declare_syntax_cat tileirTermArg
 syntax ident " := " term : tileirTermArg
 
 syntax (name := tileirModuleTerm) "tileir_module " str " do " doSeq : term
-syntax (name := tileirGlobalTerm) "global " ident " : " term " := " term : term
-syntax (name := tileirEntryTerm) "entry " str (ppSpace tileirBinder)* " do " doSeq : term
+syntax (name := tileirGlobalTerm) "tileir.global " ident " : " term " := " term : term
+syntax (name := tileirEntryTerm) "tileir.entry " str (ppSpace tileirBinder)* " do " doSeq : term
 
 syntax (name := tileirConstIntTerm) "const_int " term " : " term : term
 syntax (name := tileirConstFloatTerm) "const_float " term " : " term : term
 syntax (name := tileirConstBoolTerm) "const_bool " term " : " term : term
-syntax (name := tileirLoadPtrTkoTerm) "load_ptr_tko " term ", " term " : " term : term
-syntax (name := tileirGetGlobalTerm) "get_global " ident " : " term : term
-syntax (name := tileirBroadcastTerm) "broadcast " term " : " term : term
-syntax (name := tileirReshapeTerm) "reshape " term " : " term : term
-syntax (name := tileirOffsetTerm) "offset " term ", " term " : " term : term
-syntax (name := tileirMakeTensorViewTerm) "make_tensor_view " term " : " term : term
-syntax (name := tileirMakePartitionViewTerm) "make_partition_view " term " : " term : term
+syntax (name := tileirLoadPtrTkoTerm) "tileir.load_ptr_tko " term ", " term " : " term : term
+syntax (name := tileirGetGlobalTerm) "tileir.get_global " ident " : " term : term
+syntax (name := tileirBroadcastTerm) "tileir.broadcast " term " : " term : term
+syntax (name := tileirReshapeTerm) "tileir.reshape " term " : " term : term
+syntax (name := tileirOffsetTerm) "tileir.offset " term ", " term " : " term : term
+syntax (name := tileirMakeTensorViewTerm) "tileir.make_tensor_view " term " : " term : term
+syntax (name := tileirMakePartitionViewTerm) "tileir.make_partition_view " term " : " term : term
 syntax (name := tileirMmafTerm) "mmaf " term ", " term ", " term : term
 syntax (name := tileirMmaiTerm) "mmai " term ", " term ", " term : term
 syntax (name := tileirMaxfTerm) "maxf " term ", " term : term
 syntax (name := tileirMinfTerm) "minf " term ", " term : term
 syntax (name := tileirFor1Term)
   "for_tile " ident
-  " in " tileirLoopRange
+  " in " term
   " carrying " tileirLoopCarry
   " do " doSeq : term
-syntax (name := tileirStorePtrTkoTerm) "store_ptr_tko " term ", " term ", " term : term
-syntax (name := tileirPrintTkoTerm) "print_tko " str : term
+syntax (name := tileirStorePtrTkoTerm) "tileir.store_ptr_tko " term ", " term ", " term : term
+syntax (name := tileirPrintTkoTerm) "tileir.print " str : term
 syntax (name := tileirContinueTerm) "continue_tile " term : term
 syntax (name := tileirBreakTerm) "break_tile " term : term
 syntax (name := tileirKernelDefCmd)
@@ -1059,10 +1056,6 @@ private def hintFromPattern (pat : TSyntax `term) : String :=
   | `(term| _) => "v"
   | _ => "v"
 
-private def unpackLoopRange (stx : TSyntax `tileirLoopRange) :
-    TSyntax `term × TSyntax `term × TSyntax `term :=
-  (⟨stx.raw[1]⟩, ⟨stx.raw[3]⟩, ⟨stx.raw[6]⟩)
-
 private def unpackLoopCarry (stx : TSyntax `tileirLoopCarry) :
     Ident × TSyntax `term :=
   (⟨stx.raw[1]⟩, ⟨stx.raw[3]⟩)
@@ -1129,6 +1122,41 @@ private partial def ensureValueTerms
     values := values.push value
     prep := prep ++ valuePrep
   pure (values, prep)
+
+private partial def expandCtRange
+    (stx : TSyntax `term)
+    : FrontendM ((TSyntax `term × TSyntax `term × TSyntax `term) × Array (TSyntax `doElem)) := do
+  let kind := stx.raw.getKind
+  if kind == ``ctRange1Term then
+    let upper : TSyntax `term := ⟨stx.raw[2]⟩
+    let (upper, upperPrep) ← ensureValueTerm upper
+    let lowerId ← freshTempIdent stx `tileir_range_lower
+    let stepId ← freshTempIdent stx `tileir_range_step
+    let lowerBind ← liftM <| mkI32ConstBind lowerId "range_lower" 0
+    let stepBind ← liftM <| mkI32ConstBind stepId "range_step" 1
+    pure ((lowerId, upper, stepId), #[lowerBind, stepBind] ++ upperPrep)
+  else if kind == ``ctRange2Term then
+    let lower : TSyntax `term := ⟨stx.raw[2]⟩
+    let upper : TSyntax `term := ⟨stx.raw[4]⟩
+    let (lower, lowerPrep) ← ensureValueTerm lower
+    let (upper, upperPrep) ← ensureValueTerm upper
+    let stepId ← freshTempIdent stx `tileir_range_step
+    let stepBind ← liftM <| mkI32ConstBind stepId "range_step" 1
+    pure ((lower, upper, stepId), lowerPrep ++ upperPrep ++ #[stepBind])
+  else if kind == ``ctRange3Term then
+    let lower : TSyntax `term := ⟨stx.raw[2]⟩
+    let upper : TSyntax `term := ⟨stx.raw[4]⟩
+    let stepVal : TSyntax `term := ⟨stx.raw[6]⟩
+    let (lower, lowerPrep) ← ensureValueTerm lower
+    let (upper, upperPrep) ← ensureValueTerm upper
+    let (stepVal, stepPrep) ← ensureValueTerm stepVal
+    pure ((lower, upper, stepVal), lowerPrep ++ upperPrep ++ stepPrep)
+  else
+    frontendErrorAt stx "TileIR `for` loops expect `ct.range(stop)`, `ct.range(start, stop)`, or `ct.range(start, stop, step)`"
+
+private partial def isCtRuntimeRangeSyntax (stx : TSyntax `term) : Bool :=
+  let kind := stx.raw.getKind
+  kind == ``ctRange1Term || kind == ``ctRange2Term || kind == ``ctRange3Term
 
 private partial def expandUnaryExpr
     (_hint : String)
@@ -1373,9 +1401,9 @@ private partial def expandTileExpr?
       pure <| some (← wrapWithPrep prep body)
   | `(ctStaticEvalTerm| ct.static_eval $e:term) =>
       expandTileExpr? e hint
-  | `(tileirLoadPtrTkoTerm| load_ptr_tko $ptr:term, $tok:term : $ty:term) =>
+  | `(tileirLoadPtrTkoTerm| tileir.load_ptr_tko $ptr:term, $tok:term : $ty:term) =>
       pure <| some (← `(Tyr.GPU.Codegen.TileIR.loadPtrTko $(strLit hint) $ptr $tok $ty))
-  | `(tileirGetGlobalTerm| get_global $name:ident : $ty:term) =>
+  | `(tileirGetGlobalTerm| tileir.get_global $name:ident : $ty:term) =>
       pure <| some (← `(Tyr.GPU.Codegen.TileIR.getGlobal $(strLit hint) $(strLit name.getId.toString) $ty))
   | `(ctBroadcastTerm| ct.broadcast $src:term : $ty:term) =>
       let (src, prep) ← ensureValueTerm src
@@ -1390,7 +1418,7 @@ private partial def expandTileExpr?
       let (src, prep) ← ensureValueTerm src
       let body ← `(Tyr.GPU.Codegen.TileIR.ct.broadcastTo $(strLit hint) $src $shape)
       pure <| some (← wrapWithPrep prep body)
-  | `(tileirBroadcastTerm| broadcast $src:term : $ty:term) =>
+  | `(tileirBroadcastTerm| tileir.broadcast $src:term : $ty:term) =>
       let (src, prep) ← ensureValueTerm src
       let body ← `(Tyr.GPU.Codegen.TileIR.broadcast $(strLit hint) $src $ty)
       pure <| some (← wrapWithPrep prep body)
@@ -1427,7 +1455,7 @@ private partial def expandTileExpr?
       pure <| some (← expandExtractExpr src (unpackTermTuple indicesTuple) (unpackTermTuple shapeTuple))
   | `(ctExtractPositionalTerm| ct.extract($src:term, $indices:tileirTermTuple, $shape:tileirTermTuple)) =>
       pure <| some (← expandExtractExpr src (unpackTermTuple indices) (unpackTermTuple shape))
-  | `(tileirReshapeTerm| reshape $src:term : $ty:term) =>
+  | `(tileirReshapeTerm| tileir.reshape $src:term : $ty:term) =>
       let (src, prep) ← ensureValueTerm src
       let body ← `(Tyr.GPU.Codegen.TileIR.reshape $(strLit hint) $src $ty)
       pure <| some (← wrapWithPrep prep body)
@@ -1436,7 +1464,7 @@ private partial def expandTileExpr?
       let (idx, idxPrep) ← ensureValueTerm idx
       let body ← `(Tyr.GPU.Codegen.TileIR.ct.offsetAs $(strLit hint) $ptr $idx $ty)
       pure <| some (← wrapWithPrep (ptrPrep ++ idxPrep) body)
-  | `(tileirOffsetTerm| offset $ptr:term, $idx:term : $ty:term) =>
+  | `(tileirOffsetTerm| tileir.offset $ptr:term, $idx:term : $ty:term) =>
       let (ptr, ptrPrep) ← ensureValueTerm ptr
       let (idx, idxPrep) ← ensureValueTerm idx
       let body ← `(Tyr.GPU.Codegen.TileIR.offset $(strLit hint) $ptr $idx $ty)
@@ -1445,7 +1473,7 @@ private partial def expandTileExpr?
       let (base, prep) ← ensureValueTerm base
       let body ← `(Tyr.GPU.Codegen.TileIR.ct.tensorViewAs $(strLit hint) $base $desc)
       pure <| some (← wrapWithPrep prep body)
-  | `(tileirMakeTensorViewTerm| make_tensor_view $base:term : $desc:term) =>
+  | `(tileirMakeTensorViewTerm| tileir.make_tensor_view $base:term : $desc:term) =>
       let (base, prep) ← ensureValueTerm base
       let body ← `(Tyr.GPU.Codegen.TileIR.makeTensorView $(strLit hint) $base $desc)
       pure <| some (← wrapWithPrep prep body)
@@ -1453,7 +1481,7 @@ private partial def expandTileExpr?
       let (src, prep) ← ensureValueTerm src
       let body ← `(Tyr.GPU.Codegen.TileIR.ct.partitionViewAs $(strLit hint) $src $desc)
       pure <| some (← wrapWithPrep prep body)
-  | `(tileirMakePartitionViewTerm| make_partition_view $src:term : $desc:term) =>
+  | `(tileirMakePartitionViewTerm| tileir.make_partition_view $src:term : $desc:term) =>
       let (src, prep) ← ensureValueTerm src
       let body ← `(Tyr.GPU.Codegen.TileIR.makePartitionView $(strLit hint) $src $desc)
       pure <| some (← wrapWithPrep prep body)
@@ -1507,12 +1535,9 @@ private partial def expandTileExpr?
       pure <| some (← `(Tyr.GPU.Codegen.TileIR.ct.staticAssert $cond))
   | `(ctStaticAssertMsgTerm| ct.static_assert $cond:term, $msg:term) =>
       pure <| some (← `(Tyr.GPU.Codegen.TileIR.ct.staticAssert $cond (fun _ => toString $msg)))
-  | `(tileirFor1Term| for_tile $iv:ident in $range:tileirLoopRange carrying $carrySpec:tileirLoopCarry do $body:doSeq) =>
-      let (lower, upper, stepVal) := unpackLoopRange range
+  | `(tileirFor1Term| for_tile $iv:ident in $range:term carrying $carrySpec:tileirLoopCarry do $body:doSeq) =>
+      let ((lower, upper, stepVal), rangePrep) ← expandCtRange range
       let (carry, init) := unpackLoopCarry carrySpec
-      let (lower, lowerPrep) ← ensureValueTerm lower
-      let (upper, upperPrep) ← ensureValueTerm upper
-      let (stepVal, stepPrep) ← ensureValueTerm stepVal
       let (init, initPrep) ← ensureValueTerm init
       let loopBody ← wrapModernDoSeq body
       let loop ←
@@ -1524,8 +1549,8 @@ private partial def expandTileExpr?
             (fun $iv:ident => fun $carry:ident => $loopBody)
             $(strLit iv.getId.toString)
             $(strLit hint))
-      pure <| some (← wrapWithPrep (lowerPrep ++ upperPrep ++ stepPrep ++ initPrep) loop)
-  | `(tileirPrintTkoTerm| print_tko $msg:str) =>
+      pure <| some (← wrapWithPrep (rangePrep ++ initPrep) loop)
+  | `(tileirPrintTkoTerm| tileir.print $msg:str) =>
       pure <| some (← `(Tyr.GPU.Codegen.TileIR.printTko $msg))
   | `(ctStoreTerm| ct.store $ptr:term, $value:term) =>
       let (ptr, ptrPrep) ← ensureValueTerm ptr
@@ -1544,7 +1569,7 @@ private partial def expandTileExpr?
       let (value, valuePrep) ← ensureValueTerm value
       let body ← `(Tyr.GPU.Codegen.TileIR.ct.storeView $view #[$indices,*] $value)
       pure <| some (← wrapWithPrep (viewPrep ++ indexPrep ++ valuePrep) body)
-  | `(tileirStorePtrTkoTerm| store_ptr_tko $ptr:term, $value:term, $tok:term) =>
+  | `(tileirStorePtrTkoTerm| tileir.store_ptr_tko $ptr:term, $value:term, $tok:term) =>
       let (ptr, ptrPrep) ← ensureValueTerm ptr
       let (value, valuePrep) ← ensureValueTerm value
       let (tok, tokPrep) ← ensureValueTerm tok
@@ -1610,41 +1635,6 @@ private partial def expandTileExpr?
       pure none
 
 end
-
-private def expandCtRange
-    (stx : TSyntax `term)
-    : FrontendM ((TSyntax `term × TSyntax `term × TSyntax `term) × Array (TSyntax `doElem)) := do
-  let kind := stx.raw.getKind
-  if kind == ``ctRange1Term then
-    let upper : TSyntax `term := ⟨stx.raw[2]⟩
-    let (upper, upperPrep) ← ensureValueTerm upper
-    let lowerId ← freshTempIdent stx `tileir_range_lower
-    let stepId ← freshTempIdent stx `tileir_range_step
-    let lowerBind ← liftM <| mkI32ConstBind lowerId "range_lower" 0
-    let stepBind ← liftM <| mkI32ConstBind stepId "range_step" 1
-    pure ((lowerId, upper, stepId), #[lowerBind, stepBind] ++ upperPrep)
-  else if kind == ``ctRange2Term then
-    let lower : TSyntax `term := ⟨stx.raw[2]⟩
-    let upper : TSyntax `term := ⟨stx.raw[4]⟩
-    let (lower, lowerPrep) ← ensureValueTerm lower
-    let (upper, upperPrep) ← ensureValueTerm upper
-    let stepId ← freshTempIdent stx `tileir_range_step
-    let stepBind ← liftM <| mkI32ConstBind stepId "range_step" 1
-    pure ((lower, upper, stepId), lowerPrep ++ upperPrep ++ #[stepBind])
-  else if kind == ``ctRange3Term then
-    let lower : TSyntax `term := ⟨stx.raw[2]⟩
-    let upper : TSyntax `term := ⟨stx.raw[4]⟩
-    let stepVal : TSyntax `term := ⟨stx.raw[6]⟩
-    let (lower, lowerPrep) ← ensureValueTerm lower
-    let (upper, upperPrep) ← ensureValueTerm upper
-    let (stepVal, stepPrep) ← ensureValueTerm stepVal
-    pure ((lower, upper, stepVal), lowerPrep ++ upperPrep ++ stepPrep)
-  else
-    frontendErrorAt stx "TileIR `for` loops expect `ct.range(stop)`, `ct.range(start, stop)`, or `ct.range(start, stop, step)`"
-
-private def isCtRuntimeRangeSyntax (stx : TSyntax `term) : Bool :=
-  let kind := stx.raw.getKind
-  kind == ``ctRange1Term || kind == ``ctRange2Term || kind == ``ctRange3Term
 
 private def reduceExprFully (e : Expr) : TermElabM Expr := do
   instantiateMVars (← Lean.Meta.reduceAll (← instantiateMVars e))
@@ -2139,7 +2129,7 @@ def elabTileIRKernelDef : CommandElab
     let constParamIds := constBinders.map KernelBinder.id
     let moduleTerm : TSyntax `term ←
       `(tileir_module $(strSyntax kernelName) do
-          entry $(strSyntax kernelName)
+          tileir.entry $(strSyntax kernelName)
             $[($paramIds : $paramTys)]*
             ($tokId : .token) do
             $body)
@@ -2221,11 +2211,11 @@ macro_rules
           Tyr.GPU.Codegen.TileIR.module_ $name do $body)
 
 macro_rules
-  | `(global $name:ident : $ty := $value) =>
+  | `(tileir.global $name:ident : $ty := $value) =>
       `(Tyr.GPU.Codegen.TileIR.global $(strLit name.getId.toString) $ty $value)
 
 macro_rules
-  | `(entry $entryName:str $[$binders:tileirBinder]* do $body:doSeq) => do
+  | `(tileir.entry $entryName:str $[$binders:tileirBinder]* do $body:doSeq) => do
       expandEntryTerm entryName binders body
 
 macro_rules
@@ -2235,20 +2225,20 @@ macro_rules
       expandSurfaceTerm (← `(const_float $value:term : $ty:term))
   | `(const_bool $value:term : $ty:term) => do
       expandSurfaceTerm (← `(const_bool $value:term : $ty:term))
-  | `(load_ptr_tko $ptr:term, $tok:term : $ty:term) => do
-      expandSurfaceTerm (← `(load_ptr_tko $ptr:term, $tok:term : $ty:term))
-  | `(get_global $name:ident : $ty:term) => do
-      expandSurfaceTerm (← `(get_global $name:ident : $ty:term))
-  | `(broadcast $src:term : $ty:term) => do
-      expandSurfaceTerm (← `(broadcast $src:term : $ty:term))
-  | `(reshape $src:term : $ty:term) => do
-      expandSurfaceTerm (← `(reshape $src:term : $ty:term))
-  | `(offset $ptr:term, $idx:term : $ty:term) => do
-      expandSurfaceTerm (← `(offset $ptr:term, $idx:term : $ty:term))
-  | `(make_tensor_view $base:term : $desc:term) => do
-      expandSurfaceTerm (← `(make_tensor_view $base:term : $desc:term))
-  | `(make_partition_view $src:term : $desc:term) => do
-      expandSurfaceTerm (← `(make_partition_view $src:term : $desc:term))
+  | `(tileir.load_ptr_tko $ptr:term, $tok:term : $ty:term) => do
+      expandSurfaceTerm (← `(tileir.load_ptr_tko $ptr:term, $tok:term : $ty:term))
+  | `(tileir.get_global $name:ident : $ty:term) => do
+      expandSurfaceTerm (← `(tileir.get_global $name:ident : $ty:term))
+  | `(tileir.broadcast $src:term : $ty:term) => do
+      expandSurfaceTerm (← `(tileir.broadcast $src:term : $ty:term))
+  | `(tileir.reshape $src:term : $ty:term) => do
+      expandSurfaceTerm (← `(tileir.reshape $src:term : $ty:term))
+  | `(tileir.offset $ptr:term, $idx:term : $ty:term) => do
+      expandSurfaceTerm (← `(tileir.offset $ptr:term, $idx:term : $ty:term))
+  | `(tileir.make_tensor_view $base:term : $desc:term) => do
+      expandSurfaceTerm (← `(tileir.make_tensor_view $base:term : $desc:term))
+  | `(tileir.make_partition_view $src:term : $desc:term) => do
+      expandSurfaceTerm (← `(tileir.make_partition_view $src:term : $desc:term))
   | `(mmaf $a:term, $b:term, $c:term) => do
       expandSurfaceTerm (← `(mmaf $a:term, $b:term, $c:term))
   | `(mmai $a:term, $b:term, $c:term) => do
@@ -2257,13 +2247,13 @@ macro_rules
       expandSurfaceTerm (← `(maxf $lhs:term, $rhs:term))
   | `(minf $lhs:term, $rhs:term) => do
       expandSurfaceTerm (← `(minf $lhs:term, $rhs:term))
-  | `(for_tile $iv:ident in $range:tileirLoopRange carrying $carrySpec:tileirLoopCarry do $body:doSeq) => do
+  | `(for_tile $iv:ident in $range:term carrying $carrySpec:tileirLoopCarry do $body:doSeq) => do
       expandSurfaceTerm
-        (← `(for_tile $iv:ident in $range:tileirLoopRange carrying $carrySpec:tileirLoopCarry do $body:doSeq))
-  | `(store_ptr_tko $ptr:term, $value:term, $tok:term) => do
-      expandSurfaceTerm (← `(store_ptr_tko $ptr:term, $value:term, $tok:term))
-  | `(print_tko $msg:str) => do
-      expandSurfaceTerm (← `(print_tko $msg:str))
+        (← `(for_tile $iv:ident in $range:term carrying $carrySpec:tileirLoopCarry do $body:doSeq))
+  | `(tileir.store_ptr_tko $ptr:term, $value:term, $tok:term) => do
+      expandSurfaceTerm (← `(tileir.store_ptr_tko $ptr:term, $value:term, $tok:term))
+  | `(tileir.print $msg:str) => do
+      expandSurfaceTerm (← `(tileir.print $msg:str))
   | `(continue_tile $value:term) => do
       expandSurfaceTerm (← `(continue_tile $value:term))
   | `(break_tile $value:term) => do

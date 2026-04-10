@@ -20,14 +20,14 @@ private def countSubstr (haystack needle : String) : Nat :=
 
 private def mmaiFrontendDemo : Module :=
   tileir_module "mmai_frontend_demo" do
-    entry "mmai_demo"
+    tileir.entry "mmai_demo"
         (a : i8Tile16x16)
         (b : i8Tile16x16)
         (c : i32Tile16x16)
         (outPtr : i32PtrTile)
         (tok0 : .token) do
       let acc := mmai a, b, c
-      let _ ← store_ptr_tko outPtr, acc, tok0
+      let _ ← tileir.store_ptr_tko outPtr, acc, tok0
       pure ()
 
 private def dceDemo : Module := {
