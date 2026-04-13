@@ -340,6 +340,32 @@ def relinkBuiltExecutableToTmp (rootPath : FilePath) (exeName : String) : IO Fil
 
 /-! ## C++ Library Build -/
 
+/-- Forward GPU build overrides from the outer environment into the C++ runtime
+build so Lake and shell scripts compile `libTyrC` for the same target/family. -/
+def gpuMakeEnv : IO (Array (String × Option String)) := do
+  let gpuTarget? ← do
+    match (← IO.getEnv "TYR_GPU_TARGET") with
+    | some v => pure (some v)
+    | none => IO.getEnv "GPU"
+  let gpuFamily? ← do
+    match (← IO.getEnv "TYR_GPU_FAMILY") with
+    | some v => pure (some v)
+    | none => IO.getEnv "GPU_FAMILY"
+  let gpuCompute? ← do
+    match (← IO.getEnv "TYR_GPU_COMPUTE") with
+    | some v => pure (some v)
+    | none => IO.getEnv "GPU_COMPUTE"
+  let gpuCode? ← do
+    match (← IO.getEnv "TYR_GPU_CODE") with
+    | some v => pure (some v)
+    | none => IO.getEnv "GPU_CODE"
+  pure <| #[
+    ("GPU", gpuTarget?.bind nonEmptyTrimmed?),
+    ("GPU_FAMILY", gpuFamily?.bind nonEmptyTrimmed?),
+    ("GPU_COMPUTE", gpuCompute?.bind nonEmptyTrimmed?),
+    ("GPU_CODE", gpuCode?.bind nonEmptyTrimmed?)
+  ]
+
 /-- External library target for the C++ bindings.
     This wraps the Makefile build for now - a future enhancement could
     use Lake's native C++ compilation. -/
@@ -408,6 +434,7 @@ extern_lib libtyr pkg := do
 
   buildFileAfterDep tyrCLib depJob fun _ => do
     let sysroot ← getLeanSysroot
+    let gpuEnv ← gpuMakeEnv
     let extraEnv :=
       if System.Platform.isOSX then
         #[("MACOSX_DEPLOYMENT_TARGET", some macOSDeploymentTarget)]
@@ -460,7 +487,7 @@ extern_lib libtyr pkg := do
       env := #[
         ("LEAN_HOME", some sysroot.toString),
         ("TYR_GPU_CODEGEN_MODULE", some gpuCodegenModule)
-      ] ++ extraEnv
+      ] ++ gpuEnv ++ extraEnv
     }
 
 /-! ## Lean Library -/
