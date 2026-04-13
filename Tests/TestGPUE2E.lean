@@ -57,11 +57,11 @@ def testRotaryTorchParity : IO Unit :=
 
 @[test]
 def testLayerNormTorchParity : IO Unit :=
-  runGpuBoolTestIf
-    "layernorm_tyr_vs_torch"
-    (do pure !(← Examples.GPU.gpuTargetIsAny #["GB10", "B200", "B300"]))
-    "current kernel is Hopper-only; no validated Blackwell-family implementation exists yet"
-    Examples.GPU.RunLayerNorm.runOnce
+  runGpuBoolTest "layernorm_f32_tyr_vs_torch" Examples.GPU.RunLayerNorm.runFloat32Once
+
+@[test]
+def testLayerNormBFloat16TorchParity : IO Unit :=
+  runGpuBoolTest "layernorm_bf16_tyr_vs_torch" Examples.GPU.RunLayerNorm.runBFloat16Once
 
 @[test]
 def testFlashAttnTorchParity : IO Unit :=
