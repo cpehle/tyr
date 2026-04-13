@@ -57,8 +57,8 @@ detect_gpu_target() {
 }
 
 export TYR_GPU_TARGET="${TYR_GPU_TARGET:-$(detect_gpu_target)}"
-modules=(Tyr.GPU.Kernels.MhaGB10)
-generator_targets=(+Tyr.GPU.Codegen.GenerateMain +Tyr.GPU.Kernels.MhaGB10)
+modules=(Tyr.GPU.Kernels.MhaGB10 Tyr.GPU.Kernels.FusedLayerNorm)
+generator_targets=(+Tyr.GPU.Codegen.GenerateMain +Tyr.GPU.Kernels.MhaGB10 +Tyr.GPU.Kernels.FusedLayerNorm)
 
 echo "[1/5] Build Lean kernel generator inputs"
 lake -R --quiet build "${generator_targets[@]}"

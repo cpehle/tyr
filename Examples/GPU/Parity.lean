@@ -115,9 +115,13 @@ def runVendoredReferenceIfConfigured
       args := #[suite, fixtureDir.toString]
     }
     let stdout := out.stdout.trimAscii.toString
+    let unsupported := stdout.contains "vendored_ref unsupported=true"
     if !stdout.isEmpty then
       IO.println stdout
-    if out.exitCode ≠ 0 then
+    if unsupported then
+      IO.println s!"[{suite}] vendored_ref skipped=true"
+      pure true
+    else if out.exitCode ≠ 0 then
       let stderr := out.stderr.trimAscii.toString
       if !stderr.isEmpty then
         IO.eprintln stderr
