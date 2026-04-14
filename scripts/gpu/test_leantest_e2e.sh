@@ -91,31 +91,14 @@ extract_test_filter() {
 }
 
 select_modules_from_filter() {
-  local filter="$1"
-  local selected=()
-  if [[ -z "${filter}" ]]; then
-    printf '%s\n' \
-      Tyr.GPU.Kernels.Copy \
-      Tyr.GPU.Kernels.Rotary \
-      Tyr.GPU.Kernels.FusedLayerNorm \
-      Tyr.GPU.Kernels.MhaH100
-    return
-  fi
-  [[ "${filter}" == *copy* ]] && selected+=(Tyr.GPU.Kernels.Copy)
-  [[ "${filter}" == *rotary* ]] && selected+=(Tyr.GPU.Kernels.Rotary)
-  [[ "${filter}" == *layernorm* ]] && selected+=(Tyr.GPU.Kernels.FusedLayerNorm)
-  if [[ "${filter}" == *flashattn* || "${filter}" == *mha_h100* ]]; then
-    selected+=(Tyr.GPU.Kernels.MhaH100)
-  fi
-  if [[ "${#selected[@]}" -eq 0 ]]; then
-    printf '%s\n' \
-      Tyr.GPU.Kernels.Copy \
-      Tyr.GPU.Kernels.Rotary \
-      Tyr.GPU.Kernels.FusedLayerNorm \
-      Tyr.GPU.Kernels.MhaH100
-    return
-  fi
-  printf '%s\n' "${selected[@]}"
+  # The LeanTest GPU executable links all GPU test modules even when `--filter`
+  # narrows runtime execution, so codegen still needs the full kernel set.
+  printf '%s\n' \
+    Tyr.GPU.Kernels.Copy \
+    Tyr.GPU.Kernels.Rotary \
+    Tyr.GPU.Kernels.FusedLayerNorm \
+    Tyr.GPU.Kernels.FusedRMSNorm \
+    Tyr.GPU.Kernels.MhaH100
 }
 
 test_filter="$(extract_test_filter "$@")"

@@ -113,28 +113,32 @@ gpu_family="$(detect_gpu_family)"
 export TYR_GPU_TARGET="${TYR_GPU_TARGET:-${gpu_target}}"
 export TYR_GPU_FAMILY="${TYR_GPU_FAMILY:-${gpu_family}}"
 runner_source="Examples/GPU/${runner_exe}.lean"
+use_source_runner=0
 
 echo "[3/6] Build C++/CUDA runtime library (${label}, GPU=${TYR_GPU_TARGET}, family=${TYR_GPU_FAMILY})"
 invalidate_generated_gpu_objects
 make -C cc -j"$(cpu_count)" GPU="${TYR_GPU_TARGET}" GPU_FAMILY="${TYR_GPU_FAMILY}"
 
-if [[ -f "${runner_source}" ]]; then
-  echo "[4/6] Use Lean source runner (${runner_source})"
-else
-  echo "[4/6] Build Lean executable (${runner_exe})"
-  lake -R --quiet build "$runner_exe"
+echo "[4/6] Build Lean executable (${runner_exe})"
+if ! lake -R --quiet build "$runner_exe" "${extra_build_targets[@]}"; then
+  if [[ -f "${runner_source}" ]]; then
+    echo "[4/6] Falling back to Lean source runner (${runner_source})"
+    use_source_runner=1
+  else
+    exit 1
+  fi
 fi
 
 for i in $(seq 1 "$trials"); do
   echo "[5/6] (${i}/${trials}) Regenerate fixture tensors (${label})"
-  if [[ -f "${runner_source}" ]]; then
+  if [[ "${use_source_runner}" -eq 1 ]]; then
     lake -R env "$LEAN_BIN" --run "${runner_source}" --gen-only --regen
   else
     lake -R env ./.lake/build/bin/"${runner_exe}" --gen-only --regen
   fi
 
   echo "[6/6] (${i}/${trials}) Run end-to-end check (${label})"
-  if [[ -f "${runner_source}" ]]; then
+  if [[ "${use_source_runner}" -eq 1 ]]; then
     lake -R env "$LEAN_BIN" --run "${runner_source}"
   else
     lake -R env ./.lake/build/bin/"${runner_exe}"

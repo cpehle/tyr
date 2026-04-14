@@ -5,6 +5,7 @@ import Examples.GPU.FixtureRunner
 import Examples.GPU.RunCopy
 import Examples.GPU.RunRotary
 import Examples.GPU.RunLayerNorm
+import Examples.GPU.RunRMSNorm
 import Examples.GPU.RunFlashAttn
 import Examples.GPU.RunMhaH100
 
@@ -62,6 +63,14 @@ def testLayerNormTorchParity : IO Unit :=
 @[test]
 def testLayerNormBFloat16TorchParity : IO Unit :=
   runGpuBoolTest "layernorm_bf16_tyr_vs_torch" Examples.GPU.RunLayerNorm.runBFloat16Once
+
+@[test]
+def testRMSNormTorchParity : IO Unit :=
+  runGpuBoolTest "rmsnorm_f32_tyr_vs_torch" Examples.GPU.RunRMSNorm.runFloat32Once
+
+@[test]
+def testRMSNormBFloat16TorchParity : IO Unit :=
+  runGpuBoolTest "rmsnorm_bf16_tyr_vs_torch" Examples.GPU.RunRMSNorm.runBFloat16Once
 
 @[test]
 def testFlashAttnTorchParity : IO Unit :=
