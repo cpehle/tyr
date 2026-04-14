@@ -782,6 +782,12 @@ lean_exe RunLayerNorm where
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
+/-- End-to-end fused residual + RMSNorm fixture validation. -/
+lean_exe RunRMSNorm where
+  root := `Examples.GPU.RunRMSNorm
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
 /-- End-to-end ThunderKittens flash attention fixture validation. -/
 lean_exe RunFlashAttn where
   root := `Examples.GPU.RunFlashAttn

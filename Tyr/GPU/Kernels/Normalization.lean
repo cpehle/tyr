@@ -1,6 +1,7 @@
 import Tyr.GPU.Kernels.Activations
 import Tyr.GPU.Kernels.Flux
 import Tyr.GPU.Kernels.FusedLayerNorm
+import Tyr.GPU.Kernels.FusedRMSNorm
 
 /-!
 # Tyr.GPU.Kernels.Normalization

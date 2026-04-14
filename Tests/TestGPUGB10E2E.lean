@@ -2,6 +2,7 @@ import LeanTest
 import Tyr.Torch
 import Examples.GPU.Parity
 import Examples.GPU.RunLayerNorm
+import Examples.GPU.RunRMSNorm
 import Examples.GPU.RunMhaGB10
 
 namespace Tests.GPUGB10E2E
@@ -46,5 +47,21 @@ def testLayerNormGB10BFloat16TorchParity : IO Unit :=
     Examples.GPU.isBlackwellFamily
     "requires TYR_GPU_FAMILY=BLACKWELL"
     Examples.GPU.RunLayerNorm.runBFloat16Once
+
+@[test]
+def testRMSNormGB10Float32TorchParity : IO Unit :=
+  runGpuBoolTestIf
+    "rmsnorm_gb10_f32_tyr_vs_torch"
+    Examples.GPU.isBlackwellFamily
+    "requires TYR_GPU_FAMILY=BLACKWELL"
+    Examples.GPU.RunRMSNorm.runFloat32Once
+
+@[test]
+def testRMSNormGB10BFloat16TorchParity : IO Unit :=
+  runGpuBoolTestIf
+    "rmsnorm_gb10_bf16_tyr_vs_torch"
+    Examples.GPU.isBlackwellFamily
+    "requires TYR_GPU_FAMILY=BLACKWELL"
+    Examples.GPU.RunRMSNorm.runBFloat16Once
 
 end Tests.GPUGB10E2E
