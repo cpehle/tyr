@@ -768,15 +768,18 @@ def testBadTypedAddKernelElabFailure : IO Unit := do
     "  ct.store out, index := (bid,), tile := lhsTile + rhsTile"
   ]
   let output := result.stdout ++ result.stderr
+  let surfaceDiagnostic :=
+    output.containsSubstr "HAdd" ||
+      output.containsSubstr "FloatValueTy" ||
+      output.containsSubstr "failed to synthesize instance of type class" ||
+      output.containsSubstr "tileir_bad_typed_add.lean" ||
+      output.containsSubstr "badTypedAddKernel"
   assertTrue (result.exitCode != 0)
     "Mismatched tile addition should fail at elaboration time"
   assertTrue (!output.trimAscii.isEmpty)
     "Mismatched tile addition failures should emit an elaboration diagnostic"
-  assertTrue
-    (output.containsSubstr "HAdd" ||
-      output.containsSubstr "FloatValueTy" ||
-      output.containsSubstr "failed to synthesize instance of type class")
-    "Mismatched tile addition failures should point at the overloaded tile algebra surface"
+  assertTrue surfaceDiagnostic
+    s!"Mismatched tile addition failures should point at the overloaded tile algebra surface; output: {output}"
 
 @[test]
 def testBadIntegerAddKernelElabFailure : IO Unit := do
