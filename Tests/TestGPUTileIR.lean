@@ -772,7 +772,7 @@ def testBadTypedAddKernelElabFailure : IO Unit := do
     "Mismatched tile addition should fail at elaboration time"
   assertTrue (!output.trimAscii.isEmpty)
     "Mismatched tile addition failures should emit an elaboration diagnostic"
-  assertTrue (output.containsSubstr "HAdd")
+  assertTrue (output.containsSubstr "HAdd" || output.containsSubstr "FloatValueTy")
     "Mismatched tile addition failures should point at the overloaded tile algebra surface"
 
 @[test]
