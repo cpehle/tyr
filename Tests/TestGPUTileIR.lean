@@ -170,8 +170,8 @@ private def runLeanScriptExpectingError
   let scriptText := String.intercalate "\n" lines
   IO.FS.writeFile script scriptText
   IO.Process.output {
-    cmd := "lake"
-    args := #["env", "lean", toString script]
+    cmd := "lean"
+    args := #[toString script]
   }
 
 @[test]
