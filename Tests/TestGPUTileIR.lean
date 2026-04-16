@@ -552,17 +552,13 @@ def testCutileStyleConstShapeRendering : IO Unit := do
 
 @[test]
 def testCutileStyleStaticAssertFailure : IO Unit := do
-  let script : System.FilePath := ⟨"/tmp/tileir_static_assert_failure.lean"⟩
-  let scriptText := String.intercalate "\n" [
+  let result ← runLeanScriptExpectingError "tileir_static_assert_failure.lean" [
     "import Tyr.GPU.Codegen.TileIR.Examples",
     "#eval Tyr.GPU.Codegen.TileIR.renderModule (Tyr.GPU.Codegen.TileIR.surfaceConstShapeDemo 4)"
   ]
-  IO.FS.writeFile script scriptText
-  let result ← IO.Process.output {
-    cmd := "lake"
-    args := #["env", "lean", toString script]
-  }
   let output := result.stdout ++ result.stderr
+  assertTrue (result.exitCode != 0)
+    "Invalid ct.Const specializations should fail while evaluating ct.static_assert"
   assertTrue (output.containsSubstr "TileIR static assertion failed")
     "ct.static_assert should reject invalid ct.Const specializations during frontend evaluation"
 
