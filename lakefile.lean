@@ -784,7 +784,7 @@ lean_exe RunLayerNorm where
 
 /-- End-to-end fused residual + RMSNorm fixture validation. -/
 lean_exe RunRMSNorm where
-  root := `Examples.GPU.RunRMSNorm
+  root := `Examples.GPU.RunRMSNormExe
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
