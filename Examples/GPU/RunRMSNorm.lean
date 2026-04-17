@@ -188,7 +188,3 @@ def main (args : List String) : IO UInt32 := do
   runWithFixtures args suiteName fixtureSpec generateFixtures runOnce
 
 end Examples.GPU.RunRMSNorm
-
-/-- Lake executable entrypoint for the fused residual + RMSNorm demo. -/
-def main (args : List String) : IO UInt32 :=
-  Examples.GPU.RunRMSNorm.main args
