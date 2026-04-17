@@ -36,7 +36,12 @@ private def zerosOn {s : Shape} (device : Device) : T s :=
   torch.zeros s false device
 
 private def reqGradFalse {s : Shape} (t : T s) : T s :=
-  autograd.set_requires_grad (toFloat' t) false
+  autograd.set_requires_grad t false
+
+private def restoreInputDType {s : Shape} (input : T s) (output : T s) : T s :=
+  match input.dtype with
+  | .BFloat16 => toBFloat16' output
+  | _ => output
 
 private def clampMin {s : Shape} (x : T s) (lo : Float) : T s :=
   let loTensor : T s := add_scalar (zeros_like x) lo
@@ -92,7 +97,7 @@ private def rmsNormNoScale2d {n dim : UInt64}
   let var : T #[n, 1] := nn.meanDim (xf * xf) 1 true
   let inv : T #[n, 1] := nn.rsqrt (var + eps)
   let inv : T #[n, dim] := nn.expand inv #[n, dim]
-  xf * inv
+  restoreInputDType x (xf * inv)
 
 private def rmsNormNoScale4d {a b c dim : UInt64}
     (x : T #[a, b, c, dim])

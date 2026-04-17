@@ -62,6 +62,8 @@ def testQwen35CollectionListCoverage : IO Unit := do
     "collection list should include 35B base variant"
   LeanTest.assertTrue (hub.isQwen35CollectionRepoId "Qwen/Qwen3.5-27B-FP8")
     "collection list should include 27B FP8 variant"
+  LeanTest.assertTrue (hub.isQwen35CollectionRepoId "Qwen/Qwen3.6-35B-A3B")
+    "shared Qwen3.5 resolver should include the supported Qwen3.6-35B-A3B checkpoint"
 
 @[test]
 def testSafeTensorsLoadShardedHfSingleShardPattern : IO Unit := do

@@ -60,6 +60,8 @@ import Tests.TestKittenTTS
 import Tests.TestQwen35Model
 import Tests.TestQwen35Multimodal
 import Tests.TestQwen35Pretrained
+import Tests.TestQwen36Model
+import Tests.TestQwen36Pretrained
 import Tests.TestQwen25OmniPretrained
 import Tests.TestSafeTensorsTypeProvider
 import Tests.TestSafeTensorsTypeProviderErrors

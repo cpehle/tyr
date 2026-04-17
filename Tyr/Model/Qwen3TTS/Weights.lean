@@ -16,7 +16,12 @@ namespace torch.qwen3tts
 open torch.Log
 
 private def reqGradFalse {s : Shape} (t : T s) : T s :=
-  autograd.set_requires_grad (toFloat' t) false
+  autograd.set_requires_grad t false
+
+private def castLike {sRef s : Shape} (reference : T sRef) (t : T s) : T s :=
+  match reference.dtype with
+  | .BFloat16 => toBFloat16' t
+  | _ => t
 
 /-- Local alias for sharded tensor loading.
     Device placement is performed once in `loadSharded`. -/
@@ -134,8 +139,10 @@ private def loadCodePredictorProjectionSharded (modelDir : String) (cfg : Talker
     pure (reqGradFalse w, reqGradFalse b)
   catch _ =>
     if cp.hiddenSize == cfg.hiddenSize then
-      let w := reqGradFalse (torch.eye cp.hiddenSize false)
-      let b := reqGradFalse (torch.full_int #[cp.hiddenSize] 0)
+      let reference ← loadTensorShardedTarget modelDir "talker.model.codec_embedding.weight"
+        #[cfg.vocabSize, cfg.hiddenSize]
+      let w := castLike reference (reqGradFalse (torch.eye cp.hiddenSize false))
+      let b := castLike reference (reqGradFalse (torch.zeros #[cp.hiddenSize]))
       pure (w, b)
     else
       throw <| IO.userError

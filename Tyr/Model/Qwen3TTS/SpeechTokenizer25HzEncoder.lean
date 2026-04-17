@@ -134,7 +134,7 @@ end SpeechTokenizer25HzEncoderConfig
 /-! ## Parameters -/
 
 private def freeze {s : Shape} (t : T s) : T s :=
-  autograd.set_requires_grad (toFloat' t) false
+  autograd.set_requires_grad t false
 
 private def loadFrozen (path : String) (name : String) (s : Shape) : IO (T s) := do
   let t ← safetensors.loadTensor path name s

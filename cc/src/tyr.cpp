@@ -58,6 +58,7 @@
 #include <filesystem>
 #include <algorithm>
 #include <atomic>
+#include <cstdlib>
 #include <cmath>
 #include <limits>
 #include <memory>
@@ -69,6 +70,8 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <chrono>
+#include <thread>
 #include <lean/lean.h>
 #include <torch/torch.h>
 #include <ATen/ATen.h>
@@ -104,6 +107,10 @@
 #endif
 #else
 #define TYR_HAS_CUDA_API 0
+#endif
+
+#ifdef __APPLE__
+extern "C" bool tyr_apple_mps_is_available(int debug_flag);
 #endif
 
 // Global atomic counter for live tensors handed to Lean
@@ -183,6 +190,11 @@ torch::Device getDevice(b_lean_obj_arg device) {
     return torch::Device(torch::kCPU);
   } else {  // MPS (tag == 2)
 #ifdef __APPLE__
+    static std::once_flag g_mps_runtime_warmup_once;
+    std::call_once(g_mps_runtime_warmup_once, []() {
+      const int debug_flag = std::getenv("TYR_DEBUG_MPS") != nullptr ? 1 : 0;
+      (void)tyr_apple_mps_is_available(debug_flag);
+    });
     return torch::Device(torch::kMPS);
 #else
     // MPS not available on non-Apple platforms, fallback to CPU
@@ -4455,7 +4467,7 @@ lean_object* lean_torch_sdpa_gqa_mask(
 // Q: [batch, n_head, q_seq, head_dim]
 // K, V: [batch, n_kv_head, kv_seq, head_dim]
 // attn_mask: [batch, q_seq, kv_seq] - 1 for allowed attention edges, 0 for masked edges
-lean_object* lean_torch_sdpa_gqa_mask_qkv(
+LEAN_EXPORT lean_object* lean_torch_sdpa_gqa_mask_qkv(
   uint64_t /*batch*/,
   uint64_t n_head,
   uint64_t n_kv_head,
@@ -4756,16 +4768,18 @@ lean_object* lean_torch_cuda_synchronize(lean_object* /*w*/) {
 lean_object* lean_torch_mps_is_available(lean_object* /*w*/) {
 #ifdef __APPLE__
   try {
-    bool available = false;
-#if TYR_HAS_TORCH_MPS_API
-    available = torch::mps::is_available();
-#else
-    available = at::hasMPS();
-#endif
+    const int debug_flag = std::getenv("TYR_DEBUG_MPS") != nullptr ? 1 : 0;
+    const bool available = tyr_apple_mps_is_available(debug_flag);
     return lean_io_result_mk_ok(lean_box(available));
   } catch (const c10::Error& e) {
+    if (std::getenv("TYR_DEBUG_MPS") != nullptr) {
+      std::cerr << "[tyr:mps] c10::Error: " << e.what() << std::endl;
+    }
     return mkC10IoError("mps_is_available failed", e);
   } catch (const std::exception& e) {
+    if (std::getenv("TYR_DEBUG_MPS") != nullptr) {
+      std::cerr << "[tyr:mps] std::exception: " << e.what() << std::endl;
+    }
     return mkStdIoError("mps_is_available failed", e);
   }
 #else

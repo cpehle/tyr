@@ -118,6 +118,7 @@ def macOSFrameworkArgs : Array String :=
   #[
     "-framework", "Foundation",
     "-framework", "CoreFoundation",
+    "-framework", "Metal",
     "-framework", "CoreGraphics",
     "-framework", "ImageIO",
     "-framework", "AVFoundation",
@@ -130,12 +131,12 @@ def macOSFrameworkArgs : Array String :=
 
 /-- Prefer the locally built libsoxr from submodule source. -/
 def soxrLinkArgs : Array String :=
-  #["-Lcc/build/soxr/src", "-lsoxr"]
+  #[s!"-L{__dir__ / "cc" / "build" / "soxr" / "src"}", "-lsoxr"]
 
 def packageLinkArgs : Array String :=
   if System.Platform.isOSX then
     #[
-      "-Lexternal/libtorch/lib",
+      s!"-L{__dir__ / "external" / "libtorch" / "lib"}",
       "-ltorch", "-ltorch_cpu", "-lc10",
       "-L/opt/homebrew/opt/libomp/lib", "-lomp",
       "-L/opt/homebrew/lib", "-larrow", "-lparquet"
@@ -147,7 +148,7 @@ def packageLinkArgs : Array String :=
     ]
   else
     #[
-      "-Lexternal/libtorch/lib",
+      s!"-L{__dir__ / "external" / "libtorch" / "lib"}",
       "-ltorch", "-ltorch_cpu", "-lc10"
     ] ++ linuxSystemLinkDirs ++ soxrLinkArgs ++ #[
       "-l:libgomp.so.1", "-l:libstdc++.so.6",
@@ -158,8 +159,8 @@ def packageLinkArgs : Array String :=
 def commonLinkArgs : Array String :=
   if System.Platform.isOSX then
     #[
-      "-Lcc/build", "-lTyrC",
-      "-Lexternal/libtorch/lib",
+      s!"{__dir__ / "cc" / "build" / "libTyrC.a"}",
+      s!"-L{__dir__ / "external" / "libtorch" / "lib"}",
       "-ltorch", "-ltorch_cpu", "-lc10",
       "-L/opt/homebrew/opt/libomp/lib", "-lomp",
       "-L/opt/homebrew/lib", "-larrow", "-lparquet"
@@ -170,8 +171,8 @@ def commonLinkArgs : Array String :=
     ]
   else
     #[
-      "-Lcc/build", "-lTyrC",
-      "-Lexternal/libtorch/lib",
+      s!"{__dir__ / "cc" / "build" / "libTyrC.a"}",
+      s!"-L{__dir__ / "external" / "libtorch" / "lib"}",
       "-ltorch", "-ltorch_cpu", "-lc10"
     ] ++ linuxSystemLinkDirs ++ soxrLinkArgs ++ #[
       "-l:libgomp.so.1", "-l:libstdc++.so.6",
@@ -512,6 +513,12 @@ lean_exe Qwen25OmniRunHF where
 /-- Gemma 4 text loader/generation demo with HF repo-id resolution. -/
 lean_exe Gemma4RunHF where
   root := `Examples.Gemma4.RunHF
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
+/-- Minimal native MPS availability probe. -/
+lean_exe MpsProbe where
+  root := `Examples.MpsProbe
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 

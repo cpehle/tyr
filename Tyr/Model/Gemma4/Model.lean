@@ -52,7 +52,12 @@ private def onesOn {s : Shape} (device : Device) : T s :=
   torch.ones s false device
 
 private def reqGradFalse {s : Shape} (t : T s) : T s :=
-  autograd.set_requires_grad (toFloat' t) false
+  autograd.set_requires_grad t false
+
+private def restoreInputDType {s : Shape} (input : T s) (output : T s) : T s :=
+  match input.dtype with
+  | .BFloat16 => toBFloat16' output
+  | _ => output
 
 @[extern "lean_torch_gemma4_text_experts_forward"]
 private opaque routedTextExpertsForward
@@ -87,7 +92,7 @@ def forward2d {n dim : UInt64}
   let inv : T #[n, 1] := nn.rsqrt (var + m.eps)
   let inv : T #[n, dim] := nn.expand inv #[n, dim]
   let scale : T #[n, dim] := nn.expand (reshape (toFloat' m.weight) #[1, dim]) #[n, dim]
-  xf * inv * scale
+  restoreInputDType x (xf * inv * scale)
 
 def forward3d {batch seq dim : UInt64}
     (m : Gemma4RMSNorm dim)
@@ -113,7 +118,7 @@ private def rmsNormNoScale2d {n dim : UInt64}
   let var : T #[n, 1] := nn.meanDim (xf * xf) 1 true
   let inv : T #[n, 1] := nn.rsqrt (var + eps)
   let inv : T #[n, dim] := nn.expand inv #[n, dim]
-  xf * inv
+  restoreInputDType x (xf * inv)
 
 private def rmsNormNoScale4d {a b c dim : UInt64}
     (x : T #[a, b, c, dim])
@@ -133,7 +138,7 @@ private def rmsNormWeighted4dSlice {a b c dim maxDim : UInt64}
   let inv : T #[a * b * c, 1] := nn.rsqrt (var + eps)
   let inv : T #[a * b * c, dim] := nn.expand inv #[a * b * c, dim]
   let scale : T #[a * b * c, dim] := nn.expand (reshape (toFloat' w) #[1, dim]) #[a * b * c, dim]
-  reshape (xf * inv * scale) #[a, b, c, dim]
+  restoreInputDType x (reshape (xf * inv * scale) #[a, b, c, dim])
 
 private def rmsNormNoScale4dSlice {a b c dim : UInt64}
     (x : T #[a, b, c, dim])

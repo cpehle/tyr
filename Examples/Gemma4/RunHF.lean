@@ -113,14 +113,7 @@ private def resolveDevice (arg : String) : IO Device := do
   match requested with
   | "auto" => getBestDevice
   | "cpu" => pure Device.CPU
-  | "mps" =>
-      if ← mps_is_available then
-        pure Device.MPS
-      else
-        if (← IO.getEnv "SYSTEM_VERSION_COMPAT").isNone then
-          IO.eprintln
-            "Warning: MPS is unavailable in the current libtorch runtime. On macOS 26 with Apple Silicon, launch with SYSTEM_VERSION_COMPAT=1 to re-enable MPS."
-        pure Device.CPU
+  | "mps" => pure Device.MPS
   | "cuda" =>
       if ← cuda_is_available then pure (Device.CUDA 0) else pure Device.CPU
   | _ =>

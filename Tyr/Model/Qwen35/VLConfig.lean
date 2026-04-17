@@ -40,6 +40,22 @@ def qwen35_0_8B : Qwen35VisionConfig := {
   initializer_range := 0.02
 }
 
+/-- Default multimodal Qwen3.6-35B-A3B vision config from Hugging Face `config.json`. -/
+def qwen36_35B_A3B : Qwen35VisionConfig := {
+  depth := 27
+  hidden_size := 1152
+  hidden_act := "gelu_pytorch_tanh"
+  intermediate_size := 4304
+  num_heads := 16
+  in_channels := 3
+  patch_size := 16
+  spatial_merge_size := 2
+  temporal_patch_size := 2
+  out_hidden_size := 2048
+  num_position_embeddings := 2304
+  initializer_range := 0.02
+}
+
 def patchDim (cfg : Qwen35VisionConfig) : UInt64 :=
   cfg.in_channels * cfg.temporal_patch_size * cfg.patch_size * cfg.patch_size
 
@@ -78,6 +94,17 @@ def qwen35_0_8B : Qwen35VLConfig := {
   tie_word_embeddings := true
 }
 
+/-- Default multimodal Qwen3.6-35B-A3B config from Hugging Face `config.json`. -/
+def qwen36_35B_A3B : Qwen35VLConfig := {
+  text_config := Config.qwen36_35B_A3B
+  vision_config := Qwen35VisionConfig.qwen36_35B_A3B
+  image_token_id := 248056
+  video_token_id := 248057
+  vision_start_token_id := 248053
+  vision_end_token_id := 248054
+  tie_word_embeddings := false
+}
+
 def normalize (cfg : Qwen35VLConfig) : Qwen35VLConfig :=
   { cfg with text_config := Config.normalize cfg.text_config }
 
@@ -90,6 +117,8 @@ namespace VisionConfig
 
 def qwen35_0_8B : VisionConfig := Qwen35VisionConfig.qwen35_0_8B
 
+def qwen36_35B_A3B : VisionConfig := Qwen35VisionConfig.qwen36_35B_A3B
+
 def patchDim (cfg : VisionConfig) : UInt64 := Qwen35VisionConfig.patchDim cfg
 def mergeUnit (cfg : VisionConfig) : UInt64 := Qwen35VisionConfig.mergeUnit cfg
 def headDim (cfg : VisionConfig) : UInt64 := Qwen35VisionConfig.headDim cfg
@@ -101,6 +130,8 @@ end VisionConfig
 namespace VLConfig
 
 def qwen35_0_8B : VLConfig := Qwen35VLConfig.qwen35_0_8B
+
+def qwen36_35B_A3B : VLConfig := Qwen35VLConfig.qwen36_35B_A3B
 
 def normalize (cfg : VLConfig) : VLConfig := Qwen35VLConfig.normalize cfg
 

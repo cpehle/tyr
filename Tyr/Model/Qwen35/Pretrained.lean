@@ -21,7 +21,7 @@ structure DownloadOptions where
   includeTokenizer : Bool := true
   deriving Repr, Inhabited
 
-/-- Public Qwen3.5 repo ids explicitly covered by Tyr as of 2026-03-14. -/
+/-- Public Qwen3.5/Qwen3.6 repo ids explicitly covered by Tyr as of 2026-04-16. -/
 def qwen35CollectionRepoIds : Array String := #[
   "Qwen/Qwen3.5-0.8B",
   "Qwen/Qwen3.5-0.8B-Base",
@@ -33,7 +33,8 @@ def qwen35CollectionRepoIds : Array String := #[
   "Qwen/Qwen3.5-35B-A3B-FP8",
   "Qwen/Qwen3.5-35B-A3B-Base",
   "Qwen/Qwen3.5-27B",
-  "Qwen/Qwen3.5-27B-FP8"
+  "Qwen/Qwen3.5-27B-FP8",
+  "Qwen/Qwen3.6-35B-A3B"
 ]
 
 def isQwen35CollectionRepoId (repoId : String) : Bool :=
@@ -280,6 +281,7 @@ def loadFromPretrained
     (defaults : Config := Config.qwen35_9B)
     (revision : String := "main")
     (cacheDir : String := "~/.cache/huggingface/tyr-models")
+    (device : Device := Device.CPU)
     : IO (Sigma (fun cfg => Qwen35ForCausalLM cfg)) := do
   let modelDir ← hub.resolvePretrainedDir source {
     revision := revision
@@ -289,10 +291,10 @@ def loadFromPretrained
   let cfg ← Config.loadFromPretrainedDir modelDir defaults
   let isSharded ← hub.detectWeightLayout modelDir
   if isSharded then
-    let m ← Qwen35ForCausalLM.loadSharded modelDir cfg
+    let m ← Qwen35ForCausalLM.loadSharded modelDir cfg device
     pure ⟨cfg, m⟩
   else
-    let m ← Qwen35ForCausalLM.load s!"{modelDir}/model.safetensors" cfg
+    let m ← Qwen35ForCausalLM.load s!"{modelDir}/model.safetensors" cfg device
     pure ⟨cfg, m⟩
 
 end Qwen35ForCausalLM
@@ -305,6 +307,7 @@ def loadFromPretrained
     (defaults : VLConfig := {})
     (revision : String := "main")
     (cacheDir : String := "~/.cache/huggingface/tyr-models")
+    (device : Device := Device.CPU)
     : IO (Sigma (fun cfg => Qwen35ForConditionalGeneration cfg)) := do
   let modelDir ← hub.resolvePretrainedDir source {
     revision := revision
@@ -314,10 +317,10 @@ def loadFromPretrained
   let cfg ← VLConfig.loadFromPretrainedDir modelDir defaults
   let isSharded ← hub.detectWeightLayout modelDir
   if isSharded then
-    let m ← Qwen35ForConditionalGeneration.loadSharded modelDir cfg
+    let m ← Qwen35ForConditionalGeneration.loadSharded modelDir cfg device
     pure ⟨cfg, m⟩
   else
-    let m ← Qwen35ForConditionalGeneration.load s!"{modelDir}/model.safetensors" cfg
+    let m ← Qwen35ForConditionalGeneration.load s!"{modelDir}/model.safetensors" cfg device
     pure ⟨cfg, m⟩
 
 end Qwen35ForConditionalGeneration

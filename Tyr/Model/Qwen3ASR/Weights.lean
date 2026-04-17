@@ -14,7 +14,12 @@ namespace torch.qwen3asr
 open torch.Log
 
 private def reqGradFalse {s : Shape} (t : T s) : T s :=
-  autograd.set_requires_grad (toFloat' t) false
+  autograd.set_requires_grad t false
+
+private def castLike {sRef s : Shape} (reference : T sRef) (t : T s) : T s :=
+  match reference.dtype with
+  | .BFloat16 => toBFloat16' t
+  | _ => t
 
 private def tryLoadTensorSharded (modelDir : String) (name : String) (s : Shape)
     : IO (Option (T s)) := do
@@ -195,14 +200,15 @@ private def loadThinkerSharded (modelDir : String) (cfg : ThinkerConfig)
   let audioProjectionWeight ←
     if h : cfg.audioConfig.outputDim = cfg.textConfig.hiddenSize then
       let eye : T #[cfg.textConfig.hiddenSize, cfg.textConfig.hiddenSize] :=
-        reqGradFalse (torch.eye cfg.textConfig.hiddenSize false)
+        castLike audioTower.proj2Weight (reqGradFalse (torch.eye cfg.textConfig.hiddenSize false))
       let eye' : T #[cfg.textConfig.hiddenSize, cfg.audioConfig.outputDim] := by
         simpa [h] using eye
       pure eye'
     else
       throw <| IO.userError
         s!"Qwen3-ASR checkpoint expects audio output dim == text hidden dim, got {cfg.audioConfig.outputDim} and {cfg.textConfig.hiddenSize}"
-  let audioProjectionBias := reqGradFalse (torch.zeros #[cfg.textConfig.hiddenSize])
+  let audioProjectionBias :=
+    castLike audioTower.proj2Weight (reqGradFalse (torch.zeros #[cfg.textConfig.hiddenSize]))
 
   let lmHead ← safetensors.loadTensorSharded modelDir "thinker.lm_head.weight"
     #[ThinkerConfig.lmHeadOutDim cfg, cfg.textConfig.hiddenSize]
@@ -229,12 +235,7 @@ private def resolveAsrDevice (log : Handlers := {}) : IO Device := do
     else
       log.onWarn "TYR_DEVICE=cuda requested but CUDA is unavailable; falling back to auto device selection."
       getBestDevice
-  | some "mps" =>
-    if ← mps_is_available then
-      pure Device.MPS
-    else
-      log.onWarn "TYR_DEVICE=mps requested but MPS is unavailable; falling back to auto device selection."
-      getBestDevice
+  | some "mps" => pure Device.MPS
   | some "auto" => getBestDevice
   | some _ => getBestDevice
   | none => getBestDevice
