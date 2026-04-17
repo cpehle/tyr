@@ -13,7 +13,7 @@ namespace torch.qwen35
 open torch.Log
 
 private def reqGradFalse {s : Shape} (t : T s) : T s :=
-  autograd.set_requires_grad (toFloat' t) false
+  autograd.set_requires_grad t false
 
 private def visionNameCandidates (name : String) : Array String :=
   let out : Array String := #[name]
@@ -26,55 +26,74 @@ private def visionNameCandidates (name : String) : Array String :=
       out
   out
 
-private def tryLoadTensorSharded (modelDir : String) (name : String) (s : Shape)
+private def tryLoadTensorSharded
+    (modelDir : String)
+    (name : String)
+    (s : Shape)
+    (device : Device := Device.CPU)
     : IO (Option (T s)) := do
   try
-    let t ← safetensors.loadTensorSharded modelDir name s
+    let t ← safetensors.loadTensorShardedOnDevice modelDir name s device
     pure (some t)
   catch _ =>
     pure none
 
-private def tryLoadTensor (path : String) (name : String) (s : Shape)
+private def tryLoadTensor
+    (path : String)
+    (name : String)
+    (s : Shape)
+    (device : Device := Device.CPU)
     : IO (Option (T s)) := do
   try
-    let t ← safetensors.loadTensor path name s
+    let t ← safetensors.loadTensorOnDevice path name s device
     pure (some t)
   catch _ =>
     pure none
 
-private def loadTensorShardedCandidates (modelDir : String) (names : Array String) (s : Shape)
+private def loadTensorShardedCandidates
+    (modelDir : String)
+    (names : Array String)
+    (s : Shape)
+    (device : Device := Device.CPU)
     : IO (T s) := do
   for n in names do
-    if let some t ← tryLoadTensorSharded modelDir n s then
+    if let some t ← tryLoadTensorSharded modelDir n s device then
       return t
   throw <| IO.userError s!"Failed to load tensor (sharded): {names}"
 
-private def loadTensorCandidates (path : String) (names : Array String) (s : Shape)
+private def loadTensorCandidates
+    (path : String)
+    (names : Array String)
+    (s : Shape)
+    (device : Device := Device.CPU)
     : IO (T s) := do
   for n in names do
-    if let some t ← tryLoadTensor path n s then
+    if let some t ← tryLoadTensor path n s device then
       return t
   throw <| IO.userError s!"Failed to load tensor: {names}"
 
 private def loadVisionLayerNormSharded (modelDir : String) (base : String) (dim : UInt64)
+    (device : Device := Device.CPU)
     : IO (Qwen35VisionLayerNorm dim) := do
-  let w ← loadTensorShardedCandidates modelDir (visionNameCandidates s!"{base}.weight") #[dim]
-  let b ← loadTensorShardedCandidates modelDir (visionNameCandidates s!"{base}.bias") #[dim]
+  let w ← loadTensorShardedCandidates modelDir (visionNameCandidates s!"{base}.weight") #[dim] device
+  let b ← loadTensorShardedCandidates modelDir (visionNameCandidates s!"{base}.bias") #[dim] device
   pure { weight := reqGradFalse w, bias := reqGradFalse b, eps := 1e-6 }
 
 private def loadVisionLayerNorm (path : String) (base : String) (dim : UInt64)
+    (device : Device := Device.CPU)
     : IO (Qwen35VisionLayerNorm dim) := do
-  let w ← loadTensorCandidates path (visionNameCandidates s!"{base}.weight") #[dim]
-  let b ← loadTensorCandidates path (visionNameCandidates s!"{base}.bias") #[dim]
+  let w ← loadTensorCandidates path (visionNameCandidates s!"{base}.weight") #[dim] device
+  let b ← loadTensorCandidates path (visionNameCandidates s!"{base}.bias") #[dim] device
   pure { weight := reqGradFalse w, bias := reqGradFalse b, eps := 1e-6 }
 
 private def loadVisionMLPSharded (modelDir : String) (cfg : VisionConfig) (layerIdx : UInt64)
+    (device : Device := Device.CPU)
     : IO (Qwen35VisionMLP cfg) := do
   let p := s!"model.visual.blocks.{layerIdx}.mlp"
-  let w1 ← loadTensorShardedCandidates modelDir (visionNameCandidates s!"{p}.linear_fc1.weight") #[cfg.intermediate_size, cfg.hidden_size]
-  let b1 ← loadTensorShardedCandidates modelDir (visionNameCandidates s!"{p}.linear_fc1.bias") #[cfg.intermediate_size]
-  let w2 ← loadTensorShardedCandidates modelDir (visionNameCandidates s!"{p}.linear_fc2.weight") #[cfg.hidden_size, cfg.intermediate_size]
-  let b2 ← loadTensorShardedCandidates modelDir (visionNameCandidates s!"{p}.linear_fc2.bias") #[cfg.hidden_size]
+  let w1 ← loadTensorShardedCandidates modelDir (visionNameCandidates s!"{p}.linear_fc1.weight") #[cfg.intermediate_size, cfg.hidden_size] device
+  let b1 ← loadTensorShardedCandidates modelDir (visionNameCandidates s!"{p}.linear_fc1.bias") #[cfg.intermediate_size] device
+  let w2 ← loadTensorShardedCandidates modelDir (visionNameCandidates s!"{p}.linear_fc2.weight") #[cfg.hidden_size, cfg.intermediate_size] device
+  let b2 ← loadTensorShardedCandidates modelDir (visionNameCandidates s!"{p}.linear_fc2.bias") #[cfg.hidden_size] device
   pure {
     linear_fc1_weight := reqGradFalse w1
     linear_fc1_bias := reqGradFalse b1
@@ -83,12 +102,13 @@ private def loadVisionMLPSharded (modelDir : String) (cfg : VisionConfig) (layer
   }
 
 private def loadVisionMLP (path : String) (cfg : VisionConfig) (layerIdx : UInt64)
+    (device : Device := Device.CPU)
     : IO (Qwen35VisionMLP cfg) := do
   let p := s!"model.visual.blocks.{layerIdx}.mlp"
-  let w1 ← loadTensorCandidates path (visionNameCandidates s!"{p}.linear_fc1.weight") #[cfg.intermediate_size, cfg.hidden_size]
-  let b1 ← loadTensorCandidates path (visionNameCandidates s!"{p}.linear_fc1.bias") #[cfg.intermediate_size]
-  let w2 ← loadTensorCandidates path (visionNameCandidates s!"{p}.linear_fc2.weight") #[cfg.hidden_size, cfg.intermediate_size]
-  let b2 ← loadTensorCandidates path (visionNameCandidates s!"{p}.linear_fc2.bias") #[cfg.hidden_size]
+  let w1 ← loadTensorCandidates path (visionNameCandidates s!"{p}.linear_fc1.weight") #[cfg.intermediate_size, cfg.hidden_size] device
+  let b1 ← loadTensorCandidates path (visionNameCandidates s!"{p}.linear_fc1.bias") #[cfg.intermediate_size] device
+  let w2 ← loadTensorCandidates path (visionNameCandidates s!"{p}.linear_fc2.weight") #[cfg.hidden_size, cfg.intermediate_size] device
+  let b2 ← loadTensorCandidates path (visionNameCandidates s!"{p}.linear_fc2.bias") #[cfg.hidden_size] device
   pure {
     linear_fc1_weight := reqGradFalse w1
     linear_fc1_bias := reqGradFalse b1
@@ -97,12 +117,13 @@ private def loadVisionMLP (path : String) (cfg : VisionConfig) (layerIdx : UInt6
   }
 
 private def loadVisionAttentionSharded (modelDir : String) (cfg : VisionConfig) (layerIdx : UInt64)
+    (device : Device := Device.CPU)
     : IO (Qwen35VisionAttention cfg) := do
   let p := s!"model.visual.blocks.{layerIdx}.attn"
-  let qkvW ← loadTensorShardedCandidates modelDir (visionNameCandidates s!"{p}.qkv.weight") #[cfg.hidden_size * 3, cfg.hidden_size]
-  let qkvB ← loadTensorShardedCandidates modelDir (visionNameCandidates s!"{p}.qkv.bias") #[cfg.hidden_size * 3]
-  let projW ← loadTensorShardedCandidates modelDir (visionNameCandidates s!"{p}.proj.weight") #[cfg.hidden_size, cfg.hidden_size]
-  let projB ← loadTensorShardedCandidates modelDir (visionNameCandidates s!"{p}.proj.bias") #[cfg.hidden_size]
+  let qkvW ← loadTensorShardedCandidates modelDir (visionNameCandidates s!"{p}.qkv.weight") #[cfg.hidden_size * 3, cfg.hidden_size] device
+  let qkvB ← loadTensorShardedCandidates modelDir (visionNameCandidates s!"{p}.qkv.bias") #[cfg.hidden_size * 3] device
+  let projW ← loadTensorShardedCandidates modelDir (visionNameCandidates s!"{p}.proj.weight") #[cfg.hidden_size, cfg.hidden_size] device
+  let projB ← loadTensorShardedCandidates modelDir (visionNameCandidates s!"{p}.proj.bias") #[cfg.hidden_size] device
   pure {
     qkv_weight := reqGradFalse qkvW
     qkv_bias := reqGradFalse qkvB
@@ -111,12 +132,13 @@ private def loadVisionAttentionSharded (modelDir : String) (cfg : VisionConfig) 
   }
 
 private def loadVisionAttention (path : String) (cfg : VisionConfig) (layerIdx : UInt64)
+    (device : Device := Device.CPU)
     : IO (Qwen35VisionAttention cfg) := do
   let p := s!"model.visual.blocks.{layerIdx}.attn"
-  let qkvW ← loadTensorCandidates path (visionNameCandidates s!"{p}.qkv.weight") #[cfg.hidden_size * 3, cfg.hidden_size]
-  let qkvB ← loadTensorCandidates path (visionNameCandidates s!"{p}.qkv.bias") #[cfg.hidden_size * 3]
-  let projW ← loadTensorCandidates path (visionNameCandidates s!"{p}.proj.weight") #[cfg.hidden_size, cfg.hidden_size]
-  let projB ← loadTensorCandidates path (visionNameCandidates s!"{p}.proj.bias") #[cfg.hidden_size]
+  let qkvW ← loadTensorCandidates path (visionNameCandidates s!"{p}.qkv.weight") #[cfg.hidden_size * 3, cfg.hidden_size] device
+  let qkvB ← loadTensorCandidates path (visionNameCandidates s!"{p}.qkv.bias") #[cfg.hidden_size * 3] device
+  let projW ← loadTensorCandidates path (visionNameCandidates s!"{p}.proj.weight") #[cfg.hidden_size, cfg.hidden_size] device
+  let projB ← loadTensorCandidates path (visionNameCandidates s!"{p}.proj.bias") #[cfg.hidden_size] device
   pure {
     qkv_weight := reqGradFalse qkvW
     qkv_bias := reqGradFalse qkvB
@@ -125,31 +147,36 @@ private def loadVisionAttention (path : String) (cfg : VisionConfig) (layerIdx :
   }
 
 private def loadVisionBlockSharded (modelDir : String) (cfg : VisionConfig) (layerIdx : UInt64)
+    (device : Device := Device.CPU)
     : IO (Qwen35VisionBlock cfg) := do
-  let norm1 ← loadVisionLayerNormSharded modelDir s!"model.visual.blocks.{layerIdx}.norm1" cfg.hidden_size
-  let norm2 ← loadVisionLayerNormSharded modelDir s!"model.visual.blocks.{layerIdx}.norm2" cfg.hidden_size
-  let attn ← loadVisionAttentionSharded modelDir cfg layerIdx
-  let mlp ← loadVisionMLPSharded modelDir cfg layerIdx
+  let norm1 ← loadVisionLayerNormSharded modelDir s!"model.visual.blocks.{layerIdx}.norm1" cfg.hidden_size device
+  let norm2 ← loadVisionLayerNormSharded modelDir s!"model.visual.blocks.{layerIdx}.norm2" cfg.hidden_size device
+  let attn ← loadVisionAttentionSharded modelDir cfg layerIdx device
+  let mlp ← loadVisionMLPSharded modelDir cfg layerIdx device
   pure { norm1 := norm1, norm2 := norm2, attn := attn, mlp := mlp }
 
 private def loadVisionBlock (path : String) (cfg : VisionConfig) (layerIdx : UInt64)
+    (device : Device := Device.CPU)
     : IO (Qwen35VisionBlock cfg) := do
-  let norm1 ← loadVisionLayerNorm path s!"model.visual.blocks.{layerIdx}.norm1" cfg.hidden_size
-  let norm2 ← loadVisionLayerNorm path s!"model.visual.blocks.{layerIdx}.norm2" cfg.hidden_size
-  let attn ← loadVisionAttention path cfg layerIdx
-  let mlp ← loadVisionMLP path cfg layerIdx
+  let norm1 ← loadVisionLayerNorm path s!"model.visual.blocks.{layerIdx}.norm1" cfg.hidden_size device
+  let norm2 ← loadVisionLayerNorm path s!"model.visual.blocks.{layerIdx}.norm2" cfg.hidden_size device
+  let attn ← loadVisionAttention path cfg layerIdx device
+  let mlp ← loadVisionMLP path cfg layerIdx device
   pure { norm1 := norm1, norm2 := norm2, attn := attn, mlp := mlp }
 
 private def loadVisionModelSharded (modelDir : String) (cfg : VisionConfig)
+    (device : Device := Device.CPU)
     : IO (Qwen35VisionModel cfg) := do
   let convW ← loadTensorShardedCandidates
     modelDir
     (visionNameCandidates "model.visual.patch_embed.proj.weight")
     #[cfg.hidden_size, cfg.in_channels, cfg.temporal_patch_size, cfg.patch_size, cfg.patch_size]
+    device
   let convB ← loadTensorShardedCandidates
     modelDir
     (visionNameCandidates "model.visual.patch_embed.proj.bias")
     #[cfg.hidden_size]
+    device
   let patchW : T #[cfg.hidden_size, VisionConfig.patchDim cfg] :=
     reshape convW #[cfg.hidden_size, VisionConfig.patchDim cfg]
   let patchEmbed : Qwen35VisionPatchEmbed cfg := {
@@ -161,30 +188,35 @@ private def loadVisionModelSharded (modelDir : String) (cfg : VisionConfig)
     modelDir
     (visionNameCandidates "model.visual.pos_embed.weight")
     #[cfg.num_position_embeddings, cfg.hidden_size]
+    device
 
   let mut blocks : Array (Qwen35VisionBlock cfg) := #[]
   for i in [:cfg.depth.toNat] do
-    blocks := blocks.push (← loadVisionBlockSharded modelDir cfg i.toUInt64)
+    blocks := blocks.push (← loadVisionBlockSharded modelDir cfg i.toUInt64 device)
 
   let mergeUnit := VisionConfig.mergeUnit cfg
   let mergedHidden := cfg.hidden_size * mergeUnit
-  let mergerNorm ← loadVisionLayerNormSharded modelDir "model.visual.merger.norm" cfg.hidden_size
+  let mergerNorm ← loadVisionLayerNormSharded modelDir "model.visual.merger.norm" cfg.hidden_size device
   let fc1W ← loadTensorShardedCandidates
     modelDir
     (visionNameCandidates "model.visual.merger.linear_fc1.weight")
     #[mergedHidden, mergedHidden]
+    device
   let fc1B ← loadTensorShardedCandidates
     modelDir
     (visionNameCandidates "model.visual.merger.linear_fc1.bias")
     #[mergedHidden]
+    device
   let fc2W ← loadTensorShardedCandidates
     modelDir
     (visionNameCandidates "model.visual.merger.linear_fc2.weight")
     #[cfg.out_hidden_size, mergedHidden]
+    device
   let fc2B ← loadTensorShardedCandidates
     modelDir
     (visionNameCandidates "model.visual.merger.linear_fc2.bias")
     #[cfg.out_hidden_size]
+    device
 
   let merger : Qwen35VisionPatchMerger cfg := {
     norm := mergerNorm
@@ -202,15 +234,18 @@ private def loadVisionModelSharded (modelDir : String) (cfg : VisionConfig)
   }
 
 private def loadVisionModel (path : String) (cfg : VisionConfig)
+    (device : Device := Device.CPU)
     : IO (Qwen35VisionModel cfg) := do
   let convW ← loadTensorCandidates
     path
     (visionNameCandidates "model.visual.patch_embed.proj.weight")
     #[cfg.hidden_size, cfg.in_channels, cfg.temporal_patch_size, cfg.patch_size, cfg.patch_size]
+    device
   let convB ← loadTensorCandidates
     path
     (visionNameCandidates "model.visual.patch_embed.proj.bias")
     #[cfg.hidden_size]
+    device
   let patchW : T #[cfg.hidden_size, VisionConfig.patchDim cfg] :=
     reshape convW #[cfg.hidden_size, VisionConfig.patchDim cfg]
   let patchEmbed : Qwen35VisionPatchEmbed cfg := {
@@ -222,30 +257,35 @@ private def loadVisionModel (path : String) (cfg : VisionConfig)
     path
     (visionNameCandidates "model.visual.pos_embed.weight")
     #[cfg.num_position_embeddings, cfg.hidden_size]
+    device
 
   let mut blocks : Array (Qwen35VisionBlock cfg) := #[]
   for i in [:cfg.depth.toNat] do
-    blocks := blocks.push (← loadVisionBlock path cfg i.toUInt64)
+    blocks := blocks.push (← loadVisionBlock path cfg i.toUInt64 device)
 
   let mergeUnit := VisionConfig.mergeUnit cfg
   let mergedHidden := cfg.hidden_size * mergeUnit
-  let mergerNorm ← loadVisionLayerNorm path "model.visual.merger.norm" cfg.hidden_size
+  let mergerNorm ← loadVisionLayerNorm path "model.visual.merger.norm" cfg.hidden_size device
   let fc1W ← loadTensorCandidates
     path
     (visionNameCandidates "model.visual.merger.linear_fc1.weight")
     #[mergedHidden, mergedHidden]
+    device
   let fc1B ← loadTensorCandidates
     path
     (visionNameCandidates "model.visual.merger.linear_fc1.bias")
     #[mergedHidden]
+    device
   let fc2W ← loadTensorCandidates
     path
     (visionNameCandidates "model.visual.merger.linear_fc2.weight")
     #[cfg.out_hidden_size, mergedHidden]
+    device
   let fc2B ← loadTensorCandidates
     path
     (visionNameCandidates "model.visual.merger.linear_fc2.bias")
     #[cfg.out_hidden_size]
+    device
 
   let merger : Qwen35VisionPatchMerger cfg := {
     norm := mergerNorm
@@ -266,6 +306,7 @@ namespace Qwen35ForConditionalGeneration
 
 /-- Load Qwen3.5 multimodal model from sharded HF SafeTensors directory. -/
 def loadSharded (modelDir : String) (cfg : VLConfig := {})
+    (device : Device := Device.CPU)
     (log : Handlers := {})
     : IO (Qwen35ForConditionalGeneration cfg) := do
   log.onInfo s!"Loading Qwen35ForConditionalGeneration from {modelDir}..."
@@ -273,13 +314,14 @@ def loadSharded (modelDir : String) (cfg : VLConfig := {})
     throw <| IO.userError
       s!"vision out_hidden_size ({cfg.vision_config.out_hidden_size}) must match text hidden_size ({cfg.text_config.hidden_size})"
 
-  let visual ← loadVisionModelSharded modelDir cfg.vision_config
-  let languageModel ← Qwen35ForCausalLM.loadSharded modelDir cfg.text_config log
+  let visual ← loadVisionModelSharded modelDir cfg.vision_config device
+  let languageModel ← Qwen35ForCausalLM.loadSharded modelDir cfg.text_config device log
   log.onInfo "Loaded Qwen35ForConditionalGeneration weights."
   pure { visual := visual, language_model := languageModel }
 
 /-- Load Qwen3.5 multimodal model from a single HF SafeTensors file. -/
 def load (path : String) (cfg : VLConfig := {})
+    (device : Device := Device.CPU)
     (log : Handlers := {})
     : IO (Qwen35ForConditionalGeneration cfg) := do
   log.onInfo s!"Loading Qwen35ForConditionalGeneration from {path}..."
@@ -287,8 +329,8 @@ def load (path : String) (cfg : VLConfig := {})
     throw <| IO.userError
       s!"vision out_hidden_size ({cfg.vision_config.out_hidden_size}) must match text hidden_size ({cfg.text_config.hidden_size})"
 
-  let visual ← loadVisionModel path cfg.vision_config
-  let languageModel ← Qwen35ForCausalLM.load path cfg.text_config log
+  let visual ← loadVisionModel path cfg.vision_config device
+  let languageModel ← Qwen35ForCausalLM.load path cfg.text_config device log
   log.onInfo "Loaded Qwen35ForConditionalGeneration weights."
   pure { visual := visual, language_model := languageModel }
 

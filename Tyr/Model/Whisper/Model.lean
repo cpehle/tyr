@@ -24,6 +24,11 @@ private def activate {s : Shape} (name : String) (x : T s) : T s :=
   else
     nn.gelu x
 
+private def castLike {sRef s : Shape} (reference : T sRef) (t : T s) : T s :=
+  match reference.dtype with
+  | .BFloat16 => toBFloat16' t
+  | _ => t
+
 structure WhisperAttention (dModel nHeads : UInt64) where
   qProjWeight : T #[dModel, dModel]
   qProjBias : T #[dModel]
@@ -142,9 +147,9 @@ def forwardSelfStep {batch : UInt64}
   let vNew : T #[batch, nHeads, 1, headDim] := nn.transpose_for_attention v
 
   let kStore : T #[batch, nHeads, cache.maxLen, headDim] :=
-    reshape cache.kStoreDyn #[batch, nHeads, cache.maxLen, headDim]
+    castLike kNew (reshape cache.kStoreDyn #[batch, nHeads, cache.maxLen, headDim])
   let vStore : T #[batch, nHeads, cache.maxLen, headDim] :=
-    reshape cache.vStoreDyn #[batch, nHeads, cache.maxLen, headDim]
+    castLike vNew (reshape cache.vStoreDyn #[batch, nHeads, cache.maxLen, headDim])
 
   if cache.seq < cache.maxLen then
     let kStore' : T #[batch, nHeads, cache.maxLen, headDim] :=

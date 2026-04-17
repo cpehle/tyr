@@ -129,9 +129,28 @@ opaque cuda_synchronize : IO Unit
 @[extern "lean_torch_mps_is_available"]
 opaque mps_is_available : IO Bool
 
+/--
+Probe MPS with a short retry budget.
+
+On some macOS/libtorch combinations the first process-local probe can race MPS
+backend startup and transiently return `false`. Retrying here keeps device
+selection stable for downstream callers.
+-/
+def mps_is_available_stable (retries : Nat := 4) (delayMs : Nat := 250) : IO Bool := do
+  let rec loop (remaining : Nat) : IO Bool := do
+    let available ← mps_is_available
+    if available then
+      return true
+    match remaining with
+    | 0 => return false
+    | remaining + 1 =>
+        IO.sleep delayMs.toUInt32
+        loop remaining
+  loop retries
+
 /-- Get the best available device: MPS > CUDA > CPU -/
 def getBestDevice : IO Device := do
-  if ← mps_is_available then return Device.MPS
+  if ← mps_is_available_stable then return Device.MPS
   if ← cuda_is_available then return Device.CUDA 0
   return Device.CPU
 @[extern "lean_torch_linear"] opaque linear {m n b : UInt64} (x : @& T #[b, m]) (M : @& T #[n,m]) : T #[b, n]

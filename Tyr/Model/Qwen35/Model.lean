@@ -60,6 +60,11 @@ private def applyFinishedEos {n : UInt64}
   let eos : T #[n] := (full_int #[n] (Int64.ofNat eosToken.toNat)).to tokens.device
   where_ finished eos tokens
 
+private def castLike {sRef s : Shape} (reference : T sRef) (t : T s) : T s :=
+  match reference.dtype with
+  | .BFloat16 => toBFloat16' t
+  | _ => t
+
 private def l2NormLast4d {b s h d : UInt64}
     (x : T #[b, s, h, d])
     (eps : Float := 1e-6)
@@ -113,6 +118,11 @@ structure Qwen35RMSNorm (dim : UInt64) where
 
 namespace Qwen35RMSNorm
 
+private def restoreInputDType {s : Shape} (input : T s) (output : T s) : T s :=
+  match input.dtype with
+  | .BFloat16 => toBFloat16' output
+  | _ => output
+
 def initZeroCentered (dim : UInt64) (eps : Float := 1e-6) : Qwen35RMSNorm dim :=
   { weight := autograd.set_requires_grad (torch.zeros #[dim]) true, eps }
 
@@ -139,7 +149,7 @@ def forward2d {n dim : UInt64}
   let normed : T #[n, dim] := xf * inv
   let scale1 : T #[dim] := add_scalar (toFloat' m.weight) 1.0
   let scale : T #[n, dim] := nn.expand (reshape scale1 #[1, dim]) #[n, dim]
-  normed * scale
+  restoreInputDType x (normed * scale)
 
 def forward3d {batch seq dim : UInt64}
     (m : Qwen35RMSNorm dim)
@@ -158,6 +168,11 @@ structure Qwen35RMSNormGated (dim : UInt64) where
 
 namespace Qwen35RMSNormGated
 
+private def restoreInputDType {s : Shape} (input : T s) (output : T s) : T s :=
+  match input.dtype with
+  | .BFloat16 => toBFloat16' output
+  | _ => output
+
 def init (dim : UInt64) (eps : Float := 1e-6) : Qwen35RMSNormGated dim :=
   { weight := autograd.set_requires_grad (torch.ones #[dim]) true, eps }
 
@@ -173,7 +188,7 @@ def forward2d {n dim : UInt64}
   let normed : T #[n, dim] := xf * inv
   let scale : T #[n, dim] := nn.expand (reshape (toFloat' m.weight) #[1, dim]) #[n, dim]
   let g : T #[n, dim] := nn.silu (toFloat' gate)
-  normed * scale * g
+  restoreInputDType x (normed * scale * g)
 
 end Qwen35RMSNormGated
 
@@ -470,13 +485,12 @@ def forwardWithCache {batch seq : UInt64}
   let k := applyRotaryPartial k cos sin
 
   -- Update cache with full sequence
-  let kStore : T #[batch, cfg.num_key_value_heads, cache.maxLen, cfg.head_dim] :=
-    reshape cache.kStoreDyn #[batch, cfg.num_key_value_heads, cache.maxLen, cfg.head_dim]
-  let vStore : T #[batch, cfg.num_key_value_heads, cache.maxLen, cfg.head_dim] :=
-    reshape cache.vStoreDyn #[batch, cfg.num_key_value_heads, cache.maxLen, cfg.head_dim]
-
   let kh_new := nn.transpose_for_attention k
   let vh_new := nn.transpose_for_attention v
+  let kStore : T #[batch, cfg.num_key_value_heads, cache.maxLen, cfg.head_dim] :=
+    castLike kh_new (reshape cache.kStoreDyn #[batch, cfg.num_key_value_heads, cache.maxLen, cfg.head_dim])
+  let vStore : T #[batch, cfg.num_key_value_heads, cache.maxLen, cfg.head_dim] :=
+    castLike vh_new (reshape cache.vStoreDyn #[batch, cfg.num_key_value_heads, cache.maxLen, cfg.head_dim])
 
   let kStore' := data.sliceScatter kStore 2 0 kh_new
   let vStore' := data.sliceScatter vStore 2 0 vh_new
@@ -568,9 +582,9 @@ def forwardStep {batch : UInt64}
   let vNew : T #[batch, cfg.num_key_value_heads, 1, cfg.head_dim] := nn.transpose_for_attention v
 
   let kStore : T #[batch, cfg.num_key_value_heads, cache.maxLen, cfg.head_dim] :=
-    reshape cache.kStoreDyn #[batch, cfg.num_key_value_heads, cache.maxLen, cfg.head_dim]
+    castLike kNew (reshape cache.kStoreDyn #[batch, cfg.num_key_value_heads, cache.maxLen, cfg.head_dim])
   let vStore : T #[batch, cfg.num_key_value_heads, cache.maxLen, cfg.head_dim] :=
-    reshape cache.vStoreDyn #[batch, cfg.num_key_value_heads, cache.maxLen, cfg.head_dim]
+    castLike vNew (reshape cache.vStoreDyn #[batch, cfg.num_key_value_heads, cache.maxLen, cfg.head_dim])
 
   if cache.seq < cache.maxLen then
     let kStore' : T #[batch, cfg.num_key_value_heads, cache.maxLen, cfg.head_dim] :=
@@ -709,15 +723,19 @@ def forward {batch seq : UInt64}
       match cacheConv with
       | some st =>
         let catIn : T #[batch, Config.linearConvDim cfg, cfg.linear_conv_kernel_dim + 1] := nn.cat st mixedQKVc 2
+        let convIn : T #[batch, Config.linearConvDim cfg, cfg.linear_conv_kernel_dim + 1] :=
+          castLike m.conv1d_weight catIn
         let stNext : T #[batch, Config.linearConvDim cfg, cfg.linear_conv_kernel_dim] :=
           data.slice catIn 2 1 cfg.linear_conv_kernel_dim
         let raw : T #[batch, Config.linearConvDim cfg, 2] :=
-          nn.conv1d_group_bias catIn m.conv1d_weight m.conv1d_bias 1 0 1 (Config.linearConvDim cfg)
+          nn.conv1d_group_bias convIn m.conv1d_weight m.conv1d_bias 1 0 1 (Config.linearConvDim cfg)
         let y : T #[batch, Config.linearConvDim cfg, 1] := data.slice raw 2 1 1
         (nn.silu y, some stNext)
       | none =>
+        let convIn : T #[batch, Config.linearConvDim cfg, seq] :=
+          castLike m.conv1d_weight mixedQKVc
         let raw : T #[batch, Config.linearConvDim cfg, seq + cfg.linear_conv_kernel_dim - 1] :=
-          nn.conv1d_group_bias mixedQKVc m.conv1d_weight m.conv1d_bias 1 (cfg.linear_conv_kernel_dim - 1) 1 (Config.linearConvDim cfg)
+          nn.conv1d_group_bias convIn m.conv1d_weight m.conv1d_bias 1 (cfg.linear_conv_kernel_dim - 1) 1 (Config.linearConvDim cfg)
         let y : T #[batch, Config.linearConvDim cfg, seq] := data.slice raw 2 0 seq
         let nextState :=
           if seq >= cfg.linear_conv_kernel_dim then
@@ -728,8 +746,10 @@ def forward {batch seq : UInt64}
             some (nn.cat z0 mixedQKVc 2)
         (nn.silu y, nextState)
     else
+      let convIn : T #[batch, Config.linearConvDim cfg, seq] :=
+        castLike m.conv1d_weight mixedQKVc
       let raw : T #[batch, Config.linearConvDim cfg, seq + cfg.linear_conv_kernel_dim - 1] :=
-        nn.conv1d_group_bias mixedQKVc m.conv1d_weight m.conv1d_bias 1 (cfg.linear_conv_kernel_dim - 1) 1 (Config.linearConvDim cfg)
+        nn.conv1d_group_bias convIn m.conv1d_weight m.conv1d_bias 1 (cfg.linear_conv_kernel_dim - 1) 1 (Config.linearConvDim cfg)
       let y : T #[batch, Config.linearConvDim cfg, seq] := data.slice raw 2 0 seq
       let nextState :=
         if seq >= cfg.linear_conv_kernel_dim then

@@ -115,12 +115,14 @@ SRCS := \
 	float_buffer.cpp
 MM_SRCS :=
 ifeq ($(UNAME_S),Darwin)
+MM_SRCS += apple_mps.mm
 MM_SRCS += apple_vl_processor.mm
 MM_SRCS += apple_audio_input.mm
 MM_SRCS += apple_audio_output.mm
 APPLE_FRAMEWORK_FLAGS := \
 	-framework Foundation \
 	-framework CoreFoundation \
+	-framework Metal \
 	-framework CoreGraphics \
 	-framework ImageIO \
 	-framework AVFoundation \

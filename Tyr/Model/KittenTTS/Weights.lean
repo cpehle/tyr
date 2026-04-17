@@ -23,7 +23,12 @@ private structure LoadedCheckpointWeights where
   decoder : KokoroCheckpoint.WeightsDecoder
 
 private def reqGradFalse {s : Shape} (t : T s) : T s :=
-  autograd.set_requires_grad (toFloat' t) false
+  autograd.set_requires_grad t false
+
+private def castLike {sRef s : Shape} (reference : T sRef) (t : T s) : T s :=
+  match reference.dtype with
+  | .BFloat16 => toBFloat16' t
+  | _ => t
 
 private def getOrThrow {α} (xs : Array α) (idx : Nat) (msg : String) : IO α :=
   match xs[idx]? with
@@ -137,8 +142,8 @@ private def adaIN1dFromLinear {styleDim channels : UInt64}
     (bias : T #[2 * channels])
     : AdaIN1d styleDim channels := {
       fc := linearFromTensors weight bias
-      normWeight := reqGradFalse (torch.ones #[channels] false Device.CPU)
-      normBias := reqGradFalse (torch.zeros #[channels] false Device.CPU)
+      normWeight := castLike weight (reqGradFalse (torch.ones #[channels] false Device.CPU))
+      normBias := castLike weight (reqGradFalse (torch.zeros #[channels] false Device.CPU))
     }
 
 private def adaIN1dDynFromLinear {styleDim channels : UInt64}
@@ -147,8 +152,8 @@ private def adaIN1dDynFromLinear {styleDim channels : UInt64}
     : AdaIN1dDyn styleDim := {
       fcWeight := nn.eraseShape (reqGradFalse weight)
       fcBias := nn.eraseShape (reqGradFalse bias)
-      normWeight := nn.eraseShape (torch.ones #[channels] false Device.CPU)
-      normBias := nn.eraseShape (torch.zeros #[channels] false Device.CPU)
+      normWeight := nn.eraseShape (castLike weight (torch.ones #[channels] false Device.CPU))
+      normBias := nn.eraseShape (castLike weight (torch.zeros #[channels] false Device.CPU))
     }
 
 private def wnConv1dDynFromWeightNorm {inC outC kernel : UInt64}
@@ -410,7 +415,7 @@ private def loadProsodyPredictorFromCheckpoint
     conv2 := wnConv1dFromWeightNorm weights.f0.i1.conv2.weight_v weights.f0.i1.conv2.weight_g weights.f0.i1.conv2.bias
     norm1 := adaIN1dFromLinear weights.f0.i1.norm1.fc.weight weights.f0.i1.norm1.fc.bias
     norm2 := adaIN1dFromLinear weights.f0.i1.norm2.fc.weight weights.f0.i1.norm2.fc.bias
-    shortcut := some <| wnConv1dFromWeightNorm weights.f0.i1.conv1x1.weight_v weights.f0.i1.conv1x1.weight_g (torch.zeros #[cfg.hiddenDim / 2] false Device.CPU)
+    shortcut := some <| wnConv1dFromWeightNorm weights.f0.i1.conv1x1.weight_v weights.f0.i1.conv1x1.weight_g (castLike weights.f0.i1.conv1x1.weight_v (torch.zeros #[cfg.hiddenDim / 2] false Device.CPU))
   }
   let f0Blk2 : AdainResBlk1dSame (cfg.hiddenDim / 2) (cfg.hiddenDim / 2) cfg.styleDim := {
     conv1 := wnConv1dFromWeightNorm weights.f0.i2.conv1.weight_v weights.f0.i2.conv1.weight_g weights.f0.i2.conv1.bias
@@ -433,7 +438,7 @@ private def loadProsodyPredictorFromCheckpoint
     conv2 := wnConv1dFromWeightNorm weights.n.i1.conv2.weight_v weights.n.i1.conv2.weight_g weights.n.i1.conv2.bias
     norm1 := adaIN1dFromLinear weights.n.i1.norm1.fc.weight weights.n.i1.norm1.fc.bias
     norm2 := adaIN1dFromLinear weights.n.i1.norm2.fc.weight weights.n.i1.norm2.fc.bias
-    shortcut := some <| wnConv1dFromWeightNorm weights.n.i1.conv1x1.weight_v weights.n.i1.conv1x1.weight_g (torch.zeros #[cfg.hiddenDim / 2] false Device.CPU)
+    shortcut := some <| wnConv1dFromWeightNorm weights.n.i1.conv1x1.weight_v weights.n.i1.conv1x1.weight_g (castLike weights.n.i1.conv1x1.weight_v (torch.zeros #[cfg.hiddenDim / 2] false Device.CPU))
   }
   let nBlk2 : AdainResBlk1dSame (cfg.hiddenDim / 2) (cfg.hiddenDim / 2) cfg.styleDim := {
     conv1 := wnConv1dFromWeightNorm weights.n.i2.conv1.weight_v weights.n.i2.conv1.weight_g weights.n.i2.conv1.bias
@@ -716,28 +721,28 @@ private def loadDecoderFromCheckpoint
     conv2 := wnConv1dFromWeightNorm weights.encode.conv2.weight_v weights.encode.conv2.weight_g weights.encode.conv2.bias
     norm1 := adaIN1dFromLinear weights.encode.norm1.fc.weight weights.encode.norm1.fc.bias
     norm2 := adaIN1dFromLinear weights.encode.norm2.fc.weight weights.encode.norm2.fc.bias
-    shortcut := some <| wnConv1dFromWeightNorm weights.encode.conv1x1.weight_v weights.encode.conv1x1.weight_g (torch.zeros #[cfg.maxConvDim] false Device.CPU)
+    shortcut := some <| wnConv1dFromWeightNorm weights.encode.conv1x1.weight_v weights.encode.conv1x1.weight_g (castLike weights.encode.conv1x1.weight_v (torch.zeros #[cfg.maxConvDim] false Device.CPU))
   }
   let decode0 : AdainResBlk1dSame (cfg.maxConvDim + cfg.asrResDim + 2) cfg.maxConvDim cfg.styleDim := {
     conv1 := wnConv1dFromWeightNorm weights.decode.i0.conv1.weight_v weights.decode.i0.conv1.weight_g weights.decode.i0.conv1.bias
     conv2 := wnConv1dFromWeightNorm weights.decode.i0.conv2.weight_v weights.decode.i0.conv2.weight_g weights.decode.i0.conv2.bias
     norm1 := adaIN1dFromLinear weights.decode.i0.norm1.fc.weight weights.decode.i0.norm1.fc.bias
     norm2 := adaIN1dFromLinear weights.decode.i0.norm2.fc.weight weights.decode.i0.norm2.fc.bias
-    shortcut := some <| wnConv1dFromWeightNorm weights.decode.i0.conv1x1.weight_v weights.decode.i0.conv1x1.weight_g (torch.zeros #[cfg.maxConvDim] false Device.CPU)
+    shortcut := some <| wnConv1dFromWeightNorm weights.decode.i0.conv1x1.weight_v weights.decode.i0.conv1x1.weight_g (castLike weights.decode.i0.conv1x1.weight_v (torch.zeros #[cfg.maxConvDim] false Device.CPU))
   }
   let decode1 : AdainResBlk1dSame (cfg.maxConvDim + cfg.asrResDim + 2) cfg.maxConvDim cfg.styleDim := {
     conv1 := wnConv1dFromWeightNorm weights.decode.i1.conv1.weight_v weights.decode.i1.conv1.weight_g weights.decode.i1.conv1.bias
     conv2 := wnConv1dFromWeightNorm weights.decode.i1.conv2.weight_v weights.decode.i1.conv2.weight_g weights.decode.i1.conv2.bias
     norm1 := adaIN1dFromLinear weights.decode.i1.norm1.fc.weight weights.decode.i1.norm1.fc.bias
     norm2 := adaIN1dFromLinear weights.decode.i1.norm2.fc.weight weights.decode.i1.norm2.fc.bias
-    shortcut := some <| wnConv1dFromWeightNorm weights.decode.i1.conv1x1.weight_v weights.decode.i1.conv1x1.weight_g (torch.zeros #[cfg.maxConvDim] false Device.CPU)
+    shortcut := some <| wnConv1dFromWeightNorm weights.decode.i1.conv1x1.weight_v weights.decode.i1.conv1x1.weight_g (castLike weights.decode.i1.conv1x1.weight_v (torch.zeros #[cfg.maxConvDim] false Device.CPU))
   }
   let decode2 : AdainResBlk1dSame (cfg.maxConvDim + cfg.asrResDim + 2) cfg.maxConvDim cfg.styleDim := {
     conv1 := wnConv1dFromWeightNorm weights.decode.i2.conv1.weight_v weights.decode.i2.conv1.weight_g weights.decode.i2.conv1.bias
     conv2 := wnConv1dFromWeightNorm weights.decode.i2.conv2.weight_v weights.decode.i2.conv2.weight_g weights.decode.i2.conv2.bias
     norm1 := adaIN1dFromLinear weights.decode.i2.norm1.fc.weight weights.decode.i2.norm1.fc.bias
     norm2 := adaIN1dFromLinear weights.decode.i2.norm2.fc.weight weights.decode.i2.norm2.fc.bias
-    shortcut := some <| wnConv1dFromWeightNorm weights.decode.i2.conv1x1.weight_v weights.decode.i2.conv1x1.weight_g (torch.zeros #[cfg.maxConvDim] false Device.CPU)
+    shortcut := some <| wnConv1dFromWeightNorm weights.decode.i2.conv1x1.weight_v weights.decode.i2.conv1x1.weight_g (castLike weights.decode.i2.conv1x1.weight_v (torch.zeros #[cfg.maxConvDim] false Device.CPU))
   }
   let decode3 : AdainResBlk1dUp (cfg.maxConvDim + cfg.asrResDim + 2) (KittenTTSConfig.decoderChannels cfg) cfg.styleDim := {
     pool := wnDepthwiseTransConv1dFromWeightNorm weights.decode.i3.pool.weight_v weights.decode.i3.pool.weight_g weights.decode.i3.pool.bias
@@ -745,7 +750,7 @@ private def loadDecoderFromCheckpoint
     conv2 := wnConv1dFromWeightNorm weights.decode.i3.conv2.weight_v weights.decode.i3.conv2.weight_g weights.decode.i3.conv2.bias
     norm1 := adaIN1dFromLinear weights.decode.i3.norm1.fc.weight weights.decode.i3.norm1.fc.bias
     norm2 := adaIN1dFromLinear weights.decode.i3.norm2.fc.weight weights.decode.i3.norm2.fc.bias
-    shortcut := some <| wnConv1dFromWeightNorm weights.decode.i3.conv1x1.weight_v weights.decode.i3.conv1x1.weight_g (torch.zeros #[KittenTTSConfig.decoderChannels cfg] false Device.CPU)
+    shortcut := some <| wnConv1dFromWeightNorm weights.decode.i3.conv1x1.weight_v weights.decode.i3.conv1x1.weight_g (castLike weights.decode.i3.conv1x1.weight_v (torch.zeros #[KittenTTSConfig.decoderChannels cfg] false Device.CPU))
   }
   pure {
     f0Conv := wnConv1dFromWeightNorm weights.f0_conv.weight_v weights.f0_conv.weight_g weights.f0_conv.bias
@@ -769,12 +774,7 @@ private def resolveKittenDevice (log : Handlers := {}) : IO Device := do
     else
       log.onWarn "TYR_DEVICE=cuda requested but CUDA is unavailable; falling back to auto."
       getBestDevice
-  | some "mps" =>
-    if ← mps_is_available then
-      pure Device.MPS
-    else
-      log.onWarn "TYR_DEVICE=mps requested but MPS is unavailable; falling back to auto."
-      getBestDevice
+  | some "mps" => pure Device.MPS
   | some "auto" => getBestDevice
   | some _ => getBestDevice
   | none =>

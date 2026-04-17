@@ -621,7 +621,7 @@ lean_object* lean_torch_media_load_video_patchified(
   return lean_io_result_mk_ok(fromTorchTensor(t));
 }
 
-lean_object* lean_torch_media_load_image_patch_grid_gemma4(
+LEAN_EXPORT lean_object* lean_torch_media_load_image_patch_grid_gemma4(
     b_lean_obj_arg path_obj,
     uint64_t patch_size,
     uint64_t pooling_kernel_size,

@@ -14,7 +14,18 @@ namespace torch.qwen35
 open torch.Log
 
 private def reqGradFalse {s : Shape} (t : T s) : T s :=
-  autograd.set_requires_grad (toFloat' t) false
+  autograd.set_requires_grad t false
+
+private def castLike {sRef s : Shape} (reference : T sRef) (t : T s) : T s :=
+  match reference.dtype with
+  | .BFloat16 => toBFloat16' t
+  | _ => t
+
+private def finalizeDequantizedForDevice {s : Shape} (device : Device) (t : T s) : T s :=
+  match device with
+  | .CPU => t
+  | .MPS => toBFloat16' t
+  | .CUDA _ => toBFloat16' t
 
 private def pushUnique (xs : Array String) (x : String) : Array String :=
   if xs.contains x then xs else xs.push x
@@ -33,47 +44,71 @@ private def nameCandidates (name : String) : Array String :=
       out
   out
 
-private def tryLoadTensorSharded (modelDir : String) (name : String) (s : Shape)
+private def tryLoadTensorSharded
+    (modelDir : String)
+    (name : String)
+    (s : Shape)
+    (device : Device := Device.CPU)
     : IO (Option (T s)) := do
   try
-    let t ← safetensors.loadTensorSharded modelDir name s
+    let t ← safetensors.loadTensorShardedOnDevice modelDir name s device
     pure (some t)
   catch _ =>
     pure none
 
-private def tryLoadTensor (path : String) (name : String) (s : Shape)
+private def tryLoadTensor
+    (path : String)
+    (name : String)
+    (s : Shape)
+    (device : Device := Device.CPU)
     : IO (Option (T s)) := do
   try
-    let t ← safetensors.loadTensor path name s
+    let t ← safetensors.loadTensorOnDevice path name s device
     pure (some t)
   catch _ =>
     pure none
 
-private def loadTensorShardedCandidates (modelDir : String) (names : Array String) (s : Shape)
+private def loadTensorShardedCandidates
+    (modelDir : String)
+    (names : Array String)
+    (s : Shape)
+    (device : Device := Device.CPU)
     : IO (T s) := do
   for n in names do
-    if let some t ← tryLoadTensorSharded modelDir n s then
+    if let some t ← tryLoadTensorSharded modelDir n s device then
       return t
   throw <| IO.userError s!"Failed to load tensor (sharded): {names}"
 
-private def loadTensorCandidates (path : String) (names : Array String) (s : Shape)
+private def loadTensorCandidates
+    (path : String)
+    (names : Array String)
+    (s : Shape)
+    (device : Device := Device.CPU)
     : IO (T s) := do
   for n in names do
-    if let some t ← tryLoadTensor path n s then
+    if let some t ← tryLoadTensor path n s device then
       return t
   throw <| IO.userError s!"Failed to load tensor: {names}"
 
-private def tryLoadTensorShardedCandidates (modelDir : String) (names : Array String) (s : Shape)
+private def tryLoadTensorShardedCandidates
+    (modelDir : String)
+    (names : Array String)
+    (s : Shape)
+    (device : Device := Device.CPU)
     : IO (Option (T s)) := do
   for n in names do
-    if let some t ← tryLoadTensorSharded modelDir n s then
+    if let some t ← tryLoadTensorSharded modelDir n s device then
       return some t
   pure none
 
-private def tryLoadTensorCandidates (path : String) (names : Array String) (s : Shape)
+private def tryLoadTensorCandidates
+    (path : String)
+    (names : Array String)
+    (s : Shape)
+    (device : Device := Device.CPU)
     : IO (Option (T s)) := do
   for n in names do
-    if let some t ← tryLoadTensor path n s then
+    if let some t ← tryLoadTensor path n s device then
       return some t
   pure none
 
@@ -108,29 +143,37 @@ private def dequantizeFP8Experts {experts outDim inDim : UInt64}
   let w := w * s
   reshape w #[experts, outDim, inDim]
 
-private def loadLinearWeightSharded (modelDir : String) (baseName : String) (outDim inDim : UInt64)
+private def loadLinearWeightSharded
+    (modelDir : String)
+    (baseName : String)
+    (outDim inDim : UInt64)
+    (device : Device := Device.CPU)
     : IO (T #[outDim, inDim]) := do
   let bases := nameCandidates baseName
   for b in bases do
     let wName := s!"{b}.weight"
-    if let some w ← tryLoadTensorSharded modelDir wName #[outDim, inDim] then
+    if let some w ← tryLoadTensorSharded modelDir wName #[outDim, inDim] device then
       let scaleName := s!"{b}.weight_scale_inv"
-      let scaleInvOpt ← tryLoadTensorSharded modelDir scaleName #[outDim / 128, inDim / 128]
+      let scaleInvOpt ← tryLoadTensorSharded modelDir scaleName #[outDim / 128, inDim / 128] device
       return match scaleInvOpt with
-        | some s => dequantizeFP8 w s
+        | some s => finalizeDequantizedForDevice device (dequantizeFP8 w s)
         | none => w
   throw <| IO.userError s!"Failed to load linear weight (sharded): {baseName}"
 
-private def loadLinearWeight (path : String) (baseName : String) (outDim inDim : UInt64)
+private def loadLinearWeight
+    (path : String)
+    (baseName : String)
+    (outDim inDim : UInt64)
+    (device : Device := Device.CPU)
     : IO (T #[outDim, inDim]) := do
   let bases := nameCandidates baseName
   for b in bases do
     let wName := s!"{b}.weight"
-    if let some w ← tryLoadTensor path wName #[outDim, inDim] then
+    if let some w ← tryLoadTensor path wName #[outDim, inDim] device then
       let scaleName := s!"{b}.weight_scale_inv"
-      let scaleInvOpt ← tryLoadTensor path scaleName #[outDim / 128, inDim / 128]
+      let scaleInvOpt ← tryLoadTensor path scaleName #[outDim / 128, inDim / 128] device
       return match scaleInvOpt with
-        | some s => dequantizeFP8 w s
+        | some s => finalizeDequantizedForDevice device (dequantizeFP8 w s)
         | none => w
   throw <| IO.userError s!"Failed to load linear weight: {baseName}"
 
@@ -138,23 +181,24 @@ private def loadMoeExpertWeightSharded
     (modelDir : String)
     (baseName : String)
     (experts outDim inDim : UInt64)
+    (device : Device := Device.CPU)
     : IO (T #[experts, outDim, inDim]) := do
   let bases := nameCandidates baseName
   for b in bases do
     -- BF16-style checkpoints often store experts tensors directly (no ".weight").
-    if let some w ← tryLoadTensorSharded modelDir b #[experts, outDim, inDim] then
+    if let some w ← tryLoadTensorSharded modelDir b #[experts, outDim, inDim] device then
       let scaleName := s!"{b}.weight_scale_inv"
-      let scaleInvOpt ← tryLoadTensorSharded modelDir scaleName #[experts, outDim / 128, inDim / 128]
+      let scaleInvOpt ← tryLoadTensorSharded modelDir scaleName #[experts, outDim / 128, inDim / 128] device
       return match scaleInvOpt with
-        | some s => dequantizeFP8Experts w s
+        | some s => finalizeDequantizedForDevice device (dequantizeFP8Experts w s)
         | none => w
     -- FP8 checkpoints store them as "<base>.weight" + optional weight_scale_inv.
     let wName := s!"{b}.weight"
-    if let some w ← tryLoadTensorSharded modelDir wName #[experts, outDim, inDim] then
+    if let some w ← tryLoadTensorSharded modelDir wName #[experts, outDim, inDim] device then
       let scaleName := s!"{b}.weight_scale_inv"
-      let scaleInvOpt ← tryLoadTensorSharded modelDir scaleName #[experts, outDim / 128, inDim / 128]
+      let scaleInvOpt ← tryLoadTensorSharded modelDir scaleName #[experts, outDim / 128, inDim / 128] device
       return match scaleInvOpt with
-        | some s => dequantizeFP8Experts w s
+        | some s => finalizeDequantizedForDevice device (dequantizeFP8Experts w s)
         | none => w
   throw <| IO.userError s!"Failed to load MoE expert weight (sharded): {baseName}"
 
@@ -162,54 +206,60 @@ private def loadMoeExpertWeight
     (path : String)
     (baseName : String)
     (experts outDim inDim : UInt64)
+    (device : Device := Device.CPU)
     : IO (T #[experts, outDim, inDim]) := do
   let bases := nameCandidates baseName
   for b in bases do
-    if let some w ← tryLoadTensor path b #[experts, outDim, inDim] then
+    if let some w ← tryLoadTensor path b #[experts, outDim, inDim] device then
       let scaleName := s!"{b}.weight_scale_inv"
-      let scaleInvOpt ← tryLoadTensor path scaleName #[experts, outDim / 128, inDim / 128]
+      let scaleInvOpt ← tryLoadTensor path scaleName #[experts, outDim / 128, inDim / 128] device
       return match scaleInvOpt with
-        | some s => dequantizeFP8Experts w s
+        | some s => finalizeDequantizedForDevice device (dequantizeFP8Experts w s)
         | none => w
     let wName := s!"{b}.weight"
-    if let some w ← tryLoadTensor path wName #[experts, outDim, inDim] then
+    if let some w ← tryLoadTensor path wName #[experts, outDim, inDim] device then
       let scaleName := s!"{b}.weight_scale_inv"
-      let scaleInvOpt ← tryLoadTensor path scaleName #[experts, outDim / 128, inDim / 128]
+      let scaleInvOpt ← tryLoadTensor path scaleName #[experts, outDim / 128, inDim / 128] device
       return match scaleInvOpt with
-        | some s => dequantizeFP8Experts w s
+        | some s => finalizeDequantizedForDevice device (dequantizeFP8Experts w s)
         | none => w
   throw <| IO.userError s!"Failed to load MoE expert weight: {baseName}"
 
 private def loadRMSNormSharded (modelDir : String) (baseName : String) (dim : UInt64)
+    (device : Device := Device.CPU)
     : IO (Qwen35RMSNorm dim) := do
-  let w ← loadTensorShardedCandidates modelDir (nameCandidates s!"{baseName}.weight") #[dim]
+  let w ← loadTensorShardedCandidates modelDir (nameCandidates s!"{baseName}.weight") #[dim] device
   pure (Qwen35RMSNorm.fromCheckpointWeight (reqGradFalse w) 1e-6)
 
 private def loadRMSNorm (path : String) (baseName : String) (dim : UInt64)
+    (device : Device := Device.CPU)
     : IO (Qwen35RMSNorm dim) := do
-  let w ← loadTensorCandidates path (nameCandidates s!"{baseName}.weight") #[dim]
+  let w ← loadTensorCandidates path (nameCandidates s!"{baseName}.weight") #[dim] device
   pure (Qwen35RMSNorm.fromCheckpointWeight (reqGradFalse w) 1e-6)
 
 private def loadRMSNormGatedSharded (modelDir : String) (baseName : String) (dim : UInt64)
+    (device : Device := Device.CPU)
     : IO (Qwen35RMSNormGated dim) := do
-  let w ← loadTensorShardedCandidates modelDir (nameCandidates s!"{baseName}.weight") #[dim]
+  let w ← loadTensorShardedCandidates modelDir (nameCandidates s!"{baseName}.weight") #[dim] device
   pure { weight := reqGradFalse w, eps := 1e-6 }
 
 private def loadRMSNormGated (path : String) (baseName : String) (dim : UInt64)
+    (device : Device := Device.CPU)
     : IO (Qwen35RMSNormGated dim) := do
-  let w ← loadTensorCandidates path (nameCandidates s!"{baseName}.weight") #[dim]
+  let w ← loadTensorCandidates path (nameCandidates s!"{baseName}.weight") #[dim] device
   pure { weight := reqGradFalse w, eps := 1e-6 }
 
 private def loadAttentionSharded (modelDir : String) (cfg : Config) (layerIdx : UInt64)
+    (device : Device := Device.CPU)
     : IO (Qwen35Attention cfg) := do
   let p := s!"model.layers.{layerIdx}.self_attn"
-  let qProj ← loadLinearWeightSharded modelDir s!"{p}.q_proj" (cfg.num_attention_heads * cfg.head_dim * 2) cfg.hidden_size
-  let kProj ← loadLinearWeightSharded modelDir s!"{p}.k_proj" (cfg.num_key_value_heads * cfg.head_dim) cfg.hidden_size
-  let vProj ← loadLinearWeightSharded modelDir s!"{p}.v_proj" (cfg.num_key_value_heads * cfg.head_dim) cfg.hidden_size
-  let oProj ← loadLinearWeightSharded modelDir s!"{p}.o_proj" cfg.hidden_size (cfg.num_attention_heads * cfg.head_dim)
+  let qProj ← loadLinearWeightSharded modelDir s!"{p}.q_proj" (cfg.num_attention_heads * cfg.head_dim * 2) cfg.hidden_size device
+  let kProj ← loadLinearWeightSharded modelDir s!"{p}.k_proj" (cfg.num_key_value_heads * cfg.head_dim) cfg.hidden_size device
+  let vProj ← loadLinearWeightSharded modelDir s!"{p}.v_proj" (cfg.num_key_value_heads * cfg.head_dim) cfg.hidden_size device
+  let oProj ← loadLinearWeightSharded modelDir s!"{p}.o_proj" cfg.hidden_size (cfg.num_attention_heads * cfg.head_dim) device
 
-  let qNorm ← loadRMSNormSharded modelDir s!"{p}.q_norm" cfg.head_dim
-  let kNorm ← loadRMSNormSharded modelDir s!"{p}.k_norm" cfg.head_dim
+  let qNorm ← loadRMSNormSharded modelDir s!"{p}.q_norm" cfg.head_dim device
+  let kNorm ← loadRMSNormSharded modelDir s!"{p}.k_norm" cfg.head_dim device
 
   pure {
     q_proj := reqGradFalse qProj
@@ -221,15 +271,16 @@ private def loadAttentionSharded (modelDir : String) (cfg : Config) (layerIdx : 
   }
 
 private def loadAttention (path : String) (cfg : Config) (layerIdx : UInt64)
+    (device : Device := Device.CPU)
     : IO (Qwen35Attention cfg) := do
   let p := s!"model.layers.{layerIdx}.self_attn"
-  let qProj ← loadLinearWeight path s!"{p}.q_proj" (cfg.num_attention_heads * cfg.head_dim * 2) cfg.hidden_size
-  let kProj ← loadLinearWeight path s!"{p}.k_proj" (cfg.num_key_value_heads * cfg.head_dim) cfg.hidden_size
-  let vProj ← loadLinearWeight path s!"{p}.v_proj" (cfg.num_key_value_heads * cfg.head_dim) cfg.hidden_size
-  let oProj ← loadLinearWeight path s!"{p}.o_proj" cfg.hidden_size (cfg.num_attention_heads * cfg.head_dim)
+  let qProj ← loadLinearWeight path s!"{p}.q_proj" (cfg.num_attention_heads * cfg.head_dim * 2) cfg.hidden_size device
+  let kProj ← loadLinearWeight path s!"{p}.k_proj" (cfg.num_key_value_heads * cfg.head_dim) cfg.hidden_size device
+  let vProj ← loadLinearWeight path s!"{p}.v_proj" (cfg.num_key_value_heads * cfg.head_dim) cfg.hidden_size device
+  let oProj ← loadLinearWeight path s!"{p}.o_proj" cfg.hidden_size (cfg.num_attention_heads * cfg.head_dim) device
 
-  let qNorm ← loadRMSNorm path s!"{p}.q_norm" cfg.head_dim
-  let kNorm ← loadRMSNorm path s!"{p}.k_norm" cfg.head_dim
+  let qNorm ← loadRMSNorm path s!"{p}.q_norm" cfg.head_dim device
+  let kNorm ← loadRMSNorm path s!"{p}.k_norm" cfg.head_dim device
 
   pure {
     q_proj := reqGradFalse qProj
@@ -241,26 +292,27 @@ private def loadAttention (path : String) (cfg : Config) (layerIdx : UInt64)
   }
 
 private def loadLinearMixerSharded (modelDir : String) (cfg : Config) (layerIdx : UInt64)
+    (device : Device := Device.CPU)
     : IO (Qwen35GatedDeltaNet cfg) := do
   let p := s!"model.layers.{layerIdx}.linear_attn"
 
-  let inQKV ← loadLinearWeightSharded modelDir s!"{p}.in_proj_qkv" (Config.linearConvDim cfg) cfg.hidden_size
-  let inZ ← loadLinearWeightSharded modelDir s!"{p}.in_proj_z" (Config.linearValueDim cfg) cfg.hidden_size
-  let inB ← loadLinearWeightSharded modelDir s!"{p}.in_proj_b" cfg.linear_num_value_heads cfg.hidden_size
-  let inA ← loadLinearWeightSharded modelDir s!"{p}.in_proj_a" cfg.linear_num_value_heads cfg.hidden_size
+  let inQKV ← loadLinearWeightSharded modelDir s!"{p}.in_proj_qkv" (Config.linearConvDim cfg) cfg.hidden_size device
+  let inZ ← loadLinearWeightSharded modelDir s!"{p}.in_proj_z" (Config.linearValueDim cfg) cfg.hidden_size device
+  let inB ← loadLinearWeightSharded modelDir s!"{p}.in_proj_b" cfg.linear_num_value_heads cfg.hidden_size device
+  let inA ← loadLinearWeightSharded modelDir s!"{p}.in_proj_a" cfg.linear_num_value_heads cfg.hidden_size device
 
-  let convW ← loadTensorShardedCandidates modelDir (nameCandidates s!"{p}.conv1d.weight") #[Config.linearConvDim cfg, 1, cfg.linear_conv_kernel_dim]
-  let convBOpt ← tryLoadTensorShardedCandidates modelDir (nameCandidates s!"{p}.conv1d.bias") #[Config.linearConvDim cfg]
+  let convW ← loadTensorShardedCandidates modelDir (nameCandidates s!"{p}.conv1d.weight") #[Config.linearConvDim cfg, 1, cfg.linear_conv_kernel_dim] device
+  let convBOpt ← tryLoadTensorShardedCandidates modelDir (nameCandidates s!"{p}.conv1d.bias") #[Config.linearConvDim cfg] device
   let convB ←
     match convBOpt with
     | some b => pure b
-    | none => pure (torch.zeros #[Config.linearConvDim cfg])
+    | none => pure (castLike convW (torch.zeros #[Config.linearConvDim cfg] false device))
 
-  let dtBias ← loadTensorShardedCandidates modelDir (nameCandidates s!"{p}.dt_bias") #[cfg.linear_num_value_heads]
-  let aLog ← loadTensorShardedCandidates modelDir (nameCandidates s!"{p}.A_log") #[cfg.linear_num_value_heads]
+  let dtBias ← loadTensorShardedCandidates modelDir (nameCandidates s!"{p}.dt_bias") #[cfg.linear_num_value_heads] device
+  let aLog ← loadTensorShardedCandidates modelDir (nameCandidates s!"{p}.A_log") #[cfg.linear_num_value_heads] device
 
-  let norm ← loadRMSNormGatedSharded modelDir s!"{p}.norm" cfg.linear_value_head_dim
-  let outProj ← loadLinearWeightSharded modelDir s!"{p}.out_proj" cfg.hidden_size (Config.linearValueDim cfg)
+  let norm ← loadRMSNormGatedSharded modelDir s!"{p}.norm" cfg.linear_value_head_dim device
+  let outProj ← loadLinearWeightSharded modelDir s!"{p}.out_proj" cfg.hidden_size (Config.linearValueDim cfg) device
 
   pure {
     in_proj_qkv := reqGradFalse inQKV
@@ -276,26 +328,27 @@ private def loadLinearMixerSharded (modelDir : String) (cfg : Config) (layerIdx 
   }
 
 private def loadLinearMixer (path : String) (cfg : Config) (layerIdx : UInt64)
+    (device : Device := Device.CPU)
     : IO (Qwen35GatedDeltaNet cfg) := do
   let p := s!"model.layers.{layerIdx}.linear_attn"
 
-  let inQKV ← loadLinearWeight path s!"{p}.in_proj_qkv" (Config.linearConvDim cfg) cfg.hidden_size
-  let inZ ← loadLinearWeight path s!"{p}.in_proj_z" (Config.linearValueDim cfg) cfg.hidden_size
-  let inB ← loadLinearWeight path s!"{p}.in_proj_b" cfg.linear_num_value_heads cfg.hidden_size
-  let inA ← loadLinearWeight path s!"{p}.in_proj_a" cfg.linear_num_value_heads cfg.hidden_size
+  let inQKV ← loadLinearWeight path s!"{p}.in_proj_qkv" (Config.linearConvDim cfg) cfg.hidden_size device
+  let inZ ← loadLinearWeight path s!"{p}.in_proj_z" (Config.linearValueDim cfg) cfg.hidden_size device
+  let inB ← loadLinearWeight path s!"{p}.in_proj_b" cfg.linear_num_value_heads cfg.hidden_size device
+  let inA ← loadLinearWeight path s!"{p}.in_proj_a" cfg.linear_num_value_heads cfg.hidden_size device
 
-  let convW ← loadTensorCandidates path (nameCandidates s!"{p}.conv1d.weight") #[Config.linearConvDim cfg, 1, cfg.linear_conv_kernel_dim]
-  let convBOpt ← tryLoadTensorCandidates path (nameCandidates s!"{p}.conv1d.bias") #[Config.linearConvDim cfg]
+  let convW ← loadTensorCandidates path (nameCandidates s!"{p}.conv1d.weight") #[Config.linearConvDim cfg, 1, cfg.linear_conv_kernel_dim] device
+  let convBOpt ← tryLoadTensorCandidates path (nameCandidates s!"{p}.conv1d.bias") #[Config.linearConvDim cfg] device
   let convB ←
     match convBOpt with
     | some b => pure b
-    | none => pure (torch.zeros #[Config.linearConvDim cfg])
+    | none => pure (castLike convW (torch.zeros #[Config.linearConvDim cfg] false device))
 
-  let dtBias ← loadTensorCandidates path (nameCandidates s!"{p}.dt_bias") #[cfg.linear_num_value_heads]
-  let aLog ← loadTensorCandidates path (nameCandidates s!"{p}.A_log") #[cfg.linear_num_value_heads]
+  let dtBias ← loadTensorCandidates path (nameCandidates s!"{p}.dt_bias") #[cfg.linear_num_value_heads] device
+  let aLog ← loadTensorCandidates path (nameCandidates s!"{p}.A_log") #[cfg.linear_num_value_heads] device
 
-  let norm ← loadRMSNormGated path s!"{p}.norm" cfg.linear_value_head_dim
-  let outProj ← loadLinearWeight path s!"{p}.out_proj" cfg.hidden_size (Config.linearValueDim cfg)
+  let norm ← loadRMSNormGated path s!"{p}.norm" cfg.linear_value_head_dim device
+  let outProj ← loadLinearWeight path s!"{p}.out_proj" cfg.hidden_size (Config.linearValueDim cfg) device
 
   pure {
     in_proj_qkv := reqGradFalse inQKV
@@ -311,11 +364,12 @@ private def loadLinearMixer (path : String) (cfg : Config) (layerIdx : UInt64)
   }
 
 private def loadDenseMLPSharded (modelDir : String) (cfg : Config) (layerIdx : UInt64)
+    (device : Device := Device.CPU)
     : IO (Qwen35MLP cfg.hidden_size cfg.intermediate_size) := do
   let p := s!"model.layers.{layerIdx}.mlp"
-  let gate ← loadLinearWeightSharded modelDir s!"{p}.gate_proj" cfg.intermediate_size cfg.hidden_size
-  let up ← loadLinearWeightSharded modelDir s!"{p}.up_proj" cfg.intermediate_size cfg.hidden_size
-  let down ← loadLinearWeightSharded modelDir s!"{p}.down_proj" cfg.hidden_size cfg.intermediate_size
+  let gate ← loadLinearWeightSharded modelDir s!"{p}.gate_proj" cfg.intermediate_size cfg.hidden_size device
+  let up ← loadLinearWeightSharded modelDir s!"{p}.up_proj" cfg.intermediate_size cfg.hidden_size device
+  let down ← loadLinearWeightSharded modelDir s!"{p}.down_proj" cfg.hidden_size cfg.intermediate_size device
   pure {
     gate_proj := reqGradFalse gate
     up_proj := reqGradFalse up
@@ -323,11 +377,12 @@ private def loadDenseMLPSharded (modelDir : String) (cfg : Config) (layerIdx : U
   }
 
 private def loadDenseMLP (path : String) (cfg : Config) (layerIdx : UInt64)
+    (device : Device := Device.CPU)
     : IO (Qwen35MLP cfg.hidden_size cfg.intermediate_size) := do
   let p := s!"model.layers.{layerIdx}.mlp"
-  let gate ← loadLinearWeight path s!"{p}.gate_proj" cfg.intermediate_size cfg.hidden_size
-  let up ← loadLinearWeight path s!"{p}.up_proj" cfg.intermediate_size cfg.hidden_size
-  let down ← loadLinearWeight path s!"{p}.down_proj" cfg.hidden_size cfg.intermediate_size
+  let gate ← loadLinearWeight path s!"{p}.gate_proj" cfg.intermediate_size cfg.hidden_size device
+  let up ← loadLinearWeight path s!"{p}.up_proj" cfg.intermediate_size cfg.hidden_size device
+  let down ← loadLinearWeight path s!"{p}.down_proj" cfg.hidden_size cfg.intermediate_size device
   pure {
     gate_proj := reqGradFalse gate
     up_proj := reqGradFalse up
@@ -335,27 +390,30 @@ private def loadDenseMLP (path : String) (cfg : Config) (layerIdx : UInt64)
   }
 
 private def loadSparseMoeSharded (modelDir : String) (cfg : Config) (layerIdx : UInt64)
+    (device : Device := Device.CPU)
     : IO (Qwen35SparseMoeBlock cfg) := do
   let p := s!"model.layers.{layerIdx}.mlp"
 
-  let routerW ← loadTensorShardedCandidates modelDir (nameCandidates s!"{p}.gate.weight") #[cfg.num_experts, cfg.hidden_size]
+  let routerW ← loadTensorShardedCandidates modelDir (nameCandidates s!"{p}.gate.weight") #[cfg.num_experts, cfg.hidden_size] device
   let gu ← loadMoeExpertWeightSharded
     modelDir
     s!"{p}.experts.gate_up_proj"
     cfg.num_experts
     (2 * cfg.moe_intermediate_size)
     cfg.hidden_size
+    device
   let down ← loadMoeExpertWeightSharded
     modelDir
     s!"{p}.experts.down_proj"
     cfg.num_experts
     cfg.hidden_size
     cfg.moe_intermediate_size
+    device
 
-  let sharedGateProj ← loadLinearWeightSharded modelDir s!"{p}.shared_expert.gate_proj" cfg.shared_expert_intermediate_size cfg.hidden_size
-  let sharedUpProj ← loadLinearWeightSharded modelDir s!"{p}.shared_expert.up_proj" cfg.shared_expert_intermediate_size cfg.hidden_size
-  let sharedDownProj ← loadLinearWeightSharded modelDir s!"{p}.shared_expert.down_proj" cfg.hidden_size cfg.shared_expert_intermediate_size
-  let sharedExpertGate ← loadLinearWeightSharded modelDir s!"{p}.shared_expert_gate" 1 cfg.hidden_size
+  let sharedGateProj ← loadLinearWeightSharded modelDir s!"{p}.shared_expert.gate_proj" cfg.shared_expert_intermediate_size cfg.hidden_size device
+  let sharedUpProj ← loadLinearWeightSharded modelDir s!"{p}.shared_expert.up_proj" cfg.shared_expert_intermediate_size cfg.hidden_size device
+  let sharedDownProj ← loadLinearWeightSharded modelDir s!"{p}.shared_expert.down_proj" cfg.hidden_size cfg.shared_expert_intermediate_size device
+  let sharedExpertGate ← loadLinearWeightSharded modelDir s!"{p}.shared_expert_gate" 1 cfg.hidden_size device
 
   let router : Qwen35TopKRouter cfg := { weight := reqGradFalse routerW }
   let experts : Qwen35MoeExperts cfg := {
@@ -376,27 +434,30 @@ private def loadSparseMoeSharded (modelDir : String) (cfg : Config) (layerIdx : 
   }
 
 private def loadSparseMoe (path : String) (cfg : Config) (layerIdx : UInt64)
+    (device : Device := Device.CPU)
     : IO (Qwen35SparseMoeBlock cfg) := do
   let p := s!"model.layers.{layerIdx}.mlp"
 
-  let routerW ← loadTensorCandidates path (nameCandidates s!"{p}.gate.weight") #[cfg.num_experts, cfg.hidden_size]
+  let routerW ← loadTensorCandidates path (nameCandidates s!"{p}.gate.weight") #[cfg.num_experts, cfg.hidden_size] device
   let gu ← loadMoeExpertWeight
     path
     s!"{p}.experts.gate_up_proj"
     cfg.num_experts
     (2 * cfg.moe_intermediate_size)
     cfg.hidden_size
+    device
   let down ← loadMoeExpertWeight
     path
     s!"{p}.experts.down_proj"
     cfg.num_experts
     cfg.hidden_size
     cfg.moe_intermediate_size
+    device
 
-  let sharedGateProj ← loadLinearWeight path s!"{p}.shared_expert.gate_proj" cfg.shared_expert_intermediate_size cfg.hidden_size
-  let sharedUpProj ← loadLinearWeight path s!"{p}.shared_expert.up_proj" cfg.shared_expert_intermediate_size cfg.hidden_size
-  let sharedDownProj ← loadLinearWeight path s!"{p}.shared_expert.down_proj" cfg.hidden_size cfg.shared_expert_intermediate_size
-  let sharedExpertGate ← loadLinearWeight path s!"{p}.shared_expert_gate" 1 cfg.hidden_size
+  let sharedGateProj ← loadLinearWeight path s!"{p}.shared_expert.gate_proj" cfg.shared_expert_intermediate_size cfg.hidden_size device
+  let sharedUpProj ← loadLinearWeight path s!"{p}.shared_expert.up_proj" cfg.shared_expert_intermediate_size cfg.hidden_size device
+  let sharedDownProj ← loadLinearWeight path s!"{p}.shared_expert.down_proj" cfg.hidden_size cfg.shared_expert_intermediate_size device
+  let sharedExpertGate ← loadLinearWeight path s!"{p}.shared_expert_gate" 1 cfg.hidden_size device
 
   let router : Qwen35TopKRouter cfg := { weight := reqGradFalse routerW }
   let experts : Qwen35MoeExperts cfg := {
@@ -417,25 +478,26 @@ private def loadSparseMoe (path : String) (cfg : Config) (layerIdx : UInt64)
   }
 
 private def loadLayerSharded (modelDir : String) (cfg : Config) (layerIdx : UInt64)
+    (device : Device := Device.CPU)
     : IO (Qwen35Layer cfg) := do
   let p := s!"model.layers.{layerIdx}"
   let layerTypes := Config.normalizedLayerTypes cfg
   let lt := layerTypes.getD layerIdx.toNat .linearAttention
 
-  let inputNorm ← loadRMSNormSharded modelDir s!"{p}.input_layernorm" cfg.hidden_size
-  let postNorm ← loadRMSNormSharded modelDir s!"{p}.post_attention_layernorm" cfg.hidden_size
+  let inputNorm ← loadRMSNormSharded modelDir s!"{p}.input_layernorm" cfg.hidden_size device
+  let postNorm ← loadRMSNormSharded modelDir s!"{p}.post_attention_layernorm" cfg.hidden_size device
 
   let fullAttn ←
     match lt with
     | .fullAttention =>
-      let a ← loadAttentionSharded modelDir cfg layerIdx
+      let a ← loadAttentionSharded modelDir cfg layerIdx device
       pure (some a)
     | .linearAttention => pure none
 
   let linearAttn ←
     match lt with
     | .linearAttention =>
-      let l ← loadLinearMixerSharded modelDir cfg layerIdx
+      let l ← loadLinearMixerSharded modelDir cfg layerIdx device
       pure (some l)
     | .fullAttention => pure none
 
@@ -443,12 +505,12 @@ private def loadLayerSharded (modelDir : String) (cfg : Config) (layerIdx : UInt
     if Config.isMoE cfg then
       pure none
     else
-      let m ← loadDenseMLPSharded modelDir cfg layerIdx
+      let m ← loadDenseMLPSharded modelDir cfg layerIdx device
       pure (some m)
 
   let sparseMoe ←
     if Config.isMoE cfg then
-      let m ← loadSparseMoeSharded modelDir cfg layerIdx
+      let m ← loadSparseMoeSharded modelDir cfg layerIdx device
       pure (some m)
     else
       pure none
@@ -464,25 +526,26 @@ private def loadLayerSharded (modelDir : String) (cfg : Config) (layerIdx : UInt
   }
 
 private def loadLayer (path : String) (cfg : Config) (layerIdx : UInt64)
+    (device : Device := Device.CPU)
     : IO (Qwen35Layer cfg) := do
   let p := s!"model.layers.{layerIdx}"
   let layerTypes := Config.normalizedLayerTypes cfg
   let lt := layerTypes.getD layerIdx.toNat .linearAttention
 
-  let inputNorm ← loadRMSNorm path s!"{p}.input_layernorm" cfg.hidden_size
-  let postNorm ← loadRMSNorm path s!"{p}.post_attention_layernorm" cfg.hidden_size
+  let inputNorm ← loadRMSNorm path s!"{p}.input_layernorm" cfg.hidden_size device
+  let postNorm ← loadRMSNorm path s!"{p}.post_attention_layernorm" cfg.hidden_size device
 
   let fullAttn ←
     match lt with
     | .fullAttention =>
-      let a ← loadAttention path cfg layerIdx
+      let a ← loadAttention path cfg layerIdx device
       pure (some a)
     | .linearAttention => pure none
 
   let linearAttn ←
     match lt with
     | .linearAttention =>
-      let l ← loadLinearMixer path cfg layerIdx
+      let l ← loadLinearMixer path cfg layerIdx device
       pure (some l)
     | .fullAttention => pure none
 
@@ -490,12 +553,12 @@ private def loadLayer (path : String) (cfg : Config) (layerIdx : UInt64)
     if Config.isMoE cfg then
       pure none
     else
-      let m ← loadDenseMLP path cfg layerIdx
+      let m ← loadDenseMLP path cfg layerIdx device
       pure (some m)
 
   let sparseMoe ←
     if Config.isMoE cfg then
-      let m ← loadSparseMoe path cfg layerIdx
+      let m ← loadSparseMoe path cfg layerIdx device
       pure (some m)
     else
       pure none
@@ -514,20 +577,21 @@ namespace Qwen35ForCausalLM
 
 /-- Load Qwen3.5 model from sharded HF SafeTensors directory. -/
 def loadSharded (modelDir : String) (cfg : Config := Config.qwen35_9B)
+    (device : Device := Device.CPU)
     (log : Handlers := {})
     : IO (Qwen35ForCausalLM cfg) := do
   log.onInfo s!"Loading Qwen35ForCausalLM from {modelDir}..."
 
-  let embedTokens ← loadTensorShardedCandidates modelDir (nameCandidates "model.embed_tokens.weight") #[cfg.vocab_size, cfg.hidden_size]
+  let embedTokens ← loadTensorShardedCandidates modelDir (nameCandidates "model.embed_tokens.weight") #[cfg.vocab_size, cfg.hidden_size] device
 
   let mut layers : Array (Qwen35Layer cfg) := #[]
   for i in [:cfg.num_hidden_layers.toNat] do
-    let layer ← loadLayerSharded modelDir cfg i.toUInt64
+    let layer ← loadLayerSharded modelDir cfg i.toUInt64 device
     layers := layers.push layer
     if (i + 1) % 8 == 0 || i + 1 == cfg.num_hidden_layers.toNat then
       log.onInfo s!"  loaded layers {i + 1}/{cfg.num_hidden_layers.toNat}"
 
-  let norm ← loadRMSNormSharded modelDir "model.norm" cfg.hidden_size
+  let norm ← loadRMSNormSharded modelDir "model.norm" cfg.hidden_size device
 
   let model : Qwen35Model cfg := {
     embed_tokens := reqGradFalse embedTokens
@@ -535,13 +599,13 @@ def loadSharded (modelDir : String) (cfg : Config := Config.qwen35_9B)
     norm := norm
   }
 
-  let lmHeadOpt0 ← tryLoadTensorSharded modelDir "lm_head.weight" #[cfg.vocab_size, cfg.hidden_size]
+  let lmHeadOpt0 ← tryLoadTensorSharded modelDir "lm_head.weight" #[cfg.vocab_size, cfg.hidden_size] device
   let lmHeadOpt ←
     match lmHeadOpt0 with
     | some t => pure (some t)
     | none =>
       -- try multimodal-style prefixed key
-      tryLoadTensorSharded modelDir "language_model.lm_head.weight" #[cfg.vocab_size, cfg.hidden_size]
+      tryLoadTensorSharded modelDir "language_model.lm_head.weight" #[cfg.vocab_size, cfg.hidden_size] device
 
   let (lmHead, tieWordEmbeddings) ←
     match lmHeadOpt with
@@ -555,20 +619,21 @@ def loadSharded (modelDir : String) (cfg : Config := Config.qwen35_9B)
 
 /-- Load Qwen3.5 model from a single HF SafeTensors file. -/
 def load (path : String) (cfg : Config := Config.qwen35_9B)
+    (device : Device := Device.CPU)
     (log : Handlers := {})
     : IO (Qwen35ForCausalLM cfg) := do
   log.onInfo s!"Loading Qwen35ForCausalLM from {path}..."
 
-  let embedTokens ← loadTensorCandidates path (nameCandidates "model.embed_tokens.weight") #[cfg.vocab_size, cfg.hidden_size]
+  let embedTokens ← loadTensorCandidates path (nameCandidates "model.embed_tokens.weight") #[cfg.vocab_size, cfg.hidden_size] device
 
   let mut layers : Array (Qwen35Layer cfg) := #[]
   for i in [:cfg.num_hidden_layers.toNat] do
-    let layer ← loadLayer path cfg i.toUInt64
+    let layer ← loadLayer path cfg i.toUInt64 device
     layers := layers.push layer
     if (i + 1) % 8 == 0 || i + 1 == cfg.num_hidden_layers.toNat then
       log.onInfo s!"  loaded layers {i + 1}/{cfg.num_hidden_layers.toNat}"
 
-  let norm ← loadRMSNorm path "model.norm" cfg.hidden_size
+  let norm ← loadRMSNorm path "model.norm" cfg.hidden_size device
 
   let model : Qwen35Model cfg := {
     embed_tokens := reqGradFalse embedTokens
@@ -576,11 +641,11 @@ def load (path : String) (cfg : Config := Config.qwen35_9B)
     norm := norm
   }
 
-  let lmHeadOpt0 ← tryLoadTensor path "lm_head.weight" #[cfg.vocab_size, cfg.hidden_size]
+  let lmHeadOpt0 ← tryLoadTensor path "lm_head.weight" #[cfg.vocab_size, cfg.hidden_size] device
   let lmHeadOpt ←
     match lmHeadOpt0 with
     | some t => pure (some t)
-    | none => tryLoadTensor path "language_model.lm_head.weight" #[cfg.vocab_size, cfg.hidden_size]
+    | none => tryLoadTensor path "language_model.lm_head.weight" #[cfg.vocab_size, cfg.hidden_size] device
 
   let (lmHead, tieWordEmbeddings) ←
     match lmHeadOpt with

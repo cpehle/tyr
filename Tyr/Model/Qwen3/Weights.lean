@@ -13,7 +13,7 @@ namespace torch.qwen3
 open torch.Log
 
 private def reqGradFalse {s : Shape} (t : T s) : T s :=
-  autograd.set_requires_grad (toFloat' t) false
+  autograd.set_requires_grad t false
 
 private def isMissingTensorError (msg : String) (name : String) : Bool :=
   (msg.contains name) &&

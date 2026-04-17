@@ -67,6 +67,11 @@ def initKVCache {batch num_kv_heads head_dim : UInt64}
     torch.zeros #[batch, num_kv_heads, maxLen, head_dim] false device
   { kStoreDyn := nn.eraseShape k0, vStoreDyn := nn.eraseShape v0, seq := 0, maxLen := maxLen }
 
+private def castLike {sRef s : Shape} (reference : T sRef) (t : T s) : T s :=
+  match reference.dtype with
+  | .BFloat16 => toBFloat16' t
+  | _ => t
+
 /-- Apply RMS normalization along the last dimension (per-head norm).
     Input: [batch, seq, n_heads, head_dim], norm: [head_dim]
     Broadcasts norm across all heads. -/
@@ -182,9 +187,9 @@ def forwardStep {batch hidden_size num_heads num_kv_heads head_dim : UInt64}
   let vNew : T #[batch, num_kv_heads, 1, head_dim] := nn.transpose_for_attention v
 
   let kStore : T #[batch, num_kv_heads, cache.maxLen, head_dim] :=
-    reshape cache.kStoreDyn #[batch, num_kv_heads, cache.maxLen, head_dim]
+    castLike kNew (reshape cache.kStoreDyn #[batch, num_kv_heads, cache.maxLen, head_dim])
   let vStore : T #[batch, num_kv_heads, cache.maxLen, head_dim] :=
-    reshape cache.vStoreDyn #[batch, num_kv_heads, cache.maxLen, head_dim]
+    castLike vNew (reshape cache.vStoreDyn #[batch, num_kv_heads, cache.maxLen, head_dim])
 
   if cache.seq < cache.maxLen then
     let kStore' : T #[batch, num_kv_heads, cache.maxLen, head_dim] :=

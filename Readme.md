@@ -34,7 +34,7 @@ automatically on first `lake build`.
 **macOS:**
 ```bash
 cd external
-LIBTORCH_VERSION=2.9.1
+LIBTORCH_VERSION=2.10.0
 curl --fail --location --retry 5 --retry-all-errors --show-error \
   -o libtorch.zip "https://download.pytorch.org/libtorch/cpu/libtorch-macos-arm64-${LIBTORCH_VERSION}.zip"
 unzip -tq libtorch.zip
@@ -50,7 +50,7 @@ bash dependencies_macos.sh
 **Linux (CPU):**
 ```bash
 cd external
-LIBTORCH_VERSION=2.9.1
+LIBTORCH_VERSION=2.10.0
 curl --fail --location --retry 5 --retry-all-errors --show-error \
   -o libtorch.zip "https://download.pytorch.org/libtorch/cpu/libtorch-shared-with-deps-${LIBTORCH_VERSION}%2Bcpu.zip"
 unzip -tq libtorch.zip

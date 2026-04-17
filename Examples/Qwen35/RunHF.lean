@@ -1,7 +1,7 @@
 /-  
   Examples/Qwen35/RunHF.lean
 
-  Text generation demo for Qwen3.5 models resolved by local path or
+  Text generation demo for Qwen3.5/Qwen3.6 models resolved by local path or
   HuggingFace repo id.
 -/
 import Tyr.Model.Qwen35
@@ -59,51 +59,104 @@ private def printHelp : IO Unit := do
   IO.println "Examples:"
   IO.println "  lake exe Qwen35RunHF --source tiny-random/qwen3.5 --stream"
   IO.println "  lake exe Qwen35RunHF --source Qwen/Qwen3.5-0.8B --prompt \"Write one sentence about Lean.\""
+  IO.println "  lake exe Qwen35RunHF --source Qwen/Qwen3.6-35B-A3B --multimodal --prompt \"Describe the image.\" --image cat.png"
   IO.println "  lake exe Qwen35RunHF --source tiny-random/qwen3.5 --prompt-file prompts.txt --batch-size 4"
 
-private partial def parseArgsLoop (xs : List String) (acc : Args) : IO Args := do
-  match xs with
-  | [] => pure acc
-  | "--source" :: v :: rest =>
-      parseArgsLoop rest { acc with source := v }
-  | "--revision" :: v :: rest =>
-      parseArgsLoop rest { acc with revision := v }
-  | "--cache-dir" :: v :: rest =>
-      parseArgsLoop rest { acc with cacheDir := v }
-  | "--device" :: v :: rest =>
-      parseArgsLoop rest { acc with device := v }
-  | "--prompt" :: v :: rest =>
-      parseArgsLoop rest { acc with prompt := v }
-  | "--prompt-file" :: v :: rest =>
-      parseArgsLoop rest { acc with promptFile := some v }
-  | "--image" :: v :: rest =>
-      parseArgsLoop rest { acc with imagePath := some v }
-  | "--video" :: v :: rest =>
-      parseArgsLoop rest { acc with videoPath := some v }
-  | "--video-max-frames" :: v :: rest =>
-      parseArgsLoop rest { acc with videoMaxFrames := (← parseNatArg "--video-max-frames" v) }
-  | "--video-frame-stride" :: v :: rest =>
-      parseArgsLoop rest { acc with videoFrameStride := (← parseNatArg "--video-frame-stride" v) }
-  | "--batch-size" :: v :: rest =>
-      parseArgsLoop rest { acc with batchSize := (← parseNatArg "--batch-size" v) }
-  | "--max-new-tokens" :: v :: rest =>
-      parseArgsLoop rest { acc with maxNewTokens := (← parseNatArg "--max-new-tokens" v) }
-  | "--stream" :: rest =>
-      parseArgsLoop rest { acc with stream := true }
-  | "--multimodal" :: rest =>
-      parseArgsLoop rest { acc with multimodal := true }
-  | "--enable-thinking" :: rest =>
-      parseArgsLoop rest { acc with enableThinking := true }
-  | "--debug-ids" :: rest =>
-      parseArgsLoop rest { acc with debugIds := true }
-  | "--help" :: _ =>
-      printHelp
-      throw <| IO.userError ""
-  | x :: _ =>
-      throw <| IO.userError s!"Unknown argument: {x}"
+private def parseArgs (xs : List String) : IO Args := do
+  let defaults : Args := {}
+  let sourceRef ← IO.mkRef defaults.source
+  let revisionRef ← IO.mkRef defaults.revision
+  let cacheDirRef ← IO.mkRef defaults.cacheDir
+  let deviceRef ← IO.mkRef defaults.device
+  let promptRef ← IO.mkRef defaults.prompt
+  let promptFileRef ← IO.mkRef defaults.promptFile
+  let imagePathRef ← IO.mkRef defaults.imagePath
+  let videoPathRef ← IO.mkRef defaults.videoPath
+  let videoMaxFramesRef ← IO.mkRef defaults.videoMaxFrames
+  let videoFrameStrideRef ← IO.mkRef defaults.videoFrameStride
+  let batchSizeRef ← IO.mkRef defaults.batchSize
+  let maxNewTokensRef ← IO.mkRef defaults.maxNewTokens
+  let streamRef ← IO.mkRef defaults.stream
+  let multimodalRef ← IO.mkRef defaults.multimodal
+  let enableThinkingRef ← IO.mkRef defaults.enableThinking
+  let debugIdsRef ← IO.mkRef defaults.debugIds
 
-private def parseArgs (xs : List String) : IO Args :=
-  parseArgsLoop xs {}
+  let rec loop (rest : List String) : IO Unit := do
+    match rest with
+    | [] => pure ()
+    | "--source" :: v :: tail =>
+        sourceRef.set v
+        loop tail
+    | "--revision" :: v :: tail =>
+        revisionRef.set v
+        loop tail
+    | "--cache-dir" :: v :: tail =>
+        cacheDirRef.set v
+        loop tail
+    | "--device" :: v :: tail =>
+        deviceRef.set v
+        loop tail
+    | "--prompt" :: v :: tail =>
+        promptRef.set v
+        loop tail
+    | "--prompt-file" :: v :: tail =>
+        promptFileRef.set (some v)
+        loop tail
+    | "--image" :: v :: tail =>
+        imagePathRef.set (some v)
+        loop tail
+    | "--video" :: v :: tail =>
+        videoPathRef.set (some v)
+        loop tail
+    | "--video-max-frames" :: v :: tail =>
+        videoMaxFramesRef.set (← parseNatArg "--video-max-frames" v)
+        loop tail
+    | "--video-frame-stride" :: v :: tail =>
+        videoFrameStrideRef.set (← parseNatArg "--video-frame-stride" v)
+        loop tail
+    | "--batch-size" :: v :: tail =>
+        batchSizeRef.set (← parseNatArg "--batch-size" v)
+        loop tail
+    | "--max-new-tokens" :: v :: tail =>
+        maxNewTokensRef.set (← parseNatArg "--max-new-tokens" v)
+        loop tail
+    | "--stream" :: tail =>
+        streamRef.set true
+        loop tail
+    | "--multimodal" :: tail =>
+        multimodalRef.set true
+        loop tail
+    | "--enable-thinking" :: tail =>
+        enableThinkingRef.set true
+        loop tail
+    | "--debug-ids" :: tail =>
+        debugIdsRef.set true
+        loop tail
+    | "--help" :: _ =>
+        printHelp
+        throw <| IO.userError ""
+    | x :: _ =>
+        throw <| IO.userError s!"Unknown argument: {x}"
+
+  loop xs
+  pure {
+    source := ← sourceRef.get
+    revision := ← revisionRef.get
+    cacheDir := ← cacheDirRef.get
+    device := ← deviceRef.get
+    prompt := ← promptRef.get
+    promptFile := ← promptFileRef.get
+    imagePath := ← imagePathRef.get
+    videoPath := ← videoPathRef.get
+    videoMaxFrames := ← videoMaxFramesRef.get
+    videoFrameStride := ← videoFrameStrideRef.get
+    batchSize := ← batchSizeRef.get
+    maxNewTokens := ← maxNewTokensRef.get
+    stream := ← streamRef.get
+    multimodal := ← multimodalRef.get
+    enableThinking := ← enableThinkingRef.get
+    debugIds := ← debugIdsRef.get
+  }
 
 private def loadPrompts (args : Args) : IO (Array String) := do
   match args.promptFile with
@@ -126,31 +179,33 @@ private def deviceToString : Device → String
   | Device.CPU => "CPU"
   | Device.CUDA n => s!"CUDA:{n}"
 
-private def resolveDevice (arg : String) : IO Device := do
+private def resolveDevice (arg : String) : IO (Device × Option String) := do
   let requested := arg.trimAscii.toString.toLower
   match requested with
-  | "auto" => getBestDevice
-  | "cpu" => pure Device.CPU
-  | "mps" =>
-      if ← mps_is_available then pure Device.MPS else pure Device.CPU
+  | "auto" => return (← getBestDevice, none)
+  | "cpu" => pure (.CPU, none)
+  | "mps" => pure (.MPS, none)
   | "cuda" =>
-      if ← cuda_is_available then pure (Device.CUDA 0) else pure Device.CPU
+      if ← cuda_is_available then
+        pure (.CUDA 0, none)
+      else
+        pure (.CPU, some "Warning: --device cuda requested but CUDA is unavailable; falling back to CPU.")
   | _ =>
       if requested.startsWith "cuda:" then
         match (requested.drop 5).toNat? with
         | some idx =>
-            if ← cuda_is_available then pure (Device.CUDA idx.toUInt64) else pure Device.CPU
-        | none => pure Device.CPU
+            if ← cuda_is_available then
+              pure (.CUDA idx.toUInt64, none)
+            else
+              pure (.CPU, some s!"Warning: --device cuda:{idx} requested but CUDA is unavailable; falling back to CPU.")
+        | none => pure (.CPU, some s!"Warning: invalid device selector '{arg}'; falling back to CPU.")
       else
-        pure Device.CPU
+        pure (.CPU, some s!"Warning: invalid device selector '{arg}'; falling back to CPU.")
 
 private def moveSigmaTensorTo {d : UInt64} (device : Device)
     (x : Sigma (fun n => T #[n, d])) : Sigma (fun n => T #[n, d]) :=
   match x with
   | ⟨n, t⟩ => ⟨n, t.to device⟩
-
-private def moveModelToDevice [TensorStruct α] (device : Device) (x : α) : IO α :=
-  TensorStruct.mapM (fun t => pure (t.to device)) x
 
 private def encodePromptToIds
     (tok : tokenizer.qwen35.QwenTokenizer)
@@ -415,7 +470,7 @@ private def runMultimodalBatches
 
 def runMain (argv : List String) : IO UInt32 := do
   let args ← parseArgs argv
-  let device ← resolveDevice args.device
+  let (device, deviceWarning?) ← resolveDevice args.device
   let hasMedia := args.imagePath.isSome || args.videoPath.isSome
   let useMultimodal := args.multimodal || hasMedia
   if hasMedia && !args.multimodal then
@@ -426,6 +481,9 @@ def runMain (argv : List String) : IO UInt32 := do
     includeTokenizer := true
   }
   IO.println s!"Model directory: {modelDir}"
+  match deviceWarning? with
+  | some msg => IO.println msg
+  | none => pure ()
   IO.println s!"Using device: {deviceToString device}"
 
   let tok ← tokenizer.qwen35.loadTokenizer modelDir
@@ -434,12 +492,11 @@ def runMain (argv : List String) : IO UInt32 := do
   if useMultimodal then
     let cfg ← VLConfig.loadFromPretrainedDir modelDir {}
     let isSharded ← hub.detectWeightLayout modelDir
-    let modelCpu ←
+    let model ←
       if isSharded then
-        Qwen35ForConditionalGeneration.loadSharded modelDir cfg
+        Qwen35ForConditionalGeneration.loadSharded modelDir cfg device
       else
-        Qwen35ForConditionalGeneration.load s!"{modelDir}/model.safetensors" cfg
-    let model ← moveModelToDevice device modelCpu
+        Qwen35ForConditionalGeneration.load s!"{modelDir}/model.safetensors" cfg device
     let imagePatches? ←
       match args.imagePath with
       | some p =>
@@ -487,12 +544,11 @@ def runMain (argv : List String) : IO UInt32 := do
   else
     let cfg ← Config.loadFromPretrainedDir modelDir Config.qwen35_9B
     let isSharded ← hub.detectWeightLayout modelDir
-    let modelCpu ←
+    let model ←
       if isSharded then
-        Qwen35ForCausalLM.loadSharded modelDir cfg
+        Qwen35ForCausalLM.loadSharded modelDir cfg device
       else
-        Qwen35ForCausalLM.load s!"{modelDir}/model.safetensors" cfg
-    let model ← moveModelToDevice device modelCpu
+        Qwen35ForCausalLM.load s!"{modelDir}/model.safetensors" cfg device
     runTextBatches tok cfg model device args prompts
 
   pure 0

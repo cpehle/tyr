@@ -16,7 +16,12 @@ namespace torch.gemma4
 open torch.Log
 
 private def reqGradFalse {s : Shape} (t : T s) : T s :=
-  autograd.set_requires_grad (toFloat' t) false
+  autograd.set_requires_grad t false
+
+private def castLike {sRef s : Shape} (reference : T sRef) (t : T s) : T s :=
+  match reference.dtype with
+  | .BFloat16 => toBFloat16' t
+  | _ => t
 
 private def pushUnique (xs : Array String) (x : String) : Array String :=
   if xs.contains x then xs else xs.push x
@@ -120,15 +125,15 @@ private def zeros2dOn {rows cols : UInt64} (device : Device) : T #[rows, cols] :
 private def pad1dTo {srcDim dstDim : UInt64}
     (x : T #[srcDim])
     : T #[dstDim] :=
-  let base : T #[dstDim] := zeros1dOn x.device
-  data.sliceScatter base 0 0 (toFloat' x)
+  let base : T #[dstDim] := castLike x (zeros1dOn x.device)
+  data.sliceScatter base 0 0 x
 
 private def pad2dTo {srcRows srcCols dstRows dstCols : UInt64}
     (x : T #[srcRows, srcCols])
     : T #[dstRows, dstCols] :=
   let colsPadded : T #[srcRows, dstCols] :=
-    data.sliceScatter (zeros2dOn x.device : T #[srcRows, dstCols]) 1 0 (toFloat' x)
-  data.sliceScatter (zeros2dOn x.device : T #[dstRows, dstCols]) 0 0 colsPadded
+    data.sliceScatter (castLike x (zeros2dOn x.device : T #[srcRows, dstCols])) 1 0 x
+  data.sliceScatter (castLike x (zeros2dOn x.device : T #[dstRows, dstCols])) 0 0 colsPadded
 
 private def loadPadded1DSharded
     (modelDir : String)

@@ -115,10 +115,11 @@ Bridge scripts are launched with `uv run python` by default (`--python uv`).
 
 ## Qwen35RunHF
 
-Run Qwen3.5 text generation from either a local model directory or a Hugging Face repo ID. If you pass a repo ID, Tyr resolves a local HF snapshot if present, otherwise downloads `config.json` and model safetensors to cache.
+Run Qwen3.5/Qwen3.6 text generation from either a local model directory or a Hugging Face repo ID. If you pass a repo ID, Tyr resolves a local HF snapshot if present, otherwise downloads `config.json` and model safetensors to cache.
 
 Supported repo coverage:
-- The loader path is wired for the public Qwen3.5 repo ids Tyr tracks explicitly, including the 0.8B instruct/base checkpoints and the larger dense/MoE/FP8 variants, via the same `Qwen35` config+weight resolution path.
+- The loader path is wired for the public Qwen3.5 repo ids Tyr tracks explicitly, including the 0.8B instruct/base checkpoints and the larger dense/MoE/FP8 variants, plus `Qwen/Qwen3.6-35B-A3B`, via the same shared Qwen3.5/Qwen3.6 config+weight resolution path.
+- The text config loader also understands the nested `text_config` schema used by the multimodal Qwen3.6 checkpoint, so text-only callers do not need a separate config shim.
 
 ```bash
 lake build Qwen35RunHF
@@ -131,6 +132,9 @@ lake exe Qwen35RunHF --source Qwen/Qwen3.5-0.8B --prompt "Summarize dependent ty
 
 # Base checkpoint variant
 lake exe Qwen35RunHF --source Qwen/Qwen3.5-0.8B-Base --prompt "Summarize dependent types."
+
+# Qwen3.6 text-only from the multimodal root checkpoint
+lake exe Qwen35RunHF --source Qwen/Qwen3.6-35B-A3B --prompt "Summarize dependent types."
 
 # Prefer GPU/MPS when available.
 lake exe Qwen35RunHF --source Qwen/Qwen3.5-0.8B \
@@ -261,7 +265,6 @@ Useful flags:
 - Use literal `<|image|>` markers in the prompt to place images explicitly; if omitted, images are prefixed in input order
 - `--enable-thinking` use the Gemma 4 thinking-enabled chat template
 - `--debug-ids` print generated token ids alongside decoded text
-- On macOS 26 with the current vendored libtorch, PyTorch can incorrectly report MPS unavailable unless the process is launched with `SYSTEM_VERSION_COMPAT=1`, e.g. `SYSTEM_VERSION_COMPAT=1 lake exe Gemma4RunHF --device mps ...`
 
 ## BranchingFlows
 

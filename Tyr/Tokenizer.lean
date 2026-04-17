@@ -9,6 +9,8 @@ import Tyr.Tokenizer.Training
 import Tyr.Tokenizer.IO
 import Tyr.Tokenizer.Gemma4
 import Tyr.Tokenizer.Qwen3
+import Tyr.Tokenizer.Qwen35
+import Tyr.Tokenizer.Qwen36
 
 /-!
 # Tyr.Tokenizer
@@ -22,7 +24,7 @@ training helpers, and model-specific tokenizer support.
 - Core/token metadata: `Types`, `SpecialTokens`, `TokenBytes`.
 - Text processing: `ByteLevel` and `Pretokenize`.
 - Encoding/decoding paths: `Encode`, `Decode`, and `IO` helpers.
-- Tokenizer training routines and Qwen3-specific support.
+- Tokenizer training routines plus Qwen3/Qwen3.5/Qwen3.6 and Gemma4 support.
 
 ## Scope
 

@@ -13,7 +13,12 @@ namespace torch.whisper
 open torch.Log
 
 private def reqGradFalse {s : Shape} (t : T s) : T s :=
-  autograd.set_requires_grad (toFloat' t) false
+  autograd.set_requires_grad t false
+
+private def castLike {sRef s : Shape} (reference : T sRef) (t : T s) : T s :=
+  match reference.dtype with
+  | .BFloat16 => toBFloat16' t
+  | _ => t
 
 private def tryLoadTensorSharded (modelDir : String) (name : String) (s : Shape)
     : IO (Option (T s)) := do
@@ -40,19 +45,19 @@ private def loadAttentionSharded
   let qProjBias ←
     match (← tryLoadTensorSharded modelDir s!"{namePrefix}.q_proj.bias" #[dModel]) with
     | some b => pure b
-    | none => pure (torch.zeros #[dModel])
+    | none => pure (castLike qProjWeight (torch.zeros #[dModel]))
   let kProjBias ←
     match (← tryLoadTensorSharded modelDir s!"{namePrefix}.k_proj.bias" #[dModel]) with
     | some b => pure b
-    | none => pure (torch.zeros #[dModel])
+    | none => pure (castLike kProjWeight (torch.zeros #[dModel]))
   let vProjBias ←
     match (← tryLoadTensorSharded modelDir s!"{namePrefix}.v_proj.bias" #[dModel]) with
     | some b => pure b
-    | none => pure (torch.zeros #[dModel])
+    | none => pure (castLike vProjWeight (torch.zeros #[dModel]))
   let outProjBias ←
     match (← tryLoadTensorSharded modelDir s!"{namePrefix}.out_proj.bias" #[dModel]) with
     | some b => pure b
-    | none => pure (torch.zeros #[dModel])
+    | none => pure (castLike outProjWeight (torch.zeros #[dModel]))
   pure {
     qProjWeight := reqGradFalse qProjWeight
     qProjBias := reqGradFalse qProjBias
@@ -157,12 +162,7 @@ private def resolveWhisperDevice (log : Handlers := {}) : IO Device := do
     else
       log.onWarn "TYR_DEVICE=cuda requested but CUDA is unavailable; falling back to auto."
       getBestDevice
-  | some "mps" =>
-    if ← mps_is_available then
-      pure Device.MPS
-    else
-      log.onWarn "TYR_DEVICE=mps requested but MPS is unavailable; falling back to auto."
-      getBestDevice
+  | some "mps" => pure Device.MPS
   | some "auto" => getBestDevice
   | some _ => getBestDevice
   | none => getBestDevice

@@ -13,7 +13,7 @@ namespace torch.gemma4
 open torch.Log
 
 private def reqGradFalse {s : Shape} (t : T s) : T s :=
-  autograd.set_requires_grad (toFloat' t) false
+  autograd.set_requires_grad t false
 
 private def pushUnique (xs : Array String) (x : String) : Array String :=
   if xs.contains x then xs else xs.push x

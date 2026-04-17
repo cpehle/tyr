@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LIBTORCH_VERSION="${LIBTORCH_VERSION:-2.9.1}"
+LIBTORCH_VERSION="${LIBTORCH_VERSION:-2.10.0}"
 OS="$(uname -s)"
 ARCH="$(uname -m)"
 

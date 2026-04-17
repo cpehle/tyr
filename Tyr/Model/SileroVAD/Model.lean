@@ -22,7 +22,7 @@ private def rightReflectPad : Nat := 64
 private def preparedInputSamples : Nat := combinedInputSamples + rightReflectPad
 
 private def reqGradFalse {s : Shape} (t : T s) : T s :=
-  autograd.set_requires_grad (toFloat' t) false
+  autograd.set_requires_grad t false
 
 private def initWeight (shape : Shape) (fanIn : UInt64) : IO (T shape) := do
   let std := Float.sqrt (2.0 / fanIn.toFloat)
