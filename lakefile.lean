@@ -133,6 +133,10 @@ def macOSFrameworkArgs : Array String :=
 def soxrLinkArgs : Array String :=
   #[s!"-L{__dir__ / "cc" / "build" / "soxr" / "src"}", "-lsoxr"]
 
+/-- Vendored LibTorch directory used by both Lean dynlibs and `cc/build/libTyrC.so`. -/
+def linuxTorchLibDir : String :=
+  (__dir__ / "external" / "libtorch" / "lib").toString
+
 def packageLinkArgs : Array String :=
   if System.Platform.isOSX then
     #[
@@ -153,7 +157,7 @@ def packageLinkArgs : Array String :=
     ] ++ linuxSystemLinkDirs ++ soxrLinkArgs ++ #[
       "-l:libgomp.so.1", "-l:libstdc++.so.6",
       "-larrow", "-lparquet",
-      "-Wl,-rpath,$ORIGIN/../../../external/libtorch/lib"
+      s!"-Wl,-rpath,{linuxTorchLibDir}"
     ]
 
 def commonLinkArgs : Array String :=
@@ -177,7 +181,7 @@ def commonLinkArgs : Array String :=
     ] ++ linuxSystemLinkDirs ++ soxrLinkArgs ++ #[
       "-l:libgomp.so.1", "-l:libstdc++.so.6",
       "-larrow", "-lparquet",
-      "-Wl,-rpath,$ORIGIN/../../../external/libtorch/lib"
+      s!"-Wl,-rpath,{linuxTorchLibDir}"
     ]
 
 package tyr where
@@ -543,6 +547,18 @@ lean_exe RunLayerNorm where
 /-- End-to-end ThunderKittens flash attention fixture validation. -/
 lean_exe RunFlashAttn where
   root := `Examples.GPU.RunFlashAttn
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
+/-- End-to-end FlashAttention3 validation. -/
+lean_exe RunFlashAttn3 where
+  root := `Examples.GPU.RunFlashAttn3
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
+/-- Runtime validation for the high-level `tyr::flash_attn` bridge. -/
+lean_exe RunFlashAttnOp where
+  root := `Examples.GPU.RunFlashAttnOp
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
