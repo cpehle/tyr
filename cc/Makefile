@@ -107,6 +107,7 @@ HDRS :=
 
 SRCS := \
 	tyr.cpp\
+	tyr_qwen35.cpp\
 	tyr_distributed.cpp\
 	tyr_polar.cpp\
 	tyr_media_stub.cpp\
@@ -251,11 +252,11 @@ $(OUT_DIR)/$(DYLIB) : $(OBJ_FILES) | check-submodules $(OUT_DIR)
 
 $(OUT_DIR)/%.o : $(SRC_DIR)/%.cpp $(HDR_FILES) | check-submodules $(OUT_DIR)
 	@mkdir -p $(dir $@)
-	$(CXX) $(CXX_STD_FLAG) -o $@ -c $< -I$(HDR_DIR) -I$(LEAN_INCLUDE) $(TORCH_INC_FLAGS) $(XLA_INC_FLAGS) $(ARROW_INC_FLAGS) $(SOXR_INC_FLAGS) $(EXTRA_CXX_FLAGS) -fPIC
+	$(CXX) $(CXX_STD_FLAG) -o $@ -c $< -I$(HDR_DIR) -I$(LEAN_INCLUDE) $(TORCH_INC_FLAGS) $(ARROW_INC_FLAGS) $(SOXR_INC_FLAGS) $(EXTRA_CXX_FLAGS) -fPIC
 
 $(OUT_DIR)/%.o : $(SRC_DIR)/%.mm $(HDR_FILES) | check-submodules $(OUT_DIR)
 	@mkdir -p $(dir $@)
-	$(CXX) -x objective-c++ $(CXX_STD_FLAG) -o $@ -c $< -I$(HDR_DIR) -I$(LEAN_INCLUDE) $(TORCH_INC_FLAGS) $(XLA_INC_FLAGS) $(ARROW_INC_FLAGS) $(SOXR_INC_FLAGS) $(EXTRA_CXX_FLAGS) -fPIC -fobjc-arc
+	$(CXX) -x objective-c++ $(CXX_STD_FLAG) -o $@ -c $< -I$(HDR_DIR) -I$(LEAN_INCLUDE) $(TORCH_INC_FLAGS) $(ARROW_INC_FLAGS) $(SOXR_INC_FLAGS) $(EXTRA_CXX_FLAGS) -fPIC -fobjc-arc
 
 $(OUT_DIR)/%.o : $(SRC_DIR)/%.cu $(HDR_FILES) | check-submodules $(OUT_DIR)
 	@mkdir -p $(dir $@)
