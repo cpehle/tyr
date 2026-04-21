@@ -12,18 +12,12 @@ import Tyr.Module.Core
 import Tyr.Module.Derive
 import Tyr.Model.Qwen35.Model
 import Tyr.Model.Qwen35.VLConfig
+import Tyr.Model.Utils
 
 namespace torch.qwen35
 
 open torch
-
-private def initWeight (shape : Shape) (fanIn : UInt64) : IO (T shape) := do
-  let std := Float.sqrt (2.0 / fanIn.toFloat)
-  let w ← torch.randn shape
-  pure (autograd.set_requires_grad (mul_scalar w std) true)
-
-private def initBias (shape : Shape) : T shape :=
-  autograd.set_requires_grad (torch.zeros shape) true
+open torch.Model
 
 private def arangeOn (start stop : UInt64) (step : UInt64 := 1) (device : Device) :
     T #[(stop - start) / step] :=
@@ -473,7 +467,7 @@ def generate {batch seq : UInt64}
     (m : Qwen35ForConditionalGeneration cfg)
     (inputIds : T #[batch, seq])
     (maxNewTokens : UInt64 := 256)
-    (strategy : Qwen35ForCausalLM.SamplingStrategy := .greedy)
+    (strategy : SamplingStrategy := .greedy)
     (eosTokenIds : Array UInt64 := #[])
     (imageFeatures : Option (Sigma (fun n => T #[n, cfg.vision_config.out_hidden_size])) := none)
     (videoFeatures : Option (Sigma (fun n => T #[n, cfg.vision_config.out_hidden_size])) := none)
@@ -492,9 +486,9 @@ def generateStream {batch seq : UInt64}
     (cfg : VLConfig)
     (m : Qwen35ForConditionalGeneration cfg)
     (inputIds : T #[batch, seq])
-    (onStep : Qwen35ForCausalLM.StreamCallback batch)
+    (onStep : StreamCallback batch)
     (maxNewTokens : UInt64 := 256)
-    (strategy : Qwen35ForCausalLM.SamplingStrategy := .greedy)
+    (strategy : SamplingStrategy := .greedy)
     (eosTokenIds : Array UInt64 := #[])
     (imageFeatures : Option (Sigma (fun n => T #[n, cfg.vision_config.out_hidden_size])) := none)
     (videoFeatures : Option (Sigma (fun n => T #[n, cfg.vision_config.out_hidden_size])) := none)
@@ -516,7 +510,7 @@ partial def generateUncached {batch seq : UInt64}
     (m : Qwen35ForConditionalGeneration cfg)
     (inputIds : T #[batch, seq])
     (maxNewTokens : UInt64 := 256)
-    (strategy : Qwen35ForCausalLM.SamplingStrategy := .greedy)
+    (strategy : SamplingStrategy := .greedy)
     (eosTokenIds : Array UInt64 := #[])
     (imageFeatures : Option (Sigma (fun n => T #[n, cfg.vision_config.out_hidden_size])) := none)
     (videoFeatures : Option (Sigma (fun n => T #[n, cfg.vision_config.out_hidden_size])) := none)

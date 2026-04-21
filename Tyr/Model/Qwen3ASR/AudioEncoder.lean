@@ -13,16 +13,11 @@ import Tyr.Module.Core
 import Tyr.Module.Derive
 import Tyr.Module.LayerNorm
 import Tyr.Model.Qwen3ASR.Config
+import Tyr.Model.Utils
 
 namespace torch.qwen3asr
 
-private def initWeight (shape : Shape) (fanIn : UInt64) : IO (T shape) := do
-  let std := Float.sqrt (2.0 / fanIn.toFloat)
-  let w ← torch.randn shape
-  pure (autograd.set_requires_grad (mul_scalar w std) true)
-
-private def initBias (shape : Shape) : T shape :=
-  autograd.set_requires_grad (torch.zeros shape) true
+open torch.Model
 
 private def activate {s : Shape} (name : String) (x : T s) : T s :=
   if name == "relu" then

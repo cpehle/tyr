@@ -7,27 +7,17 @@ import Tyr.Torch
 import Tyr.TensorStruct
 import Tyr.Module.LayerNorm
 import Tyr.Model.Whisper.Config
+import Tyr.Model.Utils
 
 namespace torch.whisper
 
-private def initWeight (shape : Shape) (fanIn : UInt64) : IO (T shape) := do
-  let std := Float.sqrt (2.0 / fanIn.toFloat)
-  let w ← torch.randn shape
-  pure (autograd.set_requires_grad (mul_scalar w std) true)
-
-private def initBias (shape : Shape) : T shape :=
-  autograd.set_requires_grad (torch.zeros shape) true
+open torch.Model
 
 private def activate {s : Shape} (name : String) (x : T s) : T s :=
   if name == "relu" then
     nn.relu x
   else
     nn.gelu x
-
-private def castLike {sRef s : Shape} (reference : T sRef) (t : T s) : T s :=
-  match reference.dtype with
-  | .BFloat16 => toBFloat16' t
-  | _ => t
 
 structure WhisperAttention (dModel nHeads : UInt64) where
   qProjWeight : T #[dModel, dModel]

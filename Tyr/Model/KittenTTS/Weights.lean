@@ -25,11 +25,6 @@ private structure LoadedCheckpointWeights where
 private def reqGradFalse {s : Shape} (t : T s) : T s :=
   autograd.set_requires_grad t false
 
-private def castLike {sRef s : Shape} (reference : T sRef) (t : T s) : T s :=
-  match reference.dtype with
-  | .BFloat16 => toBFloat16' t
-  | _ => t
-
 private def getOrThrow {α} (xs : Array α) (idx : Nat) (msg : String) : IO α :=
   match xs[idx]? with
   | some x => pure x

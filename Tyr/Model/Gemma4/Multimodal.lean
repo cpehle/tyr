@@ -20,6 +20,7 @@ import Tyr.Model.Gemma4.VLConfig
 namespace torch.gemma4
 
 open torch
+open torch.Model
 
 abbrev ImagePatchGrid (cfg : VLConfig) :=
   Sigma (fun patchRows =>
@@ -32,16 +33,8 @@ abbrev ImageFeatures (cfg : VLConfig) :=
 abbrev PerLayerInputs (cfg : VLConfig) (batch seq : UInt64) :=
   Option (T #[batch, seq, cfg.text_config.num_hidden_layers, cfg.text_config.hidden_size_per_layer_input])
 
-private def zerosOn {s : Shape} (device : Device) : T s :=
-  torch.zeros s false device
-
 private def reqGradFalse {s : Shape} (t : T s) : T s :=
   autograd.set_requires_grad t false
-
-private def restoreInputDType {s : Shape} (input : T s) (output : T s) : T s :=
-  match input.dtype with
-  | .BFloat16 => toBFloat16' output
-  | _ => output
 
 private def clampMin {s : Shape} (x : T s) (lo : Float) : T s :=
   let loTensor : T s := add_scalar (zeros_like x) lo
@@ -542,7 +535,7 @@ def generate {batch seq : UInt64}
     (m : Gemma4ForConditionalGeneration cfg)
     (inputIds : T #[batch, seq])
     (maxNewTokens : UInt64 := 256)
-    (strategy : Gemma4ForCausalLM.SamplingStrategy := .greedy)
+    (strategy : SamplingStrategy := .greedy)
     (eosTokenIds : Array UInt64 := #[])
     (imageFeatures : Option (ImageFeatures cfg) := none)
     : IO (Sigma (fun outSeq => T #[batch, outSeq])) := do
@@ -562,9 +555,9 @@ def generateStream {batch seq : UInt64}
     (cfg : VLConfig)
     (m : Gemma4ForConditionalGeneration cfg)
     (inputIds : T #[batch, seq])
-    (onStep : Gemma4ForCausalLM.StreamCallback batch)
+    (onStep : StreamCallback batch)
     (maxNewTokens : UInt64 := 256)
-    (strategy : Gemma4ForCausalLM.SamplingStrategy := .greedy)
+    (strategy : SamplingStrategy := .greedy)
     (eosTokenIds : Array UInt64 := #[])
     (imageFeatures : Option (ImageFeatures cfg) := none)
     : IO (Sigma (fun outSeq => T #[batch, outSeq])) := do

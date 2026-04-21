@@ -18,11 +18,6 @@ open torch.Log
 private def reqGradFalse {s : Shape} (t : T s) : T s :=
   autograd.set_requires_grad t false
 
-private def castLike {sRef s : Shape} (reference : T sRef) (t : T s) : T s :=
-  match reference.dtype with
-  | .BFloat16 => toBFloat16' t
-  | _ => t
-
 private def pushUnique (xs : Array String) (x : String) : Array String :=
   if xs.contains x then xs else xs.push x
 

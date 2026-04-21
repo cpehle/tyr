@@ -11,8 +11,11 @@ import Tyr.Torch
 import Tyr.TensorStruct
 import Tyr.Module.Core
 import Tyr.Module.Derive
+import Tyr.Model.Utils
 
 namespace torch.silerovad
+
+open torch.Model
 
 private def sampleRate16k : UInt64 := 16000
 private def chunkSizeSamples : Nat := 512
@@ -23,14 +26,6 @@ private def preparedInputSamples : Nat := combinedInputSamples + rightReflectPad
 
 private def reqGradFalse {s : Shape} (t : T s) : T s :=
   autograd.set_requires_grad t false
-
-private def initWeight (shape : Shape) (fanIn : UInt64) : IO (T shape) := do
-  let std := Float.sqrt (2.0 / fanIn.toFloat)
-  let w ← torch.randn shape
-  pure (autograd.set_requires_grad (mul_scalar w std) true)
-
-private def initBias (shape : Shape) : T shape :=
-  autograd.set_requires_grad (torch.zeros shape) true
 
 private def addBias2d {n d : UInt64}
     (x : T #[n, d])
