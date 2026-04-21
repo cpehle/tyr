@@ -15,7 +15,7 @@ namespace hub
 
 open torch.Hub
 
-abbrev DownloadOptions := qwen35.hub.DownloadOptions
+abbrev DownloadOptions := Hub.DownloadOptions
 
 def qwen36CollectionRepoIds : Array String := #[
   "Qwen/Qwen3.6-35B-A3B"
@@ -24,11 +24,11 @@ def qwen36CollectionRepoIds : Array String := #[
 def isQwen36CollectionRepoId (repoId : String) : Bool :=
   qwen36CollectionRepoIds.contains repoId
 
-export qwen35.hub (
+export torch.qwen35.hub (
   tokenizerFiles
 )
 
-export Hub (
+export torch.Hub (
   shardFilesFromIndexFile
   findCachedSnapshot?
   resolvePretrainedDir
@@ -37,12 +37,12 @@ export Hub (
 
 end hub
 
-abbrev Qwen36ForCausalLM (cfg : Config) := qwen35.Qwen35ForCausalLM cfg
-abbrev Qwen36ForConditionalGeneration (cfg : VLConfig) := qwen35.Qwen35ForConditionalGeneration cfg
+abbrev Qwen36ForCausalLM (cfg : Config) := torch.qwen35.Qwen35ForCausalLM cfg
+abbrev Qwen36ForConditionalGeneration (cfg : VLConfig) := torch.qwen35.Qwen35ForConditionalGeneration cfg
 
 namespace Qwen36ForCausalLM
 
-export qwen35.Qwen35ForCausalLM (
+export torch.qwen35.Qwen35ForCausalLM (
   init
   embedTokens
   forwardEmbeds
@@ -55,26 +55,26 @@ export qwen35.Qwen35ForCausalLM (
   generateGreedy
 )
 
-export qwen35.Qwen35ForCausalLM.loadFromPretrained
+export torch.qwen35.Qwen35ForCausalLM (loadFromPretrained)
 
 end Qwen36ForCausalLM
 
 namespace Qwen36ForConditionalGeneration
 
-export qwen35.Qwen35ForConditionalGeneration (
+export torch.qwen35.Qwen35ForConditionalGeneration (
   init
-  embedTokens
-  forwardEmbeds
-  forward
-  generateFromEmbeds
-  generateFromEmbedsStream
+  getImageFeatures
+  getVideoFeatures
+  forwardText
+  forwardWithImageFeatures
+  forwardWithImageAndVideoFeatures
+  forwardWithImagePatches
+  forwardWithImageAndVideoPatches
   generate
   generateStream
   generateUncached
-  generateGreedy
+  loadFromPretrained
 )
-
-export qwen35.Qwen35ForConditionalGeneration.loadFromPretrained
 
 end Qwen36ForConditionalGeneration
 
