@@ -1282,9 +1282,36 @@ opaque logical_not {s : Shape} (input : @& T s) : T s
 @[extern "lean_torch_logical_and"]
 opaque logical_and {s : Shape} (a : @& T s) (b : @& T s) : T s
 
+/-- Logical OR for boolean tensors (De Morgan). -/
+def logicalOr {s : Shape} (a b : T s) : T s :=
+  logical_not (logical_and (logical_not a) (logical_not b))
+
+/-- Boolean mask of all false values on a device. -/
+def falseMask {n : UInt64} (device : Device) : T #[n] :=
+  let zeros : T #[n] := (full_int #[n] 0).to device
+  eq_scalar zeros 1
+
+/-- Zero tensor on a specific device. -/
+def zerosOn {s : Shape} (device : Device) : T s :=
+  torch.zeros s false device
+
+/-- Ones tensor on a specific device. -/
+def onesOn {s : Shape} (device : Device) : T s :=
+  torch.ones s false device
+
 /-- Convert to bfloat16 dtype. -/
 @[extern "lean_torch_to_bfloat16"]
 opaque toBFloat16' {s : Shape} (input : @& T s) : T s
+
+/-- Cast `t` to the same dtype as `reference`. -/
+def castLike {sRef s : Shape} (reference : T sRef) (t : T s) : T s :=
+  match reference.dtype with
+  | .BFloat16 => toBFloat16' t
+  | _ => t
+
+/-- Alias for `castLike` with argument names matching the "restore input dtype" pattern. -/
+def restoreInputDType {s : Shape} (input : T s) (output : T s) : T s :=
+  castLike input output
 
 /-- Index select on first dimension -/
 @[extern "lean_torch_index_select_1d"]
