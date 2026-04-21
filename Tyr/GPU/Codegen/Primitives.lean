@@ -7,9 +7,9 @@ import Tyr.GPU.Codegen.AST
 import Tyr.GPU.Codegen.GlobalLayout
 
 /-!
-# Tyr.GPU.Codegen.Ops
+# Tyr.GPU.Codegen.Primitives
 
-`Tyr.GPU.Codegen.Ops` is the core primitive DSL for building kernels.
+`Tyr.GPU.Codegen.Primitives` is the core primitive DSL for building kernels.
 Functions in this module are strongly typed wrappers around `KStmt` emission.
 
 Highlights:
@@ -362,7 +362,14 @@ def storeAddAsync {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
     (src : RT dtype rows cols layout) : KernelM Unit := do
   emit (.storeAddAsync dst.id src.id)
 
-/-! ## Matrix Multiply -/
+/-! ## Matrix Multiply
+
+Tensor-core MMA requires each tile dimension to be a multiple of 16 (WGMMA on Hopper).
+The `hM`/`hK`/`hN` auto-params discharge at elaboration for concrete literal dims
+via `by decide`; polymorphic callers must supply explicit proofs or propagate
+the hypotheses. This surfaces shape errors at kernel-build time rather than
+silently emitting broken CUDA.
+-/
 
 /-- Matrix multiply-accumulate: D = A @ B + C
     Type system enforces dimensions: A is M×K, B is K×N, C and D are M×N
@@ -372,7 +379,11 @@ def mma {M K N : Nat} {inDtype accDtype : GpuFloat}
     (a : RT inDtype M K .Row)
     (b : RT inDtype K N .Col)
     (c : RT accDtype M N .Row)
+    (hM : M % 16 = 0 := by decide)
+    (hK : K % 16 = 0 := by decide)
+    (hN : N % 16 = 0 := by decide)
     : KernelM Unit := do
+  let _ := hM; let _ := hK; let _ := hN
   emit (.mma .AB dst.id a.id b.id c.id)
 
 /-- Matrix multiply without accumulate: D = A @ B -/
@@ -380,7 +391,11 @@ def mm {M K N : Nat} {inDtype accDtype : GpuFloat}
     (dst : RT accDtype M N .Row)
     (a : RT inDtype M K .Row)
     (b : RT inDtype K N .Col)
+    (hM : M % 16 = 0 := by decide)
+    (hK : K % 16 = 0 := by decide)
+    (hN : N % 16 = 0 := by decide)
     : KernelM Unit := do
+  let _ := hM; let _ := hK; let _ := hN
   emit (.mm .AB dst.id a.id b.id)
 
 /-- Matrix multiply with B transposed: D = A @ B^T + C
@@ -390,7 +405,11 @@ def mmaT {M K N : Nat} {inDtype accDtype : GpuFloat}
     (a : RT inDtype M K .Row)
     (b : RT inDtype N K .Row)
     (c : RT accDtype M N .Row)
+    (hM : M % 16 = 0 := by decide)
+    (hK : K % 16 = 0 := by decide)
+    (hN : N % 16 = 0 := by decide)
     : KernelM Unit := do
+  let _ := hM; let _ := hK; let _ := hN
   emit (.mma .ABt dst.id a.id b.id c.id)
 
 /-- Matrix multiply with both transposed: D = A^T @ B^T + C -/
@@ -399,7 +418,11 @@ def mmaAtBt {M K N : Nat} {inDtype accDtype : GpuFloat}
     (a : RT inDtype K M .Row)
     (b : RT inDtype N K .Row)
     (c : RT accDtype M N .Row)
+    (hM : M % 16 = 0 := by decide)
+    (hK : K % 16 = 0 := by decide)
+    (hN : N % 16 = 0 := by decide)
     : KernelM Unit := do
+  let _ := hM; let _ := hK; let _ := hN
   emit (.mma .AtBt dst.id a.id b.id c.id)
 
 /-- Matrix multiply with A transposed: D = A^T @ B + C -/
@@ -408,7 +431,11 @@ def mmaAtB {M K N : Nat} {inDtype accDtype : GpuFloat}
     (a : RT inDtype K M .Col)
     (b : RT inDtype K N .Col)
     (c : RT accDtype M N .Row)
+    (hM : M % 16 = 0 := by decide)
+    (hK : K % 16 = 0 := by decide)
+    (hN : N % 16 = 0 := by decide)
     : KernelM Unit := do
+  let _ := hM; let _ := hK; let _ := hN
   emit (.mma .AtB dst.id a.id b.id c.id)
 
 /-! ## Ternary Operations (FMA) -/
@@ -1103,12 +1130,18 @@ def mmaAsyncWait (n : Nat := 0) : KernelM Unit := do
 /-! ## Blackwell tcgen05 MMA Operations -/
 
 /-- Blackwell tcgen05 MMA: zero-init multiply to TMEM destination.
-    `mm2_ABt(dst, a, b)` — first MMA that initializes the accumulator. -/
+    `mm2_ABt(dst, a, b)` — first MMA that initializes the accumulator.
+    Shapes must be multiples of 16 (minimum); B200 2-CTA variants additionally
+    require M ≥ 128 (enforce in calling code). -/
 def tcgen05Mm {M K N : Nat} {inDtype accDtype : GpuFloat}
     {inLayout : TileLayout} {accLayout : TileLayout}
     (trans : MMATranspose)
     (dst : TT accDtype M N) (a : ST inDtype M K inLayout) (b : ST inDtype N K accLayout)
+    (hM : M % 16 = 0 := by decide)
+    (hK : K % 16 = 0 := by decide)
+    (hN : N % 16 = 0 := by decide)
     : KernelM Unit := do
+  let _ := hM; let _ := hK; let _ := hN
   emit (.tcgen05Mm trans dst.id a.id b.id)
 
 /-- Blackwell tcgen05 MMA: accumulating multiply to TMEM destination.
@@ -1118,7 +1151,11 @@ def tcgen05Mma {M K N : Nat} {inDtype accDtype : GpuFloat}
     (trans : MMATranspose)
     (dst : TT accDtype M N) (a : ST inDtype M K inLayout) (b : ST inDtype N K accLayout)
     (c : TT accDtype M N)
+    (hM : M % 16 = 0 := by decide)
+    (hK : K % 16 = 0 := by decide)
+    (hN : N % 16 = 0 := by decide)
     : KernelM Unit := do
+  let _ := hM; let _ := hK; let _ := hN
   emit (.tcgen05Mma trans dst.id a.id b.id c.id)
 
 /-- Blackwell tcgen05 scaled MMA with E8M0 scale tiles (MXFP8/NVFP4).
@@ -1129,7 +1166,11 @@ def tcgen05MmaScaled {M K N : Nat} {inDtype accDtype scaleDtype : GpuFloat}
     (dst : TT accDtype M N) (a : ST inDtype M K inLayout) (b : ST inDtype N K accLayout)
     (c : TT accDtype M N)
     (scaleA : TT scaleDtype M K) (scaleB : TT scaleDtype N K)
+    (hM : M % 16 = 0 := by decide)
+    (hK : K % 16 = 0 := by decide)
+    (hN : N % 16 = 0 := by decide)
     : KernelM Unit := do
+  let _ := hM; let _ := hK; let _ := hN
   emit (.tcgen05MmaScaled trans dst.id a.id b.id c.id scaleA.id scaleB.id)
 
 /-- Commit tcgen05 results to the cluster-aware semaphore. -/
@@ -1303,18 +1344,22 @@ def complexMma {M K N : Nat} {inDtype accDtype : GpuFloat}
     (a : CRT inDtype M K .Row)
     (b : CRT inDtype K N .Col)
     (c : CRT accDtype M N .Row)
+    (hM : M % 16 = 0 := by decide)
+    (hK : K % 16 = 0 := by decide)
+    (hN : N % 16 = 0 := by decide)
     : KernelM Unit := do
+  let _ := hM; let _ := hK; let _ := hN
   -- real part: ac - bd + c_real
   let ac ← allocRT accDtype M N .Row
-  mma ac a.real b.real c.real
+  mma ac a.real b.real c.real hM hK hN
   let bd ← allocRT accDtype M N .Row
-  mma bd a.imag b.imag (← zeroRT accDtype M N .Row)
+  mma bd a.imag b.imag (← zeroRT accDtype M N .Row) hM hK hN
   sub dst.real ac bd
   -- imag part: ad + bc + c_imag
   let ad ← allocRT accDtype M N .Row
-  mma ad a.real b.imag c.imag
+  mma ad a.real b.imag c.imag hM hK hN
   let bc ← allocRT accDtype M N .Row
-  mma bc a.imag b.real (← zeroRT accDtype M N .Row)
+  mma bc a.imag b.real (← zeroRT accDtype M N .Row) hM hK hN
   add dst.imag ad bc
 
 /-- Complex matrix multiply with B transposed -/
@@ -1323,20 +1368,24 @@ def complexMmaT {M K N : Nat} {inDtype accDtype : GpuFloat}
     (a : CRT inDtype M K .Row)
     (b : CRT inDtype N K .Row)
     (c : CRT accDtype M N .Row)
+    (hM : M % 16 = 0 := by decide)
+    (hK : K % 16 = 0 := by decide)
+    (hN : N % 16 = 0 := by decide)
     : KernelM Unit := do
+  let _ := hM; let _ := hK; let _ := hN
   -- real part: ac - bd + c_real
   let ac ← allocRT accDtype M N .Row
-  mmaT ac a.real b.real c.real
+  mmaT ac a.real b.real c.real hM hK hN
   let bd ← allocRT accDtype M N .Row
-  mmaT bd a.imag b.imag (← zeroRT accDtype M N .Row)
+  mmaT bd a.imag b.imag (← zeroRT accDtype M N .Row) hM hK hN
   sub dst.real ac bd
   -- imag part: ad + bc + c_imag (note: for transposed B, we use -b.imag)
   let ad ← allocRT accDtype M N .Row
   let negBImag ← allocRT inDtype N K .Row
   neg negBImag b.imag
-  mmaT ad a.real negBImag c.imag
+  mmaT ad a.real negBImag c.imag hM hK hN
   let bc ← allocRT accDtype M N .Row
-  mmaT bc a.imag b.real (← zeroRT accDtype M N .Row)
+  mmaT bc a.imag b.real (← zeroRT accDtype M N .Row) hM hK hN
   add dst.imag ad bc
 
 /-! ## Additional Complex Operations (ThunderKittens compatibility) -/
