@@ -18,7 +18,6 @@ import Tyr.Optim.ManifoldMuon
 import Tyr.Optim.RiemannianSGD
 import Tyr.Optim.RiemannianTreeSGD
 import Tyr.Optim.Scheduler
-import Tyr.Optim.Schedule
 import Tyr.Optim.DualOptimizer
 import Tyr.Optim.DistAdam
 
@@ -45,9 +44,6 @@ import Tyr.Pipeline
 import Tyr.Train.RunLedger
 import Tyr.Train.ChatSFT
 import Tyr.RL.GRPO
-
--- Metrics
-import Tyr.Metrics
 
 -- GPU kernel abstraction
 import Tyr.GPU
@@ -77,7 +73,6 @@ This root module re-exports the core, general-purpose surface area:
 - `Tyr.Data`, `Tyr.DataLoader`, `Tyr.Tokenizer`: data ingestion, batching, and tokenization.
 - `Tyr.Checkpoint`: model/optimizer checkpoint save and restore.
 - `Tyr.Pipeline`: training/inference orchestration helpers.
-- `Tyr.Metrics`: metric definitions and reporting helpers.
 - `Tyr.GPU` (+ `Tyr.GPU.AD`, `Tyr.GPU.AutoGrad`): GPU kernel abstractions and AD support.
 
 ## Example

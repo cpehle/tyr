@@ -27,7 +27,7 @@ if [[ "${LEAN_CC_FAST:-0}" == "1" && "$is_compile" -eq 1 ]]; then
   extra+=("-O0")
 fi
 
-gcc_bin="${LEAN_CC_GCC:-/grid/it/data/elzar/easybuild/software/GCCcore/12.3.0/bin/gcc}"
+gcc_bin="${LEAN_CC_GCC:-/usr/bin/gcc}"
 if [[ ! -x "$gcc_bin" ]]; then
   gcc_bin="/usr/bin/gcc"
 fi

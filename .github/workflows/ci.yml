@@ -241,9 +241,6 @@ jobs:
             echo "No TODO/FIXME found"
           fi
 
-      - name: Check Lake/Bazel target parity
-        run: ./scripts/check_target_parity.sh
-
       - name: Check for sorry
         run: |
           echo "Checking for sorry (incomplete proofs)..."

@@ -516,12 +516,6 @@ lean_exe Gemma4RunHF where
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
-/-- Minimal native MPS availability probe. -/
-lean_exe MpsProbe where
-  root := `Examples.MpsProbe
-  supportInterpreter := true
-  moreLinkArgs := commonLinkArgs
-
 /-- Flux debug harness (saves intermediate tensors) -/
 lean_exe FluxDebug where
   root := `Examples.Flux.FluxDebug

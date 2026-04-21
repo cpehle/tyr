@@ -11,6 +11,8 @@ out/
 *produced.out
 .ninja_log
 .DS_Store
+.jj/
+cc/src/generated/
 checkpoints/
 dummy_path.ckpt/
 .pipeline_checkpoint.json
