@@ -3,6 +3,7 @@ import Tyr.Model.Qwen35
 import LeanTest
 
 open torch
+open torch.Model
 open torch.qwen35
 
 private def tinyDenseCfg : Config := {
@@ -244,7 +245,7 @@ def testQwen35DenseGreedyStreamParity : IO Unit := do
   let ids : T #[1, 4] := reshape (data.fromInt64Array #[7, 2, 5, 1]) #[1, 4]
 
   let streamedRef ← IO.mkRef (#[] : Array UInt64)
-  let onStep : Qwen35ForCausalLM.StreamCallback 1 := fun _ nextTok => do
+  let onStep : StreamCallback 1 := fun _ nextTok => do
     let flat : T #[1] := reshape (data.toLong nextTok) #[1]
     let vals ← data.tensorToUInt64Array flat
     streamedRef.modify (fun xs => xs ++ vals)
