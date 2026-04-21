@@ -67,8 +67,6 @@ NVCCFLAGS := -std=c++20 -O3 --use_fast_math --expt-extended-lambda --expt-relaxe
 NVCCFLAGS += -lineinfo -Xcompiler -fPIC
 NVCCFLAGS += -D__CUDA_NO_HALF_OPERATORS__ -D__CUDA_NO_HALF_CONVERSIONS__
 NVCCFLAGS += -D__CUDA_NO_BFLOAT16_CONVERSIONS__ -D__CUDA_NO_HALF2_OPERATORS__
-# CUDA 12.1 headers do not expose cudaLaunchAttributePreferredClusterDimension.
-NVCCFLAGS += -DcudaLaunchAttributePreferredClusterDimension=cudaLaunchAttributeClusterDimension
 GPU ?= H100
 ifeq ($(GPU),B300)
 NVCCFLAGS += -DKITTENS_BLACKWELL -gencode arch=compute_103a,code=sm_103a
@@ -80,13 +78,18 @@ else
 NVCCFLAGS += -DKITTENS_HOPPER -gencode arch=compute_90a,code=sm_90a
 endif
 
-# Optional distributed backend toggles based on available LibTorch artifacts.
-ifneq ($(wildcard $(TORCHDIR)/include/torch/csrc/distributed/c10d/ProcessGroupNCCL.hpp),)
 ifneq ($(wildcard $(TORCH_LIBPATH)/libtorch_cuda.*),)
 ifneq ($(wildcard $(TORCH_LIBPATH)/libc10_cuda.*),)
-EXTRA_CXX_FLAGS += -DUSE_C10D_NCCL
 TORCH_CUDA_LINK_FLAGS := -ltorch_cuda -lc10_cuda
 endif
+endif
+
+# Optional distributed backend toggles. Keep CUDA enabled whenever LibTorch has
+# the CUDA libs, but only enable NCCL-specific code when an NCCL module is
+# actually loaded into the environment.
+ifneq ($(wildcard $(TORCHDIR)/include/torch/csrc/distributed/c10d/ProcessGroupNCCL.hpp),)
+ifneq ($(strip $(EBROOTNCCL)),)
+EXTRA_CXX_FLAGS += -DUSE_C10D_NCCL
 endif
 endif
 
@@ -107,6 +110,7 @@ HDRS :=
 
 SRCS := \
 	tyr.cpp\
+	tyr_ops.cpp\
 	tyr_distributed.cpp\
 	tyr_polar.cpp\
 	tyr_media_stub.cpp\

@@ -1189,6 +1189,24 @@ opaque scaledDotProductAttentionGQAMaskQKV
     (enable_gqa : Bool := false)
     : T #[batch, n_head, q_seq, head_dim]
 
+/-- Experimental Tyr FlashAttention entry point.
+
+    This calls the C++ `tyr::flash_attn` operator, which currently dispatches
+    to native ThunderKittens-backed H100 kernels for the validated fixed shapes
+    and falls back to PyTorch SDPA for everything else. -/
+@[extern "lean_torch_tyr_flash_attn_4d"]
+opaque tyrFlashAttn4d
+    {batch n_head n_kv_head q_seq kv_seq head_dim : UInt64}
+    (query : @& T #[batch, n_head, q_seq, head_dim])
+    (key : @& T #[batch, n_kv_head, kv_seq, head_dim])
+    (value : @& T #[batch, n_kv_head, kv_seq, head_dim])
+    (attn_mask : Option (T #[batch, kv_seq]) := none)
+    (dropout_p : Float := 0.0)
+    (is_causal : Bool := false)
+    (scale : Option Float := none)
+    (enable_gqa : Bool := false)
+    : T #[batch, n_head, q_seq, head_dim]
+
 /-- RMSNorm without learnable parameters: x / sqrt(mean(x^2) + eps)
     Normalizes over the last dimension. -/
 def rmsNorm {s : Shape} (x : T s) (eps : Float := 1e-6) : T s :=
