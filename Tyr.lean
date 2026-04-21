@@ -37,6 +37,10 @@ import Tyr.Tokenizer
 -- HuggingFace Hub utilities
 import Tyr.Hub
 
+-- Shared model utilities and generation infrastructure
+import Tyr.Model.Utils
+import Tyr.Model.Generation
+
 -- Checkpointing
 import Tyr.Checkpoint
 
