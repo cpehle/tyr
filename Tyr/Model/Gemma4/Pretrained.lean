@@ -35,8 +35,7 @@ def tokenizerFiles : Array String := #[
   "processor_config.json"
 ]
 
-/-- Re-export generic hub utilities under the gemma4 namespace for backward compatibility. -/
-export Hub (resolvePretrainedDir detectWeightLayout findCachedSnapshot?)
+export torch.Hub (resolvePretrainedDir detectWeightLayout findCachedSnapshot?)
 
 end torch.gemma4.hub
 

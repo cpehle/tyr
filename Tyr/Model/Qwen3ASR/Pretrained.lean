@@ -129,8 +129,7 @@ def resolvePretrainedDir (source : String) (opts : DownloadOptions := {}) : IO S
     pure ()
   pure modelDir
 
-/-- Re-export generic hub utilities under the qwen3asr namespace for backward compatibility. -/
-export Hub (detectWeightLayout)
+export torch.Hub (detectWeightLayout)
 
 end torch.qwen3asr.hub
 

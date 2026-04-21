@@ -42,8 +42,7 @@ def tokenizerFiles : Array String := #[
   "merges.txt"
 ]
 
-/-- Re-export generic hub utilities under the qwen35 namespace for backward compatibility. -/
-export Hub (resolvePretrainedDir detectWeightLayout findCachedSnapshot?)
+export torch.Hub (resolvePretrainedDir detectWeightLayout findCachedSnapshot? shardFilesFromIndexFile)
 
 end torch.qwen35.hub
 
