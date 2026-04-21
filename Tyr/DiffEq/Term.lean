@@ -114,6 +114,12 @@ def layoutTag : TermTree → String
 
 end TermTree
 
+/-- Default `TermShape` for a single (non-composite) term. -/
+def defaultSingleTermShape (τ : Type) : TermShape τ where
+  arity? _ := some 1
+  layoutTag? _ := some "single"
+  tree? _ := some TermTree.single
+
 instance : TermLike (AbstractTerm Y VF Control Args) Y VF Control Args where
   vf term := term.vf
   contr term := term.contr
@@ -121,10 +127,7 @@ instance : TermLike (AbstractTerm Y VF Control Args) Y VF Control Args where
   vf_prod term := term.vf_prod
   is_vf_expensive term := term.is_vf_expensive
 
-instance : TermShape (AbstractTerm Y VF Control Args) where
-  arity? _ := some 1
-  layoutTag? _ := some "single"
-  tree? _ := some TermTree.single
+instance : TermShape (AbstractTerm Y VF Control Args) := defaultSingleTermShape _
 
 namespace AbstractTerm
 
@@ -151,10 +154,7 @@ instance [DiffEqSpace Y] : TermLike (ODETerm Y Args) Y Y Time Args where
     DiffEqSpace.scale control (term.vectorField t y args)
   is_vf_expensive _ _ _ _ _ := false
 
-instance : TermShape (ODETerm Y Args) where
-  arity? _ := some 1
-  layoutTag? _ := some "single"
-  tree? _ := some TermTree.single
+instance : TermShape (ODETerm Y Args) := defaultSingleTermShape _
 
 namespace ODETerm
 
@@ -177,10 +177,7 @@ instance : TermLike (ControlTerm Y VF Control Args) Y VF Control Args where
   vf_prod term t y args control := term.prod (term.vectorField t y args) control
   is_vf_expensive _ _ _ _ _ := false
 
-instance : TermShape (ControlTerm Y VF Control Args) where
-  arity? _ := some 1
-  layoutTag? _ := some "single"
-  tree? _ := some TermTree.single
+instance : TermShape (ControlTerm Y VF Control Args) := defaultSingleTermShape _
 
 namespace ControlTerm
 
@@ -260,6 +257,15 @@ def derivativeAware? (term : ControlTerm Y VF Control Args) : Bool :=
 
 end ControlTerm
 
+/-- Validate that a scalar scale parameter is finite and nonnegative. -/
+def validateScale (name : String) (value : Scalar) : Option String :=
+  if !Float.isFinite value then
+    some s!"{name} must be finite, got {value}"
+  else if value < 0.0 then
+    some s!"{name} must be nonnegative, got {value}"
+  else
+    none
+
 /-- Diffusion term with a Jacobian-vector product for Milstein-like solvers. -/
 structure DiffusionTerm (Y VF Control Args : Type) where
   vectorField : Time → Y → Args → VF
@@ -277,10 +283,7 @@ instance : TermLike (DiffusionTerm Y VF Control Args) Y VF Control Args where
 instance : DiffusionTermLike (DiffusionTerm Y VF Control Args) Y VF Control Args where
   jacobian_prod term := term.jacobianProd
 
-instance : TermShape (DiffusionTerm Y VF Control Args) where
-  arity? _ := some 1
-  layoutTag? _ := some "single"
-  tree? _ := some TermTree.single
+instance : TermShape (DiffusionTerm Y VF Control Args) := defaultSingleTermShape _
 
 namespace DiffusionTerm
 
@@ -307,14 +310,6 @@ structure UnderdampedLangevinDriftTerm (X Args : Type) where
   argsValid : Time → X → X → Args → Bool := fun _ _ _ _ => true
 
 namespace UnderdampedLangevinDriftTerm
-
-private def validateScale (name : String) (value : Scalar) : Option String :=
-  if !Float.isFinite value then
-    some s!"{name} must be finite, got {value}"
-  else if value < 0.0 then
-    some s!"{name} must be nonnegative, got {value}"
-  else
-    none
 
 def validate? (term : UnderdampedLangevinDriftTerm X Args)
     (t : Time) (y : X × X) (args : Args) : Option String :=
@@ -357,10 +352,7 @@ instance [DiffEqSpace X] :
     (DiffEqSpace.scale control vf.1, DiffEqSpace.scale control vf.2)
   is_vf_expensive _ _ _ _ _ := false
 
-instance : TermShape (UnderdampedLangevinDriftTerm X Args) where
-  arity? _ := some 1
-  layoutTag? _ := some "single"
-  tree? _ := some TermTree.single
+instance : TermShape (UnderdampedLangevinDriftTerm X Args) := defaultSingleTermShape _
 
 def toAbstract [DiffEqSpace X] (term : UnderdampedLangevinDriftTerm X Args) :
     AbstractTerm (X × X) (X × X) Time Args :=
@@ -397,14 +389,6 @@ instance : UnderdampedLevyControl (SpaceTimeTimeLevyArea Time X) X where
   projK? := some fun control => control.K
 
 namespace UnderdampedLangevinDiffusionTerm
-
-private def validateScale (name : String) (value : Scalar) : Option String :=
-  if !Float.isFinite value then
-    some s!"{name} must be finite, got {value}"
-  else if value < 0.0 then
-    some s!"{name} must be nonnegative, got {value}"
-  else
-    none
 
 def validate? (term : UnderdampedLangevinDiffusionTerm X Args)
     (t : Time) (y : X × X) (args : Args) : Option String :=
@@ -493,10 +477,7 @@ instance [DiffEqSpace X] :
     (zero, DiffEqSpace.scale sigma control.W)
   is_vf_expensive _ _ _ _ _ := false
 
-instance : TermShape (UnderdampedLangevinDiffusionTerm X Args) where
-  arity? _ := some 1
-  layoutTag? _ := some "single"
-  tree? _ := some TermTree.single
+instance : TermShape (UnderdampedLangevinDiffusionTerm X Args) := defaultSingleTermShape _
 
 def toAbstract [DiffEqSpace X] (term : UnderdampedLangevinDiffusionTerm X Args) :
     AbstractTerm (X × X) Scalar (SpaceTimeTimeLevyArea Time X) Args :=

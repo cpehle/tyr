@@ -47,28 +47,6 @@ def toInterpolation [DiffEqSpace Y] (info : DenseInfo Y) : DenseInterpolation Y 
 
 end DenseInfo
 
-private def zeroLike [DiffEqSpace Y] (y0 : Y) : Y :=
-  0.0 * y0
-
-private def weightedSum {s : Nat} [DiffEqSpace Y] (coeffs : Vector s Time)
-    (ks : Array Y) (y0 : Y) : Y := Id.run do
-  let mut acc := zeroLike y0
-  let coeffArr := coeffs.toArray
-  for j in [:coeffArr.size] do
-    let a := coeffArr.getD j 0.0
-    let kj := ks.getD j (zeroLike y0)
-    acc := acc + a * kj
-  return acc
-
-private def weightedSumArray [DiffEqSpace Y] (coeffs : Array Time)
-    (ks : Array Y) (y0 : Y) : Y := Id.run do
-  let mut acc := zeroLike y0
-  for j in [:coeffs.size] do
-    let a := coeffs.getD j 0.0
-    let kj := ks.getD j (zeroLike y0)
-    acc := acc + a * kj
-  return acc
-
 private def stageState {s : Nat} [DiffEqSpace Y] (rk : ExplicitRK s)
     (ks : Array Y) (y0 : Y) (stage : Nat) : Y := Id.run do
   let zero := zeroLike y0
