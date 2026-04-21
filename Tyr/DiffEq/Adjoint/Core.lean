@@ -164,9 +164,6 @@ private def mkAdjointFailure
 abbrev AdjointSolveWithReport (Y SolverState ControllerState Args : Type) :=
   (Solution Y SolverState ControllerState × Option (AdjointResult Y Args) × Option String)
 
-private def zeroLike [DiffEqSpace α] (x : α) : α :=
-  DiffEqSpace.scale 0.0 x
-
 class AcceptedStepReplayController (C : Type) where
   supportsAcceptedStepReplay : Bool
 

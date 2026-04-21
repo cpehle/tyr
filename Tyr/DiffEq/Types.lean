@@ -43,6 +43,24 @@ def smulInst [DiffEqSpace α] : SMul Scalar α where
 
 end DiffEqArithmetic
 
+/-- Zero element of the same shape as `y0`. -/
+def zeroLike [DiffEqSpace Y] (y0 : Y) : Y := DiffEqSpace.scale 0.0 y0
+
+/-- Weighted sum of stage derivatives (Array-based coefficients). -/
+def weightedSumArray [DiffEqSpace Y] (coeffs : Array Time)
+    (ks : Array Y) (y0 : Y) : Y := Id.run do
+  let mut acc := zeroLike y0
+  for j in [:coeffs.size] do
+    let a := coeffs.getD j 0.0
+    let kj := ks.getD j (zeroLike y0)
+    acc := DiffEqSpace.add acc (DiffEqSpace.scale a kj)
+  return acc
+
+/-- Weighted sum of stage derivatives (Vector-based coefficients). -/
+def weightedSum {s : Nat} [DiffEqSpace Y] (coeffs : Vector s Time)
+    (ks : Array Y) (y0 : Y) : Y :=
+  weightedSumArray coeffs.toArray ks y0
+
 /-! Optional seminorm used by adaptive controllers and error estimates. -/
 class DiffEqSeminorm (α : Type) where
   rms : α → Scalar

@@ -43,6 +43,12 @@ def fromUInt64 (seed : UInt64) : PRNGKey :=
 def foldIn (key : PRNGKey) (tag : UInt32) : PRNGKey :=
   { state := mix (key.state + toUInt64 tag + 0x9e3779b97f4a7c15) }
 
+def foldInUInt64 (key : PRNGKey) (tag : UInt64) : PRNGKey :=
+  let low := tag.toUInt32
+  let high := (tag >>> 32).toUInt32
+  let key := foldIn key low
+  foldIn key high
+
 def split (key : PRNGKey) : PRNGKey × PRNGKey :=
   let k1 := { state := mix (key.state + 0x9e3779b97f4a7c15) }
   let k2 := { state := mix (k1.state + 0x9e3779b97f4a7c15) }

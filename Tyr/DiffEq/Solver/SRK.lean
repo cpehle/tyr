@@ -42,28 +42,6 @@ structure StochasticRK (s : Nat) where
 
 namespace StochasticRK
 
-private def zeroLike [DiffEqSpace Y] (y0 : Y) : Y :=
-  0.0 * y0
-
-private def weightedSum {s : Nat} [DiffEqSpace Y] (coeffs : Vector s Time)
-    (ks : Array Y) (y0 : Y) : Y := Id.run do
-  let mut acc := zeroLike y0
-  let coeffArr := coeffs.toArray
-  for j in [:coeffArr.size] do
-    let a := coeffArr.getD j 0.0
-    let kj := ks.getD j (zeroLike y0)
-    acc := acc + a * kj
-  return acc
-
-private def weightedSumArray [DiffEqSpace Y] (coeffs : Array Time)
-    (ks : Array Y) (zero : Y) : Y := Id.run do
-  let mut acc := zero
-  for j in [:coeffs.size] do
-    let a := coeffs.getD j 0.0
-    let kj := ks.getD j zero
-    acc := acc + a * kj
-  return acc
-
 def solver {s : Nat} {Drift Diffusion Y VFg Control Args : Type}
     [TermLike Drift Y Y Time Args]
     [TermLike Diffusion Y VFg Control Args]
@@ -164,14 +142,14 @@ def solver {s : Nat} {Drift Diffusion Y VFg Control Args : Type}
             let mut ksH : Array Y := #[]
             for j in [:rows.size] do
               let row := rows.getD j #[]
-              let driftSum := weightedSumArray row ksF zero
+              let driftSum := weightedSumArray row ksF y0
               let aWRow := coeffsWArr.getD j #[]
-              let wSum := weightedSumArray aWRow ksW zero
+              let wSum := weightedSumArray aWRow ksW y0
               let hSum :=
                 match coeffsH with
                 | some _ =>
                     let aHRow := coeffsHArr.getD j #[]
-                    weightedSumArray aHRow ksH zero
+                    weightedSumArray aHRow ksH y0
                 | none => zero
               let ti := t0 + cs.getD j 0.0 * dt
               let zi := y0 + (driftSum + (wSum + hSum))

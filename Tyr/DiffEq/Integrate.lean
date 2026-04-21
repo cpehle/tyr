@@ -178,7 +178,7 @@ private def constantInterpolation [DiffEqSpace Y] (y : Y) : DenseInterpolation Y
   evaluate := fun _t0 t1 _left =>
     match t1 with
     | none => y
-    | some _ => DiffEqSpace.sub y y
+    | some _ => y
   derivative := fun _t _left =>
     DiffEqSpace.scale 0.0 (DiffEqSpace.sub y y)
 }
@@ -217,8 +217,10 @@ private def maxTol (a b : Time) : Time :=
 private def timesWithinTol (t0 t1 tol : Time) : Bool :=
   Float.abs (t0 - t1) <= tol
 
+private def defaultTimeProgressTolerance : Time := 1.0e-12
+
 private def hasNoTimeProgress (t0 t1 tol : Time) : Bool :=
-  let tol := if tol > 0.0 then tol else 1.0e-12
+  let tol := if tol > 0.0 then tol else defaultTimeProgressTolerance
   timesWithinTol t0 t1 tol
 
 private def eventHitPrecedes (forward : Bool) (lhs rhs : Time) : Bool :=
@@ -674,11 +676,9 @@ def solveLoopStep
           }
           { loop with
             attempted := attemptedNext
-            t := tNext
-            y := step.y1
             solverState := step.solverState
             attempts := loop.attempts.push attempt
-            progressState := progressMeterUpdate loop.progressState attemptedNext tNext
+            progressState := progressMeterUpdate loop.progressState attemptedNext loop.t
             result := step.result
             continueLoop := false
           }
@@ -704,11 +704,9 @@ def solveLoopStep
             }
             { loop with
               attempted := attemptedNext
-              t := tNext
-              y := step.y1
               solverState := step.solverState
               attempts := loop.attempts.push attempt
-              progressState := progressMeterUpdate loop.progressState attemptedNext tNext
+              progressState := progressMeterUpdate loop.progressState attemptedNext loop.t
               result := decision.result
               continueLoop := false
             }

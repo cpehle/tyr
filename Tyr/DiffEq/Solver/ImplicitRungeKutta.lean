@@ -49,18 +49,6 @@ def toInterpolation [DiffEqSpace Y] (info : ImplicitDenseInfo Y) : DenseInterpol
 
 end ImplicitDenseInfo
 
-private def zeroLike [DiffEqSpace Y] (y0 : Y) : Y :=
-  0.0 * y0
-
-private def weightedSumArray [DiffEqSpace Y] (coeffs : Array Time)
-    (ks : Array Y) (y0 : Y) : Y := Id.run do
-  let mut acc := zeroLike y0
-  for j in [:coeffs.size] do
-    let a := coeffs.getD j 0.0
-    let kj := ks.getD j (zeroLike y0)
-    acc := acc + a * kj
-  return acc
-
 private def baseHermiteDenseInfo [DiffEqSpace Y]
     (t0 t1 : Time) (y0 y1 : Y) (m0 m1 : Y) : LocalHermiteDenseInfo Y := {
   t0 := t0
@@ -131,19 +119,6 @@ private def denseInfo [DiffEqSpace Y]
       kencarp3Poly2DenseInfo t0 t1 y0 stageMs base
 
 namespace ImplicitRK
-
-private def zeroLike [DiffEqSpace Y] (y0 : Y) : Y :=
-  0.0 * y0
-
-private def weightedSum {s : Nat} [DiffEqSpace Y] (coeffs : Vector s Time)
-    (ks : Array Y) (y0 : Y) : Y :=
-  let coeffArr := coeffs.toArray
-  (List.range coeffArr.size).foldl
-    (fun acc j =>
-      let a := coeffArr.getD j 0.0
-      let kj := ks.getD j (zeroLike y0)
-      acc + a * kj)
-    (zeroLike y0)
 
 private def effectiveRootMethod {s : Nat} (rk : ImplicitRK s) : RootFindMethod :=
   let base : RootFindMethod := rk.rootMethod.getD (RootFindMethod.fixedPoint rk.rootFinder)
@@ -219,19 +194,6 @@ def solver {s : Nat} {Term Y VF Args : Type}
 end ImplicitRK
 
 namespace IMEXRK
-
-private def zeroLike [DiffEqSpace Y] (y0 : Y) : Y :=
-  0.0 * y0
-
-private def weightedSum {s : Nat} [DiffEqSpace Y] (coeffs : Vector s Time)
-    (ks : Array Y) (y0 : Y) : Y :=
-  let coeffArr := coeffs.toArray
-  (List.range coeffArr.size).foldl
-    (fun acc j =>
-      let a := coeffArr.getD j 0.0
-      let kj := ks.getD j (zeroLike y0)
-      acc + a * kj)
-    (zeroLike y0)
 
 private def effectiveRootMethod {s : Nat} (rk : IMEXRK s) : RootFindMethod :=
   let base : RootFindMethod := rk.rootMethod.getD (RootFindMethod.fixedPoint rk.rootFinder)
