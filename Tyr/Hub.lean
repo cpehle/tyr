@@ -38,7 +38,7 @@ def parseJsonFile (path : String) : IO Json := do
 
 /-! ## File system helpers -/
 
-private def expandHome (path : String) : IO String := do
+def expandHome (path : String) : IO String := do
   if path.startsWith "~" then
     match (← IO.getEnv "HOME") with
     | some home => pure (path.replace "~" home)
@@ -140,7 +140,7 @@ def modelDirForRepo (cacheDir repoId revision : String) : IO String := do
   let cacheDir ← expandHome cacheDir
   pure s!"{cacheDir}/{sanitizeRepoId repoId}/{revision}"
 
-private def maybeReadRef (repoDir : System.FilePath) (revision : String) : IO (Option String) := do
+def maybeReadRef (repoDir : System.FilePath) (revision : String) : IO (Option String) := do
   let refPath := repoDir / "refs" / revision
   if ← refPath.pathExists then
     let ref := (← IO.FS.readFile refPath).trimAscii.toString
