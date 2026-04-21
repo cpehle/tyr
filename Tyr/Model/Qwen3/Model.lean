@@ -14,18 +14,12 @@ import Tyr.Module.Core
 import Tyr.Module.Derive
 import Tyr.Model.Qwen
 import Tyr.Model.Qwen3.Config
+import Tyr.Model.Utils
 
 namespace torch.qwen3
 
 open torch
-
-private def initWeight (shape : Shape) (fanIn : UInt64) : IO (T shape) := do
-  let std := Float.sqrt (2.0 / fanIn.toFloat)
-  let w ← torch.randn shape
-  pure (autograd.set_requires_grad (mul_scalar w std) true)
-
-private def logicalOr {s : Shape} (a b : T s) : T s :=
-  torch.logical_not (torch.logical_and (torch.logical_not a) (torch.logical_not b))
+open torch.Model
 
 private def tokenInSetMask {batch : UInt64}
     (tokens : T #[batch])

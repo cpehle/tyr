@@ -67,11 +67,6 @@ def initKVCache {batch num_kv_heads head_dim : UInt64}
     torch.zeros #[batch, num_kv_heads, maxLen, head_dim] false device
   { kStoreDyn := nn.eraseShape k0, vStoreDyn := nn.eraseShape v0, seq := 0, maxLen := maxLen }
 
-private def castLike {sRef s : Shape} (reference : T sRef) (t : T s) : T s :=
-  match reference.dtype with
-  | .BFloat16 => toBFloat16' t
-  | _ => t
-
 /-- Apply RMS normalization along the last dimension (per-head norm).
     Input: [batch, seq, n_heads, head_dim], norm: [head_dim]
     Broadcasts norm across all heads. -/

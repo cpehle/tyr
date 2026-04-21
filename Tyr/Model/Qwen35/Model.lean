@@ -15,55 +15,13 @@ import Tyr.Module.Core
 import Tyr.Module.Derive
 import Tyr.Model.Qwen.Attention
 import Tyr.Model.Qwen35.Config
+import Tyr.Model.Utils
+import Tyr.Model.Generation
 
 namespace torch.qwen35
 
 open torch
-
-private def initWeight (shape : Shape) (fanIn : UInt64) : IO (T shape) := do
-  let std := Float.sqrt (2.0 / fanIn.toFloat)
-  let w ← torch.randn shape
-  pure (autograd.set_requires_grad (mul_scalar w std) true)
-
-private def initBias (shape : Shape) : T shape :=
-  autograd.set_requires_grad (torch.zeros shape) true
-
-private def logicalOr {s : Shape} (a b : T s) : T s :=
-  logical_not (logical_and (logical_not a) (logical_not b))
-
-private def falseMask {n : UInt64} (device : Device) : T #[n] :=
-  let zeros : T #[n] := (full_int #[n] 0).to device
-  eq_scalar zeros 1
-
-private def zerosOn {s : Shape} (device : Device) : T s :=
-  torch.zeros s false device
-
-private def onesOn {s : Shape} (device : Device) : T s :=
-  torch.ones s false device
-
-private def tokenInSet {n : UInt64}
-    (tokens : T #[n])
-    (values : Array UInt64)
-    : T #[n] :=
-  Id.run do
-    let mut mask := falseMask (n := n) tokens.device
-    for value in values do
-      let hit : T #[n] := eq_scalar tokens (Int64.ofNat value.toNat)
-      mask := logicalOr mask hit
-    return mask
-
-private def applyFinishedEos {n : UInt64}
-    (tokens : T #[n])
-    (finished : T #[n])
-    (eosToken : UInt64)
-    : T #[n] :=
-  let eos : T #[n] := (full_int #[n] (Int64.ofNat eosToken.toNat)).to tokens.device
-  where_ finished eos tokens
-
-private def castLike {sRef s : Shape} (reference : T sRef) (t : T s) : T s :=
-  match reference.dtype with
-  | .BFloat16 => toBFloat16' t
-  | _ => t
+open torch.Model
 
 private def l2NormLast4d {b s h d : UInt64}
     (x : T #[b, s, h, d])
@@ -118,11 +76,6 @@ structure Qwen35RMSNorm (dim : UInt64) where
 
 namespace Qwen35RMSNorm
 
-private def restoreInputDType {s : Shape} (input : T s) (output : T s) : T s :=
-  match input.dtype with
-  | .BFloat16 => toBFloat16' output
-  | _ => output
-
 def initZeroCentered (dim : UInt64) (eps : Float := 1e-6) : Qwen35RMSNorm dim :=
   { weight := autograd.set_requires_grad (torch.zeros #[dim]) true, eps }
 
@@ -167,11 +120,6 @@ structure Qwen35RMSNormGated (dim : UInt64) where
   deriving TensorStruct
 
 namespace Qwen35RMSNormGated
-
-private def restoreInputDType {s : Shape} (input : T s) (output : T s) : T s :=
-  match input.dtype with
-  | .BFloat16 => toBFloat16' output
-  | _ => output
 
 def init (dim : UInt64) (eps : Float := 1e-6) : Qwen35RMSNormGated dim :=
   { weight := autograd.set_requires_grad (torch.ones #[dim]) true, eps }
@@ -1214,36 +1162,6 @@ private def decodeStepFromEmbedWithCache {batch maxLen : UInt64}
   let logits3 : T #[batch, 1, cfg.vocab_size] := linear3d hiddenNorm m.lmHead
   let logits2 : T #[batch, cfg.vocab_size] := reshape logits3 #[batch, cfg.vocab_size]
   pure (logits2, cache')
-
-inductive SamplingStrategy where
-  | greedy
-  | multinomial (temperature : Float := 1.0) (topK : UInt64 := 0) (topP : Float := 1.0)
-  deriving Repr, Inhabited
-
-abbrev StreamCallback (batch : UInt64) := UInt64 → T #[batch] → IO Unit
-
-private def sampleFromLogits {batch vocab : UInt64}
-    (logits : T #[batch, vocab])
-    (strategy : SamplingStrategy)
-    : IO (T #[batch]) := do
-  match strategy with
-  | .greedy =>
-    pure (nn.argmax logits 1)
-  | .multinomial temperature topK topP =>
-    if temperature <= 0.0 then
-      throw <| IO.userError s!"multinomial sampling requires temperature > 0, got {temperature}"
-    let scaled :=
-      if temperature == 1.0 then logits
-      else mul_scalar logits (1.0 / temperature)
-    let filtered :=
-      if topK == 0 then scaled
-      else nn.topKFilter scaled topK
-    let filtered :=
-      if topP >= 1.0 then filtered
-      else nn.topPFilter filtered topP
-    let probs := nn.softmax filtered (-1)
-    let sampled ← nn.multinomial probs 1 false
-    pure (reshape (nn.squeezeDim sampled (-1)) #[batch])
 
 private partial def decodeLoopCached {batch maxLen : UInt64}
     (cfg : Config)

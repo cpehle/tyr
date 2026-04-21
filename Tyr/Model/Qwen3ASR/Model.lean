@@ -17,25 +17,17 @@ import Tyr.Model.Qwen.RoPE
 import Tyr.Model.Qwen3ASR.Config
 import Tyr.Model.Qwen3ASR.AudioEncoder
 import Tyr.Model.Qwen3ASR.ForcedAligner
+import Tyr.Model.Utils
 
 namespace torch.qwen3asr
+
+open torch.Model
 
 abbrev TextQwenConfig (cfg : ThinkerConfig) : qwen.QwenConfig :=
   TextConfig.toQwenConfig cfg.textConfig
 
 abbrev ThinkerLmVocabSize (cfg : ThinkerConfig) : UInt64 :=
   ThinkerConfig.lmHeadOutDim cfg
-
-private def initWeight (shape : Shape) (fanIn : UInt64) : IO (T shape) := do
-  let std := Float.sqrt (2.0 / fanIn.toFloat)
-  let w ← torch.randn shape
-  pure (autograd.set_requires_grad (mul_scalar w std) true)
-
-private def initBias (shape : Shape) : T shape :=
-  autograd.set_requires_grad (torch.zeros shape) true
-
-private def logicalOr {s : Shape} (a b : T s) : T s :=
-  torch.logical_not (torch.logical_and (torch.logical_not a) (torch.logical_not b))
 
 private def tokenInSetMask {batch : UInt64}
     (tokens : T #[batch])

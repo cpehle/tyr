@@ -12,20 +12,15 @@ import Tyr.TensorStruct
 import Tyr.Module.Core
 import Tyr.Module.Derive
 import Tyr.Model.KittenTTS.Config
+import Tyr.Model.Utils
 
 namespace torch.kittentts
 
-private def initWeight (shape : Shape) (fanIn : UInt64) : IO (T shape) := do
-  let std := Float.sqrt (2.0 / fanIn.toFloat)
-  let w ← torch.randn shape
-  pure (autograd.set_requires_grad (mul_scalar w std) true)
+open torch.Model
 
 private def initUniform (shape : Shape) (scale : Float) : IO (T shape) := do
   let w ← torch.uniform shape (-scale) scale
   pure (autograd.set_requires_grad w true)
-
-private def initBias (shape : Shape) : T shape :=
-  autograd.set_requires_grad (torch.zeros shape) true
 
 private def addBias2d {batch dim : UInt64}
     (x : T #[batch, dim])

@@ -17,19 +17,17 @@ import Tyr.Module.RMSNorm
 import Tyr.Model.Qwen.Layer
 import Tyr.Model.Qwen.RoPE
 import Tyr.Model.Qwen3TTS.Config
+import Tyr.Model.Utils
 
 namespace torch.qwen3tts
+
+open torch.Model
 
 abbrev TalkerLayer (cfg : TalkerConfig) :=
   qwen.QwenLayer cfg.hiddenSize cfg.numAttentionHeads cfg.numKeyValueHeads cfg.headDim cfg.intermediateSize
 
 abbrev CodePredictorLayer (cfg : TalkerCodePredictorConfig) :=
   qwen.QwenLayer cfg.hiddenSize cfg.numAttentionHeads cfg.numKeyValueHeads cfg.headDim cfg.intermediateSize
-
-private def initWeight (shape : Shape) (hidden : UInt64) : IO (T shape) := do
-  let std := Float.sqrt (2.0 / hidden.toFloat)
-  let w ← torch.randn shape
-  pure (autograd.set_requires_grad (mul_scalar w std) true)
 
 private def getOrFirst! [Inhabited α] (xs : Array α) (i : Nat) : α :=
   match xs[i]? with

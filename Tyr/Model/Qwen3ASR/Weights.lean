@@ -16,11 +16,6 @@ open torch.Log
 private def reqGradFalse {s : Shape} (t : T s) : T s :=
   autograd.set_requires_grad t false
 
-private def castLike {sRef s : Shape} (reference : T sRef) (t : T s) : T s :=
-  match reference.dtype with
-  | .BFloat16 => toBFloat16' t
-  | _ => t
-
 private def tryLoadTensorSharded (modelDir : String) (name : String) (s : Shape)
     : IO (Option (T s)) := do
   try

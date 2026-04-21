@@ -13,8 +13,11 @@ import Tyr.TensorStruct
 import Tyr.Module.Core
 import Tyr.Module.Derive
 import Tyr.Model.Qwen3TTS.Config
+import Tyr.Model.Utils
 
 namespace torch.qwen3tts
+
+open torch.Model
 
 private def c0 (cfg : SpeakerEncoderConfig) : UInt64 := cfg.encChannels.getD 0 512
 private def c1 (cfg : SpeakerEncoderConfig) : UInt64 := cfg.encChannels.getD 1 512
@@ -38,14 +41,6 @@ private def mfaInChannels (cfg : SpeakerEncoderConfig) : UInt64 := c1 cfg + c2 c
 
 private def samePadding (kernelSize dilation : UInt64) : UInt64 :=
   (dilation * (kernelSize - 1)) / 2
-
-private def initWeight (shape : Shape) (fanIn : UInt64) : IO (T shape) := do
-  let std := Float.sqrt (2.0 / fanIn.toFloat)
-  let w ← torch.randn shape
-  pure (autograd.set_requires_grad (mul_scalar w std) true)
-
-private def initBias (shape : Shape) : T shape :=
-  autograd.set_requires_grad (torch.zeros shape) true
 
 private def addBias3d {batch channels frames : UInt64}
     (x : T #[batch, channels, frames])
