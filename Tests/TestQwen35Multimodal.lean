@@ -3,6 +3,7 @@ import Tyr.Model.Qwen35
 import LeanTest
 
 open torch
+open torch.Model
 open torch.qwen35
 
 private def tinyTextCfg : Config := {
@@ -126,7 +127,7 @@ def testQwen35MultimodalGenerateStreamBatched : IO Unit := do
     reshape (data.fromInt64Array #[2, 5, 6, 7, 2, 8, 9, 10]) #[2, 4]
 
   let callbacksRef ← IO.mkRef (0 : Nat)
-  let onStep : Qwen35ForCausalLM.StreamCallback 2 := fun _ nextTok => do
+  let onStep : StreamCallback 2 := fun _ nextTok => do
     let flat : T #[2] := reshape (data.toLong nextTok) #[2]
     let vals ← data.tensorToUInt64Array flat
     if vals.size == 2 then
@@ -164,7 +165,7 @@ def testQwen35MultimodalGenerateStreamWithImageAndVideoFeatures : IO Unit := do
     torch.randn #[3, tinyVLCfg.vision_config.out_hidden_size]
 
   let callbacksRef ← IO.mkRef (0 : Nat)
-  let onStep : Qwen35ForCausalLM.StreamCallback 1 := fun _ nextTok => do
+  let onStep : StreamCallback 1 := fun _ nextTok => do
     let flat : T #[1] := reshape (data.toLong nextTok) #[1]
     let vals ← data.tensorToUInt64Array flat
     if vals.size == 1 then
