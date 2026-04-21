@@ -34,6 +34,9 @@ import Tyr.Data
 import Tyr.DataLoader
 import Tyr.Tokenizer
 
+-- HuggingFace Hub utilities
+import Tyr.Hub
+
 -- Checkpointing
 import Tyr.Checkpoint
 

@@ -5,12 +5,15 @@
   by Tyr. The underlying architecture is the same family; this module exposes
   Qwen3.6-specific defaults, repo-id helpers, and user-facing names.
 -/
+import Tyr.Hub
 import Tyr.Model.Qwen35.Pretrained
 import Tyr.Model.Qwen36.ConfigIO
 
 namespace torch.qwen36
 
 namespace hub
+
+open torch.Hub
 
 abbrev DownloadOptions := qwen35.hub.DownloadOptions
 
@@ -22,6 +25,10 @@ def isQwen36CollectionRepoId (repoId : String) : Bool :=
   qwen36CollectionRepoIds.contains repoId
 
 export qwen35.hub (
+  tokenizerFiles
+)
+
+export Hub (
   shardFilesFromIndexFile
   findCachedSnapshot?
   resolvePretrainedDir
@@ -48,19 +55,7 @@ export qwen35.Qwen35ForCausalLM (
   generateGreedy
 )
 
-export qwen35.Qwen35ForCausalLM (
-  load
-  loadSharded
-)
-
-def loadFromPretrained
-    (source : String)
-    (defaults : Config := Config.qwen36_35B_A3B)
-    (revision : String := "main")
-    (cacheDir : String := "~/.cache/huggingface/tyr-models")
-    : IO (Sigma (fun cfg => Qwen36ForCausalLM cfg)) := do
-  let ⟨cfg, model⟩ ← qwen35.Qwen35ForCausalLM.loadFromPretrained source defaults revision cacheDir
-  pure ⟨cfg, model⟩
+export qwen35.Qwen35ForCausalLM.loadFromPretrained
 
 end Qwen36ForCausalLM
 
@@ -68,30 +63,18 @@ namespace Qwen36ForConditionalGeneration
 
 export qwen35.Qwen35ForConditionalGeneration (
   init
-  getImageFeatures
-  getVideoFeatures
-  forwardText
-  forwardWithImageFeatures
-  forwardWithImageAndVideoFeatures
-  forwardWithImagePatches
-  forwardWithImageAndVideoPatches
+  embedTokens
+  forwardEmbeds
+  forward
+  generateFromEmbeds
+  generateFromEmbedsStream
   generate
   generateStream
+  generateUncached
+  generateGreedy
 )
 
-export qwen35.Qwen35ForConditionalGeneration (
-  load
-  loadSharded
-)
-
-def loadFromPretrained
-    (source : String)
-    (defaults : VLConfig := VLConfig.qwen36_35B_A3B)
-    (revision : String := "main")
-    (cacheDir : String := "~/.cache/huggingface/tyr-models")
-    : IO (Sigma (fun cfg => Qwen36ForConditionalGeneration cfg)) := do
-  let ⟨cfg, model⟩ ← qwen35.Qwen35ForConditionalGeneration.loadFromPretrained source defaults revision cacheDir
-  pure ⟨cfg, model⟩
+export qwen35.Qwen35ForConditionalGeneration.loadFromPretrained
 
 end Qwen36ForConditionalGeneration
 

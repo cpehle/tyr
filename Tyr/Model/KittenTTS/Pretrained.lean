@@ -5,12 +5,14 @@
   - a local model directory, or
   - a HuggingFace repo id (download + convert on demand).
 -/
+import Tyr.Hub
 import Tyr.Model.KittenTTS.ConfigIO
 import Tyr.Model.KittenTTS.Weights
 import Tyr.Log
-import Lean.Data.Json
 
 namespace torch.kittentts.hub
+
+open torch.Hub
 
 structure DownloadOptions where
   revision : String := "main"
@@ -18,76 +20,6 @@ structure DownloadOptions where
   deriving Repr, Inhabited
 
 def defaultRepoId : String := "hexgrad/Kokoro-82M"
-
-private def expandHome (path : String) : IO String := do
-  if path.startsWith "~" then
-    match (← IO.getEnv "HOME") with
-    | some home => pure (path.replace "~" home)
-    | none => pure path
-  else
-    pure path
-
-private def ensureParentDir (path : String) : IO Unit := do
-  let p : System.FilePath := ⟨path⟩
-  match p.parent with
-  | some parent => IO.FS.createDirAll parent
-  | none => pure ()
-
-private def fileExists (path : String) : IO Bool := do
-  let p : System.FilePath := ⟨path⟩
-  p.pathExists
-
-private def dirExists (path : String) : IO Bool := do
-  let p : System.FilePath := ⟨path⟩
-  if !(← p.pathExists) then
-    pure false
-  else
-    p.isDir
-
-private def sanitizeRepoId (repoId : String) : String :=
-  repoId.replace "/" "__"
-
-private def modelDirForRepo (cacheDir repoId revision : String) : IO String := do
-  let cacheDir ← expandHome cacheDir
-  pure s!"{cacheDir}/{sanitizeRepoId repoId}/{revision}"
-
-private def downloadFile (url : String) (dest : String) : IO Bool := do
-  if ← fileExists dest then
-    return true
-  ensureParentDir dest
-  let tmp := s!"{dest}.tmp"
-  let resumeArgs :=
-    if ← fileExists tmp then
-      #["-C", "-"]
-    else
-      #[]
-  let token? ← IO.getEnv "HF_TOKEN"
-  let args :=
-    match token? with
-    | some tok =>
-      #[
-        "-fL", "--retry", "3", "--retry-delay", "1",
-        "-H", s!"Authorization: Bearer {tok}"
-      ] ++ resumeArgs ++ #["-o", tmp, url]
-    | none =>
-      #[
-        "-fL", "--retry", "3", "--retry-delay", "1"
-      ] ++ resumeArgs ++ #["-o", tmp, url]
-  let out ← IO.Process.output { cmd := "curl", args := args }
-  if out.exitCode == 0 then
-    IO.FS.rename ⟨tmp⟩ ⟨dest⟩
-    pure true
-  else
-    pure false
-
-private def ensureRemoteFile (repoId revision relPath dest : String) : IO Unit := do
-  if ← fileExists dest then
-    pure ()
-  else
-    let url := s!"https://huggingface.co/{repoId}/resolve/{revision}/{relPath}"
-    let ok ← downloadFile url dest
-    if !ok then
-      throw <| IO.userError s!"Failed to download {repoId}:{revision}:{relPath}"
 
 private def repoModelFilename (repoId : String) : String :=
   if repoId == "hexgrad/Kokoro-82M-v1.1-zh" then

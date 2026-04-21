@@ -1,0 +1,254 @@
+/-
+  Tyr/Hub.lean
+
+  Generic HuggingFace Hub utilities for downloading, caching, and resolving
+  pretrained model directories. Used by all `Tyr.Model.*.Pretrained` modules.
+-/
+import Lean.Data.Json
+
+namespace torch.Hub
+
+open Lean
+
+/-! ## Configuration -/
+
+structure DownloadOptions where
+  revision : String := "main"
+  cacheDir : String := "~/.cache/huggingface/tyr-models"
+  includeTokenizer : Bool := true
+  deriving Repr, Inhabited
+
+/-! ## JSON helpers -/
+
+private def getObjVal? (j : Json) (key : String) : Option Json :=
+  match j with
+  | .obj kvs => Std.TreeMap.Raw.get? kvs key
+  | _ => none
+
+private def getString? (j : Json) : Option String :=
+  match j with
+  | .str s => some s
+  | _ => none
+
+def parseJsonFile (path : String) : IO Json := do
+  let contents ← IO.FS.readFile path
+  match Json.parse contents with
+  | .ok j => pure j
+  | .error err => throw <| IO.userError s!"Failed to parse JSON at {path}: {err}"
+
+/-! ## File system helpers -/
+
+private def expandHome (path : String) : IO String := do
+  if path.startsWith "~" then
+    match (← IO.getEnv "HOME") with
+    | some home => pure (path.replace "~" home)
+    | none => pure path
+  else
+    pure path
+
+def ensureParentDir (path : String) : IO Unit := do
+  let p : System.FilePath := ⟨path⟩
+  match p.parent with
+  | some parent => IO.FS.createDirAll parent
+  | none => pure ()
+
+def fileExists (path : String) : IO Bool := do
+  let p : System.FilePath := ⟨path⟩
+  p.pathExists
+
+def dirExists (path : String) : IO Bool := do
+  let p : System.FilePath := ⟨path⟩
+  if !(← p.pathExists) then
+    pure false
+  else
+    p.isDir
+
+private def pushUnique (xs : Array String) (x : String) : Array String :=
+  if xs.contains x then xs else xs.push x
+
+/-! ## Shard parsing -/
+
+/-- Parse a sharded `model.safetensors.index.json` and return unique shard file names. -/
+def shardFilesFromIndexFile (indexPath : String) : IO (Array String) := do
+  let root ← parseJsonFile indexPath
+  let mut out : Array String := #[]
+  match getObjVal? root "weight_map" with
+  | some (.obj kvs) =>
+    for (_, shardJson) in kvs do
+      match getString? shardJson with
+      | some shard => out := pushUnique out shard
+      | none => pure ()
+  | _ =>
+    throw <| IO.userError s!"Missing or invalid weight_map in {indexPath}"
+  pure out
+
+/-! ## Download -/
+
+private def downloadFile (url : String) (dest : String) : IO Bool := do
+  if ← fileExists dest then
+    return true
+
+  ensureParentDir dest
+  let tmp := s!"{dest}.tmp"
+  let resumeArgs :=
+    if ← fileExists tmp then
+      #["-C", "-"]
+    else
+      #[]
+  let token? ← IO.getEnv "HF_TOKEN"
+  let args :=
+    match token? with
+    | some tok =>
+      #[
+        "-fL", "--retry", "3", "--retry-delay", "1",
+        "-H", s!"Authorization: Bearer {tok}"
+      ] ++ resumeArgs ++ #["-o", tmp, url]
+    | none =>
+      #[
+        "-fL", "--retry", "3", "--retry-delay", "1"
+      ] ++ resumeArgs ++ #["-o", tmp, url]
+
+  let out ← IO.Process.output { cmd := "curl", args := args }
+  if out.exitCode == 0 then
+    IO.FS.rename ⟨tmp⟩ ⟨dest⟩
+    pure true
+  else
+    pure false
+
+def ensureRemoteFile (repoId revision relPath dest : String) : IO Unit := do
+  if ← fileExists dest then
+    pure ()
+  else
+    let url := s!"https://huggingface.co/{repoId}/resolve/{revision}/{relPath}"
+    let ok ← downloadFile url dest
+    if !ok then
+      throw <| IO.userError s!"Failed to download {repoId}:{revision}:{relPath}"
+
+def tryRemoteFile (repoId revision relPath dest : String) : IO Bool := do
+  if ← fileExists dest then
+    pure true
+  else
+    let url := s!"https://huggingface.co/{repoId}/resolve/{revision}/{relPath}"
+    downloadFile url dest
+
+/-! ## Cache layout -/
+
+private def sanitizeRepoId (repoId : String) : String :=
+  repoId.replace "/" "__"
+
+def modelDirForRepo (cacheDir repoId revision : String) : IO String := do
+  let cacheDir ← expandHome cacheDir
+  pure s!"{cacheDir}/{sanitizeRepoId repoId}/{revision}"
+
+private def maybeReadRef (repoDir : System.FilePath) (revision : String) : IO (Option String) := do
+  let refPath := repoDir / "refs" / revision
+  if ← refPath.pathExists then
+    let ref := (← IO.FS.readFile refPath).trimAscii.toString
+    if ref.isEmpty then pure none else pure (some ref)
+  else
+    pure none
+
+def defaultHFHubDir : IO String := do
+  match (← IO.getEnv "HF_HOME") with
+  | some home => pure s!"{home}/hub"
+  | none => pure "~/.cache/huggingface/hub"
+
+def hfRepoDirName (repoId : String) : String :=
+  s!"models--{repoId.replace "/" "--"}"
+
+/-- Check if a directory contains model weight files. -/
+def hasWeightFiles (dir : String) : IO Bool := do
+  let sharded := s!"{dir}/model.safetensors.index.json"
+  let single := s!"{dir}/model.safetensors"
+  pure ((← fileExists sharded) || (← fileExists single))
+
+/-- Try resolving a repo id against existing HuggingFace cache snapshots. -/
+def findCachedSnapshot? (repoId : String) (revision : String := "main") : IO (Option String) := do
+  let hubDir ← expandHome (← defaultHFHubDir)
+  let repoDir : System.FilePath := ⟨s!"{hubDir}/{hfRepoDirName repoId}"⟩
+  if !(← repoDir.pathExists) then
+    return none
+
+  let snapshotsDir := repoDir / "snapshots"
+  if !(← snapshotsDir.pathExists) then
+    return none
+
+  let mut candidates : Array System.FilePath := #[]
+  let directRevPath := snapshotsDir / revision
+  if ← directRevPath.pathExists then
+    candidates := candidates.push directRevPath
+
+  if let some resolvedRev ← maybeReadRef repoDir revision then
+    let resolvedPath := snapshotsDir / resolvedRev
+    if (← resolvedPath.pathExists) && !candidates.contains resolvedPath then
+      candidates := candidates.push resolvedPath
+
+  let entries ← snapshotsDir.readDir
+  for entry in entries do
+    if (← entry.path.isDir) && !candidates.contains entry.path then
+      candidates := candidates.push entry.path
+
+  for c in candidates do
+    let cStr := c.toString
+    if (← fileExists s!"{cStr}/config.json") && (← hasWeightFiles cStr) then
+      return some cStr
+  pure none
+
+/-! ## Model-specific helpers (parameterized) -/
+
+/-- Download tokenizer files given a list of relative filenames. -/
+def ensureTokenizerFiles (repoId revision modelDir : String) (files : Array String) : IO Unit := do
+  for file in files do
+    let _ ← tryRemoteFile repoId revision file s!"{modelDir}/{file}"
+  pure ()
+
+/-- Download model weights (sharded or single-file). -/
+def ensureModelWeights (repoId revision modelDir : String) : IO Unit := do
+  let indexPath := s!"{modelDir}/model.safetensors.index.json"
+  let singlePath := s!"{modelDir}/model.safetensors"
+
+  if ← fileExists indexPath then
+    let shardFiles ← shardFilesFromIndexFile indexPath
+    for shard in shardFiles do
+      ensureRemoteFile repoId revision shard s!"{modelDir}/{shard}"
+  else if ← fileExists singlePath then
+    pure ()
+  else
+    let gotIndex ← tryRemoteFile repoId revision "model.safetensors.index.json" indexPath
+    if gotIndex then
+      let shardFiles ← shardFilesFromIndexFile indexPath
+      for shard in shardFiles do
+        ensureRemoteFile repoId revision shard s!"{modelDir}/{shard}"
+    else
+      ensureRemoteFile repoId revision "model.safetensors" singlePath
+
+/-- Resolve a source into a local model directory.
+    - If `source` is an existing local directory, return it.
+    - Otherwise treat it as HF `repo_id` and resolve/download locally. -/
+def resolvePretrainedDir (source : String) (opts : DownloadOptions := {}) (tokenizerFiles : Array String := #[]) : IO String := do
+  let sourceExpanded ← expandHome source
+  if ← dirExists sourceExpanded then
+    return sourceExpanded
+
+  if let some snap ← findCachedSnapshot? source opts.revision then
+    return snap
+
+  let modelDir ← modelDirForRepo opts.cacheDir source opts.revision
+  IO.FS.createDirAll ⟨modelDir⟩
+  ensureRemoteFile source opts.revision "config.json" s!"{modelDir}/config.json"
+  ensureModelWeights source opts.revision modelDir
+  if opts.includeTokenizer then
+    ensureTokenizerFiles source opts.revision modelDir tokenizerFiles
+  pure modelDir
+
+/-- Detect whether local model files are sharded or single-file. -/
+def detectWeightLayout (modelDir : String) : IO Bool := do
+  let sharded := s!"{modelDir}/model.safetensors.index.json"
+  if ← fileExists sharded then
+    pure true
+  else if ← fileExists s!"{modelDir}/model.safetensors" then
+    pure false
+  else
+    throw <| IO.userError s!"No model.safetensors(.index.json) found in {modelDir}"
+
+end torch.Hub
