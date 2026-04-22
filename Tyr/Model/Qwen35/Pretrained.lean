@@ -58,19 +58,15 @@ def loadFromPretrained
     (cacheDir : String := Hub.defaultCacheDir)
     (device : Device := Device.CPU)
     : IO (Sigma (fun cfg => Qwen35ForCausalLM cfg)) := do
-  let modelDir ← Hub.resolvePretrainedDir source {
-    revision := revision
-    cacheDir := cacheDir
-    includeTokenizer := true
-  } hub.tokenizerFiles
-  let cfg ← Config.loadFromPretrainedDir modelDir defaults
-  let isSharded ← Hub.detectWeightLayout modelDir
-  if isSharded then
-    let m ← Qwen35ForCausalLM.loadSharded modelDir cfg device
-    pure ⟨cfg, m⟩
-  else
-    let m ← Qwen35ForCausalLM.load s!"{modelDir}/model.safetensors" cfg device
-    pure ⟨cfg, m⟩
+  Hub.loadModelFromPretrained
+    source
+    revision
+    cacheDir
+    hub.tokenizerFiles
+    (fun modelDir cfg => Config.loadFromPretrainedDir modelDir cfg)
+    defaults
+    (fun modelDir cfg => Qwen35ForCausalLM.loadSharded modelDir cfg device)
+    (fun path cfg => Qwen35ForCausalLM.load path cfg device)
 
 end Qwen35ForCausalLM
 
@@ -84,19 +80,15 @@ def loadFromPretrained
     (cacheDir : String := Hub.defaultCacheDir)
     (device : Device := Device.CPU)
     : IO (Sigma (fun cfg => Qwen35ForConditionalGeneration cfg)) := do
-  let modelDir ← Hub.resolvePretrainedDir source {
-    revision := revision
-    cacheDir := cacheDir
-    includeTokenizer := true
-  } hub.tokenizerFiles
-  let cfg ← VLConfig.loadFromPretrainedDir modelDir defaults
-  let isSharded ← Hub.detectWeightLayout modelDir
-  if isSharded then
-    let m ← Qwen35ForConditionalGeneration.loadSharded modelDir cfg device
-    pure ⟨cfg, m⟩
-  else
-    let m ← Qwen35ForConditionalGeneration.load s!"{modelDir}/model.safetensors" cfg device
-    pure ⟨cfg, m⟩
+  Hub.loadModelFromPretrained
+    source
+    revision
+    cacheDir
+    hub.tokenizerFiles
+    (fun modelDir cfg => VLConfig.loadFromPretrainedDir modelDir cfg)
+    defaults
+    (fun modelDir cfg => Qwen35ForConditionalGeneration.loadSharded modelDir cfg device)
+    (fun path cfg => Qwen35ForConditionalGeneration.load path cfg device)
 
 end Qwen35ForConditionalGeneration
 

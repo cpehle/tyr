@@ -253,4 +253,36 @@ def detectWeightLayout (modelDir : String) : IO Bool := do
   else
     throw <| IO.userError s!"No model.safetensors(.index.json) found in {modelDir}"
 
+/-- Generic helper to load a model from a local directory or HF Hub repo.
+    - Resolves/downloads the model directory
+    - Loads config
+    - Detects sharded vs single-file weights
+    - Loads via the provided model-specific functions
+    Returns the resolved config and model as a dependent pair. -/
+def loadModelFromPretrained
+    {Cfg : Type}
+    {Model : Cfg → Type}
+    (source : String)
+    (revision : String)
+    (cacheDir : String)
+    (tokenizerFiles : Array String)
+    (loadConfig : String → Cfg → IO Cfg)
+    (defaults : Cfg)
+    (loadSharded : String → (cfg : Cfg) → IO (Model cfg))
+    (loadSingle : String → (cfg : Cfg) → IO (Model cfg))
+    : IO (Sigma (fun cfg => Model cfg)) := do
+  let modelDir ← resolvePretrainedDir source {
+    revision := revision
+    cacheDir := cacheDir
+    includeTokenizer := true
+  } tokenizerFiles
+  let cfg ← loadConfig modelDir defaults
+  let isSharded ← detectWeightLayout modelDir
+  let model ←
+    if isSharded then
+      loadSharded modelDir cfg
+    else
+      loadSingle (s!"{modelDir}/model.safetensors") cfg
+  pure ⟨cfg, model⟩
+
 end torch.Hub

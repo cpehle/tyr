@@ -47,19 +47,15 @@ def loadFromPretrained
     (revision : String := "main")
     (cacheDir : String := Hub.defaultCacheDir)
     : IO (Sigma (fun cfg => Qwen25OmniForCausalLM cfg)) := do
-  let modelDir ← Hub.resolvePretrainedDir source {
-    revision := revision
-    cacheDir := cacheDir
-    includeTokenizer := true
-  } hub.tokenizerFiles
-  let cfg ← Config.loadFromPretrainedDir modelDir defaults
-  let isSharded ← Hub.detectWeightLayout modelDir
-  if isSharded then
-    let m ← Qwen25OmniForCausalLM.loadSharded modelDir cfg
-    pure ⟨cfg, m⟩
-  else
-    let m ← Qwen25OmniForCausalLM.load s!"{modelDir}/model.safetensors" cfg
-    pure ⟨cfg, m⟩
+  Hub.loadModelFromPretrained
+    source
+    revision
+    cacheDir
+    hub.tokenizerFiles
+    (fun modelDir cfg => Config.loadFromPretrainedDir modelDir cfg)
+    defaults
+    (fun modelDir cfg => Qwen25OmniForCausalLM.loadSharded modelDir cfg)
+    (fun path cfg => Qwen25OmniForCausalLM.load path cfg)
 
 end Qwen25OmniForCausalLM
 
