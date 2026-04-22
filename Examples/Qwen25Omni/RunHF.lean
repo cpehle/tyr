@@ -4,6 +4,7 @@
   Text generation demo for Qwen2.5-Omni thinker checkpoints (3B/7B),
   resolved by local path or HuggingFace repo id.
 -/
+import Tyr.Hub
 import Tyr.Model.Qwen25Omni
 import Tyr.Tokenizer.Qwen3
 
@@ -15,7 +16,7 @@ namespace Examples.Qwen25Omni
 structure Args where
   source : String := "Qwen/Qwen2.5-Omni-3B"
   revision : String := "main"
-  cacheDir : String := "~/.cache/huggingface/tyr-models"
+  cacheDir : String := Hub.defaultCacheDir
   prompt : String := "Give a concise definition of a dependent type."
   promptFile : Option String := none
   batchSize : UInt64 := 1

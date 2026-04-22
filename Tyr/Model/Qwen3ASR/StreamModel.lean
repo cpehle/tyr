@@ -49,7 +49,7 @@ private def toSamples (sec : Float) : Nat :=
 def loadFromPretrained
     (source : String)
     (revision : String := "main")
-    (cacheDir : String := "~/.cache/huggingface/tyr-models")
+    (cacheDir : String := Hub.defaultCacheDir)
     : IO StreamModel := do
   let modelDir ← hub.resolvePretrainedDir source {
     revision := revision

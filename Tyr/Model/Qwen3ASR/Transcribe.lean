@@ -853,7 +853,7 @@ namespace Qwen3ForcedAligner
 def loadFromPretrained
     (source : String)
     (revision : String := "main")
-    (cacheDir : String := "~/.cache/huggingface/tyr-models")
+    (cacheDir : String := Hub.defaultCacheDir)
     : IO Qwen3ForcedAligner := do
   let modelDir ← hub.resolvePretrainedDir source {
     revision := revision

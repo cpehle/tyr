@@ -10,11 +10,13 @@ namespace torch.Hub
 
 open Lean
 
+def defaultCacheDir : String := "~/.cache/huggingface/tyr-models"
+
 /-! ## Configuration -/
 
 structure DownloadOptions where
   revision : String := "main"
-  cacheDir : String := "~/.cache/huggingface/tyr-models"
+  cacheDir : String := defaultCacheDir
   includeTokenizer : Bool := true
   deriving Repr, Inhabited
 

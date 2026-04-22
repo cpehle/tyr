@@ -1,3 +1,4 @@
+import Tyr.Hub
 import Tyr.Model.Qwen3ASR
 import Tyr.Model.Qwen3ASR.StreamModel
 import Tyr.Tokenizer.Qwen3
@@ -10,7 +11,7 @@ structure Args where
   source : String := "weights/qwen3-asr-0.6b"
   alignerSource : Option String := none
   revision : String := "main"
-  cacheDir : String := "~/.cache/huggingface/tyr-models"
+  cacheDir : String := torch.Hub.defaultCacheDir
   wavPath : String := "MLKDream.wav"
   language : Option String := none
   returnTimeStamps : Bool := false

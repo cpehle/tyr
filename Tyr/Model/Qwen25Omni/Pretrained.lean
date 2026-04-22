@@ -45,7 +45,7 @@ def loadFromPretrained
     (source : String)
     (defaults : Config := Config.qwen25omni_3B)
     (revision : String := "main")
-    (cacheDir : String := "~/.cache/huggingface/tyr-models")
+    (cacheDir : String := Hub.defaultCacheDir)
     : IO (Sigma (fun cfg => Qwen25OmniForCausalLM cfg)) := do
   let modelDir ← Hub.resolvePretrainedDir source {
     revision := revision

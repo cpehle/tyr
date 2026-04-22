@@ -55,7 +55,7 @@ def loadFromPretrained
     (source : String)
     (defaults : Config := Config.qwen35_9B)
     (revision : String := "main")
-    (cacheDir : String := "~/.cache/huggingface/tyr-models")
+    (cacheDir : String := Hub.defaultCacheDir)
     (device : Device := Device.CPU)
     : IO (Sigma (fun cfg => Qwen35ForCausalLM cfg)) := do
   let modelDir ← Hub.resolvePretrainedDir source {
@@ -81,7 +81,7 @@ def loadFromPretrained
     (source : String)
     (defaults : VLConfig := {})
     (revision : String := "main")
-    (cacheDir : String := "~/.cache/huggingface/tyr-models")
+    (cacheDir : String := Hub.defaultCacheDir)
     (device : Device := Device.CPU)
     : IO (Sigma (fun cfg => Qwen35ForConditionalGeneration cfg)) := do
   let modelDir ← Hub.resolvePretrainedDir source {
