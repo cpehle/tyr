@@ -646,6 +646,16 @@ structure MultiTerm (T1 T2 : Type) where
   term1 : T1
   term2 : T2
 
+namespace MultiTerm
+
+def ofProd (term : T1 × T2) : MultiTerm T1 T2 :=
+  { term1 := term.1, term2 := term.2 }
+
+def toProd (term : MultiTerm T1 T2) : T1 × T2 :=
+  (term.term1, term.term2)
+
+end MultiTerm
+
 abbrev MultiTerm3 (T1 T2 T3 : Type) : Type :=
   MultiTerm (MultiTerm T1 T2) T3
 
@@ -658,60 +668,7 @@ abbrev MultiTerm5 (T1 T2 T3 T4 T5 : Type) : Type :=
 abbrev MultiTerm6 (T1 T2 T3 T4 T5 T6 : Type) : Type :=
   MultiTerm (MultiTerm5 T1 T2 T3 T4 T5) T6
 
-instance {T1 T2 Y VF1 VF2 C1 C2 Args : Type}
-    [TermLike T1 Y VF1 C1 Args] [TermLike T2 Y VF2 C2 Args]
-    [DiffEqSpace Y] :
-    TermLike (MultiTerm T1 T2) Y (VF1 × VF2) (C1 × C2) Args where
-  vf term t y args :=
-    ((inferInstance : TermLike T1 Y VF1 C1 Args).vf term.term1 t y args,
-     (inferInstance : TermLike T2 Y VF2 C2 Args).vf term.term2 t y args)
-  contr term t0 t1 :=
-    ((inferInstance : TermLike T1 Y VF1 C1 Args).contr term.term1 t0 t1,
-     (inferInstance : TermLike T2 Y VF2 C2 Args).contr term.term2 t0 t1)
-  prod term vf control :=
-    let y1 := (inferInstance : TermLike T1 Y VF1 C1 Args).prod term.term1 vf.1 control.1
-    let y2 := (inferInstance : TermLike T2 Y VF2 C2 Args).prod term.term2 vf.2 control.2
-    DiffEqSpace.add y1 y2
-  vf_prod term t y args control :=
-    let y1 := (inferInstance : TermLike T1 Y VF1 C1 Args).vf_prod term.term1 t y args control.1
-    let y2 := (inferInstance : TermLike T2 Y VF2 C2 Args).vf_prod term.term2 t y args control.2
-    DiffEqSpace.add y1 y2
-  is_vf_expensive term t0 t1 y args :=
-    (inferInstance : TermLike T1 Y VF1 C1 Args).is_vf_expensive term.term1 t0 t1 y args ||
-    (inferInstance : TermLike T2 Y VF2 C2 Args).is_vf_expensive term.term2 t0 t1 y args
-
-instance {T1 T2 : Type} [TermShape T1] [TermShape T2] : TermShape (MultiTerm T1 T2) where
-  arity? term :=
-    TermShape.combineArity
-      ((inferInstance : TermShape T1).arity? term.term1)
-      ((inferInstance : TermShape T2).arity? term.term2)
-  layoutTag? _ := some "pair"
-  partitionArities? term :=
-    TermShape.pairPartition
-      ((inferInstance : TermShape T1).arity? term.term1)
-      ((inferInstance : TermShape T2).arity? term.term2)
-  tree? term :=
-    let shape1 := (inferInstance : TermShape T1)
-    let shape2 := (inferInstance : TermShape T2)
-    let tree1 :=
-      TermShape.treeOrLeaf (shape1.tree? term.term1) (shape1.arity? term.term1)
-    let tree2 :=
-      TermShape.treeOrLeaf (shape2.tree? term.term2) (shape2.arity? term.term2)
-    some (.pair tree1 tree2)
-
 namespace MultiTerm
-
-def toAbstract {T1 T2 Y VF1 VF2 C1 C2 Args : Type}
-    [TermLike T1 Y VF1 C1 Args] [TermLike T2 Y VF2 C2 Args] [DiffEqSpace Y]
-    (term : MultiTerm T1 T2) :
-    AbstractTerm Y (VF1 × VF2) (C1 × C2) Args :=
-  AbstractTerm.ofTermLike term
-
-def ofProd (term : T1 × T2) : MultiTerm T1 T2 :=
-  { term1 := term.1, term2 := term.2 }
-
-def toProd (term : MultiTerm T1 T2) : T1 × T2 :=
-  (term.term1, term.term2)
 
 def ofProd3 (term : (T1 × T2) × T3) : MultiTerm3 T1 T2 T3 :=
   { term1 := ofProd term.1, term2 := term.2 }
@@ -758,6 +715,28 @@ def reassocLeft (term : MultiTerm T1 (MultiTerm T2 T3)) : MultiTerm (MultiTerm T
   }
 
 end MultiTerm
+
+instance {T1 T2 Y VF1 VF2 C1 C2 Args : Type}
+    [TermLike T1 Y VF1 C1 Args] [TermLike T2 Y VF2 C2 Args]
+    [DiffEqSpace Y] :
+    TermLike (MultiTerm T1 T2) Y (VF1 × VF2) (C1 × C2) Args where
+  vf term := (inferInstance : TermLike (T1 × T2) Y (VF1 × VF2) (C1 × C2) Args).vf (MultiTerm.toProd term)
+  contr term := (inferInstance : TermLike (T1 × T2) Y (VF1 × VF2) (C1 × C2) Args).contr (MultiTerm.toProd term)
+  prod term := (inferInstance : TermLike (T1 × T2) Y (VF1 × VF2) (C1 × C2) Args).prod (MultiTerm.toProd term)
+  vf_prod term := (inferInstance : TermLike (T1 × T2) Y (VF1 × VF2) (C1 × C2) Args).vf_prod (MultiTerm.toProd term)
+  is_vf_expensive term := (inferInstance : TermLike (T1 × T2) Y (VF1 × VF2) (C1 × C2) Args).is_vf_expensive (MultiTerm.toProd term)
+
+instance {T1 T2 : Type} [TermShape T1] [TermShape T2] : TermShape (MultiTerm T1 T2) where
+  arity? term := (inferInstance : TermShape (T1 × T2)).arity? (MultiTerm.toProd term)
+  layoutTag? term := (inferInstance : TermShape (T1 × T2)).layoutTag? (MultiTerm.toProd term)
+  partitionArities? term := (inferInstance : TermShape (T1 × T2)).partitionArities? (MultiTerm.toProd term)
+  tree? term := (inferInstance : TermShape (T1 × T2)).tree? (MultiTerm.toProd term)
+
+def MultiTerm.toAbstract {T1 T2 Y VF1 VF2 C1 C2 Args : Type}
+    [TermLike T1 Y VF1 C1 Args] [TermLike T2 Y VF2 C2 Args] [DiffEqSpace Y]
+    (term : MultiTerm T1 T2) :
+    AbstractTerm Y (VF1 × VF2) (C1 × C2) Args :=
+  AbstractTerm.ofTermLike term
 
 /-- Homogeneous additive combination of 1+ terms (array-like version). -/
 structure MultiTermArray (Term : Type) where

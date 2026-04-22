@@ -48,7 +48,7 @@ def loadFromPretrained
     (source : String)
     (defaults : Config := Config.gemma4_E4B)
     (revision : String := "main")
-    (cacheDir : String := "~/.cache/huggingface/tyr-models")
+    (cacheDir : String := Hub.defaultCacheDir)
     : IO (Sigma (fun cfg => Gemma4ForCausalLM cfg)) := do
   let modelDir ← Hub.resolvePretrainedDir source {
     revision := revision

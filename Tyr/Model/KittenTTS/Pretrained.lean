@@ -16,7 +16,7 @@ open torch.Hub
 
 structure DownloadOptions where
   revision : String := "main"
-  cacheDir : String := "~/.cache/huggingface/tyr-models"
+  cacheDir : String := Hub.defaultCacheDir
   deriving Repr, Inhabited
 
 def defaultRepoId : String := "hexgrad/Kokoro-82M"
@@ -274,7 +274,7 @@ def loadFromPretrained
     (source : String := hub.defaultRepoId)
     (defaults : KittenTTSConfig := {})
     (revision : String := "main")
-    (cacheDir : String := "~/.cache/huggingface/tyr-models")
+    (cacheDir : String := Hub.defaultCacheDir)
     (log : Handlers := default)
     : IO PretrainedBundle := do
   let modelDir ← hub.resolvePretrainedDir source { revision := revision, cacheDir := cacheDir }

@@ -22,6 +22,12 @@ private def initUniform (shape : Shape) (scale : Float) : IO (T shape) := do
   let w ← torch.uniform shape (-scale) scale
   pure (autograd.set_requires_grad w true)
 
+private def xavierScale (dim : Nat) : Float :=
+  1.0 / Float.sqrt (max 1 dim).toFloat
+
+private def affineShift {s : Shape} (normed g b : T s) : T s :=
+  (normed * add_scalar g 1.0) + b
+
 private def addBias2d {batch dim : UInt64}
     (x : T #[batch, dim])
     (b : T #[dim])
@@ -132,7 +138,7 @@ structure LinearNorm (inDim outDim : UInt64) where
 namespace LinearNorm
 
 def init (inDim outDim : UInt64) : IO (LinearNorm inDim outDim) := do
-  let scale := 1.0 / Float.sqrt (max 1 outDim.toNat).toFloat
+  let scale := xavierScale outDim.toNat
   let weight ← initUniform #[outDim, inDim] scale
   let bias := initBias #[outDim]
   pure { weight, bias }
@@ -402,7 +408,7 @@ structure BiLSTM (inputSize hiddenSize : UInt64) where
 namespace BiLSTM
 
 def init (inputSize hiddenSize : UInt64) : IO (BiLSTM inputSize hiddenSize) := do
-  let scale := 1.0 / Float.sqrt (max 1 hiddenSize.toNat).toFloat
+  let scale := xavierScale hiddenSize.toNat
   let wxForward ← initUniform #[4 * hiddenSize, inputSize] scale
   let whForward ← initUniform #[4 * hiddenSize, hiddenSize] scale
   let biasIHForward ← initUniform #[4 * hiddenSize] scale
@@ -489,7 +495,7 @@ structure AlbertEmbeddings (nToken : UInt64) (cfg : AlbertConfig) where
 namespace AlbertEmbeddings
 
 def init (nToken : UInt64) (cfg : AlbertConfig) : IO (AlbertEmbeddings nToken cfg) := do
-  let scale := 1.0 / Float.sqrt (max 1 cfg.embeddingSize.toNat).toFloat
+  let scale := xavierScale cfg.embeddingSize.toNat
   let wordEmbeddings ← initUniform #[nToken, cfg.embeddingSize] scale
   let positionEmbeddings ← initUniform #[cfg.maxPositionEmbeddings, cfg.embeddingSize] scale
   let tokenTypeEmbeddings ← initUniform #[cfg.typeVocabSize, cfg.embeddingSize] scale
@@ -699,7 +705,7 @@ structure TextEncoder (cfg : KittenTTSConfig) where
 namespace TextEncoder
 
 def init (cfg : KittenTTSConfig) : IO (TextEncoder cfg) := do
-  let scale := 1.0 / Float.sqrt (max 1 cfg.hiddenDim.toNat).toFloat
+  let scale := xavierScale cfg.hiddenDim.toNat
   let embedding ← initUniform #[cfg.nToken, cfg.hiddenDim] scale
   let mut convs : Array (TextConvLayer cfg) := #[]
   for _ in [:cfg.nLayer.toNat] do
@@ -743,7 +749,7 @@ def forward {batch frames styleDim channels : UInt64}
   let normed : T #[batch, frames, channels] := nn.layer_norm' xSeq #[channels] none none 1e-5
   let g : T #[batch, frames, channels] := nn.expand gamma #[batch, frames, channels]
   let b : T #[batch, frames, channels] := nn.expand beta #[batch, frames, channels]
-  seqToCF ((normed * add_scalar g 1.0) + b)
+  seqToCF (affineShift normed g b)
 
 end AdaLayerNorm
 
@@ -775,7 +781,7 @@ def forward {frames styleDim channels : UInt64}
   let normed : T #[1, channels, frames] := baseNorm * normW + normB
   let g : T #[1, channels, frames] := nn.expand gamma #[1, channels, frames]
   let b : T #[1, channels, frames] := nn.expand beta #[1, channels, frames]
-  (normed * add_scalar g 1.0) + b
+  affineShift normed g b
 
 end AdaIN1d
 
@@ -1070,7 +1076,7 @@ def forward {frames styleDim channels : UInt64}
   let normed : T #[1, channels, frames] := baseNorm * normW + normB
   let g : T #[1, channels, frames] := nn.expand gamma #[1, channels, frames]
   let b : T #[1, channels, frames] := nn.expand beta #[1, channels, frames]
-  (normed * add_scalar g 1.0) + b
+  affineShift normed g b
 
 end AdaIN1dDyn
 

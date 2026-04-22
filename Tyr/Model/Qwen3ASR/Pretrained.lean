@@ -16,7 +16,7 @@ open torch.Hub
 
 structure DownloadOptions where
   revision : String := "main"
-  cacheDir : String := "~/.cache/huggingface/tyr-models"
+  cacheDir : String := Hub.defaultCacheDir
   includeTokenizer : Bool := true
   includePreprocessor : Bool := true
   deriving Repr, Inhabited
@@ -142,7 +142,7 @@ def loadFromPretrained
     (source : String)
     (defaults : Qwen3ASRConfig := {})
     (revision : String := "main")
-    (cacheDir : String := "~/.cache/huggingface/tyr-models")
+    (cacheDir : String := Hub.defaultCacheDir)
     : IO (Sigma (fun cfg => Qwen3ASRForConditionalGeneration cfg)) := do
   let modelDir ← hub.resolvePretrainedDir source {
     revision := revision

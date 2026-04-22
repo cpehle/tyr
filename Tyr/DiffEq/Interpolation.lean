@@ -3,6 +3,25 @@ import Tyr.DiffEq.Types
 namespace torch
 namespace DiffEq
 
+def clampIndex (n : Nat) (i : Nat) : Nat :=
+  if i < n then i else if n == 0 then 0 else n - 1
+
+def findBracket (ts : Array Time) (t : Time) (left : Bool) : Nat :=
+  let n := ts.size
+  if n <= 1 then
+    0
+  else
+    let rec go (i : Nat) : Nat :=
+      if h : i + 1 < n then
+        let t1 := ts[i + 1]!
+        if left then
+          if t <= t1 then i else go (i + 1)
+        else
+          if t < t1 then i else go (i + 1)
+      else
+        n - 2
+    go 0
+
 /-! ## Interpolation
 
 Dense interpolation interfaces used by solutions.
@@ -239,27 +258,11 @@ structure PiecewiseDenseInterpolation (Y : Type) where
 
 namespace PiecewiseDenseInterpolation
 
-private def clampIndex (n : Nat) (i : Nat) : Nat :=
-  if i < n then i else if n == 0 then 0 else n - 1
-
-private def findBracket (ts : Array Time) (t : Time) : Nat :=
-  let n := ts.size
-  if n <= 1 then
-    0
-  else
-    let rec go (i : Nat) : Nat :=
-      if h : i + 1 < n then
-        let t1 := ts[i + 1]!
-        if t <= t1 then i else go (i + 1)
-      else
-        n - 2
-    go 0
-
 private def segmentIndex (interp : PiecewiseDenseInterpolation Y) (t : Time) (left : Bool) : Nat :=
   if interp.ts.size <= 1 then
     0
   else
-    let idx := findBracket interp.ts t
+    let idx := findBracket interp.ts t left
     let idx' :=
       if !left then
         let rightKnot := idx + 1
@@ -310,25 +313,6 @@ structure LinearInterpolation (Y : Type) where
   ys : Array Y
 
 namespace LinearInterpolation
-
-private def clampIndex (n : Nat) (i : Nat) : Nat :=
-  if i < n then i else if n == 0 then 0 else n - 1
-
-private def findBracket (ts : Array Time) (t : Time) (left : Bool) : Nat :=
-  let n := ts.size
-  if n <= 1 then
-    0
-  else
-    let rec go (i : Nat) : Nat :=
-      if h : i + 1 < n then
-        let t1 := ts[i + 1]!
-        if left then
-          if t <= t1 then i else go (i + 1)
-        else
-          if t < t1 then i else go (i + 1)
-      else
-        n - 2
-    go 0
 
 def toDense [DiffEqSpace Y] [Inhabited Y] (interp : LinearInterpolation Y) : DenseInterpolation Y := by
   let evalAt := fun (t : Time) (left : Bool) =>

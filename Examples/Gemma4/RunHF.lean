@@ -4,6 +4,7 @@
   Text and image-conditioned generation demo for Gemma 4 models resolved by
   local path or HuggingFace repo id.
 -/
+import Tyr.Hub
 import Tyr.Model.Gemma4
 import Tyr.Tokenizer.Gemma4
 
@@ -15,7 +16,7 @@ namespace Examples.Gemma4
 structure Args where
   source : String := "google/gemma-4-E4B"
   revision : String := "main"
-  cacheDir : String := "~/.cache/huggingface/tyr-models"
+  cacheDir : String := Hub.defaultCacheDir
   device : String := "auto"
   prompt : String := "Give a concise definition of a dependent type."
   promptFile : Option String := none

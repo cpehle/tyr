@@ -2,7 +2,6 @@ import Std
 import Tyr.Torch
 import Tyr.TensorStruct
 import Tyr.Model.Flowfusion
-import Tyr.Manifolds.Basic
 
 /-!
   BranchingFlows-style abstractions (Lean port, minimal core).
@@ -19,8 +18,6 @@ import Tyr.Manifolds.Basic
 -/
 
 namespace torch.branching
-
-open Tyr.AD
 
 /-! ## RNG utilities (deterministic LCG) -/
 

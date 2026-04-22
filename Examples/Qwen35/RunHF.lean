@@ -4,6 +4,7 @@
   Text generation demo for Qwen3.5/Qwen3.6 models resolved by local path or
   HuggingFace repo id.
 -/
+import Tyr.Hub
 import Tyr.Model.Qwen35
 import Tyr.Model.Qwen35.Media
 import Tyr.TensorStruct
@@ -17,7 +18,7 @@ namespace Examples.Qwen35
 structure Args where
   source : String := "tiny-random/qwen3.5"
   revision : String := "main"
-  cacheDir : String := "~/.cache/huggingface/tyr-models"
+  cacheDir : String := Hub.defaultCacheDir
   device : String := "auto"
   prompt : String := "Give a concise definition of a dependent type."
   promptFile : Option String := none
