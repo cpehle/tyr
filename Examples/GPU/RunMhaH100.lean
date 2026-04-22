@@ -119,22 +119,12 @@ def runOnce : IO Bool := do
   let _ ← torch.cuda_synchronize
 
   let dQ := torch.zeros #[1, 1, 128, 64] false (Device.CUDA 0)
-  let dKPart := torch.zeros #[1, 1, 128, 128] false (Device.CUDA 0)
-  let dVPartSeed := torch.ones #[1, 1, 128, 128] false (Device.CUDA 0)
-  let dVPart : T #[1, 1, 128, 128] := torch.mul_scalar dVPartSeed 0.0
-  tkMhaH100Bwd2BlockPartials.launch q k v dO lOut dVec dQ dKPart dVPart 128 64 1 2 1 128 1 1 0 stream
+  let dKStack : T #[1, 1, 256, 64] := torch.zeros #[1, 1, 256, 64] false (Device.CUDA 0)
+  let dVStack : T #[1, 1, 256, 64] := torch.zeros #[1, 1, 256, 64] false (Device.CUDA 0)
+  tkMhaH100Bwd2BlockPartials.launch q k v dO lOut dVec dQ dKStack dVStack 128 64 1 2 1 128 1 1 0 stream
   let _ ← torch.cuda_synchronize
-  -- Materialize post-launch views so downstream pure ops read mutated contents.
-  let dKPartLive : T #[1, 1, 128, 128] := torch.add_scalar dKPart 0.0
-  let dVPartLive : T #[1, 1, 128, 128] := torch.add_scalar dVPart 0.0
-
-  -- Reduce per-(kv_tile,q_tile) partials over q_tile to recover full dK/dV.
-  let dKPart6 : T #[1, 1, 2, 64, 2, 64] := torch.reshape dKPartLive #[1, 1, 2, 64, 2, 64]
-  let dVPart6 : T #[1, 1, 2, 64, 2, 64] := torch.reshape dVPartLive #[1, 1, 2, 64, 2, 64]
-  let dK5 : T #[1, 1, 2, 64, 64] := torch.nn.sumDim dKPart6 4 false
-  let dV5 : T #[1, 1, 2, 64, 64] := torch.nn.sumDim dVPart6 4 false
-  let dK : T #[1, 1, 128, 64] := torch.reshape dK5 #[1, 1, 128, 64]
-  let dV : T #[1, 1, 128, 64] := torch.reshape dV5 #[1, 1, 128, 64]
+  let dK : T #[1, 1, 128, 64] := nn.unsqueeze (nn.unsqueeze (nn.sumDim (torch.reshape dKStack #[2, 128, 64]) 0 false) 0) 0
+  let dV : T #[1, 1, 128, 64] := nn.unsqueeze (nn.unsqueeze (nn.sumDim (torch.reshape dVStack #[2, 128, 64]) 0 false) 0) 0
 
   -- Validate.
   let outOk := torch.allclose expectedOut out 3e-2 3e-2

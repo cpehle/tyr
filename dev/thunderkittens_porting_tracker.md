@@ -35,6 +35,49 @@ into the Lean GPU catalog so that:
 
 ## Training Integration Log (H100-First)
 
+### 2026-04-21
+
+Attention backward bring-up update:
+
+- The native exact-route `dK` / `dV` mismatch is no longer treated as a
+  numerical mystery in the softmax/MMA math.
+- The concrete mismatch source was the reduction contract:
+  - Tyr `MhaH100` backward had been writing `[seq, seq]` scratch partials for
+    `dK` / `dV` and reducing them later on the host/runtime side,
+  - upstream ThunderKittens `mha_h100` writes final global gradients directly.
+- The Lean/runtime path was changed to match the source kernel contract:
+  - `Tyr/GPU/Kernels/MhaH100.lean`
+  - `Tyr/GPU/Ops/MhaH100.lean`
+  - `Examples/GPU/RunMhaH100.lean`
+  - `Examples/GPU/RunMhaH100Seq768.lean`
+  - `Examples/GPU/RunMhaH100Train.lean`
+  - `cc/src/tyr_ops.cpp`
+  now allocate final `dK` / `dV` tensors and use direct `storeGlobalAdd`
+  accumulation.
+- That exposed the next real backend issue:
+  - ThunderKittens `warp::tma::store_add_async` requires the destination
+    `gl<...>` descriptor to carry the matching shared-tile type,
+  - Tyr codegen was still rendering those params as bare
+    `gl<float, 1, 1, -1, -1>`.
+- Codegen work landed to infer and render required TMA descriptor types from
+  kernel IR:
+  - `Tyr/GPU/Codegen/EmitNew.lean`
+  - `Tyr/GPU/Codegen/Attribute.lean`
+  - `Tyr/GPU/Codegen/FFI.lean`
+- The clean generator path is still not fully proven:
+  - `GenerateGpuKernels` is still emitting bare `gl<...>` in the current
+    `MhaH100` generated backward translation unit,
+  - a narrow local patch to
+    `cc/src/generated/Tyr_GPU_Kernels_MhaH100.cu`
+    adding `st<float, 64, 64>` descriptors to the two backward accumulation
+    outputs unblocked `nvcc`,
+  - `make -C cc -B build/generated/Tyr_GPU_Kernels_MhaH100.o build/libTyrC.so`
+    completes successfully with that local patch.
+- Remaining runtime-bridge blocker:
+  - `Examples/GPU/RunFlashAttnOp.lean` is still blocked by the build state of
+    `Tyr.GPU.Ops.FlashAttn` / its missing `.olean` in the current Lake graph,
+  - so the post-fix parity smoke has not yet been rerun end-to-end.
+
 ### 2026-04-20
 
 Objective shift for the next execution block:
@@ -299,9 +342,9 @@ Validation result from `Examples/GPU/RunFlashAttnOp.lean`:
     - `dq_ok=true`
     - `dk_ok=false`
     - `dv_ok=false`
-    - one observed run:
-      - `dk_mae=0.003548`, `dk_max=0.363281`
-      - `dv_mae=0.004895`, `dv_max=0.550781`
+    - after a fresh generated-kernel rebuild and relink of `cc/build/libTyrC.so`:
+      - `dk_mae=0.002040`, `dk_max=0.363281`
+      - `dv_mae=0.002166`, `dv_max=0.550781`
 - `flash_attn_portable_causal`
   - route selection correct: `route=portable`
   - forward and all gradients matched exactly
@@ -316,7 +359,12 @@ Conclusion from the current bridge state:
 - portable fallback is good enough to support broader model shapes without
   crashing,
 - native backward on the exact H100 path still needs work before the new
-  high-level op should be used as the default training path.
+  high-level op should be used as the default training path,
+- the remaining mismatch is not explained by stale bridge linkage:
+  `nm -D cc/build/libTyrC.so` initially showed the `tkMhaH100*` launcher
+  symbols as undefined until `cc/src/generated/Tyr_GPU_Kernels_MhaH100.cu`
+  was regenerated and the shared library relinked, but the `dK` / `dV`
+  parity failure remained after that real rebuild.
 
 Additional build-system observation:
 
@@ -647,3 +695,62 @@ only need role assignment (MhaH100LCF, Hedgehog, LinearAttn).
   the core catalog once the canonical source-backed surfaces were in place.
 - Do not add new alias-only modules or compatibility shims for kernel families
   that already have a canonical surface.
+
+## 2026-04-21 Runtime Bridge Checkpoint
+
+- Verified current one-H100 `tyr::flash_attn` runtime-op status with
+  `Examples/GPU/RunFlashAttnOp.lean` after rebuilding `cc/build/libTyrC.so`:
+  - `route=tkKernel`
+  - `out_ok=true`
+  - `dq_ok=true`
+  - `dk_ok=true`
+  - `dv_ok=true`
+  - `out_mae=0.000057`
+  - `dq_mae=0.000032`
+  - `dk_mae=0.000046`
+  - `dv_mae=0.000172`
+  - `dv_max=0.003906`
+
+- Source changes made to remove the hand-patched generated-CUDA dependency for
+  the non-crashing backward accumulation path:
+  - `Tyr/GPU/Kernels/MhaH100.lean`
+    - changed `tkMhaH100Bwd2BlockPartials` / `tkMhaH100Bwd12BlockPartials` to
+      write q-block-major stacked `dK`/`dV` partials with
+      `stack_row = qBlock * kvBlocks + kvBlock`
+      and plain `storeGlobal`
+    - updated comments to describe stacked partial outputs instead of final
+      in-place accumulation
+  - `Tyr/GPU/Ops/MhaH100.lean`
+    - allocate `dKStack` / `dVStack : [1, 1, kvBlocks * seq, 64]`
+    - reduce with `reshape -> nn.sumDim -> nn.unsqueeze`
+  - `Examples/GPU/RunMhaH100.lean`
+  - `Examples/GPU/RunMhaH100Train.lean`
+  - `Examples/GPU/RunMhaH100Seq768.lean`
+    - same stacked-partials reduction change for raw launcher examples
+
+- Bridge-side correctness fix:
+  - `cc/src/tyr_ops.cpp`
+    - keep kernel `dQ` and stacked `dK`
+    - compute exact `dV` in FP32 in `native_backward` via:
+      - `scores = Q K^T / sqrt(d)`
+      - `probs = softmax(scores)`
+      - `dV = probs^T dO`
+  - This is a deliberate temporary bridge fix so the high-level runtime op is
+    training-correct while the raw kernel-side `dV` mismatch stays isolated.
+
+- Validation notes:
+  - forced rebuild of `build/generated/Tyr_GPU_Kernels_MhaH100.o` and
+    `build/libTyrC.so` succeeded
+  - confirmed generated `cc/src/generated/Tyr_GPU_Kernels_MhaH100.cu` now emits
+    stacked row coordinates:
+    - 2-block: `(((qBlock * 2) + kvIdx) * 64)`
+    - 12-block: `(((qBlock * 12) + kvIdx) * 64)`
+  - raw launcher examples cannot be validated with `lean --run`; they must be
+    exercised as compiled `lean_exe` targets because the interpreter cannot
+    resolve generated launcher externs
+
+- Remaining open item:
+  - raw kernel-side `dV` tile math/layout still appears off in the standalone
+    `tkMhaH100Bwd*Partials` path
+  - the runtime op is now correct because `dV` is recomputed exactly in the C++
+    bridge
