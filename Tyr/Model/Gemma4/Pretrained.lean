@@ -50,19 +50,15 @@ def loadFromPretrained
     (revision : String := "main")
     (cacheDir : String := Hub.defaultCacheDir)
     : IO (Sigma (fun cfg => Gemma4ForCausalLM cfg)) := do
-  let modelDir ← Hub.resolvePretrainedDir source {
-    revision := revision
-    cacheDir := cacheDir
-    includeTokenizer := true
-  } hub.tokenizerFiles
-  let cfg ← Config.loadFromPretrainedDir modelDir defaults
-  let isSharded ← Hub.detectWeightLayout modelDir
-  if isSharded then
-    let m ← Gemma4ForCausalLM.loadSharded modelDir cfg
-    pure ⟨cfg, m⟩
-  else
-    let m ← Gemma4ForCausalLM.load s!"{modelDir}/model.safetensors" cfg
-    pure ⟨cfg, m⟩
+  Hub.loadModelFromPretrained
+    source
+    revision
+    cacheDir
+    hub.tokenizerFiles
+    Config.loadFromPretrainedDir
+    defaults
+    Gemma4ForCausalLM.loadSharded
+    (fun path cfg => Gemma4ForCausalLM.load path cfg)
 
 end Gemma4ForCausalLM
 

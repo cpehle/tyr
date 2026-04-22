@@ -14,11 +14,6 @@ namespace torch.kittentts.hub
 
 open torch.Hub
 
-structure DownloadOptions where
-  revision : String := "main"
-  cacheDir : String := Hub.defaultCacheDir
-  deriving Repr, Inhabited
-
 def defaultRepoId : String := "hexgrad/Kokoro-82M"
 
 private def repoModelFilename (repoId : String) : String :=
@@ -107,30 +102,34 @@ private def ensureConvertedVoice (voicePtPath : String) : IO String := do
     pure voiceStPath
 
 /-- Resolve a source into a local model directory and ensure `model.safetensors` exists. -/
-def resolvePretrainedDir (source : String) (opts : DownloadOptions := {}) : IO String := do
+def resolvePretrainedDir (source : String) (opts : Hub.DownloadOptions := {}) : IO String := do
   let sourceExpanded ← expandHome source
-  let modelDir ←
-    if ← dirExists sourceExpanded then
-      pure sourceExpanded
-    else
-      modelDirForRepo opts.cacheDir source opts.revision
-  IO.FS.createDirAll ⟨modelDir⟩
-  if !(← fileExists s!"{modelDir}/config.json") then
-    if sourceExpanded == modelDir then
-      throw <| IO.userError s!"Missing config.json in {modelDir}"
-    else
-      ensureRemoteFile source opts.revision "config.json" s!"{modelDir}/config.json"
-  if !(← fileExists s!"{modelDir}/model.safetensors") then
-    if let some rawModel ← findRawModelFile? modelDir then
-      ensureConvertedCheckpoint modelDir rawModel
-    else if sourceExpanded == modelDir then
-      throw <| IO.userError s!"No model.safetensors or raw .pth checkpoint found in {modelDir}"
-    else
-      let rawRel := repoModelFilename source
-      let rawPath := s!"{modelDir}/{rawRel}"
-      ensureRemoteFile source opts.revision rawRel rawPath
-      ensureConvertedCheckpoint modelDir rawPath
-  pure modelDir
+  if ← dirExists sourceExpanded then
+    if !(← fileExists s!"{sourceExpanded}/config.json") then
+      throw <| IO.userError s!"Missing config.json in {sourceExpanded}"
+    if !(← fileExists s!"{sourceExpanded}/model.safetensors") then
+      if let some rawModel ← findRawModelFile? sourceExpanded then
+        ensureConvertedCheckpoint sourceExpanded rawModel
+      else
+        throw <| IO.userError s!"No model.safetensors or raw .pth checkpoint found in {sourceExpanded}"
+    pure sourceExpanded
+  else
+    try
+      Hub.resolvePretrainedDir source { opts with includeTokenizer := false }
+    catch _ =>
+      let modelDir ← modelDirForRepo opts.cacheDir source opts.revision
+      IO.FS.createDirAll ⟨modelDir⟩
+      if !(← fileExists s!"{modelDir}/config.json") then
+        ensureRemoteFile source opts.revision "config.json" s!"{modelDir}/config.json"
+      if !(← fileExists s!"{modelDir}/model.safetensors") then
+        if let some rawModel ← findRawModelFile? modelDir then
+          ensureConvertedCheckpoint modelDir rawModel
+        else
+          let rawRel := repoModelFilename source
+          let rawPath := s!"{modelDir}/{rawRel}"
+          ensureRemoteFile source opts.revision rawRel rawPath
+          ensureConvertedCheckpoint modelDir rawPath
+      pure modelDir
 
 def ensureVoiceSafetensors (source revision modelDir voice : String) : IO String := do
   let normalized ←
@@ -166,6 +165,7 @@ end torch.kittentts.hub
 namespace torch.kittentts
 
 open torch.Log
+open torch.Hub
 
 structure PretrainedBundle where
   cfg : KittenTTSConfig
@@ -190,20 +190,6 @@ private def voiceIndexOfPhonemeCount (phonemeCount : UInt64) : UInt64 :=
   min 509 <| if phonemeCount == 0 then 0 else phonemeCount - 1
 
 namespace PretrainedBundle
-
-private def expandHomePath (path : String) : IO String := do
-  if path.startsWith "~" then
-    match (← IO.getEnv "HOME") with
-    | some home => pure (path.replace "~" home)
-    | none => pure path
-  else
-    pure path
-
-private def ensureParentDirPath (path : String) : IO Unit := do
-  let p : System.FilePath := ⟨path⟩
-  match p.parent with
-  | some parent => IO.FS.createDirAll parent
-  | none => pure ()
 
 def inputIdsFromPhonemes (bundle : PretrainedBundle) (phonemes : String) : Array UInt64 :=
   encodePhonemeIds bundle.vocab phonemes
@@ -233,8 +219,8 @@ def synthesizePhonemesToFile
     (speed : Float := 1.0)
     : IO KittenTTSOutput := do
   let out ← bundle.synthesizePhonemes phonemes voice speed
-  let outPath ← expandHomePath outPath
-  ensureParentDirPath outPath
+  let outPath ← expandHome outPath
+  ensureParentDir outPath
   if outPath.endsWith ".safetensors" then
     safetensors.saveTensor outPath "audio" out.audio
   else
