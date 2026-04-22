@@ -22,9 +22,6 @@ abbrev F32 (seq : UInt64) : Type := T #[1, 1, seq, 64]
 /-- Per-query-tile L tensor shape: `[kvBlocks, 64]`. -/
 abbrev L (kvBlocks : UInt64) : Type := T #[kvBlocks, 64]
 
-/-- Partial `dK`/`dV` buffer shape emitted by backward kernels. -/
-abbrev Partials (seq : UInt64) : Type := T #[1, 1, seq, seq]
-
 /-- Launch configuration shared across wrapper entry points. -/
 structure LaunchCfg where
   gridX : UInt64 := 1
@@ -61,9 +58,7 @@ class Variant (seq kvBlocks : UInt64) where
       BF16 seq → BF16 seq → BF16 seq → BF16 seq → L kvBlocks → LaunchCfg → IO Unit
   launchBwdPartials :
       BF16 seq → BF16 seq → BF16 seq → BF16 seq → L kvBlocks → L kvBlocks →
-      F32 seq → Partials seq → Partials seq → LaunchCfg → IO Unit
-  reducePartials :
-      Partials seq → Partials seq → F32 seq × F32 seq
+      F32 seq → F32 seq → F32 seq → LaunchCfg → IO Unit
 
 instance : Variant 128 2 where
   launchFwd q k v out lOut cfg := do
@@ -78,17 +73,6 @@ instance : Variant 128 2 where
       cfg.blockX cfg.blockY cfg.blockZ
       cfg.sharedMem cfg.stream
 
-  reducePartials dKPart dVPart :=
-    let dKPartLive : Partials 128 := torch.add_scalar dKPart 0.0
-    let dVPartLive : Partials 128 := torch.add_scalar dVPart 0.0
-    let dKPart6 : T #[1, 1, 2, 64, 2, 64] := torch.reshape dKPartLive #[1, 1, 2, 64, 2, 64]
-    let dVPart6 : T #[1, 1, 2, 64, 2, 64] := torch.reshape dVPartLive #[1, 1, 2, 64, 2, 64]
-    let dK5 : T #[1, 1, 2, 64, 64] := torch.nn.sumDim dKPart6 4 false
-    let dV5 : T #[1, 1, 2, 64, 64] := torch.nn.sumDim dVPart6 4 false
-    let dK : F32 128 := torch.reshape dK5 #[1, 1, 128, 64]
-    let dV : F32 128 := torch.reshape dV5 #[1, 1, 128, 64]
-    (dK, dV)
-
 instance : Variant 768 12 where
   launchFwd q k v out lOut cfg := do
     tkMhaH100Fwd12Block.launch q k v out lOut 768 64
@@ -101,17 +85,6 @@ instance : Variant 768 12 where
       cfg.gridX cfg.gridY cfg.gridZ
       cfg.blockX cfg.blockY cfg.blockZ
       cfg.sharedMem cfg.stream
-
-  reducePartials dKPart dVPart :=
-    let dKPartLive : Partials 768 := torch.add_scalar dKPart 0.0
-    let dVPartLive : Partials 768 := torch.add_scalar dVPart 0.0
-    let dKPart6 : T #[1, 1, 12, 64, 12, 64] := torch.reshape dKPartLive #[1, 1, 12, 64, 12, 64]
-    let dVPart6 : T #[1, 1, 12, 64, 12, 64] := torch.reshape dVPartLive #[1, 1, 12, 64, 12, 64]
-    let dK5 : T #[1, 1, 12, 64, 64] := torch.nn.sumDim dKPart6 4 false
-    let dV5 : T #[1, 1, 12, 64, 64] := torch.nn.sumDim dVPart6 4 false
-    let dK : F32 768 := torch.reshape dK5 #[1, 1, 768, 64]
-    let dV : F32 768 := torch.reshape dV5 #[1, 1, 768, 64]
-    (dK, dV)
 
 private def launchBwdPrep {seq kvBlocks : UInt64}
     (dO out : BF16 seq) (dVec : L kvBlocks) (cfg : LaunchCfg) : IO Unit := do
@@ -140,14 +113,17 @@ def mhaBwd {seq kvBlocks : UInt64} [Variant seq kvBlocks]
   launchBwdPrep (seq := seq) (kvBlocks := kvBlocks) dO ctx.out dVec cfg
 
   let dQ : F32 seq := torch.zeros #[1, 1, seq, 64] false q.device
-  let dKPart : Partials seq := torch.zeros #[1, 1, seq, seq] false q.device
-  let dVPartSeed : Partials seq := torch.ones #[1, 1, seq, seq] false q.device
-  let dVPart : Partials seq := torch.mul_scalar dVPartSeed 0.0
+  let dKStack : T #[1, 1, kvBlocks * seq, 64] := torch.zeros #[1, 1, kvBlocks * seq, 64] false q.device
+  let dVStack : T #[1, 1, kvBlocks * seq, 64] := torch.zeros #[1, 1, kvBlocks * seq, 64] false q.device
 
   Variant.launchBwdPartials (seq := seq) (kvBlocks := kvBlocks)
-    q k v dO ctx.lOut dVec dQ dKPart dVPart cfg
-
-  let (dK, dV) := Variant.reducePartials (seq := seq) (kvBlocks := kvBlocks) dKPart dVPart
+    q k v dO ctx.lOut dVec dQ dKStack dVStack cfg
+  let dKRows : T #[kvBlocks, seq, 64] := torch.reshape dKStack #[kvBlocks, seq, 64]
+  let dVRows : T #[kvBlocks, seq, 64] := torch.reshape dVStack #[kvBlocks, seq, 64]
+  let dK2d : T #[seq, 64] := nn.sumDim dKRows 0 false
+  let dV2d : T #[seq, 64] := nn.sumDim dVRows 0 false
+  let dK : F32 seq := nn.unsqueeze (nn.unsqueeze dK2d 0) 0
+  let dV : F32 seq := nn.unsqueeze (nn.unsqueeze dV2d 0) 0
   pure (dQ, dK, dV)
 
 private def sdpaFwdPortable {seq : UInt64}

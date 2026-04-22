@@ -228,10 +228,12 @@ def tkMhaH100BwdPrep2Block
   storeVec dShared dVec
   storeVecGlobalRow d_ptr dShared coord
 
-/-- `mha_h100` backward (2 blocks, non-causal) with partial `dK`/`dV` outputs.
-    `dQ` is final.
-    `dK_part_ptr`/`dV_part_ptr` store one 64x64 tile per `(kv_tile, q_tile)` pair.
-    The host test reduces partials across `q_tile` to recover full `dK`/`dV`. -/
+/-- `mha_h100` backward (2 blocks, non-causal) with stacked `dK`/`dV`
+    partial outputs. The launcher name keeps the older `...Partials` suffix
+    for ABI stability. `dK_part_ptr` and `dV_part_ptr` point at
+    `[1, 1, kvBlocks * seq, 64]` buffers laid out q-block-major:
+    `stack_row = qBlock * kvBlocks + kvBlock`.
+    Callers reduce those stacks across query blocks. -/
 @[gpu_kernel .SM90]
 def tkMhaH100Bwd2BlockPartials
     (q_ptr : GPtr GpuFloat.BFloat16)
@@ -330,7 +332,12 @@ def tkMhaH100Bwd2BlockPartials
     swapLayout kCol k
     mma dQ dSRow kCol dQ
 
-    let dkvCoord := (coord.withRow kvIdx.id).withCol coord.r
+    let qBlock : KVal UInt32 := ⟨coord.r, "q_block"⟩
+    let kvBlock : KVal UInt32 := ⟨kvIdx.id, "kv_block"⟩
+    let numKv : KVal UInt32 ← constIntVal numKvBlocks "num_kv_blocks"
+    let stackBase ← scalarMulVal qBlock numKv "dkv_stack_base"
+    let stackRow ← scalarAddVal stackBase kvBlock "dkv_stack_row"
+    let dkvCoord := coord.withRow stackRow.id
     store outShared dKPart
     sync
     storeGlobal dK_part_ptr outShared dkvCoord
@@ -522,8 +529,10 @@ def tkMhaH100Fwd12Block
   storeVec lShared l
   storeVecGlobalRow l_ptr lShared coord
 
-/-- `mha_h100` backward for 12 KV blocks (`seq=768`, non-causal) with partial
-    `dK`/`dV` outputs accumulated across query tiles on host. -/
+/-- `mha_h100` backward for 12 KV blocks (`seq=768`, non-causal) with stacked
+    `dK`/`dV` partial outputs. As above, the function name keeps the older
+    `...Partials` suffix for ABI stability while callers reduce the
+    q-block-major `[1, 1, kvBlocks * seq, 64]` stacks. -/
 @[gpu_kernel .SM90]
 def tkMhaH100Bwd12BlockPartials
     (q_ptr : GPtr GpuFloat.BFloat16)
@@ -620,7 +629,12 @@ def tkMhaH100Bwd12BlockPartials
     swapLayout kCol k
     mma dQ dSRow kCol dQ
 
-    let dkvCoord := (coord.withRow kvIdx.id).withCol coord.r
+    let qBlock : KVal UInt32 := ⟨coord.r, "q_block"⟩
+    let kvBlock : KVal UInt32 := ⟨kvIdx.id, "kv_block"⟩
+    let numKv : KVal UInt32 ← constIntVal numKvBlocks "num_kv_blocks"
+    let stackBase ← scalarMulVal qBlock numKv "dkv_stack_base"
+    let stackRow ← scalarAddVal stackBase kvBlock "dkv_stack_row"
+    let dkvCoord := coord.withRow stackRow.id
     store outShared dKPart
     sync
     storeGlobal dK_part_ptr outShared dkvCoord

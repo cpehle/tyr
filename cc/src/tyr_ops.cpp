@@ -1,4 +1,5 @@
 #include <cmath>
+#include <iostream>
 #include <limits>
 #include <optional>
 #include <stdexcept>
@@ -197,6 +198,7 @@ static inline uint64_t current_stream_handle(const torch::Tensor& t) {
 
 static void throw_on_launcher_error(lean_object* io_result, const char* launcher) {
   if (lean_io_result_is_error(io_result)) {
+    std::cerr << "tyr::flash_attn: native launcher failed: " << launcher << std::endl;
     lean_io_result_show_error(io_result);
     lean_dec(io_result);
     throw std::runtime_error(std::string("tyr::flash_attn: native launcher failed: ") + launcher);
@@ -278,8 +280,8 @@ static std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> native_backward(
 
   auto dVec = torch::zeros({kv_blocks, 64}, f32_opts);
   auto dQ = torch::zeros({1, 1, seq, 64}, f32_opts);
-  auto dKPart = torch::zeros({1, 1, seq, seq}, f32_opts);
-  auto dVPart = torch::zeros({1, 1, seq, seq}, f32_opts);
+  auto dKStack = torch::zeros({1, 1, kv_blocks * seq, 64}, f32_opts);
+  auto dVStack = torch::zeros({1, 1, kv_blocks * seq, 64}, f32_opts);
 
   LeanTensorRef dO_ref(dO);
   LeanTensorRef o_ref(o);
@@ -299,8 +301,8 @@ static std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> native_backward(
   LeanTensorRef v_ref(v);
   LeanTensorRef l_ref(l_saved);
   LeanTensorRef dQ_ref(dQ);
-  LeanTensorRef dK_ref(dKPart);
-  LeanTensorRef dV_ref(dVPart);
+  LeanTensorRef dK_ref(dKStack);
+  LeanTensorRef dV_ref(dVStack);
 
   lean_object* bwd_result = nullptr;
   if (route == FlashAttnRoute::TkMhaH1002Block) {
@@ -323,15 +325,14 @@ static std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> native_backward(
     throw_on_launcher_error(bwd_result, "tkMhaH100Bwd12BlockPartials");
   }
 
-  auto dK = dKPart
-      .reshape({1, 1, kv_blocks, 64, kv_blocks, 64})
-      .sum(4, false)
-      .reshape({1, 1, seq, 64});
-  auto dV = dVPart
-      .reshape({1, 1, kv_blocks, 64, kv_blocks, 64})
-      .sum(4, false)
-      .reshape({1, 1, seq, 64});
-
+  auto dK = dKStack.view({kv_blocks, seq, 64}).sum(0, false).unsqueeze(0).unsqueeze(0);
+  const double scale = 1.0 / std::sqrt(static_cast<double>(q.size(3)));
+  auto qf = q.to(torch::kFloat32);
+  auto kf = k.to(torch::kFloat32);
+  auto dOf = dO.to(torch::kFloat32);
+  auto scores = torch::matmul(qf, kf.transpose(-2, -1)) * scale;
+  auto probs = torch::softmax(scores, -1);
+  auto dV = torch::matmul(probs.transpose(-2, -1), dOf);
   return {dQ, dK, dV};
 }
 
