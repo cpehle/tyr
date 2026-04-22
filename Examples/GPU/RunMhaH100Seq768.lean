@@ -111,21 +111,12 @@ def runOnce : IO Bool := do
   let _ ← torch.cuda_synchronize
 
   let dQ : T #[1, 1, 768, 64] := torch.zeros #[1, 1, 768, 64] false (Device.CUDA 0)
-  let dKPart : T #[1, 1, 768, 768] := torch.zeros #[1, 1, 768, 768] false (Device.CUDA 0)
-  let dVPartSeed : T #[1, 1, 768, 768] := torch.ones #[1, 1, 768, 768] false (Device.CUDA 0)
-  let dVPart : T #[1, 1, 768, 768] := torch.mul_scalar dVPartSeed 0.0
-  tkMhaH100Bwd12BlockPartials.launch q k v dO lOut dVec dQ dKPart dVPart 768 64 1 12 1 128 1 1 0 stream
+  let dKStack : T #[1, 1, 9216, 64] := torch.zeros #[1, 1, 9216, 64] false (Device.CUDA 0)
+  let dVStack : T #[1, 1, 9216, 64] := torch.zeros #[1, 1, 9216, 64] false (Device.CUDA 0)
+  tkMhaH100Bwd12BlockPartials.launch q k v dO lOut dVec dQ dKStack dVStack 768 64 1 12 1 128 1 1 0 stream
   let _ ← torch.cuda_synchronize
-
-  let dKPartLive : T #[1, 1, 768, 768] := torch.add_scalar dKPart 0.0
-  let dVPartLive : T #[1, 1, 768, 768] := torch.add_scalar dVPart 0.0
-
-  let dKPart6 : T #[1, 1, 12, 64, 12, 64] := torch.reshape dKPartLive #[1, 1, 12, 64, 12, 64]
-  let dVPart6 : T #[1, 1, 12, 64, 12, 64] := torch.reshape dVPartLive #[1, 1, 12, 64, 12, 64]
-  let dK5 : T #[1, 1, 12, 64, 64] := torch.nn.sumDim dKPart6 4 false
-  let dV5 : T #[1, 1, 12, 64, 64] := torch.nn.sumDim dVPart6 4 false
-  let dK : T #[1, 1, 768, 64] := torch.reshape dK5 #[1, 1, 768, 64]
-  let dV : T #[1, 1, 768, 64] := torch.reshape dV5 #[1, 1, 768, 64]
+  let dK : T #[1, 1, 768, 64] := nn.unsqueeze (nn.unsqueeze (nn.sumDim (torch.reshape dKStack #[12, 768, 64]) 0 false) 0) 0
+  let dV : T #[1, 1, 768, 64] := nn.unsqueeze (nn.unsqueeze (nn.sumDim (torch.reshape dVStack #[12, 768, 64]) 0 false) 0) 0
 
   let outOk := torch.allclose expectedOut out 5e-2 5e-2
   let lOk := torch.allclose expectedL lOut 5e-2 5e-2

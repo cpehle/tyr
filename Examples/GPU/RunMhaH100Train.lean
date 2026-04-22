@@ -12,8 +12,6 @@ open Tyr.GPU.Kernels
 abbrev MhaTensor := T #[1, 1, 128, 64]   -- bf16 kernel inputs/outputs
 abbrev MasterTensor := T #[1, 1, 128, 64] -- fp32 optimizer state
 abbrev LTensor := T #[2, 64]
-abbrev PartTensor := T #[1, 1, 128, 128]
-
 def nElems : Float := 8192.0
 
 structure TrainSetup where
@@ -40,22 +38,11 @@ def backwardMha
   tkMhaH100BwdPrep2Block.launch dO out dVec 128 64 1 2 1 128 1 1 0 stream
 
   let dQ : MasterTensor := torch.zeros #[1, 1, 128, 64] false (Device.CUDA 0)
-  let dKPart : PartTensor := torch.zeros #[1, 1, 128, 128] false (Device.CUDA 0)
-  let dVPartSeed : PartTensor := torch.ones #[1, 1, 128, 128] false (Device.CUDA 0)
-  let dVPart : PartTensor := torch.mul_scalar dVPartSeed 0.0
-  tkMhaH100Bwd2BlockPartials.launch q k v dO lOut dVec dQ dKPart dVPart 128 64 1 2 1 128 1 1 0 stream
-
-  -- Materialize post-launch views so downstream pure ops see mutated contents.
-  let dKPartLive : PartTensor := torch.add_scalar dKPart 0.0
-  let dVPartLive : PartTensor := torch.add_scalar dVPart 0.0
-
-  -- Reduce per-(kv_tile,q_tile) partials over q_tile to recover full dK/dV.
-  let dKPart6 : T #[1, 1, 2, 64, 2, 64] := torch.reshape dKPartLive #[1, 1, 2, 64, 2, 64]
-  let dVPart6 : T #[1, 1, 2, 64, 2, 64] := torch.reshape dVPartLive #[1, 1, 2, 64, 2, 64]
-  let dK5 : T #[1, 1, 2, 64, 64] := torch.nn.sumDim dKPart6 4 false
-  let dV5 : T #[1, 1, 2, 64, 64] := torch.nn.sumDim dVPart6 4 false
-  let dK : MasterTensor := torch.reshape dK5 #[1, 1, 128, 64]
-  let dV : MasterTensor := torch.reshape dV5 #[1, 1, 128, 64]
+  let dKStack : T #[1, 1, 256, 64] := torch.zeros #[1, 1, 256, 64] false (Device.CUDA 0)
+  let dVStack : T #[1, 1, 256, 64] := torch.zeros #[1, 1, 256, 64] false (Device.CUDA 0)
+  tkMhaH100Bwd2BlockPartials.launch q k v dO lOut dVec dQ dKStack dVStack 128 64 1 2 1 128 1 1 0 stream
+  let dK : MasterTensor := nn.unsqueeze (nn.unsqueeze (nn.sumDim (torch.reshape dKStack #[2, 128, 64]) 0 false) 0) 0
+  let dV : MasterTensor := nn.unsqueeze (nn.unsqueeze (nn.sumDim (torch.reshape dVStack #[2, 128, 64]) 0 false) 0) 0
   pure (dQ, dK, dV)
 
 def lossAndGradOut (out targetOut : MhaTensor) : T #[] × MhaTensor :=

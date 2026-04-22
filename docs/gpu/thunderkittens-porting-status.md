@@ -72,6 +72,43 @@ The remaining work is now mostly DSL expressiveness work:
 
 ## Training Bring-Up Roadmap (H100-First)
 
+### 2026-04-21 update
+
+- Native Hopper MHA backward now uses the ThunderKittens-style contract for
+  `dK` / `dV`:
+  - the Lean kernels write final gradients directly with `storeGlobalAdd`
+    instead of writing `[seq, seq]` scratch partials and reducing them on the
+    host side,
+  - `Tyr/GPU/Ops/MhaH100.lean`,
+    `Examples/GPU/RunMhaH100*.lean`, and
+    `cc/src/tyr_ops.cpp`
+    were simplified accordingly.
+- The remaining exact-route mismatch was traced to a backend/codegen gap rather
+  than attention math:
+  - ThunderKittens `warp::tma::store_add_async` requires the destination
+    `gl<...>` to carry the matching shared-tile descriptor type,
+  - Tyr was still emitting bare `gl<T, ...>` params for those outputs.
+- A first codegen fix landed in:
+  - `Tyr/GPU/Codegen/EmitNew.lean`
+  - `Tyr/GPU/Codegen/Attribute.lean`
+  - `Tyr/GPU/Codegen/FFI.lean`
+  It infers per-parameter TMA descriptor requirements from kernel IR and uses
+  them when rendering `gl<...>` types.
+- The clean end-to-end generator route is still not fully confirmed:
+  - the current `GenerateGpuKernels` path is still emitting bare `gl<...>` for
+    `MhaH100` backward outputs,
+  - a narrow local patch to
+    `cc/src/generated/Tyr_GPU_Kernels_MhaH100.cu`
+    adding `st<float, 64, 64>` descriptors to the two backward accumulation
+    outputs unblocked the native CUDA compile,
+  - `make -C cc -B build/generated/Tyr_GPU_Kernels_MhaH100.o build/libTyrC.so`
+    now succeeds again on this host.
+- Current blocker before declaring the runtime bridge training-ready:
+  - rebuild the higher-level
+    `Tyr.GPU.Ops.FlashAttn` / `Examples.GPU.RunFlashAttnOp`
+    path cleanly through Lake and rerun the parity smoke with the new native
+    backward route.
+
 Kernel source coverage is complete, but end-to-end training integration is still
 in progress. The execution order is:
 
@@ -304,18 +341,43 @@ Current result on one H100:
 - native backward is not yet training-ready through the new high-level op:
   - `dQ` is close
   - `dK` and `dV` still miss the current tolerance window versus SDPA
-  - one observed run produced:
-    - `dk_mae=0.003548`, `dk_max=0.363281`
-    - `dv_mae=0.004895`, `dv_max=0.550781`
+  - after forcing a fresh native rebuild of the exact-route artifacts:
+    - `lake -R build Tyr.Torch Tyr.GPU.Kernels.MhaH100 Tyr.GPU.Ops.MhaH100 Tyr.GPU.Ops.FlashAttn`
+    - `lake -R env ./.lake/build/bin/GenerateGpuKernels Tyr.GPU.Kernels.MhaH100 --out-dir cc/src/generated`
+    - `make -C cc -B build/generated/Tyr_GPU_Kernels_MhaH100.o build/libTyrC.so -j"$(nproc)"`
+  - the mismatch remains with the same localized outlier pattern:
+    - `dk_mae=0.002040`, `dk_max=0.363281`
+    - `dv_mae=0.002166`, `dv_max=0.550781`
 
 Interpretation:
 
 - the new runtime surface is now real and usable for forward benchmarking,
 - portable fallback behavior is correct for non-native shapes and GQA,
+- the remaining `dK` / `dV` mismatch is not explained by stale generated code,
+  missing launcher symbols, or route-selection bugs,
 - the remaining blocker for end-to-end training through `tyr::flash_attn` is
   the native backward mismatch on the exact H100 path.
 
 ### Build-System Note
+
+While re-running the bridge parity check from fresh build artifacts, a concrete
+integration gap showed up:
+
+- `cc/build/libTyrC.so` can be rebuilt without native `MhaH100` launchers if
+  `cc/src/generated/Tyr_GPU_Kernels_MhaH100.cu` has not been regenerated first
+- in that state, `nm -D cc/build/libTyrC.so` showed the bridge-side launcher
+  symbols as undefined:
+  - `lean_launch_Tyr_GPU_Kernels_tkMhaH100Fwd2Block`
+  - `lean_launch_Tyr_GPU_Kernels_tkMhaH100Fwd12Block`
+  - `lean_launch_Tyr_GPU_Kernels_tkMhaH100BwdPrep2Block`
+  - `lean_launch_Tyr_GPU_Kernels_tkMhaH100Bwd2BlockPartials`
+  - `lean_launch_Tyr_GPU_Kernels_tkMhaH100Bwd12BlockPartials`
+- regenerating `cc/src/generated/Tyr_GPU_Kernels_MhaH100.cu`, rebuilding
+  `cc/build/generated/Tyr_GPU_Kernels_MhaH100.o`, and relinking
+  `cc/build/libTyrC.so` restored those symbols
+- after that real rebuild, the bridge parity result did not change, so the
+  remaining failure is in the native exact-route backward path itself rather
+  than in bridge linkage
 
 While bringing up the runtime smoke test, a broader `lake -R build RunFlashAttnOp`
 path exposed an unrelated package-native-plugin issue:
@@ -751,3 +813,83 @@ removed from the core catalog:
 
 That leaves the build/docs surface centered on the actual source-backed
 ThunderKittens counterparts instead of parallel educational shims.
+
+## Current Runtime-Bridge State (2026-04-21)
+
+- The one-H100 runtime bridge for `tyr::flash_attn` is now materially closer to
+  training-ready:
+  - `cc/build/libTyrC.so` now exports the real TK/Mha launcher symbols instead
+    of resolving to weak stubs from `cc/src/generated/tyr_gpu_kernel_stubs.cpp`.
+  - The `cc` shared library now links CUDA explicitly (`-lcudart -lcuda`), which
+    fixes the Hopper TMA runtime symbol gap (`cuTensorMapEncodeTiled`).
+  - `lakefile.lean` no longer deletes previously generated `.cu` files when
+    `TYR_SKIP_GPU_CODEGEN=1`; that deletion was silently forcing later rebuilds
+    back onto stub launchers.
+- The generated-code path is still not fully clean:
+  - the current codegen still fails to infer TMA descriptor-bearing `gl<...>`
+    parameter types for the `dK_part_ptr` / `dV_part_ptr` outputs of the
+    `MhaH100` backward kernels,
+  - so the current working state is still using local generated-CUDA edits for
+    the `MhaH100` translation unit while the permanent codegen fix is finished.
+- The more important runtime result is that the bridge no longer dies on kernel
+  launch:
+  - the native dense route now completes end-to-end,
+  - `forward`, `dQ`, and `dK` are within tolerance against PyTorch SDPA,
+  - the remaining parity failure is isolated to `dV`.
+- Current `RunFlashAttnOp` status on one H100 (`CUDA_LAUNCH_BLOCKING=1`):
+  - `route=tkKernel`
+  - `out_ok=true`
+  - `dq_ok=true`
+  - `dk_ok=true`
+  - `dv_ok=false`
+  - representative error snapshot:
+    - `out_mae=0.000057`
+    - `dq_mae=0.000032`
+    - `dk_mae=0.000046`
+    - `dv_mae=0.003351`
+    - `dv_max=0.451660`
+- The current backward workaround is:
+  - avoid the crashing TMA `store_add_async` direct-accumulation path for
+    `dK`/`dV`,
+  - stack per-query-block partials in plain global memory,
+  - reduce them in `native_backward`.
+- This proves the remaining blocker is no longer build integration or bridge
+  wiring. The next concrete task is to fix the `dV` tile math/layout mismatch
+  in `tkMhaH100Bwd2BlockPartials`, then port that fix back into the Lean kernel
+  surface so the generated CUDA no longer needs local edits.
+
+### Runtime Bridge Update (Later 2026-04-21)
+
+- The bridge parity blocker is now cleared for the current one-H100 route:
+  - `RunFlashAttnOp` now reports
+    - `route=tkKernel`
+    - `out_ok=true`
+    - `dq_ok=true`
+    - `dk_ok=true`
+    - `dv_ok=true`
+  - representative native-dense error snapshot:
+    - `out_mae=0.000057`
+    - `dq_mae=0.000032`
+    - `dk_mae=0.000046`
+    - `dv_mae=0.000172`
+    - `dv_max=0.003906`
+- The source-of-truth kernel path no longer depends on hand-edited generated
+  CUDA for the non-crashing accumulation workaround:
+  - `Tyr/GPU/Kernels/MhaH100.lean` now emits q-block-major stacked
+    `dK`/`dV` partial writes via plain `storeGlobal`,
+  - `Tyr/GPU/Ops/MhaH100.lean` and the `RunMhaH100*` examples were updated to
+    reduce `[1, 1, kvBlocks * seq, 64]` stacks back to `[1, 1, seq, 64]`.
+- The remaining split is now explicit:
+  - raw kernel forward + `dQ` + `dK` are coming from the TK/Mha path,
+  - runtime-op `dV` is currently computed exactly in `cc/src/tyr_ops.cpp`
+    by recomputing `P = softmax(Q K^T / sqrt(d))` in FP32 and forming
+    `dV = P^T dO`.
+- This is an intentional correctness bridge, not the final performance state.
+  It makes the high-level `tyr::flash_attn` op training-correct on the current
+  supported shape while the standalone kernel-side `dV` mismatch remains
+  isolated to the raw `tkMhaH100Bwd*Partials` path.
+- Operational note:
+  - raw launcher examples such as `RunMhaH100` must be exercised via their
+    compiled `lean_exe` targets (`lake build RunMhaH100` then run the binary),
+    not `lean --run`, because the interpreter cannot resolve the generated
+    launcher externs.
