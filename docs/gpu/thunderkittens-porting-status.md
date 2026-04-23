@@ -1681,3 +1681,27 @@ ThunderKittens counterparts instead of parallel educational shims.
     again.
   - [ ] Once 16-row subtiles exist, re-run the shared-Q forward test and check
     whether ptxas WGMMA serialization disappears.
+
+### 2026-04-23 WGMMA Register Cleanup
+
+- Cleaned up the validated register-Q WGMMA forward route:
+  - [x] Removed unused forward K/V register tile allocations left over from the
+    pre-WGMMA load path.
+  - [x] Regenerated `Tyr_GPU_Kernels_MhaH100.cu`.
+  - [x] Rebuilt `cc/build/tools/bench_flash_attn`.
+  - [x] Confirmed the unused-register CUDA warnings disappeared.
+  - [~] ptxas still reports WGMMA serialization from insufficient register
+    resources.
+- Benchmark result:
+  - `benchmarks/results/flash_attn_cpp_native_h100_wgmma_forward_clean_regs.jsonl`
+  - command:
+    - `source ./load_modules.sh && CUDA_VISIBLE_DEVICES=0 cc/build/tools/bench_flash_attn --case native_now --backend tyr_runtime,torch_sdpa --warmup 3 --iters 10 --repeats 2 --jsonl-out benchmarks/results/flash_attn_cpp_native_h100_wgmma_forward_clean_regs.jsonl --jsonl-stdout`
+  - `native_dense_128x64`: Tyr `0.208570 ms`, SDPA `0.191270 ms`,
+    `correctnessOk=true`, `speedupVsSdpaP50=0.917058`.
+  - `native_dense_768x64`: Tyr `0.493654 ms`, SDPA `0.196349 ms`,
+    `correctnessOk=true`, `speedupVsSdpaP50=0.397745`.
+- Interpretation:
+  - [x] Removing dead forward RT allocations helps slightly and makes ptxas
+    output easier to interpret.
+  - [ ] This does not close the performance gap; the next required step remains
+    TK-style 16-row WGMMA subtiles and warpgroup role structure.
