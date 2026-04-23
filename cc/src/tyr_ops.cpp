@@ -62,6 +62,38 @@ extern "C" lean_object* lean_launch_Tyr_GPU_Kernels_tkMhaH100Bwd12BlockPartials(
     uint64_t grid_x, uint64_t grid_y, uint64_t grid_z,
     uint64_t block_x, uint64_t block_y, uint64_t block_z,
     uint64_t shared_mem, uint64_t stream);
+extern "C" lean_object* lean_launch_Tyr_GPU_Kernels_tkMhaH100Bwd2BlockDq(
+    b_lean_obj_arg q_ptr, b_lean_obj_arg k_ptr, b_lean_obj_arg v_ptr,
+    b_lean_obj_arg dO_ptr, b_lean_obj_arg l_ptr, b_lean_obj_arg d_ptr,
+    b_lean_obj_arg dQ_ptr,
+    uint64_t seq_len, uint64_t head_dim,
+    uint64_t grid_x, uint64_t grid_y, uint64_t grid_z,
+    uint64_t block_x, uint64_t block_y, uint64_t block_z,
+    uint64_t shared_mem, uint64_t stream);
+extern "C" lean_object* lean_launch_Tyr_GPU_Kernels_tkMhaH100Bwd12BlockDq(
+    b_lean_obj_arg q_ptr, b_lean_obj_arg k_ptr, b_lean_obj_arg v_ptr,
+    b_lean_obj_arg dO_ptr, b_lean_obj_arg l_ptr, b_lean_obj_arg d_ptr,
+    b_lean_obj_arg dQ_ptr,
+    uint64_t seq_len, uint64_t head_dim,
+    uint64_t grid_x, uint64_t grid_y, uint64_t grid_z,
+    uint64_t block_x, uint64_t block_y, uint64_t block_z,
+    uint64_t shared_mem, uint64_t stream);
+extern "C" lean_object* lean_launch_Tyr_GPU_Kernels_tkMhaH100Bwd2BlockKvSweep(
+    b_lean_obj_arg q_ptr, b_lean_obj_arg k_ptr, b_lean_obj_arg v_ptr,
+    b_lean_obj_arg dO_ptr, b_lean_obj_arg l_ptr, b_lean_obj_arg d_ptr,
+    b_lean_obj_arg dQ_ptr, b_lean_obj_arg dK_ptr, b_lean_obj_arg dV_ptr,
+    uint64_t seq_len, uint64_t head_dim,
+    uint64_t grid_x, uint64_t grid_y, uint64_t grid_z,
+    uint64_t block_x, uint64_t block_y, uint64_t block_z,
+    uint64_t shared_mem, uint64_t stream);
+extern "C" lean_object* lean_launch_Tyr_GPU_Kernels_tkMhaH100Bwd12BlockKvSweep(
+    b_lean_obj_arg q_ptr, b_lean_obj_arg k_ptr, b_lean_obj_arg v_ptr,
+    b_lean_obj_arg dO_ptr, b_lean_obj_arg l_ptr, b_lean_obj_arg d_ptr,
+    b_lean_obj_arg dQ_ptr, b_lean_obj_arg dK_ptr, b_lean_obj_arg dV_ptr,
+    uint64_t seq_len, uint64_t head_dim,
+    uint64_t grid_x, uint64_t grid_y, uint64_t grid_z,
+    uint64_t block_x, uint64_t block_y, uint64_t block_z,
+    uint64_t shared_mem, uint64_t stream);
 
 namespace tyr_ops {
 
@@ -306,23 +338,39 @@ static std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> native_backward(
 
   lean_object* bwd_result = nullptr;
   if (route == FlashAttnRoute::TkMhaH1002Block) {
-    bwd_result = lean_launch_Tyr_GPU_Kernels_tkMhaH100Bwd2BlockPartials(
+    bwd_result = lean_launch_Tyr_GPU_Kernels_tkMhaH100Bwd2BlockDq(
+        q_ref.obj, k_ref.obj, v_ref.obj, dO_ref.obj, l_ref.obj, d_ref.obj,
+        dQ_ref.obj,
+        static_cast<uint64_t>(seq), static_cast<uint64_t>(q.size(3)),
+        cfg.grid_x, cfg.grid_y, cfg.grid_z,
+        cfg.block_x, cfg.block_y, cfg.block_z,
+        cfg.shared_mem, cfg.stream);
+    throw_on_launcher_error(bwd_result, "tkMhaH100Bwd2BlockDq");
+    bwd_result = lean_launch_Tyr_GPU_Kernels_tkMhaH100Bwd2BlockKvSweep(
         q_ref.obj, k_ref.obj, v_ref.obj, dO_ref.obj, l_ref.obj, d_ref.obj,
         dQ_ref.obj, dK_ref.obj, dV_ref.obj,
         static_cast<uint64_t>(seq), static_cast<uint64_t>(q.size(3)),
         cfg.grid_x, cfg.grid_y, cfg.grid_z,
         cfg.block_x, cfg.block_y, cfg.block_z,
         cfg.shared_mem, cfg.stream);
-    throw_on_launcher_error(bwd_result, "tkMhaH100Bwd2BlockPartials");
+    throw_on_launcher_error(bwd_result, "tkMhaH100Bwd2BlockKvSweep");
   } else {
-    bwd_result = lean_launch_Tyr_GPU_Kernels_tkMhaH100Bwd12BlockPartials(
+    bwd_result = lean_launch_Tyr_GPU_Kernels_tkMhaH100Bwd12BlockDq(
+        q_ref.obj, k_ref.obj, v_ref.obj, dO_ref.obj, l_ref.obj, d_ref.obj,
+        dQ_ref.obj,
+        static_cast<uint64_t>(seq), static_cast<uint64_t>(q.size(3)),
+        cfg.grid_x, cfg.grid_y, cfg.grid_z,
+        cfg.block_x, cfg.block_y, cfg.block_z,
+        cfg.shared_mem, cfg.stream);
+    throw_on_launcher_error(bwd_result, "tkMhaH100Bwd12BlockDq");
+    bwd_result = lean_launch_Tyr_GPU_Kernels_tkMhaH100Bwd12BlockKvSweep(
         q_ref.obj, k_ref.obj, v_ref.obj, dO_ref.obj, l_ref.obj, d_ref.obj,
         dQ_ref.obj, dK_ref.obj, dV_ref.obj,
         static_cast<uint64_t>(seq), static_cast<uint64_t>(q.size(3)),
         cfg.grid_x, cfg.grid_y, cfg.grid_z,
         cfg.block_x, cfg.block_y, cfg.block_z,
         cfg.shared_mem, cfg.stream);
-    throw_on_launcher_error(bwd_result, "tkMhaH100Bwd12BlockPartials");
+    throw_on_launcher_error(bwd_result, "tkMhaH100Bwd12BlockKvSweep");
   }
 
   return {dQ, dK, dV};

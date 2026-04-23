@@ -1403,3 +1403,80 @@ ThunderKittens counterparts instead of parallel educational shims.
     accumulates across query tiles in registers before one final store-add.
   - [ ] Add head-dim 128 and GQA/MQA routes needed by Qwen/Gemma-style model
     shapes.
+
+### 2026-04-23 KV-Sweep Backward Pass
+
+- Compared Tyr generated CUDA against ThunderKittens `mha_h100.cu` again, with
+  focus on `compute_bwd_loop`, the `qg` store path, and `kv_store`.
+- Implemented a TK-like K/V backward sweep:
+  - new `tkMhaH100Bwd2BlockKvSweep` and `tkMhaH100Bwd12BlockKvSweep` kernels
+    make each CTA own one KV tile,
+  - each CTA sweeps all query tiles and accumulates `dK` / `dV` in registers,
+  - each CTA emits one final `dK` store-add and one final `dV` store-add,
+    instead of the previous per-`(qBlock, kvBlock)` K/V store-add pattern.
+- Also added direct q-centric `dQ` kernels:
+  - `tkMhaH100Bwd2BlockDq`,
+  - `tkMhaH100Bwd12BlockDq`.
+- Reason for the split:
+  - a fully fused KV-sweep that store-added `dQ` across KV CTAs was buildable
+    after reducing static shared memory, but repeated diagnostics showed
+    intermittent large gradient errors on either `dQ` or `dK`, depending on the
+    run,
+  - keeping `dQ` on the known-correct q-centric direct-store path removed that
+    nondeterminism,
+  - restoring separate `dK` / `dV` shared staging in the KV sweep keeps the K/V
+    writeback closer to TK and avoids reusing a TMA source tile before the final
+    async store path has fully completed.
+- Generated-CUDA sync comparison:
+  - [x] K/V sweep now has the TK ownership shape: KV CTA, query sweep,
+    register accumulation, final K/V store-add.
+  - [x] Descriptor-bearing K/V store-add globals are emitted as
+    `const __grid_constant__ gl<..., st<float,64,64>>`.
+  - [x] TMA source shared tiles are emitted with `KITTENS_ALIGN_AS(1024)`.
+  - [x] Separate K/V FP32 staging tiles are restored in the stable KV sweep.
+  - [~] `dQ` is not yet the TK-style q-gradient store-add path; it is a
+    correctness-preserving direct q-centric pass.
+  - [~] Sync policy is still explicit raw `group<4>::sync(4)` around staging
+    and store-add issue points. This is intentionally conservative for the
+    current warp-level generated kernels; a general backend should model TK's
+    pipeline handoff semaphores instead of hardcoding barriers.
+  - [ ] Fuse the stable direct `dQ` path back into the KV sweep once the TMA
+    q-gradient store-add path is deterministic under repeated runs.
+- Validation:
+  - [x] Direct Lean compile of `Tyr/GPU/Kernels/MhaH100.lean` succeeds.
+  - [x] Generated `cc/src/generated/Tyr_GPU_Kernels_MhaH100.cu` contains the
+    new `Bwd*Dq` and `Bwd*KvSweep` launchers.
+  - [x] `make -C cc bench-flash-attn TYR_GPU_CODEGEN_MODULE=Tyr.GPU.Kernels.MhaH100`
+    succeeds.
+  - [x] `CUDA_LAUNCH_BLOCKING=1` 128x64 runtime smoke passes with
+    `correctnessOk=true`.
+  - [x] `CUDA_LAUNCH_BLOCKING=1` 768x64 runtime smoke passes with
+    `correctnessOk=true`.
+  - [x] Five repeated C++ diagnostics for 128x64 showed stable
+    `out/dQ/dK/dV` parity after the split.
+- Benchmark result:
+  - `benchmarks/results/flash_attn_cpp_native_h100_dq_direct_kv_sweep.jsonl`
+  - command:
+    - `source ./load_modules.sh && CUDA_VISIBLE_DEVICES=0 cc/build/tools/bench_flash_attn --case native_now --backend all --warmup 5 --iters 20 --repeats 3 --jsonl-out benchmarks/results/flash_attn_cpp_native_h100_dq_direct_kv_sweep.jsonl --jsonl-stdout`
+  - `native_dense_128x64`:
+    - `torch_sdpa p50_ms=0.231418`
+    - `tyr_runtime p50_ms=0.329764`
+    - `correctnessOk=true`
+    - `speedupVsSdpaP50=0.701769`
+  - `native_dense_768x64`:
+    - `torch_sdpa p50_ms=0.348799`
+    - `tyr_runtime p50_ms=1.33397`
+    - `correctnessOk=true`
+    - `speedupVsSdpaP50=0.261476`
+- Current gap list:
+  - [x] Build and validate a TK-like K/V sweep for fixed 128/768 x 64 rows.
+  - [x] Remove the unstable fused q-gradient store-add path from the training
+    bridge.
+  - [~] Preserve training correctness through a direct q-centric `dQ` pass plus
+    KV-centric K/V pass.
+  - [ ] Recover performance by making the TK-style `dQ` store-add path
+    deterministic and fusing it back into the KV sweep.
+  - [ ] Replace raw barrier snippets with first-class backend concepts for
+    async TMA producer/consumer handoffs.
+  - [ ] Add head-dim 128, causal, and GQA/MQA routes for Qwen/Gemma-style
+    model coverage.

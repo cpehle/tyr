@@ -68,7 +68,11 @@ instance : Variant 128 2 where
       cfg.sharedMem cfg.stream
 
   launchBwd q k v dO lOut dVec dQ dK dV cfg := do
-    tkMhaH100Bwd2BlockPartials.launch q k v dO lOut dVec dQ dK dV 128 64
+    tkMhaH100Bwd2BlockDq.launch q k v dO lOut dVec dQ 128 64
+      cfg.gridX cfg.gridY cfg.gridZ
+      cfg.blockX cfg.blockY cfg.blockZ
+      cfg.sharedMem cfg.stream
+    tkMhaH100Bwd2BlockKvSweep.launch q k v dO lOut dVec dQ dK dV 128 64
       cfg.gridX cfg.gridY cfg.gridZ
       cfg.blockX cfg.blockY cfg.blockZ
       cfg.sharedMem cfg.stream
@@ -81,7 +85,11 @@ instance : Variant 768 12 where
       cfg.sharedMem cfg.stream
 
   launchBwd q k v dO lOut dVec dQ dK dV cfg := do
-    tkMhaH100Bwd12BlockPartials.launch q k v dO lOut dVec dQ dK dV 768 64
+    tkMhaH100Bwd12BlockDq.launch q k v dO lOut dVec dQ 768 64
+      cfg.gridX cfg.gridY cfg.gridZ
+      cfg.blockX cfg.blockY cfg.blockZ
+      cfg.sharedMem cfg.stream
+    tkMhaH100Bwd12BlockKvSweep.launch q k v dO lOut dVec dQ dK dV 768 64
       cfg.gridX cfg.gridY cfg.gridZ
       cfg.blockX cfg.blockY cfg.blockZ
       cfg.sharedMem cfg.stream
