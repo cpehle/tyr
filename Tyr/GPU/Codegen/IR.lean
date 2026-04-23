@@ -71,8 +71,12 @@ inductive KStmt where
   | storeAdd (dst src : VarId)       -- Atomic add for gradient accumulation
   | storeAddAsync (dst src : VarId)  -- Async atomic add (TMA)
   | storeMinAsync (dst src : VarId)  -- Async atomic min (TMA)
+  | tmaStoreCommitGroup              -- Commit TMA store group
+  | tmaStoreAsyncWait                -- Wait for outstanding TMA stores
   | prefetch (src : VarId)           -- TMA prefetch
   | tmaExpect (barrier : VarId) (bytes : Nat)
+  | blockSync                        -- CTA-wide __syncthreads()
+  | groupSync (warps barrierId : Nat) -- ThunderKittens group<N>::sync(barrier)
 
   -- TMA operations with global pointers (legacy single coord)
   | tmaLoad (dst src : VarId) (coord : VarId)      -- TMA load: shared ← global[coord]

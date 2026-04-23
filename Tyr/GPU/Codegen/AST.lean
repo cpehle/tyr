@@ -207,10 +207,10 @@ def TernaryOp.toCpp : TernaryOp → String
 
 /-- Semaphore operations -/
 inductive SemaphoreOp where
-  | Init (count : Nat)    -- Initialize semaphore with count
+  | Init (threadCount : Nat) (transactionCount : Nat) -- Initialize semaphore
   | Invalidate            -- Invalidate semaphore
   | Expect (bytes : Nat)  -- Expect bytes on semaphore
-  | Wait                  -- Wait on semaphore
+  | Wait (phase : Nat)    -- Wait on semaphore phase bit
   | Arrive (count : Nat)  -- Arrive with transaction count
   | ArriveAndWait         -- Arrive and wait
   deriving Repr, BEq, Hashable, Inhabited, Lean.ToExpr

@@ -1555,3 +1555,55 @@ ThunderKittens counterparts instead of parallel educational shims.
     async TMA producer/consumer handoffs.
   - [ ] Add head-dim 128, causal, and GQA/MQA routes for Qwen/Gemma-style
     model coverage.
+
+### 2026-04-23 Async TMA DSL Parity Checkpoint
+
+- Implemented first-class DSL support for the TK synchronization pieces that were
+  previously missing from generated H100 MHA code:
+  - [x] `init_semaphore(sem, threadCount, transactionCount)` with one-thread init.
+  - [x] `warp::tma::expect_bytes` issued by one loader warp.
+  - [x] `warp::tma::load_async` for Q/K/V/O staging.
+  - [x] `wait(sem, phase)` phase-aware waits.
+  - [x] `group<N>::sync(barrier)` as a typed primitive.
+  - [x] `warp::tma::store_commit_group()` and `store_async_wait()` as typed primitives.
+  - [x] launcher-side dynamic shared-memory attribute setting.
+- Generated-CUDA structural counts for `Tyr_GPU_Kernels_MhaH100.cu` after this pass:
+  - `tma::load_async`: 44
+  - `init_semaphore`: 31
+  - `expect_bytes`: 31
+  - `wait(`: 39
+  - `warp::sync`: 0
+  - `group<4>::sync`: 24
+  - `store_commit_group`: 8
+  - `store_async_wait`: 8
+  - `warp::mma`: 36
+  - `warpgroup::mma/mm`: 0
+- Build issue found and fixed:
+  - [x] The initial async semaphore pass pushed the backward kernels from exactly
+    `0xc000` static shared bytes to `0xc018`, which ptxas rejects.
+  - [x] Backward dK/dV writeback now reuses one FP32 staging tile and waits for
+    the dK async store before overwriting that tile for dV. This preserves the
+    TK lifetime rule: do not reuse a TMA store source before commit/wait.
+- Validation:
+  - [x] Direct Lean compile of `Tyr/GPU/Kernels/MhaH100.lean` succeeds.
+  - [x] `GenerateGpuKernels Tyr.GPU.Kernels.MhaH100` succeeds.
+  - [x] `make -C cc bench-flash-attn TYR_GPU_CODEGEN_MODULE=Tyr.GPU.Kernels.MhaH100` succeeds.
+  - [x] One-H100 C++ runtime benchmark passes fwd+bwd correctness for 128x64 and 768x64.
+- Benchmark result:
+  - `benchmarks/results/flash_attn_cpp_native_h100_async_tma_dsl_parity.jsonl`
+  - command:
+    - `source ./load_modules.sh && CUDA_VISIBLE_DEVICES=0 cc/build/tools/bench_flash_attn --case native_now --backend tyr_runtime,torch_sdpa --warmup 5 --iters 20 --repeats 3 --jsonl-out benchmarks/results/flash_attn_cpp_native_h100_async_tma_dsl_parity.jsonl --jsonl-stdout`
+  - `native_dense_128x64`: Tyr `0.152307 ms`, SDPA `0.143101 ms`, `correctnessOk=true`, `speedupVsSdpaP50=0.939554`.
+  - `native_dense_768x64`: Tyr `0.496581 ms`, SDPA `0.172443 ms`, `correctnessOk=true`, `speedupVsSdpaP50=0.347261`.
+- Current gap list:
+  - [x] Remove generated `warp::sync` from H100 MHA.
+  - [x] Add generated TMA load/semaphore/store-commit/store-wait structure.
+  - [x] Keep training-route gradients correct after the async TMA change.
+  - [~] Async load/store lifetime is now modeled, but still with conservative
+    CTA-wide init syncs rather than TK's full producer/consumer phase pipeline.
+  - [ ] Replace warp-level `warp::mma_*` attention math with TK-style
+    `warpgroup::mm/mma_*` over shared/register tiles.
+  - [ ] Move from the current split dQ plus KV sweep toward TK's fused backward
+    kernel with loader/store warps and consumer warpgroups.
+  - [ ] Add the 512-thread forward and 384-thread backward launch shapes needed
+    for direct `mha_h100.cu` schedule parity.

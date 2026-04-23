@@ -1407,3 +1407,38 @@ only need role assignment (MhaH100LCF, Hedgehog, LinearAttn).
   - [ ] Recover performance lost by the two-kernel backward split.
   - [ ] Add shape-specialized head-dim 128, causal, and GQA/MQA routes for
     Qwen/Gemma coverage.
+
+## 2026-04-23 Async TMA DSL Parity Checkpoint
+
+- Implemented and validated a first-class DSL async TMA/semaphore pass for H100
+  MHA codegen.
+- TODO status:
+  - [x] Add typed semaphore init/wait phase support.
+  - [x] Add typed TMA store commit/wait support.
+  - [x] Add typed `group<N>::sync` and CTA `__syncthreads` primitives.
+  - [x] Guard TMA load/expect with one issuing warp.
+  - [x] Regenerate H100 MHA CUDA and confirm structural counts.
+  - [x] Fix ptxas static shared overflow by reusing a dK/dV staging tile only
+    after async-store wait.
+  - [x] Rebuild `cc/build/tools/bench_flash_attn`.
+  - [x] Benchmark 128x64 and 768x64 on one H100.
+  - [~] Close sync parity: no `warp::sync` remains, but init uses conservative
+    `__syncthreads` rather than TK's fully pipelined phase handoff.
+  - [ ] Close math parity: generated kernels still emit `warp::mma` instead of
+    TK `warpgroup::mm/mma`.
+  - [ ] Close schedule parity: current route is split dQ + KV sweep, not TK's
+    single pipelined backward kernel.
+- Structural counts from regenerated `Tyr_GPU_Kernels_MhaH100.cu`:
+  - `tma::load_async=44`, `init_semaphore=31`, `expect_bytes=31`, `wait=39`.
+  - `warp::sync=0`, `group<4>::sync=24`, `store_commit_group=8`, `store_async_wait=8`.
+  - `warp::mma=36`, `warpgroup::mma/mm=0`.
+- Benchmark:
+  - `benchmarks/results/flash_attn_cpp_native_h100_async_tma_dsl_parity.jsonl`
+  - `native_dense_128x64`: Tyr `0.152307 ms`, SDPA `0.143101 ms`, gradients correct.
+  - `native_dense_768x64`: Tyr `0.496581 ms`, SDPA `0.172443 ms`, gradients correct.
+- Interpretation:
+  - The async/TMA DSL pass recovers a large part of the previous regression
+    (`768x64` improved from roughly `1.28 ms` to `0.50 ms`).
+  - The remaining gap is not primarily dK/dV math correctness anymore; it is the
+    missing TK WGMMA producer/consumer schedule and the extra split-backward
+    launch structure.
