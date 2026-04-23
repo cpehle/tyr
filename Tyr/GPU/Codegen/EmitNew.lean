@@ -437,6 +437,10 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout)
     s!"{indent}warp::mma_{trans.toSuffix}({dst.toIdent}, {a.toIdent}, {b.toIdent}, {c.toIdent});\n"
   | .mm trans dst a b =>
     s!"{indent}warp::mm_{trans.toSuffix}({dst.toIdent}, {a.toIdent}, {b.toIdent});\n"
+  | .warpgroupMma trans dst a b =>
+    s!"{indent}warpgroup::mma_{trans.toSuffix}({dst.toIdent}, {a.toIdent}, {b.toIdent});\n"
+  | .warpgroupMm trans dst a b =>
+    s!"{indent}warpgroup::mm_{trans.toSuffix}({dst.toIdent}, {a.toIdent}, {b.toIdent});\n"
   | .mmaFence dst => s!"{indent}warpgroup::mma_fence({dst.toIdent});\n"
   | .mmaCommitGroup => s!"{indent}warpgroup::mma_commit_group();\n"
   | .mmaAsyncWait n => s!"{indent}warpgroup::mma_async_wait<{n}>();\n"
@@ -992,7 +996,8 @@ private partial def stmtUses (p : KStmt → Bool) : KStmt → Bool
       | .loadVecGlobalCoord .. | .storeVecGlobalCoord .. | .storeVecGlobalAddCoord ..
       | .loadScalarGlobal .. | .storeScalarGlobal ..
       | .multimemLoadReduce .. | .multimemStore .. | .multimemRed ..
-      | .mma .. | .mm .. | .mmaFence .. | .mmaCommitGroup | .mmaAsyncWait ..
+      | .mma .. | .mm .. | .warpgroupMma .. | .warpgroupMm ..
+      | .mmaFence .. | .mmaCommitGroup | .mmaAsyncWait ..
       | .tcgen05Mm .. | .tcgen05Mma .. | .tcgen05MmaScaled .. | .tcgen05Commit ..
       | .tmemAllocate .. | .tmemProvision .. | .tmemDeprovision ..
       | .loadScaleTmem .. | .tmemSubtile ..

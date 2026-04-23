@@ -1442,3 +1442,43 @@ only need role assignment (MhaH100LCF, Hedgehog, LinearAttn).
   - The remaining gap is not primarily dK/dV math correctness anymore; it is the
     missing TK WGMMA producer/consumer schedule and the extra split-backward
     launch structure.
+
+## 2026-04-23 WGMMA Forward Parity Attempt
+
+- Implementation status:
+  - [x] Added IR/emitter support for `warpgroup::mm_*` and
+    `warpgroup::mma_*` statements.
+  - [x] Added typed primitives for `warpgroup::mm_ABt`,
+    `warpgroup::mma_AB`, and related transpose/accumulate forms.
+  - [x] Forward H100 MHA loops now call `warpgroupMmT` for scores and
+    `warpgroupMma` for the probability/value accumulation.
+  - [x] Lake rebuilt the compiled `GenerateGpuKernels` executable after the IR
+    change; the expensive part was an avoidable generator link against TyrC,
+    libtorch, and CUDA.
+  - [x] Regenerated generated CUDA and counted WGMMA vs warp MMA calls.
+  - [x] Rebuilt the native flash-attention benchmark target.
+  - [x] Ran one-H100 correctness and timing for `native_now`.
+- Generated-CUDA structural counts:
+  - `warpgroup::mm_ABt=6`, `warpgroup::mma_AB=6`,
+    `warpgroup::mma_async_wait=12`.
+  - `warp::mma=24`, `warp::sync=0`, `group<4>::sync=18`.
+  - `tma::load_async=44`, `store_commit_group=8`, `store_async_wait=8`.
+- Benchmark:
+  - [x] Wrote `benchmarks/results/flash_attn_cpp_native_h100_wgmma_forward_parity.jsonl`.
+  - `native_dense_128x64`: Tyr `0.216733 ms`, SDPA `0.202832 ms`,
+    gradients correct.
+  - `native_dense_768x64`: Tyr `0.498877 ms`, SDPA `0.215072 ms`,
+    gradients correct.
+  - [~] Performance did not improve. ptxas reports WGMMA serialization from
+    insufficient register resources, so simply swapping call names is not enough.
+- ThunderKittens comparison notes:
+  - [x] Forward target call shape is known: `warpgroup::mm_ABt` over Q/K shared
+    tiles followed by `warpgroup::mma_AB` over P/V shared tiles.
+  - [x] Backward target call shape is known: WGMMA score/dP, register/shared
+    WGMMA dK/dV, then final KV-owned store.
+  - [~] Tyr now models the forward WGMMA calls, but still feeds Q from a register
+    tile and lacks TK's shared-Q, three-consumer/one-producer warpgroup role
+    split.
+  - [ ] Convert the KV sweep backward contractions to the TK WGMMA forms.
+  - [ ] Decide whether the DSL needs explicit producer/consumer warpgroup roles
+    before attempting fused dQ store-add again.

@@ -438,6 +438,59 @@ def mmaAtB {M K N : Nat} {inDtype accDtype : GpuFloat}
   let _ := hM; let _ := hK; let _ := hN
   emit (.mma .AtB dst.id a.id b.id c.id)
 
+/-- Hopper WGMMA accumulate: `dst += a @ b`, with `b` sourced from shared memory.
+    This mirrors ThunderKittens' `warpgroup::mma_AB`. The operation is async;
+    call `mmaAsyncWait` before reading `dst`. -/
+def warpgroupMma {M K N : Nat} {inDtype accDtype : GpuFloat} {layoutB : TileLayout}
+    (dst : RT accDtype M N .Row)
+    (a : RT inDtype M K .Row)
+    (b : ST inDtype K N layoutB)
+    (hM : M % 16 = 0 := by decide)
+    (hK : K % 16 = 0 := by decide)
+    (hN : N % 16 = 0 := by decide)
+    : KernelM Unit := do
+  let _ := hM; let _ := hK; let _ := hN
+  emit (.warpgroupMma .AB dst.id a.id b.id)
+
+/-- Hopper WGMMA overwrite: `dst = a @ b`, with `b` sourced from shared memory.
+    This mirrors ThunderKittens' `warpgroup::mm_AB`. -/
+def warpgroupMm {M K N : Nat} {inDtype accDtype : GpuFloat} {layoutB : TileLayout}
+    (dst : RT accDtype M N .Row)
+    (a : RT inDtype M K .Row)
+    (b : ST inDtype K N layoutB)
+    (hM : M % 16 = 0 := by decide)
+    (hK : K % 16 = 0 := by decide)
+    (hN : N % 16 = 0 := by decide)
+    : KernelM Unit := do
+  let _ := hM; let _ := hK; let _ := hN
+  emit (.warpgroupMm .AB dst.id a.id b.id)
+
+/-- Hopper WGMMA accumulate: `dst += a @ b^T`, with `b` sourced from shared memory.
+    This mirrors ThunderKittens' `warpgroup::mma_ABt`. -/
+def warpgroupMmaT {M K N : Nat} {inDtype accDtype : GpuFloat} {layoutB : TileLayout}
+    (dst : RT accDtype M N .Row)
+    (a : RT inDtype M K .Row)
+    (b : ST inDtype N K layoutB)
+    (hM : M % 16 = 0 := by decide)
+    (hK : K % 16 = 0 := by decide)
+    (hN : N % 16 = 0 := by decide)
+    : KernelM Unit := do
+  let _ := hM; let _ := hK; let _ := hN
+  emit (.warpgroupMma .ABt dst.id a.id b.id)
+
+/-- Hopper WGMMA overwrite: `dst = a @ b^T`, with `b` sourced from shared memory.
+    This mirrors ThunderKittens' `warpgroup::mm_ABt`. -/
+def warpgroupMmT {M K N : Nat} {inDtype accDtype : GpuFloat} {layoutB : TileLayout}
+    (dst : RT accDtype M N .Row)
+    (a : RT inDtype M K .Row)
+    (b : ST inDtype N K layoutB)
+    (hM : M % 16 = 0 := by decide)
+    (hK : K % 16 = 0 := by decide)
+    (hN : N % 16 = 0 := by decide)
+    : KernelM Unit := do
+  let _ := hM; let _ := hK; let _ := hN
+  emit (.warpgroupMm .ABt dst.id a.id b.id)
+
 /-! ## Ternary Operations (FMA) -/
 
 /-- Fused multiply-add: dst = a * b + c -/

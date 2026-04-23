@@ -108,6 +108,8 @@ inductive KStmt where
   -- MMA operations
   | mma (trans : MMATranspose) (dst a b c : VarId)
   | mm (trans : MMATranspose) (dst a b : VarId)
+  | warpgroupMma (trans : MMATranspose) (dst a b : VarId)
+  | warpgroupMm (trans : MMATranspose) (dst a b : VarId)
   | mmaFence (dst : VarId)
   | mmaCommitGroup
   | mmaAsyncWait (n : Nat)
