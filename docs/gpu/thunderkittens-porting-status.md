@@ -1607,3 +1607,55 @@ ThunderKittens counterparts instead of parallel educational shims.
     kernel with loader/store warps and consumer warpgroups.
   - [ ] Add the 512-thread forward and 384-thread backward launch shapes needed
     for direct `mha_h100.cu` schedule parity.
+
+### 2026-04-23 WGMMA Forward Parity Attempt
+
+- Current implementation direction:
+  - [x] Add first-class IR nodes for generated `warpgroup::mm_*` and
+    `warpgroup::mma_*` calls.
+  - [x] Add typed DSL primitives for the TK forward contraction forms:
+    `warpgroup::mm_ABt(scores, q, k_smem)` and
+    `warpgroup::mma_AB(out, probs, v_smem)`.
+  - [x] Convert generated H100 MHA forward loops from `load + warp::mma` to
+    WGMMA over shared K/V tiles.
+  - [x] Rebuild the compiled generator after the IR constructor change. This
+    exposed a build-speed problem: `GenerateGpuKernels` is still linked with
+    `libTyrC.a`, libtorch, and CUDA even though codegen only emits text.
+  - [x] Regenerate `Tyr_GPU_Kernels_MhaH100.cu` and verify the emitted forward
+    math matches the TK call shape.
+  - [x] Build `cc/build/tools/bench_flash_attn` with the regenerated CUDA.
+  - [x] Benchmark `native_dense_128x64` and `native_dense_768x64` against SDPA.
+- Generated-CUDA structural counts after this pass:
+  - `warpgroup::mm_ABt`: 6
+  - `warpgroup::mma_AB`: 6
+  - `warpgroup::mma_async_wait`: 12
+  - `warp::mma`: 24
+  - `warp::sync`: 0
+  - `group<4>::sync`: 18
+  - `tma::load_async`: 44
+  - `store_commit_group`: 8
+  - `store_async_wait`: 8
+- Benchmark result:
+  - `benchmarks/results/flash_attn_cpp_native_h100_wgmma_forward_parity.jsonl`
+  - command:
+    - `source ./load_modules.sh && CUDA_VISIBLE_DEVICES=0 cc/build/tools/bench_flash_attn --case native_now --backend tyr_runtime,torch_sdpa --warmup 3 --iters 10 --repeats 2 --jsonl-out benchmarks/results/flash_attn_cpp_native_h100_wgmma_forward_parity.jsonl --jsonl-stdout`
+  - `native_dense_128x64`: Tyr `0.216733 ms`, SDPA `0.202832 ms`,
+    `correctnessOk=true`, `speedupVsSdpaP50=0.935862`.
+  - `native_dense_768x64`: Tyr `0.498877 ms`, SDPA `0.215072 ms`,
+    `correctnessOk=true`, `speedupVsSdpaP50=0.431112`.
+- Explicit ThunderKittens reference checked:
+  - TK forward uses `warpgroup::mm_ABt(att_block, q_smem[warpgroupid],
+    k_smem[stage])`, then `warpgroup::mma_AB(o_reg, att_block_mma,
+    v_smem[stage])`, with `warpgroup::mma_async_wait()` around each group.
+  - TK backward uses `warpgroup::mma_ABt` / `warpgroup::mm_ABt` for score and
+    dP, `warpgroup::mma_AB` for dV and dK, and a KV-owned final store.
+- Remaining parity gaps after this attempt, even if it builds:
+  - [~] Generated forward math is WGMMA-like at the call level, but performance
+    did not improve. ptxas reports WGMMA serialization from insufficient
+    register resources, which is consistent with missing TK warpgroup role and
+    register allocation structure.
+  - [~] Tyr still uses register-resident Q for the forward score matmul; TK uses
+    shared `q_smem[warpgroupid]` with three consumer warpgroups.
+  - [ ] Backward math still needs WGMMA conversion in the KV sweep.
+  - [ ] Full schedule parity still needs loader/store warp roles, phase-flipped
+    semaphores, and fused dQ store-add.

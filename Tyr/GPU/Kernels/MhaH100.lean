@@ -74,15 +74,13 @@ def tkFlashAttnFwd2Block
     let p ← allocRT .BFloat16 tileSize tileSize
 
     asyncLoadGlobalPair kShared k_ptr (coord.withRow kvIdx.id) vShared v_ptr (coord.withRow kvIdx.id) kvSem
-    load k kShared
-    load v vShared
-
-    mmaT s q k s
+    warpgroupMmT s q kShared
+    mmaAsyncWait
     scalarMul s s scale
     onlineSoftmax s o softmaxState
     convert p s
-    mma o p v o
-    groupSync 4 4
+    warpgroupMma o p vShared
+    mmaAsyncWait
   finalizeSoftmax o softmaxState
 
   let oBf16 ← allocRT .BFloat16 tileSize tileSize
@@ -130,15 +128,13 @@ def tkFlashAttnFwd2BlockLse
     let p ← allocRT .BFloat16 tileSize tileSize
 
     asyncLoadGlobalPair kShared k_ptr (coord.withRow kvIdx.id) vShared v_ptr (coord.withRow kvIdx.id) kvSem
-    load k kShared
-    load v vShared
-
-    mmaT s q k s
+    warpgroupMmT s q kShared
+    mmaAsyncWait
     scalarMul s s scale
     onlineSoftmax s o softmaxState
     convert p s
-    mma o p v o
-    groupSync 4 4
+    warpgroupMma o p vShared
+    mmaAsyncWait
   finalizeSoftmax o softmaxState
   let lse ← computeLSE softmaxState
 
@@ -191,15 +187,13 @@ def tkMhaH100Fwd2Block
     let p ← allocRT .BFloat16 tileSize tileSize
 
     asyncLoadGlobalPair kShared k_ptr (coord.withRow kvIdx.id) vShared v_ptr (coord.withRow kvIdx.id) kvSem
-    load k kShared
-    load v vShared
-
-    mmaT s q k s
+    warpgroupMmT s q kShared
+    mmaAsyncWait
     scalarMul s s scale
     onlineSoftmax s o softmaxState
     convert p s
-    mma o p v o
-    groupSync 4 4
+    warpgroupMma o p vShared
+    mmaAsyncWait
   finalizeSoftmax o softmaxState
   let l ← computeLSE softmaxState
   scalarMulVec l l lScale
@@ -586,15 +580,13 @@ def tkFlashAttnFwd12Block
     let p ← allocRT .BFloat16 tileSize tileSize
 
     asyncLoadGlobalPair kShared k_ptr (coord.withRow kvIdx.id) vShared v_ptr (coord.withRow kvIdx.id) kvSem
-    load k kShared
-    load v vShared
-
-    mmaT s q k s
+    warpgroupMmT s q kShared
+    mmaAsyncWait
     scalarMul s s scale
     onlineSoftmax s o softmaxState
     convert p s
-    mma o p v o
-    groupSync 4 4
+    warpgroupMma o p vShared
+    mmaAsyncWait
   finalizeSoftmax o softmaxState
 
   let oBf16 ← allocRT .BFloat16 tileSize tileSize
@@ -641,15 +633,13 @@ def tkFlashAttnFwd12BlockLse
     let p ← allocRT .BFloat16 tileSize tileSize
 
     asyncLoadGlobalPair kShared k_ptr (coord.withRow kvIdx.id) vShared v_ptr (coord.withRow kvIdx.id) kvSem
-    load k kShared
-    load v vShared
-
-    mmaT s q k s
+    warpgroupMmT s q kShared
+    mmaAsyncWait
     scalarMul s s scale
     onlineSoftmax s o softmaxState
     convert p s
-    mma o p v o
-    groupSync 4 4
+    warpgroupMma o p vShared
+    mmaAsyncWait
   finalizeSoftmax o softmaxState
   let lse ← computeLSE softmaxState
 
@@ -701,15 +691,13 @@ def tkMhaH100Fwd12Block
     let p ← allocRT .BFloat16 tileSize tileSize
 
     asyncLoadGlobalPair kShared k_ptr (coord.withRow kvIdx.id) vShared v_ptr (coord.withRow kvIdx.id) kvSem
-    load k kShared
-    load v vShared
-
-    mmaT s q k s
+    warpgroupMmT s q kShared
+    mmaAsyncWait
     scalarMul s s scale
     onlineSoftmax s o softmaxState
     convert p s
-    mma o p v o
-    groupSync 4 4
+    warpgroupMma o p vShared
+    mmaAsyncWait
   finalizeSoftmax o softmaxState
   let l ← computeLSE softmaxState
   scalarMulVec l l lScale
