@@ -1659,3 +1659,25 @@ ThunderKittens counterparts instead of parallel educational shims.
   - [ ] Backward math still needs WGMMA conversion in the KV sweep.
   - [ ] Full schedule parity still needs loader/store warp roles, phase-flipped
     semaphores, and fused dQ store-add.
+
+### 2026-04-23 Shared-Q WGMMA Finding
+
+- Attempted the next mechanical TK alignment: feed the forward score matmul from
+  shared Q/K tiles instead of register Q plus shared K.
+- Result:
+  - [x] The generated call changed to TK's shared/shared shape,
+    `warpgroup::mm_ABt(scores, q_smem, k_smem)`.
+  - [x] `nvcc` rejected the current 64x64 destination tile with TK's
+    `static_assert(D::height == 1)`.
+  - [x] This matches TK source: the shared/shared overload consumes a 64-row
+    shared tile but writes one 16-row register tile per warp/consumer group.
+  - [x] Added typed shared/shared primitive names with that constraint:
+    `warpgroupMmSharedT64x16`, `warpgroupMmaSharedT64x16`, and AB variants.
+- Updated gap list:
+  - [~] The DSL now has a typed representation of TK's shared/shared 64-to-16
+    WGMMA primitive, but the MHA forward loop still needs 16-row score/output
+    subtiles and a way to assemble/store the four row groups.
+  - [ ] Add explicit warpgroup role/subtile APIs before trying shared-Q forward
+    again.
+  - [ ] Once 16-row subtiles exist, re-run the shared-Q forward test and check
+    whether ptxas WGMMA serialization disappears.
