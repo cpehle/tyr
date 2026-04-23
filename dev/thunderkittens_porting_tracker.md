@@ -35,6 +35,56 @@ into the Lean GPU catalog so that:
 
 ## Training Integration Log (H100-First)
 
+### 2026-04-23
+
+Performance-first checkpoint:
+
+- [x] Rebuilt the vendored ThunderKittens H100 MHA extension for Python 3.12
+  using:
+  - `module load PyTorch/2.7.1-foss-2024a-CUDA-12.6.0`
+  - `module load CUDA/12.9.1`
+- [x] Confirmed CUDA 12.6 is not sufficient for this vendored TK source on this
+  host:
+  - the compile fails on `cudaLaunchAttributePreferredClusterDimension`,
+  - no compatibility shim was added.
+- [x] Added the vendored-TK baseline harness:
+  - [benchmarks/bench_tk_mha_h100.py](/grid/zador/home/pehle/dev/tyr/benchmarks/bench_tk_mha_h100.py)
+- [x] Switched [cc/tools/bench_flash_attn.cpp](/grid/zador/home/pehle/dev/tyr/cc/tools/bench_flash_attn.cpp)
+  to CUDA-event timing for kernel-style comparison.
+- [x] Captured benchmark artifacts:
+  - [benchmarks/results/flash_attn_cpp_native_h100_cuda_event.jsonl](/grid/zador/home/pehle/dev/tyr/benchmarks/results/flash_attn_cpp_native_h100_cuda_event.jsonl)
+  - [benchmarks/results/thunderkittens_mha_h100_cuda_event.jsonl](/grid/zador/home/pehle/dev/tyr/benchmarks/results/thunderkittens_mha_h100_cuda_event.jsonl)
+- [x] Direct comparable row:
+  - row: `native_dense_768x64`, BF16, non-causal, fwd+bwd, `B=1,H=1`
+  - Tyr runtime: `1.27995 ms`
+  - vendored ThunderKittens: `0.0889981 ms`
+  - current gap: Tyr is `14.38x` slower than vendored TK.
+- [x] Non-comparable row:
+  - `native_dense_128x64` is kept for Tyr correctness smoke,
+  - vendored TK does not provide a valid row there.
+
+Gap list:
+
+- [x] Generated Tyr bridge is correctness-green on the fixed native rows.
+- [x] Vendored TK is correctness-green on the direct comparable `768x64` row.
+- [~] Tyr benchmark timing is now CUDA-event based, but TK still runs through a
+  Python PyTorch extension while Tyr runs through the C++ bridge.
+- [~] Generated backward is structurally not TK-like yet:
+  - Tyr: split `dQ` kernel plus separate K/V sweep kernel,
+  - TK: one dynamic-shared pipelined backward kernel with loader/store warps and
+    two compute warpgroups.
+- [~] Generated sync is too local/granular relative to TK:
+  - TK syncs around semaphore readiness and real shared-memory handoffs,
+  - Tyr codegen still emits many `warp::sync(0)` barriers.
+- [ ] Add dynamic shared-memory allocation to generated Hopper kernels.
+- [ ] Add launch-time dynamic shared-memory attributes to generated wrappers.
+- [ ] Add first-class TMA semaphore operations to the DSL/codegen path.
+- [ ] Generate the TK-style D=64 backward sweep before optimizing D=128.
+- [ ] Extend specializations to `seq >= 768`, `seq % 256 == 0`,
+  `headDim in {64,128}` before Qwen/Gemma GQA and causal variants.
+- [ ] Produce one joined benchmark report that lists Tyr, vendored TK, and SDPA
+  rows side by side from the JSONL artifacts.
+
 ### 2026-04-22
 
 Current working checklist:
