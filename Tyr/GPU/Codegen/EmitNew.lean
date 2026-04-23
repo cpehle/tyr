@@ -320,13 +320,13 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout)
     -- source comment so the emitted C++ documents the intended semantics.
     match layout with
     | .Row =>
-      s!"{indent}__shared__ st<{dtype.toCpp}, {rows}, {cols}> {v.toIdent}; // layout: row_l\n"
+      s!"{indent}__shared__ KITTENS_ALIGN_AS(1024) st<{dtype.toCpp}, {rows}, {cols}> {v.toIdent}; // layout: row_l\n"
     | .Col =>
       -- TK has no native col-layout shared tile; the tile is physically
       -- row-major in SMEM and the Lean `.Col` annotation indicates the
       -- producer/consumer loads it transposed (see RT col_l ops that pair
       -- with this ST). Emit a tag comment so callers can audit this.
-      s!"{indent}__shared__ st<{dtype.toCpp}, {rows}, {cols}> {v.toIdent}; // layout: col_l (Tyr .Col; TK has no col-layout ST, traversed transposed)\n"
+      s!"{indent}__shared__ KITTENS_ALIGN_AS(1024) st<{dtype.toCpp}, {rows}, {cols}> {v.toIdent}; // layout: col_l (Tyr .Col; TK has no col-layout ST, traversed transposed)\n"
   | .declRV v dtype len =>
     s!"{indent}rv<{dtype.toCpp}, {len}{rvLayoutSuffix rvLayouts v}> {v.toIdent};\n"
   | .declSV v dtype len =>
@@ -385,7 +385,9 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout)
     let (rowScale, colScale) := match tileInfo[src]? with
       | some info => (info.rows, info.cols)
       | none => (1, 1)
-    s!"{indent}warp::tma::store_add_async({dst.toIdent}, {src.toIdent}, kittens::coord<>({coordB.toIdent}, {coordD.toIdent}, ({coordR.toIdent} * {rowScale}), ({coordC.toIdent} * {colScale})));\n"
+    s!"{indent}if (kittens::warpid() == 0) \{\n" ++
+    s!"{indent}  warp::tma::store_add_async({dst.toIdent}, {src.toIdent}, kittens::coord<>({coordB.toIdent}, {coordD.toIdent}, ({coordR.toIdent} * {rowScale}), ({coordC.toIdent} * {colScale})));\n" ++
+    s!"{indent}}\n"
   | .layoutDim dst src .Batch =>
     s!"{indent}auto {dst.toIdent} = {src.toIdent}.batch();\n"
   | .layoutDim dst src .Depth =>
@@ -937,7 +939,11 @@ def generateParams (k : Kernel) : String :=
         let tmaTypes := match paramTmaTypes[idx]? with
           | some tys => tys
           | none => #[]
-        out := out.concat s!"{renderGlobalParamCppType p tmaTypes} v{idx}"
+        let cppTy := renderGlobalParamCppType p tmaTypes
+        if tmaTypes.isEmpty then
+          out := out.concat s!"{cppTy} v{idx}"
+        else
+          out := out.concat s!"const __grid_constant__ {cppTy} v{idx}"
       else
         out := out.concat s!"{p.scalarTy.toCpp} v{idx}"
     return out

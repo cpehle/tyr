@@ -1311,3 +1311,95 @@ ThunderKittens counterparts instead of parallel educational shims.
     hidden-symbol errors (`_ZdlPvm`).
 - No linker-selector shim is kept in `scripts/lean_cc_wrapper.sh`; the
   known-working BFD path remains the only supported path on this host.
+
+### 2026-04-22 Store-Add Accumulation Pass
+
+- New direction after comparing Tyr's generated CUDA with
+  `thirdparty/ThunderKittens/kernels/attention/mha_h100/mha_h100.cu`:
+  - ThunderKittens accumulates `kg_reg` / `vg_reg` across query tiles inside
+    the backward kernel and emits final KV gradients with
+    `warp::tma::store_add_async`,
+  - Tyr's previous runtime path wrote q-block-major `dK` / `dV` partial stacks
+    and reduced those stacks after the kernel,
+  - that external partial-reduction contract was correct for the fixed rows but
+    both slower and less general than the ThunderKittens contract.
+- Current implementation changes in flight:
+  - `Tyr/GPU/Kernels/MhaH100.lean` now stores `dK` / `dV` contributions to
+    final `[1, 1, seq, 64]` buffers with `storeGlobalAdd`,
+  - the kernels issue `warp::tma::store_async_wait()` after the async
+    store-adds, matching the important completion wait in TK `kv_store`,
+  - `cc/src/tyr_ops.cpp` now allocates final zeroed `dK` / `dV` tensors and no
+    longer calls a host-side stacked-partial reduction,
+  - raw validation runners and the training demo now consume final gradients
+    directly under `contract=store_add_accum`.
+- Validation status:
+  - [x] Identify that TK's production path does not use Tyr's external partial
+    stack reduction contract.
+  - [x] Move the native runtime bridge to final dK/dV buffers.
+  - [x] Update raw example and training callers to the final-gradient contract.
+  - [~] Rebuild the generated `Tyr_GPU_Kernels_MhaH100.cu` and confirm it emits
+    `store_add_async` plus `store_async_wait`.
+  - [ ] Re-run raw 128x64 and 768x64 parity on one H100.
+  - [ ] Re-run the compiled C++ bridge benchmark and compare against the
+    previous `native_dv` JSONL.
+- Gap list:
+  - [x] Remove the largest obvious performance tax: PyTorch-side reduction of
+    q-major `dK` / `dV` partial stacks.
+  - [~] Close the semantic gap to TK's final-gradient store-add contract.
+  - [ ] Replace per-q-block CTAs that store-add every KV tile with a more
+    TK-like KV-centric sweep that accumulates across query tiles in registers.
+  - [ ] Revisit generic `sync` placement after the store-add path is correct;
+    TK's syncs are tied to pipeline handoffs and async store completion, not
+    blanket barriers after every logical operation.
+  - [ ] Add head-dim 128 coverage and decide how Qwen/Gemma head-dim 256 should
+    route.
+
+### 2026-04-23 Store-Add Fault Resolution
+
+- The illegal-memory-access blocker in the store-add backward route was not a
+  math-gradient issue.
+- Root cause:
+  - ThunderKittens requires TMA descriptor-bearing global-layout arguments to
+    be grid-constant kernel parameters,
+  - ThunderKittens also allocates TMA-swizzled shared tiles through
+    `tma_swizzle_allocator`, giving them 1024-byte alignment,
+  - Tyr's generated CUDA passed `gl<..., st<...>>` descriptor objects by value
+    as ordinary kernel parameters and emitted plain static `__shared__ st<>`
+    objects.
+- Codegen fix:
+  - pointer parameters with inferred TMA descriptors now emit as
+    `const __grid_constant__ gl<..., st<...>>`,
+  - generated shared tiles now emit `__shared__ KITTENS_ALIGN_AS(1024) st<...>`,
+  - the H100 MHA backward store-add sections use `group<4>::sync(4)`, one
+    issuing warp, `warp::tma::store_add_async`, and
+    `warp::tma::store_async_wait()`.
+- Validation:
+  - blocking one-H100 runtime check:
+    - `CUDA_VISIBLE_DEVICES=0 CUDA_LAUNCH_BLOCKING=1 cc/build/tools/bench_flash_attn --case native_dense_128x64 --backend tyr_runtime --warmup 0 --iters 1 --repeats 1 --jsonl-stdout`
+    - result: `correctnessOk=true`
+    - `dkMae=4.58404e-05`
+    - `dvMae=0`
+  - compiled one-H100 bridge benchmark:
+    - `source ./load_modules.sh && CUDA_VISIBLE_DEVICES=0 cc/build/tools/bench_flash_attn --case native_now --backend all --warmup 5 --iters 20 --repeats 3 --jsonl-out benchmarks/results/flash_attn_cpp_native_h100_store_add_gridconst.jsonl --jsonl-stdout`
+  - `native_dense_128x64`:
+    - `torch_sdpa p50_ms=0.147628`
+    - `tyr_runtime p50_ms=0.160957`
+    - `correctnessOk=true`
+    - `speedupVsSdpaP50=0.91719`
+  - `native_dense_768x64`:
+    - `torch_sdpa p50_ms=0.177279`
+    - `tyr_runtime p50_ms=0.522411`
+    - `correctnessOk=true`
+    - `speedupVsSdpaP50=0.339348`
+- Updated gap list:
+  - [x] Diagnose and fix the TMA store-add illegal memory access.
+  - [x] Verify native dK and dV parity through the compiled C++ runtime bridge.
+  - [x] Remove the external q-major partial-stack reduction from the runtime
+    bridge path.
+  - [~] Generalize the codegen contract for TMA: current descriptor and shared
+    alignment requirements are encoded, but issuer policy is still hardcoded for
+    the single-warpgroup MHA kernels.
+  - [ ] Close the performance gap with a TK-like KV-centric backward sweep that
+    accumulates across query tiles in registers before one final store-add.
+  - [ ] Add head-dim 128 and GQA/MQA routes needed by Qwen/Gemma-style model
+    shapes.
