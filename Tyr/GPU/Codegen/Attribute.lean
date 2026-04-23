@@ -407,6 +407,10 @@ def generateCppLauncherCode (kernel : Kernel) : String :=
   "    auto cuda_stream = reinterpret_cast<cudaStream_t>(stream);\n" ++
   "    dim3 grid(grid_x, grid_y, grid_z);\n" ++
   "    dim3 block(block_x, block_y, block_z);\n\n" ++
+  "    if (shared_mem > 0) {\n" ++
+  "      if (auto err = cudaFuncSetAttribute(" ++ name ++ ", cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(shared_mem)); err != cudaSuccess)\n" ++
+  "        return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string(cudaGetErrorString(err))));\n" ++
+  "    }\n\n" ++
   "    " ++ name ++ "<<<grid, block, shared_mem, cuda_stream>>>(" ++ argStr ++ ");\n\n" ++
   "    if (auto err = cudaGetLastError(); err != cudaSuccess)\n" ++
   "      return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string(cudaGetErrorString(err))));\n" ++

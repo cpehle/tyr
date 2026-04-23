@@ -902,6 +902,23 @@ def storeMinAsync {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
     (src : RT dtype rows cols layout) : KernelM Unit := do
   emit (.storeMinAsync dst.id src.id)
 
+/-- Commit the current async TMA store group. -/
+def tmaStoreCommitGroup : KernelM Unit := do
+  emit .tmaStoreCommitGroup
+
+/-- Wait for outstanding async TMA stores issued by this warp. -/
+def tmaStoreAsyncWait : KernelM Unit := do
+  emit .tmaStoreAsyncWait
+
+/-- CTA-wide synchronization. Use sparingly: TK kernels prefer semaphore
+    handoffs, but setup/init paths need a full block rendezvous. -/
+def blockSync : KernelM Unit := do
+  emit .blockSync
+
+/-- ThunderKittens group synchronization (`group<N>::sync(barrierId)`). -/
+def groupSync (warps barrierId : Nat) : KernelM Unit := do
+  emit (.groupSync warps barrierId)
+
 /-- TMA load from global pointer to shared tile -/
 def tmaLoad {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
     (dst : ST dtype rows cols layout)
@@ -1080,9 +1097,10 @@ def allocSemaphore : KernelM Semaphore := do
   emit (.declSemaphore v)
   pure ⟨v⟩
 
-/-- Initialize semaphore with count -/
-def initSemaphore (sem : Semaphore) (count : Nat := 1) : KernelM Unit := do
-  emit (.semaphore (.Init count) sem.id)
+/-- Initialize semaphore with expected arriving threads and transactions. -/
+def initSemaphore (sem : Semaphore) (threadCount : Nat := 1) (transactionCount : Nat := 0)
+    : KernelM Unit := do
+  emit (.semaphore (.Init threadCount transactionCount) sem.id)
 
 /-- Invalidate semaphore -/
 def invalidateSemaphore (sem : Semaphore) : KernelM Unit := do
@@ -1092,9 +1110,13 @@ def invalidateSemaphore (sem : Semaphore) : KernelM Unit := do
 def expectBytes (sem : Semaphore) (bytes : Nat) : KernelM Unit := do
   emit (.semaphore (.Expect bytes) sem.id)
 
-/-- Wait on semaphore -/
+/-- Wait on semaphore phase bit. -/
+def waitSemaphorePhase (sem : Semaphore) (phase : Nat) : KernelM Unit := do
+  emit (.semaphore (.Wait phase) sem.id)
+
+/-- Wait on semaphore phase 0. -/
 def waitSemaphore (sem : Semaphore) : KernelM Unit := do
-  emit (.semaphore .Wait sem.id)
+  waitSemaphorePhase sem 0
 
 /-- Arrive at semaphore with transaction count -/
 def arriveSemaphore (sem : Semaphore) (count : Nat := 1) : KernelM Unit := do
