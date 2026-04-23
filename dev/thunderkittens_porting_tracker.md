@@ -1230,3 +1230,86 @@ only need role assignment (MhaH100LCF, Hedgehog, LinearAttn).
     the updated static bridge.
   - [ ] Add forward-only inference timing rows.
   - [ ] Close the optimization gap versus PyTorch SDPA.
+
+## 2026-04-22 ThunderKittens-Aligned Store-Add Accumulation
+
+- Compared the current Tyr backward contract against ThunderKittens
+  `mha_h100.cu`.
+- Key finding:
+  - TK accumulates `dK` / `dV` for a KV tile in registers across query tiles,
+    then writes final gradients through `warp::tma::store_add_async` and
+    `warp::tma::store_async_wait()`,
+  - Tyr was still writing one q-major partial tile per `(qBlock, kvBlock)` and
+    reducing with PyTorch/Torch tensor ops after the kernel,
+  - that explains most of the benchmark gap attributed to partial reduction.
+- Implementation moved in that direction:
+  - `Tyr/GPU/Kernels/MhaH100.lean` now writes `dK` / `dV` with
+    `storeGlobalAdd` into final zeroed gradient tensors,
+  - the kernels wait on async TMA stores before reusing shared staging,
+  - `cc/src/tyr_ops.cpp` now returns direct native `dK` / `dV` tensors and
+    removes `reduce_stacked_partials`,
+  - `RunMhaH100`, `RunMhaH100Seq768`, `RunMhaH100Train`, and the typed
+    `Tyr.GPU.Ops.MhaH100` wrapper now use `contract=store_add_accum`.
+- TODO state:
+  - [x] Create an intermediate checkpoint commit before this riskier kernel
+    contract change.
+  - [x] Check TK source for whether the extra syncs are semantically necessary.
+  - [x] Replace runtime bridge partial-stack outputs with direct gradient
+    buffers.
+  - [~] Finish normal Lake rebuild / generated CUDA refresh for the new
+    store-add path.
+  - [ ] Confirm generated CUDA contains `store_add_async` and
+    `store_async_wait` for both 2-block and 12-block backward kernels.
+  - [ ] Re-run raw 128x64 and 768x64 parity.
+  - [ ] Re-run one-H100 C++ bridge benchmark and quantify whether removing the
+    partial-stack reduction improves `tyr_runtime`.
+  - [ ] If parity fails, compare generated C++ against TK's `compute_bwd_loop`
+    and `kv_store` before touching math again.
+
+## 2026-04-23 Store-Add Route Fixed and Benchmarked
+
+- The store-add route failed with `an illegal memory access was encountered`
+  inside `tkMhaH100Bwd2BlockPartials`.
+- Diagnosis from comparing generated C++ to ThunderKittens:
+  - [x] `warp::tma::store_add_async` must be issued by one warp per shared
+    tile and followed by an async-store wait before shared-buffer reuse.
+  - [x] Shared tiles used by TMA need the TK swizzle-alignment contract
+    (`tma_swizzle_allocator` in TK, now `KITTENS_ALIGN_AS(1024)` in generated
+    Tyr static shared declarations).
+  - [x] `gl<..., st<...>>` parameters with embedded `CUtensorMap` descriptors
+    must be `const __grid_constant__`, matching TK's descriptor-bearing
+    globals.
+  - [~] The current issuer policy is correct for the single-warpgroup generated
+    MHA kernels; a future generalized backend needs explicit issuer policy
+    rather than a hidden `warpid()==0` assumption.
+- Implemented:
+  - [x] Aligned generated `st<>` shared tile declarations.
+  - [x] Emitted `const __grid_constant__` for TMA descriptor-bearing kernel
+    parameters.
+  - [x] Added `group<4>::sync(4)` around the H100 MHA dK/dV TMA store-add
+    staging.
+  - [x] Regenerated `cc/src/generated/Tyr_GPU_Kernels_MhaH100.cu`.
+  - [x] Rebuilt `cc/build/tools/bench_flash_attn`.
+- Validation:
+  - [x] `CUDA_LAUNCH_BLOCKING=1` runtime route no longer faults for
+    `native_dense_128x64`.
+  - [x] compiled C++ bridge benchmark passes fwd+bwd correctness for
+    `native_dense_128x64`.
+  - [x] compiled C++ bridge benchmark passes fwd+bwd correctness for
+    `native_dense_768x64`.
+- Benchmark result:
+  - `benchmarks/results/flash_attn_cpp_native_h100_store_add_gridconst.jsonl`
+  - `native_dense_128x64`: Tyr `0.160957 ms`, PyTorch SDPA `0.147628 ms`,
+    `speedupVsSdpaP50=0.91719`.
+  - `native_dense_768x64`: Tyr `0.522411 ms`, PyTorch SDPA `0.177279 ms`,
+    `speedupVsSdpaP50=0.339348`.
+- Next TODO:
+  - [~] Keep the current store-add route as the training-correct bridge path for
+    fixed 128/768 x 64 rows.
+  - [ ] Replace the q-block outer loop store-add pattern with a TK-like
+    KV-centric backward kernel that accumulates dK/dV across query tiles before
+    one final store-add.
+  - [ ] Add forward-only inference benchmark rows for Qwen/Gemma-relevant
+    shapes.
+  - [ ] Add shape-specialized codegen coverage for head-dim 128, GQA/MQA, and
+    longer sequence lengths.

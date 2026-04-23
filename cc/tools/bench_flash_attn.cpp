@@ -13,6 +13,7 @@
 
 #include <ATen/ATen.h>
 #include <c10/cuda/CUDAFunctions.h>
+#include <cuda_runtime_api.h>
 #include <lean/lean.h>
 #include <torch/torch.h>
 
@@ -159,7 +160,12 @@ Options parse_args(int argc, char** argv) {
 
 void sync_cuda() {
   if (torch::cuda::is_available()) {
-    c10::cuda::device_synchronize();
+    const auto err = cudaDeviceSynchronize();
+    if (err != cudaSuccess) {
+      std::cerr << "bench_flash_attn: cudaDeviceSynchronize failed: "
+                << cudaGetErrorString(err) << "\n";
+      std::exit(3);
+    }
   }
 }
 

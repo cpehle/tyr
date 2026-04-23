@@ -56,7 +56,7 @@ structure FwdCtxDispatch (seq : UInt64) where
 class Variant (seq kvBlocks : UInt64) where
   launchFwd :
       BF16 seq → BF16 seq → BF16 seq → BF16 seq → L kvBlocks → LaunchCfg → IO Unit
-  launchBwdPartials :
+  launchBwd :
       BF16 seq → BF16 seq → BF16 seq → BF16 seq → L kvBlocks → L kvBlocks →
       F32 seq → F32 seq → F32 seq → LaunchCfg → IO Unit
 
@@ -67,8 +67,8 @@ instance : Variant 128 2 where
       cfg.blockX cfg.blockY cfg.blockZ
       cfg.sharedMem cfg.stream
 
-  launchBwdPartials q k v dO lOut dVec dQ dKPart dVPart cfg := do
-    tkMhaH100Bwd2BlockPartials.launch q k v dO lOut dVec dQ dKPart dVPart 128 64
+  launchBwd q k v dO lOut dVec dQ dK dV cfg := do
+    tkMhaH100Bwd2BlockPartials.launch q k v dO lOut dVec dQ dK dV 128 64
       cfg.gridX cfg.gridY cfg.gridZ
       cfg.blockX cfg.blockY cfg.blockZ
       cfg.sharedMem cfg.stream
@@ -80,8 +80,8 @@ instance : Variant 768 12 where
       cfg.blockX cfg.blockY cfg.blockZ
       cfg.sharedMem cfg.stream
 
-  launchBwdPartials q k v dO lOut dVec dQ dKPart dVPart cfg := do
-    tkMhaH100Bwd12BlockPartials.launch q k v dO lOut dVec dQ dKPart dVPart 768 64
+  launchBwd q k v dO lOut dVec dQ dK dV cfg := do
+    tkMhaH100Bwd12BlockPartials.launch q k v dO lOut dVec dQ dK dV 768 64
       cfg.gridX cfg.gridY cfg.gridZ
       cfg.blockX cfg.blockY cfg.blockZ
       cfg.sharedMem cfg.stream
@@ -108,28 +108,16 @@ def mhaBwd {seq kvBlocks : UInt64} [Variant seq kvBlocks]
     (q k v dO : BF16 seq) (ctx : FwdCtx seq kvBlocks) (stream : UInt64 := 0)
     : IO (F32 seq × F32 seq × F32 seq) := do
   let cfg := LaunchCfg.default kvBlocks stream
-  let qBlocks : UInt64 := seq / 64
 
   let dVec : L kvBlocks := torch.mul_scalar ctx.lOut 0.0
   launchBwdPrep (seq := seq) (kvBlocks := kvBlocks) dO ctx.out dVec cfg
 
   let dQ : F32 seq := torch.zeros #[1, 1, seq, 64] false q.device
-  let partialSeed : T #[1, 1, kvBlocks * seq, 64] := torch.zeros #[1, 1, kvBlocks * seq, 64] false q.device
-  let dKStack : T #[1, 1, kvBlocks * seq, 64] := torch.mul_scalar partialSeed 1.0
-  let dVStack : T #[1, 1, kvBlocks * seq, 64] := torch.mul_scalar partialSeed 2.0
+  let dK : F32 seq := torch.zeros #[1, 1, seq, 64] false q.device
+  let dV : F32 seq := torch.zeros #[1, 1, seq, 64] false q.device
 
-  Variant.launchBwdPartials (seq := seq) (kvBlocks := kvBlocks)
-    q k v dO ctx.lOut dVec dQ dKStack dVStack cfg
-  -- The kernel stacks one 64x64 partial per `(qBlock, kvBlock)` in q-block-major
-  -- order. Make that contract explicit instead of depending on `qBlocks = kvBlocks`.
-  let dKTiles : T #[qBlocks, kvBlocks, 64, 64] := torch.reshape dKStack #[qBlocks, kvBlocks, 64, 64]
-  let dVTiles : T #[qBlocks, kvBlocks, 64, 64] := torch.reshape dVStack #[qBlocks, kvBlocks, 64, 64]
-  let dKByKv : T #[kvBlocks, 64, 64] := nn.sumDim dKTiles 0 false
-  let dVByKv : T #[kvBlocks, 64, 64] := nn.sumDim dVTiles 0 false
-  let dK2d : T #[seq, 64] := torch.reshape dKByKv #[seq, 64]
-  let dV2d : T #[seq, 64] := torch.reshape dVByKv #[seq, 64]
-  let dK : F32 seq := nn.unsqueeze (nn.unsqueeze dK2d 0) 0
-  let dV : F32 seq := nn.unsqueeze (nn.unsqueeze dV2d 0) 0
+  Variant.launchBwd (seq := seq) (kvBlocks := kvBlocks)
+    q k v dO ctx.lOut dVec dQ dK dV cfg
   pure (dQ, dK, dV)
 
 private def sdpaFwdPortable {seq : UInt64}

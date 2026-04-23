@@ -228,12 +228,12 @@ def tkMhaH100BwdPrep2Block
   storeVec dShared dVec
   storeVecGlobalRow d_ptr dShared coord
 
-/-- `mha_h100` backward (2 blocks, non-causal) with stacked `dK`/`dV`
-    partial outputs. The launcher name keeps the older `...Partials` suffix
-    for ABI stability. `dK_part_ptr` and `dV_part_ptr` point at
-    `[1, 1, kvBlocks * seq, 64]` buffers laid out q-block-major:
-    `stack_row = qBlock * kvBlocks + kvBlock`.
-    Callers reduce those stacks across query blocks. -/
+/-- `mha_h100` backward (2 blocks, non-causal) with in-kernel `dK`/`dV`
+    accumulation. The launcher name keeps the older `...Partials` suffix for
+    ABI stability, but `dK_part_ptr` and `dV_part_ptr` now point at final
+    zero-initialized `[1, 1, seq, 64]` buffers. Each query tile contributes to
+    the KV tile with TMA store-add, matching ThunderKittens' `kv_store`
+    accumulation contract more closely than the earlier external partial stack. -/
 @[gpu_kernel .SM90]
 def tkMhaH100Bwd2BlockPartials
     (q_ptr : GPtr GpuFloat.BFloat16)
@@ -327,19 +327,15 @@ def tkMhaH100Bwd2BlockPartials
     swapLayout kCol k
     mma dQ dSRow kCol dQ
 
-    let qBlock : KVal UInt32 := ⟨coord.r, "q_block"⟩
-    let kvBlock : KVal UInt32 := ⟨kvIdx.id, "kv_block"⟩
-    let numKv : KVal UInt32 ← constIntVal numKvBlocks "num_kv_blocks"
-    let stackBase ← scalarMulVal qBlock numKv "dkv_stack_base"
-    let stackRow ← scalarAddVal stackBase kvBlock "dkv_stack_row"
-    let dkvCoord := coord.withRow stackRow.id
+    let dkvCoord := coord.withRow kvIdx.id
     store dKShared dKPart
-    sync
-    storeGlobal dK_part_ptr dKShared dkvCoord
+    emitRaw "group<4>::sync(4);"
+    storeGlobalAdd dK_part_ptr dKShared dkvCoord
     store dVShared dVPart
-    sync
-    storeGlobal dV_part_ptr dVShared dkvCoord
-    sync
+    emitRaw "group<4>::sync(4);"
+    storeGlobalAdd dV_part_ptr dVShared dkvCoord
+    emitRaw "warp::tma::store_async_wait();"
+    emitRaw "group<4>::sync(4);"
 
   store dKShared dQ
   sync
@@ -524,10 +520,10 @@ def tkMhaH100Fwd12Block
   storeVec lShared l
   storeVecGlobalRow l_ptr lShared coord
 
-/-- `mha_h100` backward for 12 KV blocks (`seq=768`, non-causal) with stacked
-    `dK`/`dV` partial outputs. As above, the function name keeps the older
-    `...Partials` suffix for ABI stability while callers reduce the
-    q-block-major `[1, 1, kvBlocks * seq, 64]` stacks. -/
+/-- `mha_h100` backward for 12 KV blocks (`seq=768`, non-causal) with in-kernel
+    `dK`/`dV` accumulation. As above, the function name keeps the older
+    `...Partials` suffix for ABI stability while callers pass final
+    zero-initialized `[1, 1, seq, 64]` gradient buffers. -/
 @[gpu_kernel .SM90]
 def tkMhaH100Bwd12BlockPartials
     (q_ptr : GPtr GpuFloat.BFloat16)
@@ -620,19 +616,15 @@ def tkMhaH100Bwd12BlockPartials
     swapLayout kCol k
     mma dQ dSRow kCol dQ
 
-    let qBlock : KVal UInt32 := ⟨coord.r, "q_block"⟩
-    let kvBlock : KVal UInt32 := ⟨kvIdx.id, "kv_block"⟩
-    let numKv : KVal UInt32 ← constIntVal numKvBlocks "num_kv_blocks"
-    let stackBase ← scalarMulVal qBlock numKv "dkv_stack_base"
-    let stackRow ← scalarAddVal stackBase kvBlock "dkv_stack_row"
-    let dkvCoord := coord.withRow stackRow.id
+    let dkvCoord := coord.withRow kvIdx.id
     store dKShared dKPart
-    sync
-    storeGlobal dK_part_ptr dKShared dkvCoord
+    emitRaw "group<4>::sync(4);"
+    storeGlobalAdd dK_part_ptr dKShared dkvCoord
     store dVShared dVPart
-    sync
-    storeGlobal dV_part_ptr dVShared dkvCoord
-    sync
+    emitRaw "group<4>::sync(4);"
+    storeGlobalAdd dV_part_ptr dVShared dkvCoord
+    emitRaw "warp::tma::store_async_wait();"
+    emitRaw "group<4>::sync(4);"
 
   store dKShared dQ
   sync
