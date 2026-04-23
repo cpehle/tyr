@@ -1482,3 +1482,25 @@ only need role assignment (MhaH100LCF, Hedgehog, LinearAttn).
   - [ ] Convert the KV sweep backward contractions to the TK WGMMA forms.
   - [ ] Decide whether the DSL needs explicit producer/consumer warpgroup roles
     before attempting fused dQ store-add again.
+
+## 2026-04-23 Shared-Q WGMMA Experiment
+
+- What I tried:
+  - [x] Replaced the forward score matmul with a shared/shared
+    `warpgroup::mm_ABt(scores, qShared, kShared)` shape in generated CUDA.
+  - [x] Rebuilt the generated CUDA through `make -C cc bench-flash-attn`.
+- Result:
+  - [x] Compile failed in ThunderKittens at
+    `warpgroup.cuh` with `static_assert(D::height == 1)`.
+  - [x] The failure is structurally informative, not a random template issue:
+    Tyr tried to write a 64x64 register tile, while TK's shared/shared WGMMA
+    overload writes a 16x64 register subtile.
+  - [x] Restored the production MHA forward loop to the previously validated
+    register-Q WGMMA route and rebuilt the native benchmark target successfully.
+  - [x] Added typed primitive names for the actual TK shape:
+    `warpgroupMmSharedT64x16`, `warpgroupMmaSharedT64x16`, plus AB forms.
+- Next required DSL/kernel work:
+  - [ ] Represent 16-row WGMMA output subtiles in the H100 attention loop.
+  - [ ] Add warpgroup-id/subtile ownership so four 16-row pieces can cover a
+    64-row query tile.
+  - [ ] Reattempt shared-Q forward only after the subtile ownership model exists.
