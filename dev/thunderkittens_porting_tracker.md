@@ -1523,3 +1523,32 @@ only need role assignment (MhaH100LCF, Hedgehog, LinearAttn).
   - [~] WGMMA serialization warnings remain.
   - [ ] Performance still requires TK-style 16-row consumer subtiles and
     explicit warpgroup role scheduling.
+
+## 2026-04-23 K/V Sweep WGMMA Checkpoint
+
+- Implemented:
+  - [x] Converted KV-sweep `dV += P @ dO` to register/shared
+    `warpgroup::mma_AB`.
+  - [x] Converted KV-sweep `dK += dS @ Q` to register/shared
+    `warpgroup::mma_AB`.
+  - [x] Reused the existing BF16 shared tile and reloaded Q before dK to avoid
+    increasing static shared memory past the H100 ptxas limit hit earlier.
+  - [x] Rebuilt `cc/build/tools/bench_flash_attn`.
+- Structural counts:
+  - `warpgroup::mm_ABt=6`, `warpgroup::mma_AB=10`,
+    `warpgroup::mma_async_wait=16`.
+  - `warp::mma=20`, `warp::sync=0`, `group<4>::sync=18`.
+  - `tma::load_async=46`, `store_commit_group=8`, `store_async_wait=8`.
+- Benchmark:
+  - [x] Wrote `benchmarks/results/flash_attn_cpp_native_h100_bwd_kv_wgmma_reload_q.jsonl`.
+  - `native_dense_128x64`: Tyr `0.196867 ms`, SDPA `0.186461 ms`,
+    gradients correct.
+  - `native_dense_768x64`: Tyr `0.471824 ms`, SDPA `0.188912 ms`,
+    gradients correct.
+- Status:
+  - [x] Correctness remains green after WGMMA dK/dV.
+  - [~] Runtime improves versus the cleaned forward-only WGMMA checkpoint.
+  - [~] The Q reload is a deliberate temporary tradeoff to avoid adding another
+    shared tile before the real TK producer/consumer schedule exists.
+  - [ ] ptxas serialization warnings remain; next work must target TK's
+    16-row consumer subtile/register schedule.

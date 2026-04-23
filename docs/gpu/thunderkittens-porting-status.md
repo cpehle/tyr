@@ -1705,3 +1705,37 @@ ThunderKittens counterparts instead of parallel educational shims.
     output easier to interpret.
   - [ ] This does not close the performance gap; the next required step remains
     TK-style 16-row WGMMA subtiles and warpgroup role structure.
+
+### 2026-04-23 K/V Sweep WGMMA Checkpoint
+
+- Implemented a conservative WGMMA conversion for the KV-owned backward sweep:
+  - [x] `dV += P @ dO` now uses register/shared `warpgroup::mma_AB`.
+  - [x] `dK += dS @ Q` now uses register/shared `warpgroup::mma_AB`.
+  - [x] The implementation reuses the existing BF16 shared staging tile to stay
+    under the 48 KB static shared-memory limit.
+  - [~] Q is reloaded before the `dK` WGMMA because the current DSL does not yet
+    model TK's double-buffered Q/O shared-memory lifetime.
+- Generated-CUDA structural counts after this pass:
+  - `warpgroup::mm_ABt`: 6
+  - `warpgroup::mma_AB`: 10
+  - `warpgroup::mma_async_wait`: 16
+  - `warp::mma`: 20
+  - `warp::sync`: 0
+  - `group<4>::sync`: 18
+  - `tma::load_async`: 46
+  - `store_commit_group`: 8
+  - `store_async_wait`: 8
+- Benchmark result:
+  - `benchmarks/results/flash_attn_cpp_native_h100_bwd_kv_wgmma_reload_q.jsonl`
+  - command:
+    - `source ./load_modules.sh && CUDA_VISIBLE_DEVICES=0 cc/build/tools/bench_flash_attn --case native_now --backend tyr_runtime,torch_sdpa --warmup 3 --iters 10 --repeats 2 --jsonl-out benchmarks/results/flash_attn_cpp_native_h100_bwd_kv_wgmma_reload_q.jsonl --jsonl-stdout`
+  - `native_dense_128x64`: Tyr `0.196867 ms`, SDPA `0.186461 ms`,
+    `correctnessOk=true`, `speedupVsSdpaP50=0.947140`.
+  - `native_dense_768x64`: Tyr `0.471824 ms`, SDPA `0.188912 ms`,
+    `correctnessOk=true`, `speedupVsSdpaP50=0.400387`.
+- Remaining gaps:
+  - [~] This reduces warp-level MMA count and improves latency versus the
+    cleaned forward-only WGMMA checkpoint.
+  - [ ] ptxas still reports WGMMA serialization for forward and KV sweep kernels.
+  - [ ] Full TK parity still needs 16-row consumer subtiles, role-specific
+    register allocation, and fused dQ store-add.
