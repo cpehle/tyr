@@ -10,7 +10,7 @@ import Tyr.GPU.Codegen.TileTypes
 import Tyr.GPU.Codegen.IR
 import Tyr.GPU.Codegen.Monad
 import Tyr.GPU.Codegen.AST
-import Tyr.GPU.Codegen.Ops
+import Tyr.GPU.Codegen.Primitives
 
 namespace Tyr.GPU.Codegen
 
@@ -207,11 +207,15 @@ def attentionBlockIter {blockM blockN headDim : Nat} {inDtype accDtype : GpuFloa
     (state : SoftmaxState accDtype blockM)
     (isCausal : Bool := false)
     (maskVal : Float := -1e10)
+    (hBlockM : blockM % 16 = 0 := by decide)
+    (hBlockN : blockN % 16 = 0 := by decide)
+    (hHeadDim : headDim % 16 = 0 := by decide)
     : KernelM Unit := do
+  let _ := hBlockM; let _ := hBlockN; let _ := hHeadDim
   comment "Compute S = Q @ K^T"
   let scores ← allocRT accDtype blockM blockN .Row
   let zeros ← zeroRT accDtype blockM blockN .Row
-  mmaT scores q k zeros
+  mmaT scores q k zeros hBlockM hHeadDim hBlockN
 
   -- Apply causal mask if needed
   if isCausal then
@@ -226,7 +230,7 @@ def attentionBlockIter {blockM blockN headDim : Nat} {inDtype accDtype : GpuFloa
   convert p scores
 
   comment "Accumulate O += P @ V"
-  mma output p v output
+  mma output p v output hBlockM hBlockN hHeadDim
 
 /-! ## Helper Macros via Syntax Extensions
 
@@ -240,12 +244,12 @@ structure NamedBarrier where
   numThreads : Nat
   deriving Repr
 
-/-- Signal a named barrier (producer side) -/
-def signalBarrier (b : NamedBarrier) : KernelM Unit :=
+/-- Signal a named barrier (producer side) without shadowing the primitive barrier op. -/
+def signalNamedBarrier (b : NamedBarrier) : KernelM Unit :=
   namedBarrierArrive b.id b.numThreads
 
-/-- Wait on a named barrier (consumer side) -/
-def waitBarrier (b : NamedBarrier) : KernelM Unit :=
+/-- Wait on a named barrier (consumer side) without shadowing the primitive barrier op. -/
+def waitNamedBarrier (b : NamedBarrier) : KernelM Unit :=
   namedBarrierSync b.id b.numThreads
 
 /-- Common barrier for query ready signal in FA3 -/

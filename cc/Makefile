@@ -84,6 +84,11 @@ TORCH_CUDA_LINK_FLAGS := -ltorch_cuda -lc10_cuda
 endif
 endif
 
+CUDA_RUNTIME_LINK_FLAGS :=
+ifeq ($(HAS_NVCC),1)
+CUDA_RUNTIME_LINK_FLAGS += -lcudart -lcuda
+endif
+
 # Optional distributed backend toggles. Keep CUDA enabled whenever LibTorch has
 # the CUDA libs, but only enable NCCL-specific code when an NCCL module is
 # actually loaded into the environment.
@@ -102,6 +107,7 @@ SRC_DIR := src
 HDR_DIR := include
 OUT_DIR := build
 TOOLS_DIR := tools
+BENCH_FLASH_ATTN := $(OUT_DIR)/tools/bench_flash_attn
 GPU_STUB_SRC := $(SRC_DIR)/generated/tyr_gpu_kernel_stubs.cpp
 GPU_STUB_SCRIPT := $(TOOLS_DIR)/generate_gpu_kernel_stubs.py
 GPU_STUB_IR_ROOT := ../.lake/build/ir/Tyr/GPU
@@ -139,7 +145,15 @@ APPLE_FRAMEWORK_FLAGS := \
 else
 APPLE_FRAMEWORK_FLAGS :=
 endif
+GPU_CODEGEN_MODULES := $(strip $(TYR_GPU_CODEGEN_MODULE))
+ifeq ($(GPU_CODEGEN_MODULES),)
 CU_SRCS := $(wildcard $(SRC_DIR)/generated/*.cu)
+else ifeq ($(GPU_CODEGEN_MODULES),all)
+CU_SRCS := $(wildcard $(SRC_DIR)/generated/*.cu)
+else
+GPU_CODEGEN_CU_NAMES := $(addsuffix .cu,$(subst .,_,$(GPU_CODEGEN_MODULES)))
+CU_SRCS := $(addprefix $(SRC_DIR)/generated/,$(GPU_CODEGEN_CU_NAMES))
+endif
 ifneq ($(HAS_NVCC),1)
 ifneq ($(strip $(CU_SRCS)),)
 $(warning NVCC not found; disabling CUDA kernel compilation and using CPU stubs)
@@ -171,6 +185,7 @@ LEAN_LIB := $(LEAN_HOME)/lib/lean
 # Shared library link flags
 DYLIB_LINK_FLAGS := -L$(LEAN_LIB) -lleanshared \
 	-L$(TORCH_LIBPATH) -ltorch -ltorch_cpu -lc10 $(TORCH_CUDA_LINK_FLAGS) \
+	$(CUDA_RUNTIME_LINK_FLAGS) \
 	-L$(ARROW_LIBPATH) -larrow -lparquet \
 	-L$(SOXR_LIBPATH) -lsoxr \
 	-Wl,-rpath,$(LEAN_LIB) \
@@ -205,6 +220,8 @@ all: lib dylib
 lib: check-submodules soxr $(OUT_DIR)/$(LIB)
 
 dylib: check-submodules soxr $(OUT_DIR)/$(DYLIB)
+
+bench-flash-attn: check-submodules soxr $(OUT_DIR)/$(DYLIB) $(BENCH_FLASH_ATTN)
 
 soxr: check-submodules $(SOXR_LIB)
 
@@ -253,6 +270,10 @@ $(OUT_DIR)/$(LIB) : $(OBJ_FILES) | check-submodules $(OUT_DIR)
 
 $(OUT_DIR)/$(DYLIB) : $(OBJ_FILES) | check-submodules $(OUT_DIR)
 	$(CXX) $(SHARED_FLAG) -o $@ $^ $(DYLIB_LINK_FLAGS)
+
+$(BENCH_FLASH_ATTN): $(TOOLS_DIR)/bench_flash_attn.cpp $(OUT_DIR)/$(DYLIB) | check-submodules $(OUT_DIR)
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXX_STD_FLAG) -o $@ $< -I$(HDR_DIR) -I$(LEAN_INCLUDE) $(TORCH_INC_FLAGS) $(XLA_INC_FLAGS) $(ARROW_INC_FLAGS) $(SOXR_INC_FLAGS) $(EXTRA_CXX_FLAGS) -L$(OUT_DIR) -l$(LIB_NAME) $(DYLIB_LINK_FLAGS) -Wl,-rpath,$(abspath $(OUT_DIR))
 
 $(OUT_DIR)/%.o : $(SRC_DIR)/%.cpp $(HDR_FILES) | check-submodules $(OUT_DIR)
 	@mkdir -p $(dir $@)

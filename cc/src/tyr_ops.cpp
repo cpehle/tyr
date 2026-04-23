@@ -217,6 +217,19 @@ static int64_t kv_blocks_for(FlashAttnRoute route) {
   return route == FlashAttnRoute::TkMhaH10012Block ? 12 : 2;
 }
 
+static torch::Tensor reduce_stacked_partials(
+    const torch::Tensor& stack,
+    int64_t seq,
+    int64_t kv_blocks) {
+  constexpr int64_t tile_rows = 64;
+  TORCH_CHECK(seq % tile_rows == 0,
+    "tyr::flash_attn: stacked partial reduction requires seq to be a multiple of 64");
+  const int64_t q_blocks = seq / tile_rows;
+  return stack.view({q_blocks, kv_blocks, tile_rows, 64})
+      .sum(0, false)
+      .reshape({1, 1, seq, 64});
+}
+
 static std::pair<torch::Tensor, torch::Tensor> native_forward(
     const torch::Tensor& query,
     const torch::Tensor& key,
@@ -325,14 +338,8 @@ static std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> native_backward(
     throw_on_launcher_error(bwd_result, "tkMhaH100Bwd12BlockPartials");
   }
 
-  auto dK = dKStack.view({kv_blocks, seq, 64}).sum(0, false).unsqueeze(0).unsqueeze(0);
-  const double scale = 1.0 / std::sqrt(static_cast<double>(q.size(3)));
-  auto qf = q.to(torch::kFloat32);
-  auto kf = k.to(torch::kFloat32);
-  auto dOf = dO.to(torch::kFloat32);
-  auto scores = torch::matmul(qf, kf.transpose(-2, -1)) * scale;
-  auto probs = torch::softmax(scores, -1);
-  auto dV = torch::matmul(probs.transpose(-2, -1), dOf);
+  auto dK = reduce_stacked_partials(dKStack, seq, kv_blocks);
+  auto dV = reduce_stacked_partials(dVStack, seq, kv_blocks);
   return {dQ, dK, dV};
 }
 

@@ -1,6 +1,7 @@
 import Tyr.GPU.Types
 import Tyr.GPU.Codegen.Var
 import Tyr.GPU.Codegen.IR
+import Tyr.GPU.Capabilities
 
 /-!
 # Tyr.GPU.Codegen.Monad
@@ -72,19 +73,43 @@ def buildKernel (name : String) (params : Array KParam := #[]) : KernelM Kernel 
 def runKernelM (arch : GpuArch := .SM90) (m : KernelM α) : α × KernelState :=
   m.run { arch := arch }
 
+/-- Maximum shared memory in bytes for a runtime `GpuArch` value.
+    Mirrors `GpuCapabilities.maxSharedMem` but is usable without a typeclass
+    instance at hand (dynamic dispatch on `arch`). -/
+def maxSharedMemForArch (arch : GpuArch) : Nat :=
+  match arch with
+  | .SM80 => GpuCapabilities.maxSharedMem .SM80
+  | .SM90 => GpuCapabilities.maxSharedMem .SM90
+  | .SM100 => GpuCapabilities.maxSharedMem .SM100
+
+/-- Compare a finalized kernel's `sharedMemBytes` against the architecture's max.
+    Returns `.error` with a descriptive message if the budget is exceeded. -/
+def checkSharedMemBudget (k : Kernel) : Except String Unit :=
+  let maxBytes := maxSharedMemForArch k.arch
+  if k.sharedMemBytes > maxBytes then
+    .error s!"Kernel {k.name}: shared memory usage {k.sharedMemBytes} bytes exceeds \
+             architecture {repr k.arch} limit of {maxBytes} bytes"
+  else
+    .ok ()
+
 /-- Run and extract just the kernel.
     Note: nextId starts at params.size to avoid conflicts with parameter VarIds -/
 def buildKernelM (name : String) (arch : GpuArch := .SM90)
     (params : Array KParam := #[]) (m : KernelM Unit) : Kernel :=
   -- Start nextId at params.size so freshVar doesn't conflict with parameter VarIds
   let (_, state) := m.run { arch := arch, nextId := params.size }
-  {
+  let k : Kernel := {
     name := name
     arch := state.arch
     params := params
     body := state.body
     sharedMemBytes := state.sharedMemBytes
   }
+  -- Warn (do not fail) if the shared-memory budget is exceeded. Some tests
+  -- deliberately over-subscribe shared memory expecting dynamic allocation.
+  match checkSharedMemBudget k with
+  | .ok _ => k
+  | .error msg => dbg_trace s!"[tyr] warning: {msg}"; k
 
 /-- Capture loop body: saves state, runs body, extracts statements, restores -/
 def captureBody (body : KernelM Unit) : KernelM (Array KStmt) := do

@@ -3,7 +3,7 @@ import Tyr.GPU.Codegen.Arch.Monad
 import Tyr.GPU.Codegen.Arch.Capabilities
 import Tyr.GPU.Codegen.TileTypes
 import Tyr.GPU.Codegen.IR
-import Tyr.GPU.Codegen.Ops
+import Tyr.GPU.Codegen.Primitives
 
 /-!
 # Tyr.GPU.Codegen.Arch.Ops

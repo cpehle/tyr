@@ -3,7 +3,7 @@ import Tyr.GPU.Types
 import Tyr.GPU.Codegen.Var
 import Tyr.GPU.Codegen.TileTypes
 import Tyr.GPU.Codegen.IR
-import Tyr.GPU.Codegen.Monad
+import Tyr.GPU.Codegen.Primitives
 import Tyr.GPU.Codegen.EmitNew
 import Tyr.GPU.Codegen.Arch.Level
 
@@ -200,21 +200,45 @@ def extractParamFromType? (paramName : Name) (type : Expr) : MetaM (Option Extra
     return some { name := paramName, dtype := .Float32, isPointer := false, scalarTy := scalarTy }
   return none
 
-/-- Extract parameters from function type -/
-partial def extractParams (type : Expr) : MetaM (Array ExtractedParam) := do
-  let mut params := #[]
-  let mut currType := type
+/-- Count the number of leading forall binders in `type` (bounded by `fuel`). -/
+private def countForallBinders (fuel : Nat) (type : Expr) : MetaM Nat := do
+  match fuel with
+  | 0 => return 0
+  | fuel + 1 =>
+    let type ← whnf type
+    if type.isForall then
+      let name := type.bindingName!
+      let body := type.bindingBody!.instantiate1 (mkFVar ⟨name⟩)
+      let rest ← countForallBinders fuel body
+      return rest + 1
+    else
+      return 0
 
-  while currType.isForall do
-    let name := currType.bindingName!
-    let domainType := currType.bindingDomain!
+/-- Helper: iterate the forall chain with `fuel` steps, accumulating parameters. -/
+private def extractParamsAux
+    : Nat → Expr → Array ExtractedParam → MetaM (Array ExtractedParam)
+  | 0, _, acc => pure acc
+  | fuel + 1, type, acc => do
+    let type ← whnf type
+    if type.isForall then
+      let name := type.bindingName!
+      let domainType := type.bindingDomain!
+      let acc :=
+        match ← extractParamFromType? name domainType with
+        | some p => acc.push p
+        | none => acc
+      let body := type.bindingBody!.instantiate1 (mkFVar ⟨name⟩)
+      extractParamsAux fuel body acc
+    else
+      pure acc
 
-    if let some param ← extractParamFromType? name domainType then
-      params := params.push param
-
-    currType ← whnf (currType.bindingBody!.instantiate1 (mkFVar ⟨name⟩))
-
-  return params
+/-- Extract parameters from function type. Uses a fuel bound (the binder count
+    plus a small slack) to stay structurally recursive rather than `partial`. -/
+def extractParams (type : Expr) : MetaM (Array ExtractedParam) := do
+  -- Generous upper bound on binder depth; real kernels have a handful of params.
+  let fuelCap := 1024
+  let depth ← countForallBinders fuelCap type
+  extractParamsAux (depth + 1) type #[]
 
 /-! ## Kernel Attribute Implementation -/
 
@@ -329,8 +353,13 @@ def paramToCppArgAttr (idx : Nat) (p : KParam) : String :=
   else p.name
 
 /-- Generate pointer extraction code for a param -/
-def generatePtrExtractionAttr (idx : Nat) (p : KParam) : String :=
+def generatePtrExtractionAttr
+    (paramTmaTypes : Std.HashMap Nat (Array GlobalParamTmaType))
+    (idx : Nat) (p : KParam) : String :=
   if p.isPointer then
+    let tmaTypes := match paramTmaTypes[idx]? with
+      | some tys => tys
+      | none => #[]
     s!"    auto v{idx}_tensor = borrowTensor({p.name});\n" ++
     s!"    if (!v{idx}_tensor.is_cuda()) return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string(\"{p.name} must be a CUDA tensor\")));\n" ++
     s!"    if (!v{idx}_tensor.is_contiguous()) return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string(\"{p.name} must be contiguous\")));\n" ++
@@ -338,19 +367,20 @@ def generatePtrExtractionAttr (idx : Nat) (p : KParam) : String :=
     s!"    std::array<int, 4> v{idx}_shape = \{1, 1, 1, 1};\n" ++
     s!"    for (int i = 0; i < static_cast<int>(v{idx}_tensor.dim()); ++i)\n" ++
     s!"      v{idx}_shape[4 - v{idx}_tensor.dim() + i] = static_cast<int>(v{idx}_tensor.size(i));\n" ++
-    s!"    using v{idx}_gl_t = gl<{p.dtype.toCpp}, 1, 1, -1, -1>;\n" ++
+    s!"    using v{idx}_gl_t = {renderGlobalParamCppType p tmaTypes};\n" ++
     s!"    auto v{idx}_gl = kittens::make_gl<v{idx}_gl_t, false>(reinterpret_cast<uint64_t>(v{idx}_tensor.data_ptr()),\n" ++
     s!"      v{idx}_shape[0], v{idx}_shape[1], v{idx}_shape[2], v{idx}_shape[3]);\n"
   else ""
 
 /-- Generate complete C++ launcher code for a kernel -/
-def generateCppLauncherCode (kernelName : String) (arch : GpuArch) (params : Array KParam) : String :=
-  let name := kernelName.replace "." "_"
+def generateCppLauncherCode (kernel : Kernel) : String :=
+  let name := kernel.name.replace "." "_"
   let externName := "lean_launch_" ++ name
-  let archGuard := arch.toGuard
-  let archMsg := toString arch
+  let archGuard := kernel.arch.toGuard
+  let archMsg := toString kernel.arch
+  let paramTmaTypes := inferGlobalParamTmaTypes kernel
 
-  let externParams := params.toList.map paramToCppExternAttr
+  let externParams := kernel.params.toList.map paramToCppExternAttr
   let allParams := externParams ++ [
     "uint64_t grid_x", "uint64_t grid_y", "uint64_t grid_z",
     "uint64_t block_x", "uint64_t block_y", "uint64_t block_z",
@@ -360,14 +390,14 @@ def generateCppLauncherCode (kernelName : String) (arch : GpuArch) (params : Arr
 
   let extractionCode := Id.run do
     let mut out := ""
-    for h : idx in [:params.size] do
-      out := out ++ generatePtrExtractionAttr idx params[idx]
+    for h : idx in [:kernel.params.size] do
+      out := out ++ generatePtrExtractionAttr paramTmaTypes idx kernel.params[idx]
     return out
 
   let kernelArgs := Id.run do
     let mut args : List String := []
-    for h : idx in [:params.size] do
-      args := args.concat (paramToCppArgAttr idx params[idx])
+    for h : idx in [:kernel.params.size] do
+      args := args.concat (paramToCppArgAttr idx kernel.params[idx])
     return args
   let argStr := String.intercalate ", " kernelArgs
 
@@ -440,7 +470,7 @@ def generateLaunchDecl (declName : Name) (params : Array ExtractedParam) : Comma
 /-- Build a persistent registration spec from a materialized kernel value. -/
 def mkRegisteredKernelSpec (moduleName regName : Name) (kernel : Kernel) : RegisteredKernelSpec :=
   let emitInfo := generateKernelEmitInfo kernel
-  let cppCode := generateCppLauncherCode kernel.name kernel.arch kernel.params
+  let cppCode := generateCppLauncherCode kernel
   {
     moduleName := moduleName
     name := regName
@@ -717,18 +747,6 @@ initialize registerBuiltinAttribute {
     gpuKernelDeclTag.setTag declName
 }
 
-/-! ## Kernel Building Macro -/
-
-/-- Build a kernel from a KernelM function with explicit parameters -/
-def buildGpuKernel (name : String) (arch : GpuArch) (params : Array KParam)
-    (body : KernelM Unit) : Kernel :=
-  buildKernelM name arch params body
-
-/-- Macro to define and register a GPU kernel in one step -/
-macro "gpu_kernel" name:ident arch:term params:term ":=" body:term : command => `(
-  def $name : Kernel := buildGpuKernel $(quote name.getId.toString) $arch $params $body
-)
-
 /-! ## Code Generation Commands -/
 
 /-- Command to generate C++ for all registered kernels -/
@@ -744,15 +762,5 @@ elab_rules : command
 
 /-- Command to print a specific kernel's C++ code -/
 syntax "#print_gpu_kernel" ident : command
-
-/-! ## Helper for defining kernels with the new syntax -/
-
-/-- Define a kernel function that returns KernelM Unit -/
-abbrev GpuKernelFn := KernelM Unit
-
-/-- Wrapper to make kernel definitions cleaner -/
-def kernel (arch : GpuArch) (body : KernelM Unit) : KernelM Unit := do
-  setArch arch
-  body
 
 end Tyr.GPU.Codegen

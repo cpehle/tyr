@@ -35,7 +35,11 @@ private def mhaH100LcfFwd
     (v_ptr : GPtr GpuFloat.BFloat16)
     (o_ptr : GPtr GpuFloat.BFloat16)
     (_seq_len : KVal UInt64)
-    (_head_dim : KVal UInt64) : KernelM Unit := do
+    (_head_dim : KVal UInt64)
+    (hHeadDim : headDim % 16 = 0 := by decide)
+    (hKvTileRows : kvTileRows % 16 = 0 := by decide)
+    : KernelM Unit := do
+  let _ := hHeadDim; let _ := hKvTileRows
   comment banner
   comment "ThunderKittens lcf pipeline compressed into a typed single-query-tile shell"
   comment "The exact multi-worker CTA packing is still flattened to one logical query tile per kernel instance."
@@ -68,11 +72,11 @@ private def mhaH100LcfFwd
     load k kShared
     load v vShared
 
-    mmaT scores q k scores
+    mmaT scores q k scores (by decide) hHeadDim hKvTileRows
     scalarMul scores scores scale
     onlineSoftmax scores o softmaxState
     convert probs scores
-    mma o probs v o
+    mma o probs v o (by decide) hKvTileRows hHeadDim
     sync
 
   finalizeSoftmax o softmaxState

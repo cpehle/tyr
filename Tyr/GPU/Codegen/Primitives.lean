@@ -1104,6 +1104,14 @@ def arriveSemaphore (sem : Semaphore) (count : Nat := 1) : KernelM Unit := do
 def arriveAndWait (barrier : Nat := 0) : KernelM Unit := do
   emit (.arriveAndWait barrier)
 
+/-- Wait on a barrier (for FA3 specialization) -/
+def waitBarrier (barrier : Nat) : KernelM Unit := do
+  emit (.arriveAndWait barrier)
+
+/-- Signal a barrier (for FA3 specialization) -/
+def signalBarrier (barrier : Nat) : KernelM Unit := do
+  emit (.arrive barrier)
+
 /-! ## Synchronization -/
 
 /-- Barrier synchronization -/

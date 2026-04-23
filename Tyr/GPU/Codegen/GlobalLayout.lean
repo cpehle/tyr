@@ -339,6 +339,16 @@ def loadVecGlobalRow {dtype : GpuFloat} {len : Nat}
     : KernelM Unit := do
   emit (.loadVecGlobal dst.id src.id coord.rowOffset)
 
+/-- Load vector directly from global memory into a register vector using row offset.
+    This avoids allocating shared vector staging when the value is consumed
+    immediately in registers. -/
+def loadVecGlobalRowRV {dtype : GpuFloat} {len : Nat}
+    (dst : RV dtype len)
+    (src : GPtr dtype)
+    (coord : RTileCoord)
+    : KernelM Unit := do
+  emit (.loadVecGlobal dst.id src.id coord.rowOffset)
+
 /-- Store vector to global memory using row offset. -/
 def storeVecGlobalRow {dtype : GpuFloat} {len : Nat}
     (dst : GPtr dtype)

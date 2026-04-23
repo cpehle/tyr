@@ -12,7 +12,19 @@ open Tyr.GPU.Kernels
 abbrev MhaTensor := T #[1, 1, 128, 64]   -- bf16 kernel inputs/outputs
 abbrev MasterTensor := T #[1, 1, 128, 64] -- fp32 optimizer state
 abbrev LTensor := T #[2, 64]
+private abbrev PartialStack := T #[1, 1, 256, 64]
 def nElems : Float := 8192.0
+private def contractLabel : String := "stacked_partials"
+private def seqLen : Nat := 128
+private def headDim : Nat := 64
+private def kvTiles : Nat := 2
+private def stackRows : Nat := seqLen * kvTiles
+
+private def reduceStackedPartials (stack : PartialStack) : MasterTensor :=
+  let tiles : T #[2, 2, 64, 64] := torch.reshape stack #[2, 2, 64, 64]
+  let byKv : T #[2, 64, 64] := nn.sumDim tiles 0 false
+  let flat : T #[128, 64] := torch.reshape byKv #[128, 64]
+  nn.unsqueeze (nn.unsqueeze flat 0) 0
 
 structure TrainSetup where
   stream : UInt64
@@ -38,11 +50,12 @@ def backwardMha
   tkMhaH100BwdPrep2Block.launch dO out dVec 128 64 1 2 1 128 1 1 0 stream
 
   let dQ : MasterTensor := torch.zeros #[1, 1, 128, 64] false (Device.CUDA 0)
-  let dKStack : T #[1, 1, 256, 64] := torch.zeros #[1, 1, 256, 64] false (Device.CUDA 0)
-  let dVStack : T #[1, 1, 256, 64] := torch.zeros #[1, 1, 256, 64] false (Device.CUDA 0)
+  let partialSeed : PartialStack := torch.zeros #[1, 1, 256, 64] false (Device.CUDA 0)
+  let dKStack : PartialStack := torch.mul_scalar partialSeed 1.0
+  let dVStack : PartialStack := torch.mul_scalar partialSeed 2.0
   tkMhaH100Bwd2BlockPartials.launch q k v dO lOut dVec dQ dKStack dVStack 128 64 1 2 1 128 1 1 0 stream
-  let dK : MasterTensor := nn.unsqueeze (nn.unsqueeze (nn.sumDim (torch.reshape dKStack #[2, 128, 64]) 0 false) 0) 0
-  let dV : MasterTensor := nn.unsqueeze (nn.unsqueeze (nn.sumDim (torch.reshape dVStack #[2, 128, 64]) 0 false) 0) 0
+  let dK := reduceStackedPartials dKStack
+  let dV := reduceStackedPartials dVStack
   pure (dQ, dK, dV)
 
 def lossAndGradOut (out targetOut : MhaTensor) : T #[] × MhaTensor :=
@@ -193,12 +206,12 @@ def runTrainKernel (steps : Nat) (lr : Float) (noiseScale : Float) (logEvery : N
         firstLoss := loss
       if step + 1 == steps then
         lastLoss := loss
-      IO.println s!"mha_h100_train step={step+1}/{steps} loss={loss}"
+      IO.println s!"mha_h100_train contract={contractLabel} seq={seqLen} head_dim={headDim} kv_tiles={kvTiles} stack_rows={stackRows} step={step+1}/{steps} loss={loss}"
 
   let relImprovement :=
     if firstLoss > 0.0 then (firstLoss - lastLoss) / firstLoss else 0.0
   let ok : Bool := if lastLoss < firstLoss then true else false
-  IO.println s!"mha_h100_train init_loss={firstLoss} final_loss={lastLoss} rel_improvement={relImprovement} ok={ok}"
+  IO.println s!"mha_h100_train contract={contractLabel} seq={seqLen} head_dim={headDim} kv_tiles={kvTiles} stack_rows={stackRows} init_loss={firstLoss} final_loss={lastLoss} rel_improvement={relImprovement} ok={ok}"
   pure ok
 
 def benchKernel (setup : TrainSetup) (warmup benchIters : Nat) (lr : Float) : IO Float := do
@@ -264,13 +277,13 @@ def runBenchmark
 
   let kernelMs ← benchKernel setup warmup benchIters lr
   let kernelStepsPerSec := 1000.0 / kernelMs
-  IO.println s!"mha_h100_bench kernel_ms_per_step={kernelMs} kernel_steps_per_sec={kernelStepsPerSec} warmup={warmup} bench_iters={benchIters}"
+  IO.println s!"mha_h100_bench contract={contractLabel} seq={seqLen} head_dim={headDim} kv_tiles={kvTiles} stack_rows={stackRows} kernel_ms_per_step={kernelMs} kernel_steps_per_sec={kernelStepsPerSec} warmup={warmup} bench_iters={benchIters}"
 
   if compareTorch then
     let torchMs ← benchTorch setup warmup benchIters lr
     let torchStepsPerSec := 1000.0 / torchMs
     let kernelSpeedupVsTorch := torchMs / kernelMs
-    IO.println s!"mha_h100_bench torch_ms_per_step={torchMs} torch_steps_per_sec={torchStepsPerSec} kernel_speedup_vs_torch={kernelSpeedupVsTorch}"
+    IO.println s!"mha_h100_bench contract={contractLabel} seq={seqLen} head_dim={headDim} kv_tiles={kvTiles} stack_rows={stackRows} torch_ms_per_step={torchMs} torch_steps_per_sec={torchStepsPerSec} kernel_speedup_vs_torch={kernelSpeedupVsTorch}"
 
   pure true
 
