@@ -517,13 +517,13 @@ def tkMhaH100Bwd2BlockKvSweep
     let dSTBf16 ← allocRT .BFloat16 tileSize tileSize
     convert dSTBf16 dSTScaled
 
-    let dOCol ← allocRT .BFloat16 tileSize tileSize .Col
-    swapLayout dOCol dO
-    mma dVAccum pTBf16 dOCol dVAccum
+    warpgroupMma dVAccum pTBf16 rowShared
+    mmaAsyncWait
 
-    let qCol ← allocRT .BFloat16 tileSize tileSize .Col
-    swapLayout qCol q
-    mma dKAccum dSTBf16 qCol dKAccum
+    -- Reuse the BF16 staging tile for Q before the dK WGMMA.
+    asyncLoadGlobalTile rowShared q_ptr qCoord qSem
+    warpgroupMma dKAccum dSTBf16 rowShared
+    mmaAsyncWait
 
   store dKVShared dKAccum
   groupSync 4 4
@@ -972,13 +972,13 @@ def tkMhaH100Bwd12BlockKvSweep
     let dSTBf16 ← allocRT .BFloat16 tileSize tileSize
     convert dSTBf16 dSTScaled
 
-    let dOCol ← allocRT .BFloat16 tileSize tileSize .Col
-    swapLayout dOCol dO
-    mma dVAccum pTBf16 dOCol dVAccum
+    warpgroupMma dVAccum pTBf16 rowShared
+    mmaAsyncWait
 
-    let qCol ← allocRT .BFloat16 tileSize tileSize .Col
-    swapLayout qCol q
-    mma dKAccum dSTBf16 qCol dKAccum
+    -- Reuse the BF16 staging tile for Q before the dK WGMMA.
+    asyncLoadGlobalTile rowShared q_ptr qCoord qSem
+    warpgroupMma dKAccum dSTBf16 rowShared
+    mmaAsyncWait
 
   store dKVShared dKAccum
   groupSync 4 4
