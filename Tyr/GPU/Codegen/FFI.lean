@@ -105,7 +105,7 @@ def generatePointerExtraction (p : KParam) : String :=
 
 /-- Generate C++ launcher function for a kernel registration. -/
 def generateCppLauncher (kernel : RegisteredKernel) : String :=
-  generateCppLauncherCode kernel.kernelName kernel.arch kernel.params
+  kernel.cppCode
 
 /-- Generate complete C++ header for kernel launchers -/
 def generateCppHeader : String :=
@@ -117,8 +117,12 @@ def generateCppHeader : String :=
   "#include <cuda_runtime.h>\n" ++
   "#include <cuda_fp16.h>\n" ++
   "#include <cuda_bf16.h>\n" ++
+  "#if defined(KITTENS_HOPPER) || defined(KITTENS_BLACKWELL)\n" ++
   "#include <cuda_fp8.h>\n" ++
-  "#include <cuda_fp4.h>\n\n" ++
+  "#endif\n" ++
+  "#ifdef KITTENS_BLACKWELL\n" ++
+  "#include <cuda_fp4.h>\n" ++
+  "#endif\n\n" ++
   "using namespace kittens;\n\n" ++
   "// Forward declarations\n" ++
   "extern torch::Tensor borrowTensor(b_lean_obj_arg o);\n" ++

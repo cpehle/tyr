@@ -2,8 +2,7 @@ import Tyr.GPU.Types
 import Tyr.GPU.Codegen.Var
 import Tyr.GPU.Codegen.TileTypes
 import Tyr.GPU.Codegen.IR
-import Tyr.GPU.Codegen.Monad
-import Tyr.GPU.Codegen.Ops
+import Tyr.GPU.Codegen.Primitives
 import Tyr.GPU.Codegen.Loop
 import Tyr.GPU.Codegen.GlobalLayout
 import Tyr.GPU.Codegen.EmitNew

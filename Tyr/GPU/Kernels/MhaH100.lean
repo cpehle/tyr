@@ -261,11 +261,11 @@ def tkMhaH100Bwd2BlockPartials
   let lse ← allocRV .Float32 tileSize
   let dVec ← allocRV .Float32 tileSize
 
-  -- Reuse shared buffers aggressively to stay within SM90 shared-memory limits.
   let rowShared ← allocST .BFloat16 tileSize tileSize
-  let colShared ← allocST .BFloat16 tileSize tileSize .Col
-  let outShared ← allocST .Float32 tileSize tileSize
-  let vecShared ← allocSV .Float32 tileSize
+  let vShared ← allocST .BFloat16 tileSize tileSize .Col
+  -- Keep K/V writeback staging disjoint to mirror the TK separation more closely.
+  let dKShared ← allocST .Float32 tileSize tileSize
+  let dVShared ← allocST .Float32 tileSize tileSize
 
   loadGlobal rowShared q_ptr coord
   sync
@@ -274,12 +274,8 @@ def tkMhaH100Bwd2BlockPartials
   sync
   load dO rowShared
 
-  loadVecGlobalRow vecShared l_ptr coord
-  sync
-  loadVec lTk vecShared
-  loadVecGlobalRow vecShared d_ptr coord
-  sync
-  loadVec dVec vecShared
+  loadVecGlobalRowRV lTk l_ptr coord
+  loadVecGlobalRowRV dVec d_ptr coord
   scalarMulVec lse lTk invLScale
 
   for kvIdx in krange 0 numKvBlocks do
@@ -293,10 +289,12 @@ def tkMhaH100Bwd2BlockPartials
     let dVPart ← zeroRT .Float32 tileSize tileSize
 
     loadGlobal rowShared k_ptr (coord.withRow kvIdx.id)
-    loadGlobal colShared v_ptr (coord.withRow kvIdx.id)
+    loadGlobal vShared v_ptr (coord.withRow kvIdx.id)
     sync
     load k rowShared
-    load v colShared
+    load v vShared
+    let vRow ← allocRT .BFloat16 tileSize tileSize
+    swapLayout vRow v
 
     -- Reference-style orientation: keep score/probability blocks in KxQ order.
     mmaT sT k q sT
@@ -304,8 +302,6 @@ def tkMhaH100Bwd2BlockPartials
     subRow sT sT lse
     exp pT sT
 
-    let vRow ← allocRT .BFloat16 tileSize tileSize
-    swapLayout vRow v
     mmaT dPT vRow dO dPT
     subRow dPT dPT dVec
 
@@ -322,12 +318,11 @@ def tkMhaH100Bwd2BlockPartials
     swapLayout dOCol dO
     mma dVPart pTBf16 dOCol dVPart
 
+    let dSRow ← allocRT .BFloat16 tileSize tileSize
+    transpose dSRow dSTBf16
     let qCol ← allocRT .BFloat16 tileSize tileSize .Col
     swapLayout qCol q
     mma dKPart dSTBf16 qCol dKPart
-
-    let dSRow ← allocRT .BFloat16 tileSize tileSize
-    transpose dSRow dSTBf16
     let kCol ← allocRT .BFloat16 tileSize tileSize .Col
     swapLayout kCol k
     mma dQ dSRow kCol dQ
@@ -338,17 +333,17 @@ def tkMhaH100Bwd2BlockPartials
     let stackBase ← scalarMulVal qBlock numKv "dkv_stack_base"
     let stackRow ← scalarAddVal stackBase kvBlock "dkv_stack_row"
     let dkvCoord := coord.withRow stackRow.id
-    store outShared dKPart
+    store dKShared dKPart
     sync
-    storeGlobal dK_part_ptr outShared dkvCoord
-    store outShared dVPart
+    storeGlobal dK_part_ptr dKShared dkvCoord
+    store dVShared dVPart
     sync
-    storeGlobal dV_part_ptr outShared dkvCoord
+    storeGlobal dV_part_ptr dVShared dkvCoord
     sync
 
-  store outShared dQ
+  store dKShared dQ
   sync
-  storeGlobal dQ_ptr outShared coord
+  storeGlobal dQ_ptr dKShared coord
 
 /-- FlashAttention forward for 12 KV blocks (seq=768, head_dim=64). -/
 @[gpu_kernel .SM90]
@@ -561,9 +556,10 @@ def tkMhaH100Bwd12BlockPartials
   let dVec ← allocRV .Float32 tileSize
 
   let rowShared ← allocST .BFloat16 tileSize tileSize
-  let colShared ← allocST .BFloat16 tileSize tileSize .Col
-  let outShared ← allocST .Float32 tileSize tileSize
-  let vecShared ← allocSV .Float32 tileSize
+  let vShared ← allocST .BFloat16 tileSize tileSize .Col
+  -- Keep K/V writeback staging disjoint to mirror the TK separation more closely.
+  let dKShared ← allocST .Float32 tileSize tileSize
+  let dVShared ← allocST .Float32 tileSize tileSize
 
   loadGlobal rowShared q_ptr coord
   sync
@@ -572,12 +568,8 @@ def tkMhaH100Bwd12BlockPartials
   sync
   load dO rowShared
 
-  loadVecGlobalRow vecShared l_ptr coord
-  sync
-  loadVec lTk vecShared
-  loadVecGlobalRow vecShared d_ptr coord
-  sync
-  loadVec dVec vecShared
+  loadVecGlobalRowRV lTk l_ptr coord
+  loadVecGlobalRowRV dVec d_ptr coord
   scalarMulVec lse lTk invLScale
 
   for kvIdx in krange 0 numKvBlocks do
@@ -591,18 +583,18 @@ def tkMhaH100Bwd12BlockPartials
     let dVPart ← zeroRT .Float32 tileSize tileSize
 
     loadGlobal rowShared k_ptr (coord.withRow kvIdx.id)
-    loadGlobal colShared v_ptr (coord.withRow kvIdx.id)
+    loadGlobal vShared v_ptr (coord.withRow kvIdx.id)
     sync
     load k rowShared
-    load v colShared
+    load v vShared
+    let vRow ← allocRT .BFloat16 tileSize tileSize
+    swapLayout vRow v
 
     mmaT sT k q sT
     scalarMul sT sT scale
     subRow sT sT lse
     exp pT sT
 
-    let vRow ← allocRT .BFloat16 tileSize tileSize
-    swapLayout vRow v
     mmaT dPT vRow dO dPT
     subRow dPT dPT dVec
 
@@ -619,12 +611,11 @@ def tkMhaH100Bwd12BlockPartials
     swapLayout dOCol dO
     mma dVPart pTBf16 dOCol dVPart
 
+    let dSRow ← allocRT .BFloat16 tileSize tileSize
+    transpose dSRow dSTBf16
     let qCol ← allocRT .BFloat16 tileSize tileSize .Col
     swapLayout qCol q
     mma dKPart dSTBf16 qCol dKPart
-
-    let dSRow ← allocRT .BFloat16 tileSize tileSize
-    transpose dSRow dSTBf16
     let kCol ← allocRT .BFloat16 tileSize tileSize .Col
     swapLayout kCol k
     mma dQ dSRow kCol dQ
@@ -635,16 +626,16 @@ def tkMhaH100Bwd12BlockPartials
     let stackBase ← scalarMulVal qBlock numKv "dkv_stack_base"
     let stackRow ← scalarAddVal stackBase kvBlock "dkv_stack_row"
     let dkvCoord := coord.withRow stackRow.id
-    store outShared dKPart
+    store dKShared dKPart
     sync
-    storeGlobal dK_part_ptr outShared dkvCoord
-    store outShared dVPart
+    storeGlobal dK_part_ptr dKShared dkvCoord
+    store dVShared dVPart
     sync
-    storeGlobal dV_part_ptr outShared dkvCoord
+    storeGlobal dV_part_ptr dVShared dkvCoord
     sync
 
-  store outShared dQ
+  store dKShared dQ
   sync
-  storeGlobal dQ_ptr outShared coord
+  storeGlobal dQ_ptr dKShared coord
 
 end Tyr.GPU.Kernels

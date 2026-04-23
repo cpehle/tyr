@@ -27,8 +27,12 @@ def tiledAccumulator {tileM tileK tileN kBlocks : Nat} {inDtype : GpuFloat}
     (m : KVal UInt64)
     (n : KVal UInt64)
     (k : KVal UInt64)
+    (hM : tileM % 16 = 0 := by decide)
+    (hK : tileK % 16 = 0 := by decide)
+    (hN : tileN % 16 = 0 := by decide)
     : KernelM (RT GpuFloat.Float32 tileM tileN × RTileCoord) := do
   let _ := (m, n, k)
+  let _ := hM; let _ := hK; let _ := hN
   comment banner
   comment sourceNote
   comment s!"Tile shape: A {tileM}x{tileK}, B {tileN}x{tileK}, C {tileM}x{tileN}"
@@ -50,7 +54,7 @@ def tiledAccumulator {tileM tileK tileN kBlocks : Nat} {inDtype : GpuFloat}
     sync
     load a aShared
     load b bShared
-    mmaT accum a b accum
+    mmaT accum a b accum hM hK hN
     sync
 
   pure (accum, coord)

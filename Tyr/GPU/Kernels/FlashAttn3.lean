@@ -156,7 +156,7 @@ def flashAttn3Fwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat
     sync 0
 
     -- Signal Q is ready for consumers
-    signalBarrier queryReady
+    signalNamedBarrier queryReady
 
     comment "Main K/V loading loop with 2-stage pipelining"
     forLoop 0 numKvBlocks do
@@ -186,7 +186,7 @@ def flashAttn3Fwd (Q_ptr : GPtr GpuFloat.BFloat16) (K_ptr : GPtr GpuFloat.BFloat
     comment "Consumer: Compute attention with pipelined K/V"
 
     -- Wait for Q to be ready
-    waitBarrier queryReady
+    waitNamedBarrier queryReady
 
     comment "Load Q from shared to registers (long-resident)"
     load q sQ

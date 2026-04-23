@@ -215,6 +215,94 @@ private def layoutDiagnostics (conflicts : Std.HashSet VarId) : String :=
 private def inferTileInfo (k : Kernel) : Std.HashMap VarId TileInfo :=
   k.body.foldl collectTileInfoStmt {}
 
+/-- Extra ThunderKittens TMA descriptor type that must be attached to a `gl`.
+    We currently infer shared-tile descriptors, which are enough for the
+    generated TMA load/store/store-add paths used by Hopper attention kernels. -/
+inductive GlobalParamTmaType where
+  | st (dtype : GpuFloat) (rows cols : Nat)
+  deriving Repr, BEq, Hashable, Inhabited
+
+/-- Render a TMA descriptor type in ThunderKittens C++ syntax. -/
+def GlobalParamTmaType.toCpp : GlobalParamTmaType → String
+  | .st dtype rows cols => s!"st<{dtype.toCpp}, {rows}, {cols}>"
+
+private def tileInfoToGlobalParamTmaType? : TileInfo → Option GlobalParamTmaType
+  | { kind := .ST, dtype := dtype, rows := rows, cols := cols, .. } =>
+      some (.st dtype rows cols)
+  | _ => none
+
+private def insertGlobalParamTmaType
+    (acc : Std.HashMap Nat (Array GlobalParamTmaType))
+    (paramIdx : Nat) (tmaTy : GlobalParamTmaType) :
+    Std.HashMap Nat (Array GlobalParamTmaType) :=
+  let existing := match acc[paramIdx]? with
+    | some tys => tys
+    | none => #[]
+  if existing.contains tmaTy then acc
+  else acc.insert paramIdx (existing.push tmaTy)
+
+private def insertParamTmaFromTile
+    (params : Array KParam)
+    (tileInfo : Std.HashMap VarId TileInfo)
+    (acc : Std.HashMap Nat (Array GlobalParamTmaType))
+    (paramVar tileVar : VarId) :
+    Std.HashMap Nat (Array GlobalParamTmaType) :=
+  let paramIdx := paramVar.idx
+  if h : paramIdx < params.size then
+    let param := params[paramIdx]
+    if !param.isPointer then acc
+    else
+      match tileInfo[tileVar]? >>= tileInfoToGlobalParamTmaType? with
+      | some tmaTy => insertGlobalParamTmaType acc paramIdx tmaTy
+      | none => acc
+  else
+    acc
+
+private partial def collectGlobalParamTmaTypesStmt
+    (params : Array KParam)
+    (tileInfo : Std.HashMap VarId TileInfo)
+    (acc : Std.HashMap Nat (Array GlobalParamTmaType)) :
+    KStmt → Std.HashMap Nat (Array GlobalParamTmaType)
+  | .loadGlobalAsync dst src _ _ _ _ _ =>
+      insertParamTmaFromTile params tileInfo acc src dst
+  | .storeGlobalAsync dst src _ _ _ _ =>
+      insertParamTmaFromTile params tileInfo acc dst src
+  | .storeGlobalAdd dst src _ _ _ _ =>
+      insertParamTmaFromTile params tileInfo acc dst src
+  | .clusterTmaLoad dst src _ _ _ _ _ =>
+      insertParamTmaFromTile params tileInfo acc src dst
+  | .clusterTmaStore dst src _ _ _ _ =>
+      insertParamTmaFromTile params tileInfo acc dst src
+  | .forLoop _ _ _ body =>
+      body.foldl (collectGlobalParamTmaTypesStmt params tileInfo) acc
+  | .forLoopVal _ _ _ body =>
+      body.foldl (collectGlobalParamTmaTypesStmt params tileInfo) acc
+  | .forLoopRev _ _ _ body =>
+      body.foldl (collectGlobalParamTmaTypesStmt params tileInfo) acc
+  | .forLoopValRev _ _ _ body =>
+      body.foldl (collectGlobalParamTmaTypesStmt params tileInfo) acc
+  | .ifStmt _ thenBody elseBody =>
+      let acc' := thenBody.foldl (collectGlobalParamTmaTypesStmt params tileInfo) acc
+      elseBody.foldl (collectGlobalParamTmaTypesStmt params tileInfo) acc'
+  | .ifWarpGroup _ body =>
+      body.foldl (collectGlobalParamTmaTypesStmt params tileInfo) acc
+  | _ => acc
+
+/-- Infer which kernel pointer params require ThunderKittens TMA descriptor
+    types, based on the shared tiles they participate with in TMA ops. -/
+def inferGlobalParamTmaTypes (k : Kernel) : Std.HashMap Nat (Array GlobalParamTmaType) :=
+  let tileInfo := inferTileInfo k
+  k.body.foldl (collectGlobalParamTmaTypesStmt k.params tileInfo) {}
+
+/-- Render the concrete `gl<...>` type for a kernel pointer parameter, including
+    any inferred TMA descriptor types. -/
+def renderGlobalParamCppType
+    (p : KParam) (tmaTypes : Array GlobalParamTmaType := #[]) : String :=
+  let tmaSuffix :=
+    if tmaTypes.isEmpty then ""
+    else ", " ++ String.intercalate ", " (tmaTypes.toList.map GlobalParamTmaType.toCpp)
+  s!"gl<{p.dtype.toCpp}, 1, 1, -1, -1{tmaSuffix}>"
+
 /-- Generate C++ for a single statement -/
 partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout)
     (rvVars : Std.HashSet VarId)
@@ -223,9 +311,22 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout)
   | .declRT v dtype rows cols layout =>
     s!"{indent}rt<{dtype.toCpp}, {rows}, {cols}, {layout.toCpp}> {v.toIdent};\n"
   | .declST v dtype rows cols layout =>
-    -- ThunderKittens shared tiles do not carry a row/col layout parameter.
-    let _ := layout
-    s!"{indent}__shared__ st<{dtype.toCpp}, {rows}, {cols}> {v.toIdent};\n"
+    -- ThunderKittens shared tiles do not carry a row/col layout template
+    -- parameter (unlike rt<>): the `st<T, rows, cols, swizzle, swizzle_bytes>`
+    -- template only has swizzle parameters. Row- vs column-major traversal
+    -- is handled by the consuming ops (swap_layout, transpose, MMA transpose
+    -- flags, or by transposing the register tile that loads into/out of
+    -- this shared tile). We preserve the Lean-level layout annotation as a
+    -- source comment so the emitted C++ documents the intended semantics.
+    match layout with
+    | .Row =>
+      s!"{indent}__shared__ st<{dtype.toCpp}, {rows}, {cols}> {v.toIdent}; // layout: row_l\n"
+    | .Col =>
+      -- TK has no native col-layout shared tile; the tile is physically
+      -- row-major in SMEM and the Lean `.Col` annotation indicates the
+      -- producer/consumer loads it transposed (see RT col_l ops that pair
+      -- with this ST). Emit a tag comment so callers can audit this.
+      s!"{indent}__shared__ st<{dtype.toCpp}, {rows}, {cols}> {v.toIdent}; // layout: col_l (Tyr .Col; TK has no col-layout ST, traversed transposed)\n"
   | .declRV v dtype len =>
     s!"{indent}rv<{dtype.toCpp}, {len}{rvLayoutSuffix rvLayouts v}> {v.toIdent};\n"
   | .declSV v dtype len =>
@@ -732,9 +833,9 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout)
 
   -- Fence operations (for WGMMA pipelining)
   | .fenceViewAsyncShared =>
-    s!"{indent}__syncwarp();\n{indent}__fence_view_async_shared();\n"
+    s!"{indent}__syncwarp();\n{indent}kittens::tma::fence_view_async_shared();\n"
   | .fenceProxyAsync =>
-    s!"{indent}__fence_proxy_async();\n"
+    s!"{indent}kittens::tma::fence_proxy_async();\n"
 
   -- Semaphore operations
   | .semaphore op sem =>
@@ -742,7 +843,7 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout)
     | .Init count => s!"{indent}init_semaphore({sem.toIdent}, {count});\n"
     | .Invalidate => s!"{indent}invalidate_semaphore({sem.toIdent});\n"
     | .Expect bytes => s!"{indent}expect({sem.toIdent}, {bytes});\n"
-    | .Wait => s!"{indent}wait({sem.toIdent});\n"
+    | .Wait => s!"{indent}wait({sem.toIdent}, 0);\n"
     | .Arrive count => s!"{indent}arrive({sem.toIdent}, {count});\n"
     | .ArriveAndWait => s!"{indent}arrive_and_wait({sem.toIdent});\n"
 
@@ -825,16 +926,18 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout)
   | .raw code =>
     indentRaw indent code ++ "\n"
 
-/-- Generate kernel parameter list -/
-def generateParams (params : Array KParam) : String :=
+/-- Generate kernel parameter list. -/
+def generateParams (k : Kernel) : String :=
+  let paramTmaTypes := inferGlobalParamTmaTypes k
   let paramStrs := Id.run do
     let mut out : List String := []
-    for h : idx in [:params.size] do
-      let p := params[idx]
+    for h : idx in [:k.params.size] do
+      let p := k.params[idx]
       if p.isPointer then
-        -- Kernel-side global pointers are ThunderKittens gl descriptors.
-        -- Start with a minimal 2D dynamic shape (b=1, d=1, rows/cols runtime).
-        out := out.concat s!"gl<{p.dtype.toCpp}, 1, 1, -1, -1> v{idx}"
+        let tmaTypes := match paramTmaTypes[idx]? with
+          | some tys => tys
+          | none => #[]
+        out := out.concat s!"{renderGlobalParamCppType p tmaTypes} v{idx}"
       else
         out := out.concat s!"{p.scalarTy.toCpp} v{idx}"
     return out
@@ -844,6 +947,7 @@ private partial def stmtUses (p : KStmt → Bool) : KStmt → Bool
   | stmt =>
     if p stmt then true else
       match stmt with
+      -- Recursive cases: constructors whose payload contains `Array KStmt`.
       | .forLoop _ _ _ body => body.any (stmtUses p)
       | .forLoopVal _ _ _ body => body.any (stmtUses p)
       | .forLoopRev _ _ _ body => body.any (stmtUses p)
@@ -851,7 +955,50 @@ private partial def stmtUses (p : KStmt → Bool) : KStmt → Bool
       | .ifStmt _ thenBody elseBody =>
         thenBody.any (stmtUses p) || elseBody.any (stmtUses p)
       | .ifWarpGroup _ body => body.any (stmtUses p)
-      | _ => false
+      -- Leaf cases: no nested `KStmt`s. Listed explicitly so that adding a new
+      -- `KStmt` constructor causes a non-exhaustive match error rather than
+      -- silently falling through to `false`.
+      | .declRT .. | .declST .. | .declRV .. | .declSV .. | .declSemaphore ..
+      | .declTT ..
+      | .declGPtr .. | .declKVal ..
+      | .load .. | .store .. | .loadAsync .. | .storeAsync ..
+      | .storeAdd .. | .storeAddAsync .. | .storeMinAsync ..
+      | .prefetch .. | .tmaExpect ..
+      | .tmaLoad .. | .tmaStore ..
+      | .loadGlobal .. | .storeGlobal ..
+      | .loadGlobalAsync .. | .storeGlobalAsync .. | .storeGlobalAdd ..
+      | .layoutDim ..
+      | .loadVecGlobal .. | .storeVecGlobal .. | .storeVecGlobalAdd ..
+      | .loadVecGlobalCoord .. | .storeVecGlobalCoord .. | .storeVecGlobalAddCoord ..
+      | .loadScalarGlobal .. | .storeScalarGlobal ..
+      | .multimemLoadReduce .. | .multimemStore .. | .multimemRed ..
+      | .mma .. | .mm .. | .mmaFence .. | .mmaCommitGroup | .mmaAsyncWait ..
+      | .tcgen05Mm .. | .tcgen05Mma .. | .tcgen05MmaScaled .. | .tcgen05Commit ..
+      | .tmemAllocate .. | .tmemProvision .. | .tmemDeprovision ..
+      | .loadScaleTmem .. | .tmemSubtile ..
+      | .clusterIdx .. | .clusterTmaLoad .. | .clusterTmaStore ..
+      | .clusterArrive .. | .clusterWait ..
+      | .cpAsyncLoad .. | .tmaLoadAsync ..
+      | .unary .. | .binary .. | .ternary .. | .eqMask ..
+      | .scalarMul .. | .scalarAdd ..
+      | .broadcast .. | .binaryBroadcast ..
+      | .reduce .. | .reduceAccum ..
+      | .cumsum .. | .cumprod ..
+      | .outer ..
+      | .swapLayout .. | .transpose .. | .convert ..
+      | .mask ..
+      | .sliceRows .. | .sliceCols .. | .concatCols ..
+      | .sync .. | .arrive .. | .arriveAndWait ..
+      | .namedBarrierSync .. | .namedBarrierArrive ..
+      | .warpGroupIdx .. | .electOneSync ..
+      | .fenceViewAsyncShared | .fenceProxyAsync
+      | .semaphore ..
+      | .comment ..
+      | .getBlockIdx .. | .getThreadIdx ..
+      | .constInt .. | .constFloat ..
+      | .scalarUnary .. | .scalarCompare .. | .scalarBinary .. | .scalarSelect ..
+      | .vecIota .. | .vecFillScalar ..
+      | .raw .. => false
 
 private def bodyUses (p : KStmt → Bool) (body : Array KStmt) : Bool :=
   body.any (stmtUses p)
@@ -1087,7 +1234,7 @@ private def generateKernelDefinition (k : Kernel) (emitSharedDecl : Bool := fals
   let rvVars := inferRvDecls k
   let tileInfo := inferTileInfo k
   let archGuard := s!"#if defined({k.arch.toGuard})\n"
-  let paramStr := if k.params.isEmpty then "/* TODO: params */" else generateParams k.params
+  let paramStr := if k.params.isEmpty then "/* empty parameter list */" else generateParams k
   let signature := s!"__global__ void {k.name}({paramStr}) \{\n"
   let sharedDecl := if emitSharedDecl && k.sharedMemBytes > 0
     then s!"  extern __shared__ char smem[{k.sharedMemBytes}];\n"

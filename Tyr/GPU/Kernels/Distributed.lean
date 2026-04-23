@@ -23,7 +23,11 @@ private def localGemmAccumulate {inDtype : GpuFloat} {rowBlock colBlock redBlock
     (label : String)
     (aPtr : GPtr inDtype) (bPtr : GPtr inDtype)
     (coord : RTileCoord)
+    (hM : rowBlock % 16 = 0 := by decide)
+    (hK : redBlock % 16 = 0 := by decide)
+    (hN : colBlock % 16 = 0 := by decide)
     : KernelM (RT GpuFloat.Float32 rowBlock colBlock) := do
+  let _ := hM; let _ := hK; let _ := hN
   let aStage : ST inDtype rowBlock redBlock ← allocST inDtype rowBlock redBlock
   let bStage : ST inDtype redBlock colBlock .Col ← allocST inDtype redBlock colBlock .Col
   let semA ← allocSemaphore
@@ -43,7 +47,7 @@ private def localGemmAccumulate {inDtype : GpuFloat} {rowBlock colBlock redBlock
     let bTile : RT inDtype redBlock colBlock .Col ← allocRT inDtype redBlock colBlock .Col
     load aTile aStage
     load bTile bStage
-    mma cAcc aTile bTile cAcc
+    mma cAcc aTile bTile cAcc hM hK hN
     sync
   pure cAcc
 
@@ -101,8 +105,13 @@ private def agGemmCompatBody {inDtype : GpuFloat} {rowBlock colBlock redBlock nu
     (b_ptr : GPtr inDtype)
     (dev_idx : KVal UInt32)
     (world_size : KVal UInt32)
-    (num_comm_sms : KVal UInt32) : KernelM Unit := do
+    (num_comm_sms : KVal UInt32)
+    (hM : rowBlock % 16 = 0 := by decide)
+    (hK : redBlock % 16 = 0 := by decide)
+    (hN : colBlock % 16 = 0 := by decide)
+    : KernelM Unit := do
   let _ := (dev_idx, world_size, num_comm_sms)
+  let _ := hM; let _ := hK; let _ := hN
   let coord ← blockCoord2D
 
   let aStage : ST inDtype rowBlock redBlock ← allocST inDtype rowBlock redBlock
@@ -139,7 +148,7 @@ private def agGemmCompatBody {inDtype : GpuFloat} {rowBlock colBlock redBlock nu
       let bTile : RT inDtype redBlock colBlock .Col ← allocRT inDtype redBlock colBlock .Col
       load aGathered aGatherStage
       load bTile bStage
-      mma cAcc aGathered bTile cAcc
+      mma cAcc aGathered bTile cAcc hM hK hN
       sync
 
     let out : RT GpuFloat.BFloat16 rowBlock colBlock ← allocRT .BFloat16 rowBlock colBlock
@@ -154,8 +163,13 @@ private def gemmArCompatBody {inDtype : GpuFloat} {rowBlock colBlock redBlock nu
     (b_ptr : GPtr inDtype)
     (dev_idx : KVal UInt32)
     (world_size : KVal UInt32)
-    (num_comm_sms : KVal UInt32) : KernelM Unit := do
+    (num_comm_sms : KVal UInt32)
+    (hM : rowBlock % 16 = 0 := by decide)
+    (hK : redBlock % 16 = 0 := by decide)
+    (hN : colBlock % 16 = 0 := by decide)
+    : KernelM Unit := do
   let _ := (dev_idx, world_size, num_comm_sms)
+  let _ := hM; let _ := hK; let _ := hN
   let coord ← blockCoord2D
 
   let partialShared : ST GpuFloat.Float32 rowBlock colBlock ← allocST .Float32 rowBlock colBlock
@@ -163,7 +177,7 @@ private def gemmArCompatBody {inDtype : GpuFloat} {rowBlock colBlock redBlock nu
   let outShared : ST GpuFloat.BFloat16 rowBlock colBlock ← allocST .BFloat16 rowBlock colBlock
 
   ifWarpGroup 1 do
-    let cAcc ← localGemmAccumulate (redBlock := redBlock) (numRedTiles := numRedTiles) label a_ptr b_ptr coord
+    let cAcc ← localGemmAccumulate (redBlock := redBlock) (numRedTiles := numRedTiles) label a_ptr b_ptr coord hM hK hN
     store partialShared cAcc
     namedBarrierArrive 3 128
 
@@ -187,10 +201,15 @@ private def gemmRsReduceBody {inDtype : GpuFloat} {rowBlock colBlock redBlock nu
     (a_ptr : GPtr inDtype)
     (b_ptr : GPtr inDtype)
     (dev_idx : KVal UInt32)
-    (world_size : KVal UInt32) : KernelM Unit := do
+    (world_size : KVal UInt32)
+    (hM : rowBlock % 16 = 0 := by decide)
+    (hK : redBlock % 16 = 0 := by decide)
+    (hN : colBlock % 16 = 0 := by decide)
+    : KernelM Unit := do
   let _ := (dev_idx, world_size)
+  let _ := hM; let _ := hK; let _ := hN
   let coord ← blockCoord2D
-  let cAcc ← localGemmAccumulate (redBlock := redBlock) (numRedTiles := numRedTiles) label a_ptr b_ptr coord
+  let cAcc ← localGemmAccumulate (redBlock := redBlock) (numRedTiles := numRedTiles) label a_ptr b_ptr coord hM hK hN
 
   let partialShared : ST GpuFloat.Float32 rowBlock colBlock ← allocST .Float32 rowBlock colBlock
   let outShared : ST GpuFloat.BFloat16 rowBlock colBlock ← allocST .BFloat16 rowBlock colBlock
@@ -210,10 +229,15 @@ private def gemmRsStoreAddCompatBody {inDtype : GpuFloat} {rowBlock colBlock red
     (a_ptr : GPtr inDtype)
     (b_ptr : GPtr inDtype)
     (dev_idx : KVal UInt32)
-    (world_size : KVal UInt32) : KernelM Unit := do
+    (world_size : KVal UInt32)
+    (hM : rowBlock % 16 = 0 := by decide)
+    (hK : redBlock % 16 = 0 := by decide)
+    (hN : colBlock % 16 = 0 := by decide)
+    : KernelM Unit := do
   let _ := (dev_idx, world_size)
+  let _ := hM; let _ := hK; let _ := hN
   let coord ← blockCoord2D
-  let cAcc ← localGemmAccumulate (redBlock := redBlock) (numRedTiles := numRedTiles) label a_ptr b_ptr coord
+  let cAcc ← localGemmAccumulate (redBlock := redBlock) (numRedTiles := numRedTiles) label a_ptr b_ptr coord hM hK hN
 
   let outShared : ST GpuFloat.BFloat16 rowBlock colBlock ← allocST .BFloat16 rowBlock colBlock
   Support.barrierAllDevices "gemm_rs local tiles ready for distributed store_add" 0
