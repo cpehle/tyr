@@ -1,5 +1,4 @@
 #include <algorithm>
-#include <chrono>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -270,13 +269,48 @@ double time_backend_ms(
     step();
   }
   sync_cuda();
-  const auto start = std::chrono::steady_clock::now();
+
+  cudaEvent_t start_event{};
+  cudaEvent_t stop_event{};
+  auto err = cudaEventCreate(&start_event);
+  if (err != cudaSuccess) {
+    throw std::runtime_error(std::string("cudaEventCreate(start) failed: ") + cudaGetErrorString(err));
+  }
+  err = cudaEventCreate(&stop_event);
+  if (err != cudaSuccess) {
+    cudaEventDestroy(start_event);
+    throw std::runtime_error(std::string("cudaEventCreate(stop) failed: ") + cudaGetErrorString(err));
+  }
+
+  err = cudaEventRecord(start_event, 0);
+  if (err != cudaSuccess) {
+    cudaEventDestroy(start_event);
+    cudaEventDestroy(stop_event);
+    throw std::runtime_error(std::string("cudaEventRecord(start) failed: ") + cudaGetErrorString(err));
+  }
   for (int i = 0; i < iters; ++i) {
     step();
   }
-  sync_cuda();
-  const auto stop = std::chrono::steady_clock::now();
-  const double total_ms = std::chrono::duration<double, std::milli>(stop - start).count();
+  err = cudaEventRecord(stop_event, 0);
+  if (err != cudaSuccess) {
+    cudaEventDestroy(start_event);
+    cudaEventDestroy(stop_event);
+    throw std::runtime_error(std::string("cudaEventRecord(stop) failed: ") + cudaGetErrorString(err));
+  }
+  err = cudaEventSynchronize(stop_event);
+  if (err != cudaSuccess) {
+    cudaEventDestroy(start_event);
+    cudaEventDestroy(stop_event);
+    throw std::runtime_error(std::string("cudaEventSynchronize(stop) failed: ") + cudaGetErrorString(err));
+  }
+  float total_ms_float = 0.0f;
+  err = cudaEventElapsedTime(&total_ms_float, start_event, stop_event);
+  cudaEventDestroy(start_event);
+  cudaEventDestroy(stop_event);
+  if (err != cudaSuccess) {
+    throw std::runtime_error(std::string("cudaEventElapsedTime failed: ") + cudaGetErrorString(err));
+  }
+  const double total_ms = static_cast<double>(total_ms_float);
   return total_ms / static_cast<double>(std::max(1, iters));
 }
 
@@ -373,7 +407,7 @@ int main(int argc, char** argv) {
     std::ostream* file_out = jsonl_file ? &jsonl_file : nullptr;
 
     emit_line(file_out, opts.jsonl_stdout,
-        "{\"event\":\"meta\",\"tool\":\"cc/tools/bench_flash_attn\",\"device\":\"cuda:0\"}");
+        "{\"event\":\"meta\",\"tool\":\"cc/tools/bench_flash_attn\",\"device\":\"cuda:0\",\"timer\":\"cuda_event\"}");
 
     bool all_ok = true;
     for (const auto& case_id : opts.case_ids) {

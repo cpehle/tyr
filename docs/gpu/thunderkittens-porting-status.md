@@ -72,6 +72,81 @@ The remaining work is now mostly DSL expressiveness work:
 
 ## Training Bring-Up Roadmap (H100-First)
 
+### 2026-04-23 update
+
+Current performance checkpoint:
+
+- [x] Rebuilt the vendored ThunderKittens H100 MHA PyTorch extension for the
+  active Python 3.12 ABI.
+  - `PyTorch/2.7.1-foss-2024a-CUDA-12.6.0` alone fails to compile the vendored
+    source because CUDA 12.6 headers do not expose
+    `cudaLaunchAttributePreferredClusterDimension`.
+  - Loading `CUDA/12.9.1` after the PyTorch module builds the extension without
+    a source compatibility shim.
+- [x] Added a direct vendored-TK benchmark harness:
+  - [benchmarks/bench_tk_mha_h100.py](/grid/zador/home/pehle/dev/tyr/benchmarks/bench_tk_mha_h100.py)
+  - It records TK rows as `unsupported` when the vendored source cannot provide
+    a valid apples-to-apples case.
+- [x] Switched the native C++ flash-attention benchmark to CUDA-event timing so
+  Tyr/SDPA rows use the same timing style as the ThunderKittens benchmark.
+- [x] Captured one-H100 CUDA-event benchmark outputs:
+  - [benchmarks/results/flash_attn_cpp_native_h100_cuda_event.jsonl](/grid/zador/home/pehle/dev/tyr/benchmarks/results/flash_attn_cpp_native_h100_cuda_event.jsonl)
+  - [benchmarks/results/thunderkittens_mha_h100_cuda_event.jsonl](/grid/zador/home/pehle/dev/tyr/benchmarks/results/thunderkittens_mha_h100_cuda_event.jsonl)
+- [x] Established the first direct TK performance target:
+  - `native_dense_768x64`, fwd+bwd, BF16, non-causal, `B=1,H=1`
+  - Tyr runtime: `1.27995 ms`, correctness green
+  - Vendored TK: `0.0889981 ms`, correctness green
+  - Current Tyr is about `14.38x` slower than the vendored TK kernel on the
+    direct comparable row.
+- [x] Marked `native_dense_128x64` as not directly comparable to vendored TK:
+  - the vendored H100 MHA launch grid is zero for `N=128`,
+  - an exploratory `N=256` run launched but failed parity,
+  - the vendored benchmark itself starts at `N=768`.
+
+Performance gap list:
+
+- [x] Correctness checkpoint for the generated Tyr bridge:
+  - current `dQ` plus K/V sweep backward is deterministic and gradient-correct
+    on `128x64` and `768x64`.
+- [~] Benchmark comparability:
+  - CUDA-event timing is now used for the native C++ bench and the TK Python
+    extension bench,
+  - SDPA absolute numbers differ between the C++ libtorch path and the Python
+    PyTorch module, so SDPA is a sanity baseline, not the direct cross-process
+    headline.
+- [~] Backward structure:
+  - Tyr currently uses a split backward path with direct `dQ` and a separate
+    K/V sweep,
+  - TK uses one dynamic-shared backward kernel with loader/store warps, ping-pong
+    Q/O/L/D staging, two compute warpgroups, and `qg_ready` / `compute_done`
+    synchronization.
+- [~] Synchronization fidelity:
+  - TK uses semaphore waits and coarse group syncs around real shared-memory
+    handoff points,
+  - generated Tyr still emits many local `warp::sync(0)` barriers and lacks the
+    TK loader/compute/store pipeline.
+- [ ] Dynamic shared memory support:
+  - codegen needs a first-class `extern __shared__` allocator equivalent to TK's
+    `tma_swizzle_allocator`,
+  - launch wrappers need to set `cudaFuncAttributeMaxDynamicSharedMemorySize`
+    for generated Hopper kernels.
+- [ ] TMA/semaphore pipeline support:
+  - expose `expect_bytes`, `load_async`, `wait`, `arrive`,
+    `store_commit_group`, and `store_async_wait` as first-class DSL/codegen
+    operations instead of relying on per-tile synchronous load/store shells.
+- [ ] TK-like backward generation:
+  - generate the D=64 `bwd_attend_ker` structure with one CTA owning a KV tile,
+    sweeping query tiles, accumulating `kg_reg` / `vg_reg`, producing `qg`, and
+    emitting final K/V gradients with one store-add per tile.
+- [ ] Broader supported rows:
+  - extend generated specializations to TK-compatible `seq >= 768`,
+    `seq % 256 == 0`, `headDim in {64,128}` first,
+  - only then broaden to Qwen/Gemma-oriented GQA/MQA and causal rows.
+- [ ] Unified reporting:
+  - either add a native TK backend to the C++ benchmark or keep the Python TK
+    harness as the official vendored baseline and teach the report step to join
+    Tyr and TK JSONL files into one table.
+
 ### 2026-04-22 update
 
 Current one-H100 flash-attention bring-up status:
