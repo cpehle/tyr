@@ -341,6 +341,191 @@ def tkMhaH100Bwd2BlockPartials
   sync
   storeGlobal dQ_ptr dKShared coord
 
+/-- Q-centric `dQ` pass for 2-block H100 MHA backward.
+    This keeps the stable direct-store `dQ` accumulation while the K/V gradients
+    are produced by the KV-centric sweep below. -/
+@[gpu_kernel .SM90]
+def tkMhaH100Bwd2BlockDq
+    (q_ptr : GPtr GpuFloat.BFloat16)
+    (k_ptr : GPtr GpuFloat.BFloat16)
+    (v_ptr : GPtr GpuFloat.BFloat16)
+    (dO_ptr : GPtr GpuFloat.BFloat16)
+    (l_ptr : GPtr GpuFloat.Float32)
+    (d_ptr : GPtr GpuFloat.Float32)
+    (dQ_ptr : GPtr GpuFloat.Float32)
+    (_seq_len : KVal UInt64)
+    (_head_dim : KVal UInt64) : KernelM Unit := do
+  let tileSize : Nat := 64
+  let numKvBlocks : Nat := 2
+  let scale : Float := 0.125
+  let invLScale : Float := -0.125
+
+  let coord ← blockCoord2D
+
+  let q ← allocRT .BFloat16 tileSize tileSize
+  let dO ← allocRT .BFloat16 tileSize tileSize
+  let dQ ← zeroRT .Float32 tileSize tileSize
+  let lTk ← allocRV .Float32 tileSize
+  let lse ← allocRV .Float32 tileSize
+  let dVec ← allocRV .Float32 tileSize
+
+  let rowShared ← allocST .BFloat16 tileSize tileSize
+  let vShared ← allocST .BFloat16 tileSize tileSize .Col
+  let dQShared ← allocST .Float32 tileSize tileSize
+
+  loadGlobal rowShared q_ptr coord
+  sync
+  load q rowShared
+  loadGlobal rowShared dO_ptr coord
+  sync
+  load dO rowShared
+
+  loadVecGlobalRowRV lTk l_ptr coord
+  loadVecGlobalRowRV dVec d_ptr coord
+  scalarMulVec lse lTk invLScale
+
+  for kvIdx in krange 0 numKvBlocks do
+    let k ← allocRT .BFloat16 tileSize tileSize
+    let v ← allocRT .BFloat16 tileSize tileSize .Col
+    let sT ← zeroRT .Float32 tileSize tileSize
+    let pT ← allocRT .Float32 tileSize tileSize
+    let dPT ← zeroRT .Float32 tileSize tileSize
+    let dST ← allocRT .Float32 tileSize tileSize
+
+    loadGlobal rowShared k_ptr (coord.withRow kvIdx.id)
+    loadGlobal vShared v_ptr (coord.withRow kvIdx.id)
+    sync
+    load k rowShared
+    load v vShared
+    let vRow ← allocRT .BFloat16 tileSize tileSize
+    swapLayout vRow v
+
+    mmaT sT k q sT
+    scalarMul sT sT scale
+    subRow sT sT lse
+    exp pT sT
+
+    mmaT dPT vRow dO dPT
+    subRow dPT dPT dVec
+
+    mul dST pT dPT
+    let dSTScaled ← allocRT .Float32 tileSize tileSize
+    scalarMul dSTScaled dST scale
+
+    let dSTBf16 ← allocRT .BFloat16 tileSize tileSize
+    convert dSTBf16 dSTScaled
+
+    let dSRow ← allocRT .BFloat16 tileSize tileSize
+    transpose dSRow dSTBf16
+    let kCol ← allocRT .BFloat16 tileSize tileSize .Col
+    swapLayout kCol k
+    mma dQ dSRow kCol dQ
+
+  store dQShared dQ
+  sync
+  storeGlobal dQ_ptr dQShared coord
+
+/-- KV-centric `mha_h100` backward sweep for 2 blocks. This mirrors
+    ThunderKittens' backward ownership more closely than the q-centric
+    `...Partials` compatibility kernel: one CTA owns a KV tile, sweeps all query
+    tiles, accumulates `dK`/`dV` in registers, then store-adds each once. -/
+@[gpu_kernel .SM90]
+def tkMhaH100Bwd2BlockKvSweep
+    (q_ptr : GPtr GpuFloat.BFloat16)
+    (k_ptr : GPtr GpuFloat.BFloat16)
+    (v_ptr : GPtr GpuFloat.BFloat16)
+    (dO_ptr : GPtr GpuFloat.BFloat16)
+    (l_ptr : GPtr GpuFloat.Float32)
+    (d_ptr : GPtr GpuFloat.Float32)
+    (_dQ_ptr : GPtr GpuFloat.Float32)
+    (dK_ptr : GPtr GpuFloat.Float32)
+    (dV_ptr : GPtr GpuFloat.Float32)
+    (_seq_len : KVal UInt64)
+    (_head_dim : KVal UInt64) : KernelM Unit := do
+  let tileSize : Nat := 64
+  let numQBlocks : Nat := 2
+  let scale : Float := 0.125
+  let invLScale : Float := -0.125
+
+  let kvCoord ← blockCoord2D
+
+  let k ← allocRT .BFloat16 tileSize tileSize
+  let v ← allocRT .BFloat16 tileSize tileSize .Col
+  let dKAccum ← zeroRT .Float32 tileSize tileSize
+  let dVAccum ← zeroRT .Float32 tileSize tileSize
+
+  let rowShared ← allocST .BFloat16 tileSize tileSize
+  let vShared ← allocST .BFloat16 tileSize tileSize .Col
+  let dKShared ← allocST .Float32 tileSize tileSize
+  let dVShared ← allocST .Float32 tileSize tileSize
+
+  loadGlobal rowShared k_ptr kvCoord
+  loadGlobal vShared v_ptr kvCoord
+  sync
+  load k rowShared
+  load v vShared
+
+  let vRow ← allocRT .BFloat16 tileSize tileSize
+  swapLayout vRow v
+
+  for qIdx in krange 0 numQBlocks do
+    let qCoord := kvCoord.withRow qIdx.id
+    let q ← allocRT .BFloat16 tileSize tileSize
+    let dO ← allocRT .BFloat16 tileSize tileSize
+    let lTk ← allocRV .Float32 tileSize
+    let lse ← allocRV .Float32 tileSize
+    let dVec ← allocRV .Float32 tileSize
+
+    loadGlobal rowShared q_ptr qCoord
+    sync
+    load q rowShared
+    loadGlobal rowShared dO_ptr qCoord
+    sync
+    load dO rowShared
+
+    loadVecGlobalRowRV lTk l_ptr qCoord
+    loadVecGlobalRowRV dVec d_ptr qCoord
+    scalarMulVec lse lTk invLScale
+
+    -- Keep score/probability blocks in KxQ order, matching TK's bwd loop.
+    let sT ← zeroRT .Float32 tileSize tileSize
+    let pT ← allocRT .Float32 tileSize tileSize
+    let dPT ← zeroRT .Float32 tileSize tileSize
+    let dST ← allocRT .Float32 tileSize tileSize
+
+    mmaT sT k q sT
+    scalarMul sT sT scale
+    subRow sT sT lse
+    exp pT sT
+
+    mmaT dPT vRow dO dPT
+    subRow dPT dPT dVec
+
+    mul dST pT dPT
+    let dSTScaled ← allocRT .Float32 tileSize tileSize
+    scalarMul dSTScaled dST scale
+
+    let pTBf16 ← allocRT .BFloat16 tileSize tileSize
+    convert pTBf16 pT
+    let dSTBf16 ← allocRT .BFloat16 tileSize tileSize
+    convert dSTBf16 dSTScaled
+
+    let dOCol ← allocRT .BFloat16 tileSize tileSize .Col
+    swapLayout dOCol dO
+    mma dVAccum pTBf16 dOCol dVAccum
+
+    let qCol ← allocRT .BFloat16 tileSize tileSize .Col
+    swapLayout qCol q
+    mma dKAccum dSTBf16 qCol dKAccum
+
+  store dKShared dKAccum
+  emitRaw "group<4>::sync(4);"
+  storeGlobalAdd dK_ptr dKShared kvCoord
+  store dVShared dVAccum
+  emitRaw "group<4>::sync(4);"
+  storeGlobalAdd dV_ptr dVShared kvCoord
+  emitRaw "warp::tma::store_async_wait();"
+
 /-- FlashAttention forward for 12 KV blocks (seq=768, head_dim=64). -/
 @[gpu_kernel .SM90]
 def tkFlashAttnFwd12Block
@@ -629,5 +814,186 @@ def tkMhaH100Bwd12BlockPartials
   store dKShared dQ
   sync
   storeGlobal dQ_ptr dKShared coord
+
+/-- Q-centric `dQ` pass for 12-block H100 MHA backward (`seq=768`, `d=64`). -/
+@[gpu_kernel .SM90]
+def tkMhaH100Bwd12BlockDq
+    (q_ptr : GPtr GpuFloat.BFloat16)
+    (k_ptr : GPtr GpuFloat.BFloat16)
+    (v_ptr : GPtr GpuFloat.BFloat16)
+    (dO_ptr : GPtr GpuFloat.BFloat16)
+    (l_ptr : GPtr GpuFloat.Float32)
+    (d_ptr : GPtr GpuFloat.Float32)
+    (dQ_ptr : GPtr GpuFloat.Float32)
+    (_seq_len : KVal UInt64)
+    (_head_dim : KVal UInt64) : KernelM Unit := do
+  let tileSize : Nat := 64
+  let numKvBlocks : Nat := 12
+  let scale : Float := 0.125
+  let invLScale : Float := -0.125
+
+  let coord ← blockCoord2D
+
+  let q ← allocRT .BFloat16 tileSize tileSize
+  let dO ← allocRT .BFloat16 tileSize tileSize
+  let dQ ← zeroRT .Float32 tileSize tileSize
+  let lTk ← allocRV .Float32 tileSize
+  let lse ← allocRV .Float32 tileSize
+  let dVec ← allocRV .Float32 tileSize
+
+  let rowShared ← allocST .BFloat16 tileSize tileSize
+  let vShared ← allocST .BFloat16 tileSize tileSize .Col
+  let dQShared ← allocST .Float32 tileSize tileSize
+
+  loadGlobal rowShared q_ptr coord
+  sync
+  load q rowShared
+  loadGlobal rowShared dO_ptr coord
+  sync
+  load dO rowShared
+
+  loadVecGlobalRowRV lTk l_ptr coord
+  loadVecGlobalRowRV dVec d_ptr coord
+  scalarMulVec lse lTk invLScale
+
+  for kvIdx in krange 0 numKvBlocks do
+    let k ← allocRT .BFloat16 tileSize tileSize
+    let v ← allocRT .BFloat16 tileSize tileSize .Col
+    let sT ← zeroRT .Float32 tileSize tileSize
+    let pT ← allocRT .Float32 tileSize tileSize
+    let dPT ← zeroRT .Float32 tileSize tileSize
+    let dST ← allocRT .Float32 tileSize tileSize
+
+    loadGlobal rowShared k_ptr (coord.withRow kvIdx.id)
+    loadGlobal vShared v_ptr (coord.withRow kvIdx.id)
+    sync
+    load k rowShared
+    load v vShared
+    let vRow ← allocRT .BFloat16 tileSize tileSize
+    swapLayout vRow v
+
+    mmaT sT k q sT
+    scalarMul sT sT scale
+    subRow sT sT lse
+    exp pT sT
+
+    mmaT dPT vRow dO dPT
+    subRow dPT dPT dVec
+
+    mul dST pT dPT
+    let dSTScaled ← allocRT .Float32 tileSize tileSize
+    scalarMul dSTScaled dST scale
+
+    let dSTBf16 ← allocRT .BFloat16 tileSize tileSize
+    convert dSTBf16 dSTScaled
+
+    let dSRow ← allocRT .BFloat16 tileSize tileSize
+    transpose dSRow dSTBf16
+    let kCol ← allocRT .BFloat16 tileSize tileSize .Col
+    swapLayout kCol k
+    mma dQ dSRow kCol dQ
+
+  store dQShared dQ
+  sync
+  storeGlobal dQ_ptr dQShared coord
+
+/-- KV-centric `mha_h100` backward sweep for 12 blocks (`seq=768`, `d=64`).
+    Each CTA owns one KV tile and sweeps all query tiles, matching the
+    ThunderKittens K/V reduction direction. -/
+@[gpu_kernel .SM90]
+def tkMhaH100Bwd12BlockKvSweep
+    (q_ptr : GPtr GpuFloat.BFloat16)
+    (k_ptr : GPtr GpuFloat.BFloat16)
+    (v_ptr : GPtr GpuFloat.BFloat16)
+    (dO_ptr : GPtr GpuFloat.BFloat16)
+    (l_ptr : GPtr GpuFloat.Float32)
+    (d_ptr : GPtr GpuFloat.Float32)
+    (_dQ_ptr : GPtr GpuFloat.Float32)
+    (dK_ptr : GPtr GpuFloat.Float32)
+    (dV_ptr : GPtr GpuFloat.Float32)
+    (_seq_len : KVal UInt64)
+    (_head_dim : KVal UInt64) : KernelM Unit := do
+  let tileSize : Nat := 64
+  let numQBlocks : Nat := 12
+  let scale : Float := 0.125
+  let invLScale : Float := -0.125
+
+  let kvCoord ← blockCoord2D
+
+  let k ← allocRT .BFloat16 tileSize tileSize
+  let v ← allocRT .BFloat16 tileSize tileSize .Col
+  let dKAccum ← zeroRT .Float32 tileSize tileSize
+  let dVAccum ← zeroRT .Float32 tileSize tileSize
+
+  let rowShared ← allocST .BFloat16 tileSize tileSize
+  let vShared ← allocST .BFloat16 tileSize tileSize .Col
+  let dKShared ← allocST .Float32 tileSize tileSize
+  let dVShared ← allocST .Float32 tileSize tileSize
+
+  loadGlobal rowShared k_ptr kvCoord
+  loadGlobal vShared v_ptr kvCoord
+  sync
+  load k rowShared
+  load v vShared
+
+  let vRow ← allocRT .BFloat16 tileSize tileSize
+  swapLayout vRow v
+
+  for qIdx in krange 0 numQBlocks do
+    let qCoord := kvCoord.withRow qIdx.id
+    let q ← allocRT .BFloat16 tileSize tileSize
+    let dO ← allocRT .BFloat16 tileSize tileSize
+    let lTk ← allocRV .Float32 tileSize
+    let lse ← allocRV .Float32 tileSize
+    let dVec ← allocRV .Float32 tileSize
+
+    loadGlobal rowShared q_ptr qCoord
+    sync
+    load q rowShared
+    loadGlobal rowShared dO_ptr qCoord
+    sync
+    load dO rowShared
+
+    loadVecGlobalRowRV lTk l_ptr qCoord
+    loadVecGlobalRowRV dVec d_ptr qCoord
+    scalarMulVec lse lTk invLScale
+
+    let sT ← zeroRT .Float32 tileSize tileSize
+    let pT ← allocRT .Float32 tileSize tileSize
+    let dPT ← zeroRT .Float32 tileSize tileSize
+    let dST ← allocRT .Float32 tileSize tileSize
+
+    mmaT sT k q sT
+    scalarMul sT sT scale
+    subRow sT sT lse
+    exp pT sT
+
+    mmaT dPT vRow dO dPT
+    subRow dPT dPT dVec
+
+    mul dST pT dPT
+    let dSTScaled ← allocRT .Float32 tileSize tileSize
+    scalarMul dSTScaled dST scale
+
+    let pTBf16 ← allocRT .BFloat16 tileSize tileSize
+    convert pTBf16 pT
+    let dSTBf16 ← allocRT .BFloat16 tileSize tileSize
+    convert dSTBf16 dSTScaled
+
+    let dOCol ← allocRT .BFloat16 tileSize tileSize .Col
+    swapLayout dOCol dO
+    mma dVAccum pTBf16 dOCol dVAccum
+
+    let qCol ← allocRT .BFloat16 tileSize tileSize .Col
+    swapLayout qCol q
+    mma dKAccum dSTBf16 qCol dKAccum
+
+  store dKShared dKAccum
+  emitRaw "group<4>::sync(4);"
+  storeGlobalAdd dK_ptr dKShared kvCoord
+  store dVShared dVAccum
+  emitRaw "group<4>::sync(4);"
+  storeGlobalAdd dV_ptr dVShared kvCoord
+  emitRaw "warp::tma::store_async_wait();"
 
 end Tyr.GPU.Kernels

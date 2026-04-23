@@ -65,14 +65,15 @@ Current working checklist:
 - [x] Confirm the raw-partial dump path works from the rebuilt native binary.
 - [x] Extend the PyTorch raw-partial comparator to unwrap TorchScript-wrapped
   single-tensor fixture payloads.
-- [~] Fix the remaining per-tile `dK` mismatch that appears before any
-  reduction.
+- [x] Stabilize fixed-row H100 runtime gradients through the direct `dQ` plus
+  KV-sweep backward split.
 - [~] Reduce the broad Lake rebuild fanout so the standard native validation
   loop is practical.
-- [ ] Benchmark the current Tyr runtime against:
+- [x] Benchmark the current Tyr runtime against:
   - PyTorch SDPA
-  - repo-local FA3
-  on one H100 with machine-readable output.
+  on one H100 with machine-readable output for the native 128/768 x 64 rows.
+- [ ] Add apples-to-apples repo-local FA3 rows for the same native training
+  shapes once FA3 backward coverage is available.
 - [ ] Broaden the native runtime beyond the current fixed `headDim=64`
   families.
 - [ ] Route real model attention paths through the runtime operator:
@@ -1313,3 +1314,46 @@ only need role assignment (MhaH100LCF, Hedgehog, LinearAttn).
     shapes.
   - [ ] Add shape-specialized codegen coverage for head-dim 128, GQA/MQA, and
     longer sequence lengths.
+
+## 2026-04-23 KV-Sweep Backward Stabilization
+
+- Implemented the next H100 MHA backward checkpoint:
+  - `tkMhaH100Bwd2BlockDq` / `tkMhaH100Bwd12BlockDq` compute `dQ` with the
+    known-correct q-centric direct-store accumulation.
+  - `tkMhaH100Bwd2BlockKvSweep` / `tkMhaH100Bwd12BlockKvSweep` compute `dK` /
+    `dV` with a ThunderKittens-like KV-owned query sweep.
+  - Runtime bridge, typed op wrappers, raw examples, and training example now
+    launch direct `dQ` first, then the K/V sweep.
+- Sync/TK comparison result:
+  - [x] K/V ownership now matches the important TK structure: one KV tile per
+    CTA, all query tiles swept, K/V accumulated in registers, final store-add.
+  - [x] Generated TMA descriptor globals are `const __grid_constant__`.
+  - [x] Generated TMA source shared tiles are 1024-byte aligned.
+  - [x] K/V final writeback uses separate FP32 shared staging again.
+  - [~] `dQ` is intentionally not using TK-style cross-KV TMA store-add yet.
+    The fused attempt was nondeterministic under repeated runs.
+  - [~] Sync is conservative raw `group<4>::sync(4)` around store-add staging;
+    the general backend still needs a real async-handoff abstraction.
+- Validation:
+  - [x] Lean kernel module compiles.
+  - [x] CUDA generation succeeds.
+  - [x] Native C++ benchmark target builds.
+  - [x] 128x64 launch-blocking bridge smoke passes.
+  - [x] 768x64 launch-blocking bridge smoke passes.
+  - [x] Repeated 128x64 diagnostics are deterministic after the split.
+- Benchmark:
+  - [x] Wrote `benchmarks/results/flash_attn_cpp_native_h100_dq_direct_kv_sweep.jsonl`.
+  - `native_dense_128x64`: Tyr `0.329764 ms`, SDPA `0.231418 ms`,
+    `correctnessOk=true`, `speedupVsSdpaP50=0.701769`.
+  - `native_dense_768x64`: Tyr `1.33397 ms`, SDPA `0.348799 ms`,
+    `correctnessOk=true`, `speedupVsSdpaP50=0.261476`.
+- TODO state:
+  - [x] Create a working, benchmarked KV-sweep K/V backward route.
+  - [x] Keep the runtime bridge training-correct for the fixed native rows.
+  - [~] Analyze unnecessary/too-granular syncs versus TK; current syncs are
+    conservative but not yet a general pipeline model.
+  - [ ] Make the TK-style q-gradient store-add path deterministic so the direct
+    q-centric `dQ` pass can be removed.
+  - [ ] Recover performance lost by the two-kernel backward split.
+  - [ ] Add shape-specialized head-dim 128, causal, and GQA/MQA routes for
+    Qwen/Gemma coverage.
