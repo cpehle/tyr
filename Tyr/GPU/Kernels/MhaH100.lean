@@ -53,8 +53,6 @@ def tkFlashAttnFwd2Block
   let coord ← blockCoord2D
 
   let q ← allocRT .BFloat16 tileSize tileSize
-  let k ← allocRT .BFloat16 tileSize tileSize
-  let v ← allocRT .BFloat16 tileSize tileSize .Col
   let o ← zeroRT .Float32 tileSize tileSize
 
   let softmaxState ← allocSoftmaxState .Float32 tileSize
@@ -106,8 +104,6 @@ def tkFlashAttnFwd2BlockLse
   let coord ← blockCoord2D
 
   let q ← allocRT .BFloat16 tileSize tileSize
-  let k ← allocRT .BFloat16 tileSize tileSize
-  let v ← allocRT .BFloat16 tileSize tileSize .Col
   let o ← zeroRT .Float32 tileSize tileSize
 
   let softmaxState ← allocSoftmaxState .Float32 tileSize
@@ -166,8 +162,6 @@ def tkMhaH100Fwd2Block
   let coord ← blockCoord2D
 
   let q ← allocRT .BFloat16 tileSize tileSize
-  let k ← allocRT .BFloat16 tileSize tileSize
-  let v ← allocRT .BFloat16 tileSize tileSize .Col
   let o ← zeroRT .Float32 tileSize tileSize
   let softmaxState ← allocSoftmaxState .Float32 tileSize
 
@@ -559,8 +553,6 @@ def tkFlashAttnFwd12Block
   let coord ← blockCoord2D
 
   let q ← allocRT .BFloat16 tileSize tileSize
-  let k ← allocRT .BFloat16 tileSize tileSize
-  let v ← allocRT .BFloat16 tileSize tileSize .Col
   let o ← zeroRT .Float32 tileSize tileSize
 
   let softmaxState ← allocSoftmaxState .Float32 tileSize
@@ -611,8 +603,6 @@ def tkFlashAttnFwd12BlockLse
   let coord ← blockCoord2D
 
   let q ← allocRT .BFloat16 tileSize tileSize
-  let k ← allocRT .BFloat16 tileSize tileSize
-  let v ← allocRT .BFloat16 tileSize tileSize .Col
   let o ← zeroRT .Float32 tileSize tileSize
 
   let softmaxState ← allocSoftmaxState .Float32 tileSize
@@ -670,8 +660,6 @@ def tkMhaH100Fwd12Block
   let coord ← blockCoord2D
 
   let q ← allocRT .BFloat16 tileSize tileSize
-  let k ← allocRT .BFloat16 tileSize tileSize
-  let v ← allocRT .BFloat16 tileSize tileSize .Col
   let o ← zeroRT .Float32 tileSize tileSize
   let softmaxState ← allocSoftmaxState .Float32 tileSize
 

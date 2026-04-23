@@ -1504,3 +1504,22 @@ only need role assignment (MhaH100LCF, Hedgehog, LinearAttn).
   - [ ] Add warpgroup-id/subtile ownership so four 16-row pieces can cover a
     64-row query tile.
   - [ ] Reattempt shared-Q forward only after the subtile ownership model exists.
+
+## 2026-04-23 Forward WGMMA Register Cleanup
+
+- Implemented:
+  - [x] Removed unused forward K/V register tiles from the WGMMA route.
+  - [x] Regenerated H100 MHA CUDA.
+  - [x] Rebuilt `cc/build/tools/bench_flash_attn`.
+  - [x] Re-ran one-H100 `native_now` benchmark.
+- Benchmark:
+  - [x] Wrote `benchmarks/results/flash_attn_cpp_native_h100_wgmma_forward_clean_regs.jsonl`.
+  - `native_dense_128x64`: Tyr `0.208570 ms`, SDPA `0.191270 ms`,
+    gradients correct.
+  - `native_dense_768x64`: Tyr `0.493654 ms`, SDPA `0.196349 ms`,
+    gradients correct.
+- Status:
+  - [x] Dead register declarations are gone from generated forward CUDA.
+  - [~] WGMMA serialization warnings remain.
+  - [ ] Performance still requires TK-style 16-row consumer subtiles and
+    explicit warpgroup role scheduling.
