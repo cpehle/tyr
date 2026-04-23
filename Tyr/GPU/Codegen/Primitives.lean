@@ -491,6 +491,58 @@ def warpgroupMmT {M K N : Nat} {inDtype accDtype : GpuFloat} {layoutB : TileLayo
   let _ := hM; let _ := hK; let _ := hN
   emit (.warpgroupMm .ABt dst.id a.id b.id)
 
+/-- Hopper WGMMA accumulate: `dst += a @ b`, with both inputs in shared memory.
+    TK's shared/shared overload consumes a 64-row shared tile but writes one
+    16-row register subtile per participating warp. -/
+def warpgroupMmaShared64x16 {K N : Nat} {inDtype accDtype : GpuFloat}
+    {layoutA layoutB : TileLayout}
+    (dst : RT accDtype 16 N .Row)
+    (a : ST inDtype 64 K layoutA)
+    (b : ST inDtype K N layoutB)
+    (hK : K % 16 = 0 := by decide)
+    (hN : N % 16 = 0 := by decide)
+    : KernelM Unit := do
+  let _ := hK; let _ := hN
+  emit (.warpgroupMma .AB dst.id a.id b.id)
+
+/-- Hopper WGMMA overwrite: `dst = a @ b`, with both inputs in shared memory. -/
+def warpgroupMmShared64x16 {K N : Nat} {inDtype accDtype : GpuFloat}
+    {layoutA layoutB : TileLayout}
+    (dst : RT accDtype 16 N .Row)
+    (a : ST inDtype 64 K layoutA)
+    (b : ST inDtype K N layoutB)
+    (hK : K % 16 = 0 := by decide)
+    (hN : N % 16 = 0 := by decide)
+    : KernelM Unit := do
+  let _ := hK; let _ := hN
+  emit (.warpgroupMm .AB dst.id a.id b.id)
+
+/-- Hopper WGMMA accumulate: `dst += a @ b^T`, with both inputs in shared memory.
+    This matches TK forward scores: `warpgroup::mma_ABt(scores, q_smem, k_smem)`. -/
+def warpgroupMmaSharedT64x16 {K N : Nat} {inDtype accDtype : GpuFloat}
+    {layoutA layoutB : TileLayout}
+    (dst : RT accDtype 16 N .Row)
+    (a : ST inDtype 64 K layoutA)
+    (b : ST inDtype N K layoutB)
+    (hK : K % 16 = 0 := by decide)
+    (hN : N % 16 = 0 := by decide)
+    : KernelM Unit := do
+  let _ := hK; let _ := hN
+  emit (.warpgroupMma .ABt dst.id a.id b.id)
+
+/-- Hopper WGMMA overwrite: `dst = a @ b^T`, with both inputs in shared memory.
+    This matches TK forward scores: `warpgroup::mm_ABt(scores, q_smem, k_smem)`. -/
+def warpgroupMmSharedT64x16 {K N : Nat} {inDtype accDtype : GpuFloat}
+    {layoutA layoutB : TileLayout}
+    (dst : RT accDtype 16 N .Row)
+    (a : ST inDtype 64 K layoutA)
+    (b : ST inDtype N K layoutB)
+    (hK : K % 16 = 0 := by decide)
+    (hN : N % 16 = 0 := by decide)
+    : KernelM Unit := do
+  let _ := hK; let _ := hN
+  emit (.warpgroupMm .ABt dst.id a.id b.id)
+
 /-! ## Ternary Operations (FMA) -/
 
 /-- Fused multiply-add: dst = a * b + c -/
