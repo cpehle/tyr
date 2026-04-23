@@ -8,6 +8,33 @@ namespace Tyr.GPU.Kernels
 open Tyr.GPU
 open Tyr.GPU.Codegen
 
+private def asyncLoadGlobalTile {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
+    (dst : ST dtype rows cols layout)
+    (src : GPtr dtype)
+    (coord : RTileCoord)
+    (sem : Semaphore) : KernelM Unit := do
+  initSemaphore sem 0 1
+  blockSync
+  expectBytes sem (rows * cols * dtype.bytes)
+  loadGlobalAsync dst src coord sem.id
+  waitSemaphore sem
+
+private def asyncLoadGlobalPair {dtype : GpuFloat} {rows cols : Nat}
+    {layoutA layoutB : TileLayout}
+    (dstA : ST dtype rows cols layoutA)
+    (srcA : GPtr dtype)
+    (coordA : RTileCoord)
+    (dstB : ST dtype rows cols layoutB)
+    (srcB : GPtr dtype)
+    (coordB : RTileCoord)
+    (sem : Semaphore) : KernelM Unit := do
+  initSemaphore sem 0 1
+  blockSync
+  expectBytes sem (2 * rows * cols * dtype.bytes)
+  loadGlobalAsync dstA srcA coordA sem.id
+  loadGlobalAsync dstB srcB coordB sem.id
+  waitSemaphore sem
+
 /-- FlashAttention forward for two KV blocks (seq=128, head_dim=64).
     This kernel is currently non-causal because dynamic block-offset masking is
     not yet represented in the IR. -/
@@ -36,18 +63,17 @@ def tkFlashAttnFwd2Block
   let kShared ← allocST .BFloat16 tileSize tileSize
   let vShared ← allocST .BFloat16 tileSize tileSize .Col
   let oShared ← allocST .BFloat16 tileSize tileSize
+  let qSem ← allocSemaphore
+  let kvSem ← allocSemaphore
 
-  loadGlobal qShared q_ptr coord
-  sync
+  asyncLoadGlobalTile qShared q_ptr coord qSem
   load q qShared
 
   for kvIdx in krange 0 numKvBlocks do
     let s ← zeroRT .Float32 tileSize tileSize
     let p ← allocRT .BFloat16 tileSize tileSize
 
-    loadGlobal kShared k_ptr (coord.withRow kvIdx.id)
-    loadGlobal vShared v_ptr (coord.withRow kvIdx.id)
-    sync
+    asyncLoadGlobalPair kShared k_ptr (coord.withRow kvIdx.id) vShared v_ptr (coord.withRow kvIdx.id) kvSem
     load k kShared
     load v vShared
 
@@ -56,8 +82,7 @@ def tkFlashAttnFwd2Block
     onlineSoftmax s o softmaxState
     convert p s
     mma o p v o
-    sync
-
+    groupSync 4 4
   finalizeSoftmax o softmaxState
 
   let oBf16 ← allocRT .BFloat16 tileSize tileSize
@@ -94,18 +119,17 @@ def tkFlashAttnFwd2BlockLse
   let vShared ← allocST .BFloat16 tileSize tileSize .Col
   let oShared ← allocST .BFloat16 tileSize tileSize
   let lseShared ← allocSV .Float32 tileSize
+  let qSem ← allocSemaphore
+  let kvSem ← allocSemaphore
 
-  loadGlobal qShared q_ptr coord
-  sync
+  asyncLoadGlobalTile qShared q_ptr coord qSem
   load q qShared
 
   for kvIdx in krange 0 numKvBlocks do
     let s ← zeroRT .Float32 tileSize tileSize
     let p ← allocRT .BFloat16 tileSize tileSize
 
-    loadGlobal kShared k_ptr (coord.withRow kvIdx.id)
-    loadGlobal vShared v_ptr (coord.withRow kvIdx.id)
-    sync
+    asyncLoadGlobalPair kShared k_ptr (coord.withRow kvIdx.id) vShared v_ptr (coord.withRow kvIdx.id) kvSem
     load k kShared
     load v vShared
 
@@ -114,8 +138,7 @@ def tkFlashAttnFwd2BlockLse
     onlineSoftmax s o softmaxState
     convert p s
     mma o p v o
-    sync
-
+    groupSync 4 4
   finalizeSoftmax o softmaxState
   let lse ← computeLSE softmaxState
 
@@ -157,18 +180,17 @@ def tkMhaH100Fwd2Block
   let vShared ← allocST .BFloat16 tileSize tileSize .Col
   let oShared ← allocST .BFloat16 tileSize tileSize
   let lShared ← allocSV .Float32 tileSize
+  let qSem ← allocSemaphore
+  let kvSem ← allocSemaphore
 
-  loadGlobal qShared q_ptr coord
-  sync
+  asyncLoadGlobalTile qShared q_ptr coord qSem
   load q qShared
 
   for kvIdx in krange 0 numKvBlocks do
     let s ← zeroRT .Float32 tileSize tileSize
     let p ← allocRT .BFloat16 tileSize tileSize
 
-    loadGlobal kShared k_ptr (coord.withRow kvIdx.id)
-    loadGlobal vShared v_ptr (coord.withRow kvIdx.id)
-    sync
+    asyncLoadGlobalPair kShared k_ptr (coord.withRow kvIdx.id) vShared v_ptr (coord.withRow kvIdx.id) kvSem
     load k kShared
     load v vShared
 
@@ -177,8 +199,7 @@ def tkMhaH100Fwd2Block
     onlineSoftmax s o softmaxState
     convert p s
     mma o p v o
-    sync
-
+    groupSync 4 4
   finalizeSoftmax o softmaxState
   let l ← computeLSE softmaxState
   scalarMulVec l l lScale
@@ -213,10 +234,9 @@ def tkMhaH100BwdPrep2Block
   let dOShared ← allocST .BFloat16 tileSize tileSize
   let oShared ← allocST .BFloat16 tileSize tileSize
   let dShared ← allocSV .Float32 tileSize
+  let doSem ← allocSemaphore
 
-  loadGlobal dOShared dO_ptr coord
-  loadGlobal oShared o_ptr coord
-  sync
+  asyncLoadGlobalPair dOShared dO_ptr coord oShared o_ptr coord doSem
   load dO dOShared
   load o oShared
 
@@ -263,15 +283,15 @@ def tkMhaH100Bwd2BlockPartials
 
   let rowShared ← allocST .BFloat16 tileSize tileSize
   let vShared ← allocST .BFloat16 tileSize tileSize .Col
-  -- Keep K/V writeback staging disjoint to mirror the TK separation more closely.
-  let dKShared ← allocST .Float32 tileSize tileSize
-  let dVShared ← allocST .Float32 tileSize tileSize
+  -- Reuse one FP32 staging tile; wait before overwriting it with the next TMA store.
+  let dKVShared ← allocST .Float32 tileSize tileSize
+  let qSem ← allocSemaphore
+  let doSem ← allocSemaphore
+  let kvSem ← allocSemaphore
 
-  loadGlobal rowShared q_ptr coord
-  sync
+  asyncLoadGlobalTile rowShared q_ptr coord qSem
   load q rowShared
-  loadGlobal rowShared dO_ptr coord
-  sync
+  asyncLoadGlobalTile rowShared dO_ptr coord doSem
   load dO rowShared
 
   loadVecGlobalRowRV lTk l_ptr coord
@@ -288,9 +308,7 @@ def tkMhaH100Bwd2BlockPartials
     let dKPart ← zeroRT .Float32 tileSize tileSize
     let dVPart ← zeroRT .Float32 tileSize tileSize
 
-    loadGlobal rowShared k_ptr (coord.withRow kvIdx.id)
-    loadGlobal vShared v_ptr (coord.withRow kvIdx.id)
-    sync
+    asyncLoadGlobalPair rowShared k_ptr (coord.withRow kvIdx.id) vShared v_ptr (coord.withRow kvIdx.id) kvSem
     load k rowShared
     load v vShared
     let vRow ← allocRT .BFloat16 tileSize tileSize
@@ -328,18 +346,22 @@ def tkMhaH100Bwd2BlockPartials
     mma dQ dSRow kCol dQ
 
     let dkvCoord := coord.withRow kvIdx.id
-    store dKShared dKPart
-    emitRaw "group<4>::sync(4);"
-    storeGlobalAdd dK_part_ptr dKShared dkvCoord
-    store dVShared dVPart
-    emitRaw "group<4>::sync(4);"
-    storeGlobalAdd dV_part_ptr dVShared dkvCoord
-    emitRaw "warp::tma::store_async_wait();"
-    emitRaw "group<4>::sync(4);"
+    store dKVShared dKPart
+    groupSync 4 4
+    storeGlobalAdd dK_part_ptr dKVShared dkvCoord
+    tmaStoreCommitGroup
+    tmaStoreAsyncWait
+    groupSync 4 4
+    store dKVShared dVPart
+    groupSync 4 4
+    storeGlobalAdd dV_part_ptr dKVShared dkvCoord
+    tmaStoreCommitGroup
+    tmaStoreAsyncWait
+    groupSync 4 4
 
-  store dKShared dQ
-  sync
-  storeGlobal dQ_ptr dKShared coord
+  store dKVShared dQ
+  groupSync 4 4
+  storeGlobal dQ_ptr dKVShared coord
 
 /-- Q-centric `dQ` pass for 2-block H100 MHA backward.
     This keeps the stable direct-store `dQ` accumulation while the K/V gradients
@@ -372,12 +394,13 @@ def tkMhaH100Bwd2BlockDq
   let rowShared ← allocST .BFloat16 tileSize tileSize
   let vShared ← allocST .BFloat16 tileSize tileSize .Col
   let dQShared ← allocST .Float32 tileSize tileSize
+  let qSem ← allocSemaphore
+  let doSem ← allocSemaphore
+  let kvSem ← allocSemaphore
 
-  loadGlobal rowShared q_ptr coord
-  sync
+  asyncLoadGlobalTile rowShared q_ptr coord qSem
   load q rowShared
-  loadGlobal rowShared dO_ptr coord
-  sync
+  asyncLoadGlobalTile rowShared dO_ptr coord doSem
   load dO rowShared
 
   loadVecGlobalRowRV lTk l_ptr coord
@@ -392,9 +415,7 @@ def tkMhaH100Bwd2BlockDq
     let dPT ← zeroRT .Float32 tileSize tileSize
     let dST ← allocRT .Float32 tileSize tileSize
 
-    loadGlobal rowShared k_ptr (coord.withRow kvIdx.id)
-    loadGlobal vShared v_ptr (coord.withRow kvIdx.id)
-    sync
+    asyncLoadGlobalPair rowShared k_ptr (coord.withRow kvIdx.id) vShared v_ptr (coord.withRow kvIdx.id) kvSem
     load k rowShared
     load v vShared
     let vRow ← allocRT .BFloat16 tileSize tileSize
@@ -422,7 +443,7 @@ def tkMhaH100Bwd2BlockDq
     mma dQ dSRow kCol dQ
 
   store dQShared dQ
-  sync
+  groupSync 4 4
   storeGlobal dQ_ptr dQShared coord
 
 /-- KV-centric `mha_h100` backward sweep for 2 blocks. This mirrors
@@ -456,12 +477,12 @@ def tkMhaH100Bwd2BlockKvSweep
 
   let rowShared ← allocST .BFloat16 tileSize tileSize
   let vShared ← allocST .BFloat16 tileSize tileSize .Col
-  let dKShared ← allocST .Float32 tileSize tileSize
-  let dVShared ← allocST .Float32 tileSize tileSize
+  let dKVShared ← allocST .Float32 tileSize tileSize
+  let kvSem ← allocSemaphore
+  let qSem ← allocSemaphore
+  let doSem ← allocSemaphore
 
-  loadGlobal rowShared k_ptr kvCoord
-  loadGlobal vShared v_ptr kvCoord
-  sync
+  asyncLoadGlobalPair rowShared k_ptr kvCoord vShared v_ptr kvCoord kvSem
   load k rowShared
   load v vShared
 
@@ -476,11 +497,9 @@ def tkMhaH100Bwd2BlockKvSweep
     let lse ← allocRV .Float32 tileSize
     let dVec ← allocRV .Float32 tileSize
 
-    loadGlobal rowShared q_ptr qCoord
-    sync
+    asyncLoadGlobalTile rowShared q_ptr qCoord qSem
     load q rowShared
-    loadGlobal rowShared dO_ptr qCoord
-    sync
+    asyncLoadGlobalTile rowShared dO_ptr qCoord doSem
     load dO rowShared
 
     loadVecGlobalRowRV lTk l_ptr qCoord
@@ -518,13 +537,17 @@ def tkMhaH100Bwd2BlockKvSweep
     swapLayout qCol q
     mma dKAccum dSTBf16 qCol dKAccum
 
-  store dKShared dKAccum
-  emitRaw "group<4>::sync(4);"
-  storeGlobalAdd dK_ptr dKShared kvCoord
-  store dVShared dVAccum
-  emitRaw "group<4>::sync(4);"
-  storeGlobalAdd dV_ptr dVShared kvCoord
-  emitRaw "warp::tma::store_async_wait();"
+  store dKVShared dKAccum
+  groupSync 4 4
+  storeGlobalAdd dK_ptr dKVShared kvCoord
+  tmaStoreCommitGroup
+  tmaStoreAsyncWait
+  groupSync 4 4
+  store dKVShared dVAccum
+  groupSync 4 4
+  storeGlobalAdd dV_ptr dKVShared kvCoord
+  tmaStoreCommitGroup
+  tmaStoreAsyncWait
 
 /-- FlashAttention forward for 12 KV blocks (seq=768, head_dim=64). -/
 @[gpu_kernel .SM90]
@@ -552,18 +575,17 @@ def tkFlashAttnFwd12Block
   let kShared ← allocST .BFloat16 tileSize tileSize
   let vShared ← allocST .BFloat16 tileSize tileSize .Col
   let oShared ← allocST .BFloat16 tileSize tileSize
+  let qSem ← allocSemaphore
+  let kvSem ← allocSemaphore
 
-  loadGlobal qShared q_ptr coord
-  sync
+  asyncLoadGlobalTile qShared q_ptr coord qSem
   load q qShared
 
   for kvIdx in krange 0 numKvBlocks do
     let s ← zeroRT .Float32 tileSize tileSize
     let p ← allocRT .BFloat16 tileSize tileSize
 
-    loadGlobal kShared k_ptr (coord.withRow kvIdx.id)
-    loadGlobal vShared v_ptr (coord.withRow kvIdx.id)
-    sync
+    asyncLoadGlobalPair kShared k_ptr (coord.withRow kvIdx.id) vShared v_ptr (coord.withRow kvIdx.id) kvSem
     load k kShared
     load v vShared
 
@@ -572,8 +594,7 @@ def tkFlashAttnFwd12Block
     onlineSoftmax s o softmaxState
     convert p s
     mma o p v o
-    sync
-
+    groupSync 4 4
   finalizeSoftmax o softmaxState
 
   let oBf16 ← allocRT .BFloat16 tileSize tileSize
@@ -609,18 +630,17 @@ def tkFlashAttnFwd12BlockLse
   let vShared ← allocST .BFloat16 tileSize tileSize .Col
   let oShared ← allocST .BFloat16 tileSize tileSize
   let lseShared ← allocSV .Float32 tileSize
+  let qSem ← allocSemaphore
+  let kvSem ← allocSemaphore
 
-  loadGlobal qShared q_ptr coord
-  sync
+  asyncLoadGlobalTile qShared q_ptr coord qSem
   load q qShared
 
   for kvIdx in krange 0 numKvBlocks do
     let s ← zeroRT .Float32 tileSize tileSize
     let p ← allocRT .BFloat16 tileSize tileSize
 
-    loadGlobal kShared k_ptr (coord.withRow kvIdx.id)
-    loadGlobal vShared v_ptr (coord.withRow kvIdx.id)
-    sync
+    asyncLoadGlobalPair kShared k_ptr (coord.withRow kvIdx.id) vShared v_ptr (coord.withRow kvIdx.id) kvSem
     load k kShared
     load v vShared
 
@@ -629,8 +649,7 @@ def tkFlashAttnFwd12BlockLse
     onlineSoftmax s o softmaxState
     convert p s
     mma o p v o
-    sync
-
+    groupSync 4 4
   finalizeSoftmax o softmaxState
   let lse ← computeLSE softmaxState
 
@@ -671,18 +690,17 @@ def tkMhaH100Fwd12Block
   let vShared ← allocST .BFloat16 tileSize tileSize .Col
   let oShared ← allocST .BFloat16 tileSize tileSize
   let lShared ← allocSV .Float32 tileSize
+  let qSem ← allocSemaphore
+  let kvSem ← allocSemaphore
 
-  loadGlobal qShared q_ptr coord
-  sync
+  asyncLoadGlobalTile qShared q_ptr coord qSem
   load q qShared
 
   for kvIdx in krange 0 numKvBlocks do
     let s ← zeroRT .Float32 tileSize tileSize
     let p ← allocRT .BFloat16 tileSize tileSize
 
-    loadGlobal kShared k_ptr (coord.withRow kvIdx.id)
-    loadGlobal vShared v_ptr (coord.withRow kvIdx.id)
-    sync
+    asyncLoadGlobalPair kShared k_ptr (coord.withRow kvIdx.id) vShared v_ptr (coord.withRow kvIdx.id) kvSem
     load k kShared
     load v vShared
 
@@ -691,8 +709,7 @@ def tkMhaH100Fwd12Block
     onlineSoftmax s o softmaxState
     convert p s
     mma o p v o
-    sync
-
+    groupSync 4 4
   finalizeSoftmax o softmaxState
   let l ← computeLSE softmaxState
   scalarMulVec l l lScale
@@ -738,15 +755,15 @@ def tkMhaH100Bwd12BlockPartials
 
   let rowShared ← allocST .BFloat16 tileSize tileSize
   let vShared ← allocST .BFloat16 tileSize tileSize .Col
-  -- Keep K/V writeback staging disjoint to mirror the TK separation more closely.
-  let dKShared ← allocST .Float32 tileSize tileSize
-  let dVShared ← allocST .Float32 tileSize tileSize
+  -- Reuse one FP32 staging tile; wait before overwriting it with the next TMA store.
+  let dKVShared ← allocST .Float32 tileSize tileSize
+  let qSem ← allocSemaphore
+  let doSem ← allocSemaphore
+  let kvSem ← allocSemaphore
 
-  loadGlobal rowShared q_ptr coord
-  sync
+  asyncLoadGlobalTile rowShared q_ptr coord qSem
   load q rowShared
-  loadGlobal rowShared dO_ptr coord
-  sync
+  asyncLoadGlobalTile rowShared dO_ptr coord doSem
   load dO rowShared
 
   loadVecGlobalRowRV lTk l_ptr coord
@@ -763,9 +780,7 @@ def tkMhaH100Bwd12BlockPartials
     let dKPart ← zeroRT .Float32 tileSize tileSize
     let dVPart ← zeroRT .Float32 tileSize tileSize
 
-    loadGlobal rowShared k_ptr (coord.withRow kvIdx.id)
-    loadGlobal vShared v_ptr (coord.withRow kvIdx.id)
-    sync
+    asyncLoadGlobalPair rowShared k_ptr (coord.withRow kvIdx.id) vShared v_ptr (coord.withRow kvIdx.id) kvSem
     load k rowShared
     load v vShared
     let vRow ← allocRT .BFloat16 tileSize tileSize
@@ -802,18 +817,22 @@ def tkMhaH100Bwd12BlockPartials
     mma dQ dSRow kCol dQ
 
     let dkvCoord := coord.withRow kvIdx.id
-    store dKShared dKPart
-    emitRaw "group<4>::sync(4);"
-    storeGlobalAdd dK_part_ptr dKShared dkvCoord
-    store dVShared dVPart
-    emitRaw "group<4>::sync(4);"
-    storeGlobalAdd dV_part_ptr dVShared dkvCoord
-    emitRaw "warp::tma::store_async_wait();"
-    emitRaw "group<4>::sync(4);"
+    store dKVShared dKPart
+    groupSync 4 4
+    storeGlobalAdd dK_part_ptr dKVShared dkvCoord
+    tmaStoreCommitGroup
+    tmaStoreAsyncWait
+    groupSync 4 4
+    store dKVShared dVPart
+    groupSync 4 4
+    storeGlobalAdd dV_part_ptr dKVShared dkvCoord
+    tmaStoreCommitGroup
+    tmaStoreAsyncWait
+    groupSync 4 4
 
-  store dKShared dQ
-  sync
-  storeGlobal dQ_ptr dKShared coord
+  store dKVShared dQ
+  groupSync 4 4
+  storeGlobal dQ_ptr dKVShared coord
 
 /-- Q-centric `dQ` pass for 12-block H100 MHA backward (`seq=768`, `d=64`). -/
 @[gpu_kernel .SM90]
@@ -844,12 +863,13 @@ def tkMhaH100Bwd12BlockDq
   let rowShared ← allocST .BFloat16 tileSize tileSize
   let vShared ← allocST .BFloat16 tileSize tileSize .Col
   let dQShared ← allocST .Float32 tileSize tileSize
+  let qSem ← allocSemaphore
+  let doSem ← allocSemaphore
+  let kvSem ← allocSemaphore
 
-  loadGlobal rowShared q_ptr coord
-  sync
+  asyncLoadGlobalTile rowShared q_ptr coord qSem
   load q rowShared
-  loadGlobal rowShared dO_ptr coord
-  sync
+  asyncLoadGlobalTile rowShared dO_ptr coord doSem
   load dO rowShared
 
   loadVecGlobalRowRV lTk l_ptr coord
@@ -864,9 +884,7 @@ def tkMhaH100Bwd12BlockDq
     let dPT ← zeroRT .Float32 tileSize tileSize
     let dST ← allocRT .Float32 tileSize tileSize
 
-    loadGlobal rowShared k_ptr (coord.withRow kvIdx.id)
-    loadGlobal vShared v_ptr (coord.withRow kvIdx.id)
-    sync
+    asyncLoadGlobalPair rowShared k_ptr (coord.withRow kvIdx.id) vShared v_ptr (coord.withRow kvIdx.id) kvSem
     load k rowShared
     load v vShared
     let vRow ← allocRT .BFloat16 tileSize tileSize
@@ -894,7 +912,7 @@ def tkMhaH100Bwd12BlockDq
     mma dQ dSRow kCol dQ
 
   store dQShared dQ
-  sync
+  groupSync 4 4
   storeGlobal dQ_ptr dQShared coord
 
 /-- KV-centric `mha_h100` backward sweep for 12 blocks (`seq=768`, `d=64`).
@@ -927,12 +945,12 @@ def tkMhaH100Bwd12BlockKvSweep
 
   let rowShared ← allocST .BFloat16 tileSize tileSize
   let vShared ← allocST .BFloat16 tileSize tileSize .Col
-  let dKShared ← allocST .Float32 tileSize tileSize
-  let dVShared ← allocST .Float32 tileSize tileSize
+  let dKVShared ← allocST .Float32 tileSize tileSize
+  let kvSem ← allocSemaphore
+  let qSem ← allocSemaphore
+  let doSem ← allocSemaphore
 
-  loadGlobal rowShared k_ptr kvCoord
-  loadGlobal vShared v_ptr kvCoord
-  sync
+  asyncLoadGlobalPair rowShared k_ptr kvCoord vShared v_ptr kvCoord kvSem
   load k rowShared
   load v vShared
 
@@ -947,11 +965,9 @@ def tkMhaH100Bwd12BlockKvSweep
     let lse ← allocRV .Float32 tileSize
     let dVec ← allocRV .Float32 tileSize
 
-    loadGlobal rowShared q_ptr qCoord
-    sync
+    asyncLoadGlobalTile rowShared q_ptr qCoord qSem
     load q rowShared
-    loadGlobal rowShared dO_ptr qCoord
-    sync
+    asyncLoadGlobalTile rowShared dO_ptr qCoord doSem
     load dO rowShared
 
     loadVecGlobalRowRV lTk l_ptr qCoord
@@ -988,12 +1004,16 @@ def tkMhaH100Bwd12BlockKvSweep
     swapLayout qCol q
     mma dKAccum dSTBf16 qCol dKAccum
 
-  store dKShared dKAccum
-  emitRaw "group<4>::sync(4);"
-  storeGlobalAdd dK_ptr dKShared kvCoord
-  store dVShared dVAccum
-  emitRaw "group<4>::sync(4);"
-  storeGlobalAdd dV_ptr dVShared kvCoord
-  emitRaw "warp::tma::store_async_wait();"
+  store dKVShared dKAccum
+  groupSync 4 4
+  storeGlobalAdd dK_ptr dKVShared kvCoord
+  tmaStoreCommitGroup
+  tmaStoreAsyncWait
+  groupSync 4 4
+  store dKVShared dVAccum
+  groupSync 4 4
+  storeGlobalAdd dV_ptr dKVShared kvCoord
+  tmaStoreCommitGroup
+  tmaStoreAsyncWait
 
 end Tyr.GPU.Kernels

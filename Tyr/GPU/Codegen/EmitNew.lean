@@ -351,8 +351,12 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout)
   | .storeAdd dst src => s!"{indent}store_add({dst.toIdent}, {src.toIdent});\n"
   | .storeAddAsync dst src => s!"{indent}warp::tma::store_add_async({dst.toIdent}, {src.toIdent});\n"
   | .storeMinAsync dst src => s!"{indent}warp::tma::store_min_async({dst.toIdent}, {src.toIdent});\n"
+  | .tmaStoreCommitGroup => s!"{indent}warp::tma::store_commit_group();\n"
+  | .tmaStoreAsyncWait => s!"{indent}warp::tma::store_async_wait();\n"
   | .prefetch src => s!"{indent}warp::tma::prefetch({src.toIdent});\n"
   | .tmaExpect barrier bytes => s!"{indent}warp::tma::expect_bytes({barrier.toIdent}, {bytes});\n"
+  | .blockSync => s!"{indent}__syncthreads();\n"
+  | .groupSync warps barrierId => s!"{indent}group<{warps}>::sync({barrierId});\n"
 
   -- TMA operations with global pointers
   | .tmaLoad dst src coord =>
@@ -375,7 +379,9 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout)
     let (rowScale, colScale) := match tileInfo[dst]? with
       | some info => (info.rows, info.cols)
       | none => (1, 1)
-    s!"{indent}warp::tma::load_async({dst.toIdent}, {src.toIdent}, kittens::coord<>({coordB.toIdent}, {coordD.toIdent}, ({coordR.toIdent} * {rowScale}), ({coordC.toIdent} * {colScale})), {sem.toIdent});\n"
+    s!"{indent}if (kittens::warpid() == 0) \{\n" ++
+    s!"{indent}  warp::tma::load_async({dst.toIdent}, {src.toIdent}, kittens::coord<>({coordB.toIdent}, {coordD.toIdent}, ({coordR.toIdent} * {rowScale}), ({coordC.toIdent} * {colScale})), {sem.toIdent});\n" ++
+    s!"{indent}}\n"
   | .storeGlobalAsync dst src coordB coordD coordR coordC =>
     let (rowScale, colScale) := match tileInfo[src]? with
       | some info => (info.rows, info.cols)
@@ -842,10 +848,16 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout)
   -- Semaphore operations
   | .semaphore op sem =>
     match op with
-    | .Init count => s!"{indent}init_semaphore({sem.toIdent}, {count});\n"
+    | .Init threadCount transactionCount =>
+      s!"{indent}if (threadIdx.x == 0) \{\n" ++
+      s!"{indent}  init_semaphore({sem.toIdent}, {threadCount}, {transactionCount});\n" ++
+      s!"{indent}}\n"
     | .Invalidate => s!"{indent}invalidate_semaphore({sem.toIdent});\n"
-    | .Expect bytes => s!"{indent}expect({sem.toIdent}, {bytes});\n"
-    | .Wait => s!"{indent}wait({sem.toIdent}, 0);\n"
+    | .Expect bytes =>
+      s!"{indent}if (kittens::warpid() == 0) \{\n" ++
+      s!"{indent}  warp::tma::expect_bytes({sem.toIdent}, {bytes});\n" ++
+      s!"{indent}}\n"
+    | .Wait phase => s!"{indent}wait({sem.toIdent}, {phase});\n"
     | .Arrive count => s!"{indent}arrive({sem.toIdent}, {count});\n"
     | .ArriveAndWait => s!"{indent}arrive_and_wait({sem.toIdent});\n"
 
@@ -969,7 +981,9 @@ private partial def stmtUses (p : KStmt → Bool) : KStmt → Bool
       | .declGPtr .. | .declKVal ..
       | .load .. | .store .. | .loadAsync .. | .storeAsync ..
       | .storeAdd .. | .storeAddAsync .. | .storeMinAsync ..
+      | .tmaStoreCommitGroup | .tmaStoreAsyncWait
       | .prefetch .. | .tmaExpect ..
+      | .blockSync | .groupSync ..
       | .tmaLoad .. | .tmaStore ..
       | .loadGlobal .. | .storeGlobal ..
       | .loadGlobalAsync .. | .storeGlobalAsync .. | .storeGlobalAdd ..
