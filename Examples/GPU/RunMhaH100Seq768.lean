@@ -13,7 +13,7 @@ private abbrev MhaTensor := T #[1, 1, 768, 64]
 private abbrev LTensor := T #[12, 64]
 private abbrev GradTiles := T #[12, 64, 64]
 
-private def contractLabel : String := "store_add_accum"
+private def contractLabel : String := "dq_direct_kv_sweep_store_add"
 private def seqLen : Nat := 768
 private def headDim : Nat := 64
 private def kvTiles : Nat := 12
@@ -134,7 +134,8 @@ def runOnce (dumpPartials : Bool := false) : IO Bool := do
   let dQ : MhaTensor := torch.zeros #[1, 1, 768, 64] false (Device.CUDA 0)
   let dK : MhaTensor := torch.zeros #[1, 1, 768, 64] false (Device.CUDA 0)
   let dV : MhaTensor := torch.zeros #[1, 1, 768, 64] false (Device.CUDA 0)
-  tkMhaH100Bwd12BlockPartials.launch q k v dO lOut dVec dQ dK dV 768 64 1 12 1 128 1 1 0 stream
+  tkMhaH100Bwd12BlockDq.launch q k v dO lOut dVec dQ 768 64 1 12 1 128 1 1 0 stream
+  tkMhaH100Bwd12BlockKvSweep.launch q k v dO lOut dVec dQ dK dV 768 64 1 12 1 128 1 1 0 stream
   let _ ← torch.cuda_synchronize
   if dumpPartials then
     dumpAccumulatedGrads dK dV

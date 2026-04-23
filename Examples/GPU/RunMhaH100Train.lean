@@ -13,7 +13,7 @@ abbrev MhaTensor := T #[1, 1, 128, 64]   -- bf16 kernel inputs/outputs
 abbrev MasterTensor := T #[1, 1, 128, 64] -- fp32 optimizer state
 abbrev LTensor := T #[2, 64]
 def nElems : Float := 8192.0
-private def contractLabel : String := "store_add_accum"
+private def contractLabel : String := "dq_direct_kv_sweep_store_add"
 private def seqLen : Nat := 128
 private def headDim : Nat := 64
 private def kvTiles : Nat := 2
@@ -44,7 +44,8 @@ def backwardMha
   let dQ : MasterTensor := torch.zeros #[1, 1, 128, 64] false (Device.CUDA 0)
   let dK : MasterTensor := torch.zeros #[1, 1, 128, 64] false (Device.CUDA 0)
   let dV : MasterTensor := torch.zeros #[1, 1, 128, 64] false (Device.CUDA 0)
-  tkMhaH100Bwd2BlockPartials.launch q k v dO lOut dVec dQ dK dV 128 64 1 2 1 128 1 1 0 stream
+  tkMhaH100Bwd2BlockDq.launch q k v dO lOut dVec dQ 128 64 1 2 1 128 1 1 0 stream
+  tkMhaH100Bwd2BlockKvSweep.launch q k v dO lOut dVec dQ dK dV 128 64 1 2 1 128 1 1 0 stream
   pure (dQ, dK, dV)
 
 def lossAndGradOut (out targetOut : MhaTensor) : T #[] × MhaTensor :=
