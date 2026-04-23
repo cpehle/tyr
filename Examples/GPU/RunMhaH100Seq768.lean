@@ -9,6 +9,23 @@ namespace Examples.GPU
 open torch
 open Tyr.GPU.Kernels
 
+private abbrev MhaTensor := T #[1, 1, 768, 64]
+private abbrev LTensor := T #[12, 64]
+private abbrev PartialStack := T #[1, 1, 9216, 64]
+private abbrev PartialTiles := T #[12, 12, 64, 64]
+
+private def contractLabel : String := "stacked_partials"
+private def seqLen : Nat := 768
+private def headDim : Nat := 64
+private def kvTiles : Nat := 12
+private def stackRows : Nat := seqLen * kvTiles
+
+private def reduceStackedPartials (stack : PartialStack) : MhaTensor :=
+  let tiles : PartialTiles := torch.reshape stack #[12, 12, 64, 64]
+  let byKv : T #[12, 64, 64] := nn.sumDim tiles 0 false
+  let flat : T #[768, 64] := torch.reshape byKv #[768, 64]
+  nn.unsqueeze (nn.unsqueeze flat 0) 0
+
 def fixtureSpec : FixtureSpec := {
   dir := ⟨"data/gpu_fixtures/mha_h100_768x64"⟩
   names := #[
@@ -20,6 +37,18 @@ def fixtureSpec : FixtureSpec := {
 
 def fixtureFile (name : String) : System.FilePath :=
   Examples.GPU.fixturePath fixtureSpec name
+
+private def partialDumpFile (name : String) : System.FilePath :=
+  fixtureSpec.dir / name
+
+private def dumpStackedPartials (dKStack dVStack : PartialStack) : IO Unit := do
+  let dKTiles : PartialTiles := torch.reshape dKStack #[12, 12, 64, 64]
+  let dVTiles : PartialTiles := torch.reshape dVStack #[12, 12, 64, 64]
+  let dKPath := partialDumpFile "diag_dK_tiles.pt"
+  let dVPath := partialDumpFile "diag_dV_tiles.pt"
+  torch.data.saveTensor dKTiles dKPath.toString
+  torch.data.saveTensor dVTiles dVPath.toString
+  IO.println s!"mha_h100_768x64 partial_dump=true dK_tiles={dKPath} dV_tiles={dVPath}"
 
 def generateFixtures : IO Unit := do
   if !(← torch.cuda_is_available) then
@@ -75,7 +104,7 @@ def generateFixtures : IO Unit := do
   let dqMean := torch.nn.item (torch.nn.meanAll expectedDQ)
   IO.println s!"Generated mha_h100_768x64 fixtures in {fixtureSpec.dir} outMean={outMean} lMean={lMean} dqMean={dqMean}"
 
-def runOnce : IO Bool := do
+def runOnce (dumpPartials : Bool := false) : IO Bool := do
   if !(← torch.cuda_is_available) then
     IO.eprintln "CUDA is not available on this host."
     return false
@@ -110,21 +139,27 @@ def runOnce : IO Bool := do
   tkMhaH100BwdPrep2Block.launch dO out dVec 768 64 1 12 1 128 1 1 0 stream
   let _ ← torch.cuda_synchronize
 
-  let dQ : T #[1, 1, 768, 64] := torch.zeros #[1, 1, 768, 64] false (Device.CUDA 0)
-  let dKStack : T #[1, 1, 9216, 64] := torch.zeros #[1, 1, 9216, 64] false (Device.CUDA 0)
-  let dVStack : T #[1, 1, 9216, 64] := torch.zeros #[1, 1, 9216, 64] false (Device.CUDA 0)
+  let dQ : MhaTensor := torch.zeros #[1, 1, 768, 64] false (Device.CUDA 0)
+  let partialSeed : PartialStack := torch.zeros #[1, 1, 9216, 64] false (Device.CUDA 0)
+  let dKStack : PartialStack := torch.mul_scalar partialSeed 1.0
+  let dVStack : PartialStack := torch.mul_scalar partialSeed 2.0
   tkMhaH100Bwd12BlockPartials.launch q k v dO lOut dVec dQ dKStack dVStack 768 64 1 12 1 128 1 1 0 stream
   let _ ← torch.cuda_synchronize
-  let dK : T #[1, 1, 768, 64] := nn.unsqueeze (nn.unsqueeze (nn.sumDim (torch.reshape dKStack #[12, 768, 64]) 0 false) 0) 0
-  let dV : T #[1, 1, 768, 64] := nn.unsqueeze (nn.unsqueeze (nn.sumDim (torch.reshape dVStack #[12, 768, 64]) 0 false) 0) 0
+  if dumpPartials then
+    dumpStackedPartials dKStack dVStack
+  let dK := reduceStackedPartials dKStack
+  let dV := reduceStackedPartials dVStack
 
-  let outOk := torch.allclose expectedOut out 5e-2 5e-2
-  let lOk := torch.allclose expectedL lOut 5e-2 5e-2
-  let lKernelConsistent := torch.allclose lFromLse lOut 5e-2 5e-2
-  let lFixtureConsistent := torch.allclose expectedL lFromLse 5e-2 5e-2
-  let dqOk := torch.allclose expectedDQ dQ 8e-2 8e-2
-  let dkOk := torch.allclose expectedDK dK 8e-2 8e-2
-  let dvOk := torch.allclose expectedDV dV 8e-2 8e-2
+  let outRefOk := torch.allclose expectedOut out 5e-2 5e-2
+  let lRefOk := torch.allclose expectedL lOut 5e-2 5e-2
+  let lVsLseOk := torch.allclose lFromLse lOut 5e-2 5e-2
+  let lseRefOk := torch.allclose expectedL lFromLse 5e-2 5e-2
+  let dqRefOk := torch.allclose expectedDQ dQ 8e-2 8e-2
+  let dkRefOk := torch.allclose expectedDK dK 8e-2 8e-2
+  let dvRefOk := torch.allclose expectedDV dV 8e-2 8e-2
+  let kernelRefOk := outRefOk && lRefOk && dqRefOk && dkRefOk && dvRefOk
+  let lRouteOk := lVsLseOk && lseRefOk
+  let overallOk := kernelRefOk && lRouteOk
 
   let outMae := torch.nn.item (torch.nn.meanAll (torch.nn.abs (out - expectedOut)))
   let outMaxErr := torch.nn.item (torch.nn.maxAll (torch.nn.abs (out - expectedOut)))
@@ -139,12 +174,13 @@ def runOnce : IO Bool := do
   let dvMae := torch.nn.item (torch.nn.meanAll (torch.nn.abs (dV - expectedDV)))
   let dvMaxErr := torch.nn.item (torch.nn.maxAll (torch.nn.abs (dV - expectedDV)))
 
-  IO.println s!"mha_h100_768x64 fwd_ok={outOk} l_ok={lOk} l_kernel_consistent={lKernelConsistent} l_fixture_consistent={lFixtureConsistent} dq_ok={dqOk} dk_ok={dkOk} dv_ok={dvOk} out_mae={outMae} out_max={outMaxErr} l_mae={lMae} l_max={lMaxErr} l_kernel_mae={lKernelMae} l_fixture_mae={lFixtureMae} dq_mae={dqMae} dq_max={dqMaxErr} dk_mae={dkMae} dk_max={dkMaxErr} dv_mae={dvMae} dv_max={dvMaxErr}"
+  IO.println s!"mha_h100_768x64 contract={contractLabel} seq={seqLen} head_dim={headDim} kv_tiles={kvTiles} stack_rows={stackRows} overall_ok={overallOk} kernel_ref_ok={kernelRefOk} l_route_ok={lRouteOk} out_ref_ok={outRefOk} l_ref_ok={lRefOk} l_vs_lse_ok={lVsLseOk} lse_ref_ok={lseRefOk} dq_ref_ok={dqRefOk} dk_ref_ok={dkRefOk} dv_ref_ok={dvRefOk} out_mae={outMae} out_max={outMaxErr} l_mae={lMae} l_max={lMaxErr} l_kernel_mae={lKernelMae} l_fixture_mae={lFixtureMae} dq_mae={dqMae} dq_max={dqMaxErr} dk_mae={dkMae} dk_max={dkMaxErr} dv_mae={dvMae} dv_max={dvMaxErr}"
 
-  pure (outOk && lOk && dqOk && dkOk && dvOk)
+  pure overallOk
 
 def main (args : List String) : IO UInt32 := do
-  runWithFixtures args fixtureSpec generateFixtures runOnce
+  let dumpPartials := args.contains "--dump-partials"
+  runWithFixtures args fixtureSpec generateFixtures (runOnce dumpPartials)
 
 end Examples.GPU
 

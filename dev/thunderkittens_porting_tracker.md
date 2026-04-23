@@ -35,6 +35,112 @@ into the Lean GPU catalog so that:
 
 ## Training Integration Log (H100-First)
 
+### 2026-04-22
+
+Current working checklist:
+
+- [x] Fix the runtime reduction contract for stacked `dK` / `dV` partials in
+  `Tyr.GPU.Ops.MhaH100`.
+- [x] Add raw-partial dump support to the direct H100 runners so we can inspect
+  `dK` / `dV` before any reduction.
+- [x] Add a raw-partial tile comparator:
+  - `scripts/gpu/compare_mha_partial_tile.py`
+- [x] Fix the nested codegen execution path in `lakefile.lean` so the normal
+  build can run `GenerateGpuKernels` through `lake -R env`.
+- [x] Narrow the GPU-codegen invalidation surface in `lakefile.lean` by
+  fingerprinting:
+  - `TYR_GPU_CODEGEN_MODULE`
+  - `TYR_SKIP_GPU_CODEGEN`
+  - `TYR_BUILD_TYRC_DYLIB`
+- [x] Add a reproducible one-H100 benchmark scaffold:
+  - `Examples/GPU/RunFlashAttnBench.lean`
+  - `scripts/gpu/bench_flash_attn_matrix.sh`
+- [x] Wire an initial `flash_attention` baseline into that scaffold using the
+  repo-local FA3 kernel for the exact `1x1x256x64` forward-only row.
+- [x] Fix the native backward shared-memory overrun by loading `l` / `d`
+  directly into RV registers instead of staging them through an extra shared
+  vector.
+- [x] Rebuild and rerun a fresh native `RunMhaH100` binary through the manual
+  trace-based relink path.
+- [x] Confirm the raw-partial dump path works from the rebuilt native binary.
+- [x] Extend the PyTorch raw-partial comparator to unwrap TorchScript-wrapped
+  single-tensor fixture payloads.
+- [~] Fix the remaining per-tile `dK` mismatch that appears before any
+  reduction.
+- [~] Reduce the broad Lake rebuild fanout so the standard native validation
+  loop is practical.
+- [ ] Benchmark the current Tyr runtime against:
+  - PyTorch SDPA
+  - repo-local FA3
+  on one H100 with machine-readable output.
+- [ ] Broaden the native runtime beyond the current fixed `headDim=64`
+  families.
+- [ ] Route real model attention paths through the runtime operator:
+  - Qwen
+  - Gemma
+
+Notes from today:
+
+- Native backward shared-memory compile blocker is cleared in source:
+  - `Tyr/GPU/Codegen/GlobalLayout.lean` now provides a direct RV global row
+    load helper,
+  - `Tyr/GPU/Kernels/MhaH100.lean` and
+    `Tyr/GPU/Kernels/AttentionFactory.lean` now load `l` / `d` directly into
+    RV registers instead of allocating an extra shared `SV<float, 64>`,
+  - this removes the `0x100` shared-byte overrun that had pushed the generated
+    `tkMhaH100Bwd*Partials` kernels above the H100 `0xc000` limit.
+- Fresh native validation now exists through a manual rebuild path:
+  - refreshed the relevant `.olean` files directly,
+  - regenerated `cc/src/generated/Tyr_GPU_Kernels_MhaH100.cu`,
+  - rebuilt the generated object and `cc/build/libTyrC.a`,
+  - relinked `/tmp/RunMhaH100.manual` from the traced link line and ran it
+    successfully with `--dump-partials`.
+- Raw partial dumps are now confirmed working from the rebuilt native path:
+  - `diag_dK_tiles.pt`
+  - `diag_dV_tiles.pt`
+- The PyTorch comparator now handles the fixture payload format we actually
+  dump:
+  - `scripts/gpu/compare_mha_partial_tile.py` unwraps TorchScript
+    `RecursiveScriptModule` objects that contain a single tensor in the state
+    dict.
+- Current diagnosis from the rebuilt binary plus comparator:
+  - forward, `l`, `dQ`, and `dV` are on the expected route,
+  - `dK` still mismatches,
+  - the mismatch is already present in the raw per-tile `dK` dumps before any
+    q-block reduction, so reduction is not the leading bug anymore.
+- Build-system status:
+  - the broad Lake rebuild fanout remains unresolved,
+  - `lake -R build RunMhaH100` still replays a much larger graph than this
+    kernel loop should require on this machine,
+  - the current reliable validation path is the manual trace-based relink, not
+    the normal narrow `lake build` loop.
+
+- The key build failure moved from “generator binary not executable” to the
+  stricter Lake issue:
+  - nested `lake env` was re-reading an invalid compiled config
+  - switching the generator execution path to `lake -R env` fixes that class
+    of failure
+- A second host-specific executable issue then surfaced:
+  - some `lean_exe` outputs under `.lake/build/bin` are being produced as
+    sparse zero-filled files instead of valid ELF binaries
+  - concrete examples seen today:
+    - `GenerateGpuKernels`
+    - `RunFlashAttnBench`
+  - this is not a linker-command bug:
+    - the exact link command recorded in `GenerateGpuKernels.trace` produces a
+      valid ELF when the output path is moved to `/tmp`
+  - current mitigation in `lakefile.lean`:
+    - if a built executable under `.lake/build/bin` is invalid, relink it from
+      its `.trace` into `/tmp/tyr_relinked/<ExeName>` and run the repaired copy
+      from there
+- The benchmark wrapper now uses the same `-R` path for:
+  - native codegen
+  - benchmark executable launch
+- The benchmark surface is intentionally honest:
+  - `flash_attention` is not advertised as generic yet
+  - it is only wired for the exact repo-local FA3-supported row
+  - all other rows should still report `unsupported`
+
 ### 2026-04-21
 
 Attention backward bring-up update:
@@ -736,7 +842,7 @@ only need role assignment (MhaH100LCF, Hedgehog, LinearAttn).
       - `probs = softmax(scores)`
       - `dV = probs^T dO`
   - This is a deliberate temporary bridge fix so the high-level runtime op is
-    training-correct while the raw kernel-side `dV` mismatch stays isolated.
+    training-correct while the raw kernel-side `dK` mismatch stays isolated.
 
 - Validation notes:
   - forced rebuild of `build/generated/Tyr_GPU_Kernels_MhaH100.o` and
@@ -750,7 +856,377 @@ only need role assignment (MhaH100LCF, Hedgehog, LinearAttn).
     resolve generated launcher externs
 
 - Remaining open item:
-  - raw kernel-side `dV` tile math/layout still appears off in the standalone
+  - raw kernel-side `dK` tile math/layout still appears off in the standalone
     `tkMhaH100Bwd*Partials` path
-  - the runtime op is now correct because `dV` is recomputed exactly in the C++
-    bridge
+  - raw tile dumps plus the PyTorch comparator now show this happens before the
+    q-block reduction step
+  - the runtime op remains training-correct on the bridged path because `dV`
+    is recomputed exactly in the C++ bridge and `dQ` / `dV` parity is already
+    in line on the native route
+
+## 2026-04-22 Native Rebuild And Tile-Math Checkpoint
+
+- Source-level compile fix:
+  - removed the extra shared `SV<float, 64>` staging for `l` / `d` in the
+    backward partial kernels,
+  - replaced it with direct RV global loads so the generated CUDA fits inside
+    Hopper shared-memory limits without a generated-file compatibility shim.
+- Fresh native run:
+  - the current authoritative binary is `/tmp/RunMhaH100.manual`,
+  - it was produced from the traced link line after refreshing the relevant
+    Lean artifacts and rebuilding the native archive,
+  - it runs successfully with `--dump-partials`.
+- Comparator status:
+  - TorchScript-wrapped fixture tensors now load directly,
+  - `dV` tiles compare correctly,
+  - `dK` tiles mismatch in every inspected `(qBlock, kvBlock)` tile, which
+    makes this a raw tile-math or layout issue rather than a reduction bug.
+- TODO state:
+  - [x] Fix the shared-memory overrun in the backward partial kernels.
+  - [x] Rebuild and run a fresh native manual `RunMhaH100` binary.
+  - [x] Verify that native raw partial dumps are emitted.
+  - [x] Make the PyTorch comparator accept TorchScript fixture payloads.
+  - [x] Identify the true root cause of the apparent `dK` failure on the 128x64 example path.
+  - [~] Reduce the broad Lake rebuild fanout in the standard native build path.
+  - [ ] Collapse the manual trace-based rebuild into a simpler normal build flow.
+  - [ ] Resume one-H100 benchmark rows now that native 128x64 parity is closed.
+
+## 2026-04-22 Output Buffer Aliasing Root Cause
+
+- The earlier 128x64 `dK` failure diagnosis was wrong.
+- Actual root cause:
+  - Lean treated identical `torch.zeros ...` constructors for mutable output
+    buffers as pure and merged them during code generation,
+  - the compiled `RunMhaH100` call site passed the same tensor for
+    `dK_part_ptr` and `dV_part_ptr`,
+  - because the kernel writes `dK` first and `dV` second, the aliased stack
+    ended the launch containing `dV`, which made `dv_ref_ok=true` and
+    `dk_ref_ok=false` look like a kernel-side `dK` bug.
+- Concrete evidence:
+  - in `.lake/build/ir/Examples/GPU/RunMhaH100.c`, the generated backward
+    launch used `x_549` for both `dK_part_ptr` and `dV_part_ptr`,
+  - a direct trace-based relink of the compiled example binary made temporary
+    debug routes take effect immediately, which ruled out stale generated CUDA
+    as the explanation,
+  - after restoring the intended kernel path and making the caller allocate
+    distinct fresh `dK` / `dV` stacks, the relinked compiled binary reported:
+    - `overall_ok=true`
+    - `dq_ref_ok=true`
+    - `dk_ref_ok=true`
+    - `dv_ref_ok=true`
+    - `dk_mae=0.000166`
+    - `dv_mae=0.000153`
+- Source fix:
+  - `Examples/GPU/RunMhaH100.lean`
+  - `Examples/GPU/RunMhaH100Train.lean`
+  - `Examples/GPU/RunMhaH100Seq768.lean`
+  - `Tyr/GPU/Ops/MhaH100.lean`
+  - each now seeds the partial stacks once and builds `dK` / `dV` outputs from
+    distinct `torch.mul_scalar` expressions so Lean cannot CSE them into one
+    mutable tensor.
+- Kernel cleanup:
+  - `Tyr/GPU/Kernels/MhaH100.lean` was restored to the intended backward path
+    after the temporary `V` / `dO` debug stores and the speculative `dK`
+    contraction edits.
+- Runtime-op status:
+  - the relinked compiled `RunFlashAttnOp` bridge test is now green on the
+    native dense route too:
+    - `route=tkKernel`
+    - `out_ok=true`
+    - `dq_ok=true`
+    - `dk_ok=true`
+    - `dv_ok=true`
+    - representative native-dense errors:
+      - `out_mae=0.000057`
+      - `dq_mae=0.000032`
+      - `dk_mae=0.000046`
+      - `dv_mae=0.000172`
+- Consequence:
+  - the current 128x64 one-H100 blocker is no longer backward correctness,
+  - the next priority is benchmarking plus build-flow simplification, not more
+    `dK` tile-math forensics on this path.
+
+## 2026-04-22 Writeback Staging Investigation
+
+- Cross-checked Tyr `MhaH100` backward against ThunderKittens `mha_h100`.
+- Main result:
+  - TK `dK` and `dV` use separate shared staging plus async TMA-store ordering.
+  - Tyr `storeGlobal` lowers to blocking `warp::store`, so the useful local change is shared-buffer separation, not adding a new post-store wait.
+- Kernel and source changes made:
+  - `Tyr/GPU/Kernels/MhaH100.lean`
+    - replaced the single FP32 writeback tile with separate `dKShared` and `dVShared` tiles in both 2-block and 12-block backward kernels
+    - kept the backward tile math unchanged
+  - `Tyr/GPU/Kernels/AttentionFactory.lean`
+    - applied the same K/V writeback staging split to the generator template so regeneration preserves the fix direction
+- Build and validation note:
+  - a clean narrow rebuild was started via `lake -R build GenerateGpuKernels Tyr.GPU.Kernels.MhaH100 RunMhaH100 RunMhaH100Seq768`
+  - earlier concurrent example-only builds had produced non-runnable `.lake/build/bin/RunMhaH100*` artifacts identified by `file` as plain `data`, so the current rebuild is intended to replace those with a single authoritative pass
+  - the first long rebuild attempt also exposed a Lake race on `GenerateGpuKernels`:
+    overlapping work can fail with a missing
+    `.lake/build/bin/GenerateGpuKernels` and leave
+    `cc/src/generated/Tyr_GPU_Kernels_MhaH100.cu` stale
+  - `lakefile.lean` already carries the narrower raw-example helpers:
+    - `TYR_BUILD_TYRC_DYLIB=0`
+    - `buildMhaH100Examples`
+    - `runMhaH100Exe`
+    - `runMhaH100Seq768Exe`
+    - `validateMhaH100Examples`
+  - `buildNamedExecutables` now tries plain `lake build` first and retries
+    with `lake -R build` only when the failure text looks like a reconfigure
+    problem
+  - `extern_lib libtyr` now narrows the GPU IR invalidation set specifically
+    for the `Tyr.GPU.Kernels.MhaH100` loop instead of tracking every
+    `.c.o.export` under `.lake/build/ir/Tyr/GPU`
+  - `extern_lib libtyr` now also fingerprints
+    `TYR_GPU_CODEGEN_MODULE`, `TYR_SKIP_GPU_CODEGEN`, and
+    `TYR_BUILD_TYRC_DYLIB` into a small build-dir config file so those
+    environment-driven build modes participate in invalidation
+  - these do not eliminate the heavy Lake replay, but they define the correct non-interpreter validation loop and avoid some unnecessary native churn
+- Remaining known limitation:
+  - the stacked-partials reduction still only scales naturally for the current fixed-shape cases because `qBlocks == kvBlocks` for `128` and `768`; this must be generalized before claiming arbitrary-sequence support
+- Additional TK gap checklist captured during this pass:
+  - [x] Split `dK` and `dV` writeback staging in the current Tyr `MhaH100` path
+  - [x] Add narrower Lake-side raw-example helpers for the compiled validation loop
+  - [x] Add a gated raw-partial dump hook in the raw example runners so `dK` /
+    `dV` tile tensors can be inspected before reduction
+  - [~] Validate the staging-only kernel change end to end through regenerated CUDA plus rebuilt raw examples
+  - [ ] Generalize stacked-partials reduction beyond the accidental `qBlocks == kvBlocks` fixed-shape case
+  - [ ] Add the `head_dim=128` branch that exists in TK `mha_h100` and matches the in-tree classic `Qwen` path
+  - [ ] Decide how to cover the in-tree `Qwen35` / `Gemma4` `head_dim=256` path, which is outside the current TK `64` / `128` family
+  - [ ] Add the head-ratio (`hr`) path required for GQA/MQA
+  - [ ] Add causal backward and forward variants inside the `MhaH100` family
+  - [ ] Revisit the async K/V writeback pipeline gap between TK and Tyr once correctness is stable
+
+## 2026-04-22 One-H100 Benchmark Contract
+
+- Headline native rows:
+  - `B=1, H=1, KV=1, seq=128, headDim=64, bf16, dense_prefill, non-causal`
+  - `B=1, H=1, KV=1, seq=768, headDim=64, bf16, dense_prefill, non-causal`
+- Portable control rows:
+  - `seq=96, headDim=64, non-causal`
+  - `seq=128, headDim=64, causal=true`
+  - `q_heads=4, kv_heads=2, seq=96, headDim=64, enable_gqa=true`
+- Per-row report requirements:
+  - requested backend
+  - executed backend
+  - route (`tkKernel` or `portable`)
+  - `out` / `dQ` / `dK` / `dV` correctness metrics
+  - p50/p10/p90 latency
+  - speedup vs SDPA only when the row actually ran natively and passed correctness
+
+## 2026-04-22 Model-Driven Wrapper Priority
+
+- Current `head_dim=64` is a bring-up target, not the real in-tree text-model
+  endpoint.
+- Wrapper order implied by in-tree configs:
+  - `dense_gqa_hd128_r{4,5}` for classic `Qwen`
+  - `dense_gqa_hd256_r{4,8}` for `Qwen35` full-attention
+  - `dense_gqa_hd512_r{4,8}` for `Gemma4` full-attention/global-head layers
+  - `window_gqa_hd256_r{2,4,8}` as the next distinct family for `Gemma4`
+    sliding attention
+- Immediate consequence:
+  - `d=128` is the first practical dense specialization after the current
+    `d=64` bring-up
+  - `d=256` plus GQA is what starts to cover real `Qwen35` / `Gemma4` text
+    paths
+
+## 2026-04-22 Family-By-Family Implementation Order
+
+- Stage 1:
+  - refactor runtime routing to `family + specialization key`
+  - keep current `d=64` behavior unchanged
+  - benchmark current native `128x64` / `768x64` rows as the control baseline
+- Stage 2:
+  - land `hd128` dense GQA forward prefill for real `Qwen` shapes
+- Stage 3:
+  - complete `hd128` decode and mask coverage
+- Stage 4:
+  - add `hd128` backward and training-safe runtime integration
+- Stage 5:
+  - land `hd256` dense GQA forward for `Qwen35`
+- Stage 6:
+  - complete `hd256` decode/mask/backward
+- Stage 7:
+  - land `windowed hd256` decode-first for `Gemma4` sliding attention
+- Stage 8:
+  - extend `windowed hd256` to prefill and broader window/ratio coverage
+- Stage 9:
+  - add `windowed hd256` backward and Gemma training readiness
+
+## 2026-04-22 Nested Codegen Staleness Risk
+
+- The nested `GenerateGpuKernels` step inside `extern_lib libtyr` is
+  intentional, but staleness can still happen when:
+  - `extern_lib libtyr` is not invalidated, so the nested generator is skipped,
+  - `TYR_GPU_CODEGEN_MODULE` changes without any tracked file change,
+  - `TYR_SKIP_GPU_CODEGEN=1` suppresses regeneration,
+  - concurrent builds share `cc/src/generated`,
+  - the nested generator fails after leaving the previous target file in place.
+- Immediate implication:
+  - codegen-module selection and skip-codegen mode should be treated as part of
+    the effective build contract, not as invisible side inputs.
+
+## 2026-04-22 Benchmark Scaffold
+
+- `Examples/GPU/RunFlashAttnBench.lean` now exists as the structured benchmark
+  surface for one-H100 flash-attention comparisons.
+- Verified static CLI surfaces:
+  - `--list-cases`
+  - `--list-backends`
+- The benchmark schema is no longer the blocker.
+- Remaining execution blocker:
+  - native benchmark runs require the compiled `RunFlashAttnBench` binary,
+    because interpreter mode does not resolve the Torch/CUDA extern path needed
+    for real execution.
+
+## 2026-04-22 Minimal PyTorch Benchmark Path
+
+- The cleanest current benchmark path is still the in-tree native runner, not a
+  separate Python harness:
+  - `scripts/gpu/bench_flash_attn_matrix.sh`
+  - `Examples/GPU/RunFlashAttnBench.lean`
+- Why:
+  - Tyr runtime and PyTorch SDPA already execute inside the same process and
+    the same timing loop,
+  - that keeps correctness checks, case selection, JSONL output, and build
+    wiring in one place,
+  - it avoids introducing `uv` and a second benchmark implementation unless we
+    explicitly decide to benchmark an external wheel.
+- The wrapper help now documents the exact FA3 build knob:
+  - `TYR_GPU_CODEGEN_MODULE=Tyr.GPU.Kernels.FlashAttn3`
+  - use it with `--case future_flash_256x64 --backend flash_attention`
+- Host inspection on this machine:
+  - site PyTorch `2.7.1` on CUDA `12.6` is present and reports flash SDPA
+    support,
+  - no standalone `flash_attn` Python package is installed.
+- Immediate recommendation:
+  - treat `torch_sdpa` as the default PyTorch baseline,
+  - keep `flash_attention` as the exact repo-local FA3 row,
+  - add an in-process `torch_flash` backend later if we want an explicit forced
+    PyTorch flash comparison without adding a Python-side runner.
+
+## 2026-04-22 Raw 128x64 Revalidation After dK/dV Concern
+
+- Revalidated the compiled raw `RunMhaH100` path after the concern that fixing
+  `dV` may have moved the mismatch to `dK`.
+- Command that produced the trusted result:
+  - `source ./load_modules.sh && LEAN_CC=$PWD/scripts/lean_cc_wrapper.sh LEAN_CC_LINKER=bfd lake -R run runMhaH100Exe --dump-partials`
+- Result:
+  - `overall_ok=true`
+  - `kernel_ref_ok=true`
+  - `dq_ref_ok=true`
+  - `dk_ref_ok=true`
+  - `dv_ref_ok=true`
+  - `dq_mae=0.000168`
+  - `dk_mae=0.000166`
+  - `dv_mae=0.000153`
+- Interpretation:
+  - the current 128x64 native raw kernel does not show a moved `dK` mismatch,
+  - the earlier `dK`/`dV` confusion remains best explained by caller-side
+    partial-buffer aliasing plus stale/overlapping build artifacts.
+- Build note:
+  - direct `lake -R build RunMhaH100` can still stall on this machine while
+    linking `GenerateGpuKernels` into `.lake/build/bin`,
+  - the supported `runMhaH100Exe` helper successfully avoided the bad
+    `.lake/build/bin` artifact by relinking from the Lake trace to `/tmp`,
+  - this still runs a compiled binary and does not use the interpreter.
+- Linker experiment:
+  - `ld.lld` from the Lean toolchain fails with the same `GLIBC_2.29` issue as
+    Lean `clang`,
+  - `ld.gold` exists in the module stack but fails here due an older
+    `/cm/local/apps/gcc/9.2.0/lib64/libstdc++.so.6` missing
+    `GLIBCXX_3.4.29`,
+  - after forcing the GCCcore runtime library path, `gold` still fails with
+    hidden-symbol errors (`_ZdlPvm`),
+  - no linker-selector shim is kept in `scripts/lean_cc_wrapper.sh`; the
+    known-working BFD path remains the default.
+- TODO status:
+  - [x] Confirm raw 128x64 `dK` did not regress after the aliasing fix.
+  - [x] Remove the `gold` experiment after validating it is not reliable on
+    this module stack.
+  - [~] Fix the normal direct build stall so `lake -R build RunMhaH100` is
+    sufficient without needing the trace relink fallback.
+  - [x] Re-run 768x64 raw parity after the direct-build stall is addressed.
+  - [ ] Run the first one-H100 benchmark rows through
+    `RunFlashAttnBench`.
+
+## 2026-04-22 Raw 768x64 Revalidation After Stale-Binary Check
+
+- The apparent 768x64 `dK` / `dV` regression was reproduced only with a stale
+  `.lake/build/bin/RunMhaH100Seq768` executable from before the current object
+  files were built.
+- Evidence:
+  - the first `runMhaH100Seq768Exe --dump-partials` execution reported
+    `dk_ref_ok=false` and `dv_ref_ok=false`,
+  - that executable timestamp predated the source and generated C object,
+  - a fresh relink from the current object files reported the correct partial
+    dump and full parity.
+- Trusted command after hardening the compiled-run path:
+  - `source ./load_modules.sh && LEAN_CC=$PWD/scripts/lean_cc_wrapper.sh LEAN_CC_LINKER=bfd CUDA_VISIBLE_DEVICES=0 lake -R run runMhaH100Seq768Exe --dump-partials`
+- Result:
+  - `overall_ok=true`
+  - `kernel_ref_ok=true`
+  - `dq_ref_ok=true`
+  - `dk_ref_ok=true`
+  - `dv_ref_ok=true`
+  - `dq_mae=0.000078`
+  - `dk_mae=0.000077`
+  - `dv_mae=0.000070`
+- Build hygiene change:
+  - `runBuiltExecutable` now treats a compiled executable as stale when the
+    corresponding `.lake/build/ir/**/<Exe>.c.o.export` is newer than the ELF,
+  - stale or invalid executables are relinked to `/tmp/tyr_relinked` before
+    execution,
+  - this keeps validation on compiled binaries while avoiding stale executable
+    artifacts from looking like kernel math regressions.
+- TODO status:
+  - [x] Confirm raw 128x64 `dK` / `dV` parity.
+  - [x] Confirm raw 768x64 `dK` / `dV` parity from fresh compiled objects.
+  - [x] Add stale-binary detection to the compiled-run helper.
+  - [~] Fix the underlying direct Lake final-link stall so the `/tmp` relink
+    fallback stops being needed.
+  - [ ] Continue with one-H100 `RunFlashAttnBench` forward/backward rows.
+
+## 2026-04-22 Native Runtime Benchmark Path
+
+- Added a narrow compiled C++ benchmark:
+  - `cc/tools/bench_flash_attn.cpp`
+  - `make -C cc bench-flash-attn TYR_GPU_CODEGEN_MODULE=Tyr.GPU.Kernels.MhaH100`
+- Rationale:
+  - avoids the Python `torch` / vendored LibTorch ABI mismatch,
+  - avoids the current Lean `mkC10IoError` crash path in fwd+bwd benchmark
+    rows,
+  - still calls the real `tyr_ops::flash_attn_dispatch` runtime bridge.
+- Switched the native bridge backward path to return native reduced `dVStack`:
+  - previous bridge path reduced native `dKStack` but recomputed `dV` with
+    PyTorch softmax/matmul,
+  - fresh raw 128x64 and 768x64 validation now shows native `dVStack` parity,
+    so the bridge now reduces `dVStack` symmetrically with `dKStack`.
+- Command:
+  - `source ./load_modules.sh && CUDA_VISIBLE_DEVICES=0 cc/build/tools/bench_flash_attn --case native_now --backend torch_sdpa,tyr_runtime --warmup 5 --iters 20 --repeats 3 --jsonl-out benchmarks/results/flash_attn_cpp_native_h100_native_dv.jsonl --jsonl-stdout`
+- Result after the native-`dV` bridge change:
+  - `native_dense_128x64`
+    - `torch_sdpa`: `p50_ms=0.186584`
+    - `tyr_runtime`: `p50_ms=0.197651`
+    - `correctnessOk=true`
+    - `speedupVsSdpaP50=0.944007`
+  - `native_dense_768x64`
+    - `torch_sdpa`: `p50_ms=0.188121`
+    - `tyr_runtime`: `p50_ms=0.562412`
+    - `correctnessOk=true`
+    - `speedupVsSdpaP50=0.334489`
+- Interpretation:
+  - runtime fwd+bwd correctness is green for the current native 128x64 and
+    768x64 routes,
+  - native `dV` is no longer masked by a PyTorch recompute in the bridge,
+  - Tyr is still slower than PyTorch SDPA on these one-H100 training rows,
+    especially at 768x64, because the runtime route launches multiple kernels
+    and writes/reduces stacked partials while SDPA uses a more fused backend.
+- TODO status:
+  - [x] Add compiled one-H100 C++ benchmark for runtime bridge vs SDPA.
+  - [x] Use native reduced `dVStack` in the runtime bridge backward path.
+  - [x] Produce first correctness+latency JSONL for 128x64 and 768x64.
+  - [~] Rebuild and rerun the Lean `RunFlashAttnOp` parity executable against
+    the updated static bridge.
+  - [ ] Add forward-only inference timing rows.
+  - [ ] Close the optimization gap versus PyTorch SDPA.

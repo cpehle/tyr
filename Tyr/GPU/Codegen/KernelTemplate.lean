@@ -11,7 +11,7 @@ import Tyr.GPU.Codegen.TileTypes
 import Tyr.GPU.Codegen.IR
 import Tyr.GPU.Codegen.Monad
 import Tyr.GPU.Codegen.AST
-import Tyr.GPU.Codegen.Ops
+import Tyr.GPU.Codegen.Primitives
 import Tyr.GPU.Codegen.Loop
 import Tyr.GPU.Codegen.Pipeline
 import Tyr.GPU.Codegen.PersistentKernel
@@ -30,8 +30,8 @@ Each phase emits its own IR statements, and the template sums shared memory.
 structure KernelPhase where
   /-- Phase name (emitted as comment) -/
   name : String
-  /-- Additional shared memory bytes needed by this phase -/
-  sharedMemBytes : Nat := 0
+  /-- Extra raw shared memory (bytes) beyond what `allocST` inside `emit` accounts for. -/
+  extraRawBytes : Nat := 0
   /-- Phase body -/
   emit : KernelM Unit
 
@@ -55,8 +55,8 @@ def KernelTemplate.addPhase (tmpl : KernelTemplate) (phase : KernelPhase)
 /-- Build a `Kernel` from a template by emitting all phases with barriers between them. -/
 def KernelTemplate.build (tmpl : KernelTemplate) : Kernel :=
   buildKernelM tmpl.name tmpl.arch tmpl.params do
-    -- Track extra shared memory from phases
-    let totalExtra := tmpl.phases.foldl (fun acc p => acc + p.sharedMemBytes) 0
+    -- Track extra shared memory from phases (raw bytes beyond allocST).
+    let totalExtra := tmpl.phases.foldl (fun acc p => acc + p.extraRawBytes) 0
     if totalExtra > 0 then
       modify fun s => { s with sharedMemBytes := s.sharedMemBytes + totalExtra }
     -- Emit phases with barriers
@@ -105,7 +105,11 @@ def fusedGemm (cfg : FusedGemmConfig)
     (lhsShared : ST cfg.inDtype cfg.tileM cfg.tileK .Row)
     (rhsShared : ST cfg.inDtype cfg.tileK cfg.tileN .Col)
     (epilogue : RT cfg.outDtype cfg.tileM cfg.tileN .Row → KernelM Unit)
+    (hM : cfg.tileM % 16 = 0 := by decide)
+    (hK : cfg.tileK % 16 = 0 := by decide)
+    (hN : cfg.tileN % 16 = 0 := by decide)
     : KernelM Unit := do
+  let _ := hM; let _ := hK; let _ := hN
   comment s!"Fused GEMM: {cfg.tileM}x{cfg.tileN}x{cfg.tileK}, {cfg.kBlocks} K-blocks"
   -- Allocate accumulator
   let accum ← zeroRT cfg.outDtype cfg.tileM cfg.tileN
@@ -116,7 +120,7 @@ def fusedGemm (cfg : FusedGemmConfig)
   forLoop 0 cfg.kBlocks do
     load aReg lhsShared
     load bReg rhsShared
-    mma accum aReg bReg accum
+    mma accum aReg bReg accum hM hK hN
     sync
   -- Epilogue
   comment "GEMM epilogue"

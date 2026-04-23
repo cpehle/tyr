@@ -4,13 +4,13 @@ import Tyr.GPU.Codegen.TileTypes
 import Tyr.GPU.Codegen.IR
 import Tyr.GPU.Codegen.Monad
 import Tyr.GPU.Codegen.AST
-import Tyr.GPU.Codegen.Ops
+import Tyr.GPU.Codegen.Primitives
 
 /-!
 # Tyr.GPU.Codegen.Notation
 
 `Tyr.GPU.Codegen.Notation` adds expression-style syntax on top of
-`Tyr.GPU.Codegen.Ops`.
+`Tyr.GPU.Codegen.Primitives`.
 
 Use this module when you want concise kernel authoring with operators
 and fluent combinators (for example matrix product and elementwise pipelines),

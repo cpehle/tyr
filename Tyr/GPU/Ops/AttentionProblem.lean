@@ -52,6 +52,28 @@ inductive GqaClass where
   | invalid
   deriving Repr, Inhabited, BEq
 
+/-- Coarse scaling-policy bucket used for future family-based routing. -/
+inductive ScaleClass where
+  | implicitDefault
+  | explicitDefault
+  | custom
+  deriving Repr, Inhabited, BEq
+
+/-- Incremental family-routing metadata view derived from `AttentionProblem`.
+
+    This is intentionally additive. Existing selectors can keep using the raw
+    `AttentionProblem` fields while newer family-based dispatch code can consume
+    a stable classification surface. -/
+structure AttentionRoutingMetadata where
+  headDimClass : HeadDimClass
+  gqaRatio : Option UInt64
+  execMode : AttentionMode
+  scaleClass : ScaleClass
+  qTiles : UInt64
+  kvTiles : UInt64
+  windowTiles : Option UInt64
+  deriving Repr, Inhabited, BEq
+
 /-- Current native specialization set known to the runtime operator layer. -/
 inductive AttentionSpecialization where
   | portable
@@ -98,6 +120,13 @@ structure AttentionProblem where
   deriving Repr, Inhabited
 
 namespace AttentionProblem
+
+/-- Ceiling division for positive tile sizes. Returns `0` when `d = 0`. -/
+private def ceilDiv (n d : UInt64) : UInt64 :=
+  if d == 0 then
+    0
+  else
+    (n + d - 1) / d
 
 /-- Infer the broad attention mode from sequence lengths and optional windowing. -/
 def inferMode (qSeq kvSeq : UInt64) (windowSize : Option UInt64 := none) : AttentionMode :=
@@ -207,6 +236,51 @@ def gqaClass (problem : AttentionProblem) : GqaClass :=
     .grouped (problem.numQHeads / problem.numKVHeads)
   else
     .invalid
+
+/-- Exact grouped-query ratio when the runtime head counts are well-formed. -/
+def gqaRatio (problem : AttentionProblem) : Option UInt64 :=
+  match problem.gqaClass with
+  | .equal => some 1
+  | .grouped ratio => some ratio
+  | .invalid => none
+
+/-- Execution-mode accessor retained separately from the raw `mode` field so
+    future routing code can talk in terms of a stable classification surface. -/
+def execMode (problem : AttentionProblem) : AttentionMode :=
+  problem.mode
+
+/-- Coarse scaling-policy bucket for family-level dispatch decisions. -/
+def scaleClass (problem : AttentionProblem) : ScaleClass :=
+  match problem.scale with
+  | none => .implicitDefault
+  | some _ =>
+      if problem.scaleMatchesDefault then
+        .explicitDefault
+      else
+        .custom
+
+/-- Query tile count at the current planning granularity. -/
+def qTiles (problem : AttentionProblem) (tile : UInt64 := 64) : UInt64 :=
+  ceilDiv problem.qSeq tile
+
+/-- KV tile count at the current planning granularity. -/
+def kvTiles (problem : AttentionProblem) (tile : UInt64 := 64) : UInt64 :=
+  ceilDiv problem.kvSeq tile
+
+/-- Optional windowed-attention tile count at the current planning granularity. -/
+def windowTiles (problem : AttentionProblem) (tile : UInt64 := 64) : Option UInt64 :=
+  problem.windowSize.map (fun window => ceilDiv window tile)
+
+/-- Stable family-routing metadata view derived from the full runtime problem. -/
+def routingMetadata (problem : AttentionProblem) (tile : UInt64 := 64) : AttentionRoutingMetadata := {
+  headDimClass := problem.headDimClass
+  gqaRatio := problem.gqaRatio
+  execMode := problem.execMode
+  scaleClass := problem.scaleClass
+  qTiles := problem.qTiles tile
+  kvTiles := problem.kvTiles tile
+  windowTiles := problem.windowTiles tile
+}
 
 /-- Whether the current one-H100 TK-backed selector may consider this problem. -/
 def currentTkBaseEligible (problem : AttentionProblem) : Bool :=
