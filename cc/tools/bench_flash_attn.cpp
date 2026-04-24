@@ -28,6 +28,24 @@ torch::Tensor flash_attn_dispatch(
     bool is_causal,
     const c10::optional<double>& scale,
     bool enable_gqa);
+torch::Tensor flash_attn_dispatch_generated(
+    const torch::Tensor& query,
+    const torch::Tensor& key,
+    const torch::Tensor& value,
+    const c10::optional<torch::Tensor>& attn_mask,
+    double dropout_p,
+    bool is_causal,
+    const c10::optional<double>& scale,
+    bool enable_gqa);
+torch::Tensor flash_attn_dispatch_vendored_tk(
+    const torch::Tensor& query,
+    const torch::Tensor& key,
+    const torch::Tensor& value,
+    const c10::optional<torch::Tensor>& attn_mask,
+    double dropout_p,
+    bool is_causal,
+    const c10::optional<double>& scale,
+    bool enable_gqa);
 } // namespace tyr_ops
 
 namespace {
@@ -44,7 +62,7 @@ struct CaseDef {
 
 struct Options {
   std::vector<std::string> case_ids{"native_dense_128x64", "native_dense_768x64"};
-  std::vector<std::string> backends{"torch_sdpa", "tyr_runtime"};
+  std::vector<std::string> backends{"torch_sdpa", "tyr_runtime", "tyr_generated"};
   int warmup{5};
   int iters{20};
   int repeats{3};
@@ -108,6 +126,8 @@ void print_cases() {
 void print_backends() {
   std::cout << "torch_sdpa\n";
   std::cout << "tyr_runtime\n";
+  std::cout << "tyr_generated\n";
+  std::cout << "tk_vendored\n";
 }
 
 Options parse_args(int argc, char** argv) {
@@ -125,7 +145,9 @@ Options parse_args(int argc, char** argv) {
       opts.case_ids = (value == "native_now") ? std::vector<std::string>{"native_dense_128x64", "native_dense_768x64"} : split_csv(value);
     } else if (arg == "--backend") {
       const auto value = next("--backend");
-      opts.backends = (value == "all") ? std::vector<std::string>{"torch_sdpa", "tyr_runtime"} : split_csv(value);
+      opts.backends = (value == "all")
+          ? std::vector<std::string>{"torch_sdpa", "tyr_runtime", "tyr_generated", "tk_vendored"}
+          : split_csv(value);
     } else if (arg == "--warmup") {
       opts.warmup = std::stoi(next("--warmup"));
     } else if (arg == "--iters") {
@@ -191,6 +213,12 @@ torch::Tensor run_backend(
   }
   if (backend == "tyr_runtime") {
     return tyr_ops::flash_attn_dispatch(q, k, v, c10::nullopt, 0.0, false, c10::nullopt, false);
+  }
+  if (backend == "tyr_generated") {
+    return tyr_ops::flash_attn_dispatch_generated(q, k, v, c10::nullopt, 0.0, false, c10::nullopt, false);
+  }
+  if (backend == "tk_vendored") {
+    return tyr_ops::flash_attn_dispatch_vendored_tk(q, k, v, c10::nullopt, 0.0, false, c10::nullopt, false);
   }
   throw std::invalid_argument("unknown backend: " + backend);
 }
@@ -324,6 +352,14 @@ std::string route_for(const std::string& backend, const CaseDef& c) {
   }
   if (backend == "tyr_runtime" && c.batch == 1 && c.q_heads == 1 && c.kv_heads == 1 &&
       c.head_dim == 64 && (c.seq == 128 || c.seq == 768)) {
+    return c.seq == 128 ? "tk_mha_h100_2block" : "vendored_tk_mha_h100_12block";
+  }
+  if (backend == "tk_vendored" && c.batch == 1 && c.q_heads == 1 && c.kv_heads == 1 &&
+      c.head_dim == 64 && (c.seq == 128 || c.seq == 768)) {
+    return c.seq == 128 ? "generated_fallback_2block" : "vendored_tk_mha_h100_12block";
+  }
+  if (backend == "tyr_generated" && c.batch == 1 && c.q_heads == 1 && c.kv_heads == 1 &&
+      c.head_dim == 64 && (c.seq == 128 || c.seq == 768)) {
     return c.seq == 128 ? "tk_mha_h100_2block" : "tk_mha_h100_12block";
   }
   return "portable";
@@ -426,7 +462,8 @@ int main(int argc, char** argv) {
       std::vector<std::tuple<std::string, Metrics, double>> summaries;
 
       for (const auto& backend : opts.backends) {
-        if (backend != "torch_sdpa" && backend != "tyr_runtime") {
+        if (backend != "torch_sdpa" && backend != "tyr_runtime" &&
+            backend != "tyr_generated" && backend != "tk_vendored") {
           throw std::invalid_argument("unknown backend: " + backend);
         }
         const auto got = (backend == "torch_sdpa") ? ref : run_once(backend, q_base, k_base, v_base, dO_base);
