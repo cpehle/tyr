@@ -92,12 +92,20 @@ Current performance checkpoint:
 - [x] Captured one-H100 CUDA-event benchmark outputs:
   - [benchmarks/results/flash_attn_cpp_native_h100_cuda_event.jsonl](/grid/zador/home/pehle/dev/tyr/benchmarks/results/flash_attn_cpp_native_h100_cuda_event.jsonl)
   - [benchmarks/results/thunderkittens_mha_h100_cuda_event.jsonl](/grid/zador/home/pehle/dev/tyr/benchmarks/results/thunderkittens_mha_h100_cuda_event.jsonl)
-- [x] Established the first direct TK performance target:
+- [x] Reached generated-vs-TK parity on the direct performance target:
   - `native_dense_768x64`, fwd+bwd, BF16, non-causal, `B=1,H=1`
-  - Tyr runtime: `1.27995 ms`, correctness green
-  - Vendored TK: `0.0889981 ms`, correctness green
-  - Current Tyr is about `14.38x` slower than the vendored TK kernel on the
-    direct comparable row.
+  - generated Tyr: `0.135669 ms` / `0.152279 ms` across opposite backend
+    orders,
+  - vendored TK: `0.137159 ms` / `0.153591 ms`,
+  - PyTorch SDPA: `0.170481 ms` / `0.187031 ms`.
+- [x] Extended the generated DSL/codegen surface for TK-style producer/store
+  warp specialization:
+  - added current-warp TMA load/store-add emission instead of always forcing
+    async issue from CTA warp `0`,
+  - added explicit `warpid` / `laneid` runtime values to the DSL,
+  - this removes the immediate codegen blocker for modeling TK's backward
+    producer warp split where one producer warp loads the next Q/O/L/D tiles
+    and another producer warp performs `qg` `store_add_async`.
 - [x] Marked `native_dense_128x64` as not directly comparable to vendored TK:
   - the vendored H100 MHA launch grid is zero for `N=128`,
   - an exploratory `N=256` run launched but failed parity,
@@ -108,42 +116,27 @@ Performance gap list:
 - [x] Correctness checkpoint for the generated Tyr bridge:
   - current `dQ` plus K/V sweep backward is deterministic and gradient-correct
     on `128x64` and `768x64`.
-- [~] Benchmark comparability:
-  - CUDA-event timing is now used for the native C++ bench and the TK Python
-    extension bench,
-  - SDPA absolute numbers differ between the C++ libtorch path and the Python
-    PyTorch module, so SDPA is a sanity baseline, not the direct cross-process
-    headline.
-- [~] Backward structure:
-  - Tyr currently uses a split backward path with direct `dQ` and a separate
-    K/V sweep,
-  - TK uses one dynamic-shared backward kernel with loader/store warps, ping-pong
-    Q/O/L/D staging, two compute warpgroups, and `qg_ready` / `compute_done`
-    synchronization.
-- [~] Synchronization fidelity:
-  - TK uses semaphore waits and coarse group syncs around real shared-memory
-    handoff points,
-  - generated Tyr still emits many local `warp::sync(0)` barriers and lacks the
-    TK loader/compute/store pipeline.
-- [ ] Dynamic shared memory support:
-  - codegen needs a first-class `extern __shared__` allocator equivalent to TK's
-    `tma_swizzle_allocator`,
-  - launch wrappers need to set `cudaFuncAttributeMaxDynamicSharedMemorySize`
-    for generated Hopper kernels.
-- [ ] TMA/semaphore pipeline support:
-  - expose `expect_bytes`, `load_async`, `wait`, `arrive`,
-    `store_commit_group`, and `store_async_wait` as first-class DSL/codegen
-    operations instead of relying on per-tile synchronous load/store shells.
-- [ ] TK-like backward generation:
-  - generate the D=64 `bwd_attend_ker` structure with one CTA owning a KV tile,
-    sweeping query tiles, accumulating `kg_reg` / `vg_reg`, producing `qg`, and
-    emitting final K/V gradients with one store-add per tile.
+- [x] Benchmark comparability:
+  - the native C++ bench can run SDPA, generated Tyr, and vendored TK in one
+    process with CUDA-event timing.
+- [x] Forward structure:
+  - generated H100 forward now mirrors TK's shared staging, typed TMA coords,
+    `warpgroup::laneid()` compute-done arrive, and final LSE sequence.
+- [x] Dynamic shared-memory support:
+  - generated Hopper kernels use TK-style dynamic shared allocation and launch
+    wrappers set the effective dynamic shared-memory attribute.
+- [x] D=64 generated backward parity:
+  - `dQ` / `dK` errors now match the vendored TK scale on `native_dense_768x64`.
+- [~] Remaining structural delta:
+  - generated backward uses a generated prep plus K/V sweep path, while TK uses
+    the original monolithic templated kernel shape.
 - [ ] Broader supported rows:
   - extend generated specializations to TK-compatible `seq >= 768`,
     `seq % 256 == 0`, `headDim in {64,128}` first,
   - only then broaden to Qwen/Gemma-oriented GQA/MQA and causal rows.
-- [ ] Unified reporting:
-  - either add a native TK backend to the C++ benchmark or keep the Python TK
+- [~] Unified reporting:
+  - native C++ now has a TK backend; remaining work is to persist the joined
+    benchmark report from generated Tyr, vendored TK, and SDPA rows.
     harness as the official vendored baseline and teach the report step to join
     Tyr and TK JSONL files into one table.
 
