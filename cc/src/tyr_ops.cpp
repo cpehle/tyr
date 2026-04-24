@@ -95,12 +95,23 @@ extern "C" lean_object* lean_launch_Tyr_GPU_Kernels_tkMhaH100Bwd12BlockKvSweep(
     uint64_t block_x, uint64_t block_y, uint64_t block_z,
     uint64_t shared_mem, uint64_t stream);
 
+std::vector<at::Tensor> tyr_tk_attention_forward_nosync(
+    at::Tensor q, at::Tensor k, at::Tensor v, bool causal);
+std::vector<at::Tensor> tyr_tk_attention_backward_nosync(
+    at::Tensor q, at::Tensor k, at::Tensor v,
+    at::Tensor o, at::Tensor l_vec, at::Tensor og, bool causal);
+
 namespace tyr_ops {
 
 enum class FlashAttnRoute {
   Portable,
   TkMhaH1002Block,
   TkMhaH10012Block,
+};
+
+enum class FlashAttnImpl {
+  Generated,
+  VendoredTk,
 };
 
 struct LaunchConfig {
@@ -240,7 +251,13 @@ static void throw_on_launcher_error(lean_object* io_result, const char* launcher
 
 static LaunchConfig launch_config_for(const torch::Tensor& query, FlashAttnRoute route) {
   LaunchConfig cfg;
-  cfg.grid_y = (route == FlashAttnRoute::TkMhaH10012Block) ? 12 : 2;
+  if (route == FlashAttnRoute::TkMhaH10012Block) {
+    cfg.grid_x = static_cast<uint64_t>(query.size(2) / (3 * 64));
+    cfg.grid_y = static_cast<uint64_t>(query.size(1));
+    cfg.block_x = 512;
+  } else {
+    cfg.grid_y = 2;
+  }
   cfg.stream = current_stream_handle(query);
   return cfg;
 }
@@ -249,7 +266,19 @@ static int64_t kv_blocks_for(FlashAttnRoute route) {
   return route == FlashAttnRoute::TkMhaH10012Block ? 12 : 2;
 }
 
-static std::pair<torch::Tensor, torch::Tensor> native_forward(
+static uint64_t generated_forward_shared_mem() {
+  return 227 * 1024 - 1024;
+}
+
+static uint64_t generated_backward_prep_shared_mem() {
+  return 227 * 1024 - 1024;
+}
+
+static uint64_t generated_backward_sweep_shared_mem() {
+  return 117760;
+}
+
+static std::pair<torch::Tensor, torch::Tensor> generated_forward(
     const torch::Tensor& query,
     const torch::Tensor& key,
     const torch::Tensor& value,
@@ -257,9 +286,9 @@ static std::pair<torch::Tensor, torch::Tensor> native_forward(
   const auto q = query.contiguous();
   const auto k = key.contiguous();
   const auto v = value.contiguous();
-  auto out = torch::zeros_like(q);
-  auto l = torch::zeros(
-      {kv_blocks_for(route), 64},
+  auto out = torch::empty_like(q);
+  auto l = torch::empty(
+      {1, 1, 1, q.size(2)},
       q.options().dtype(torch::kFloat32));
 
   LeanTensorRef q_ref(q);
@@ -268,7 +297,8 @@ static std::pair<torch::Tensor, torch::Tensor> native_forward(
   LeanTensorRef out_ref(out);
   LeanTensorRef l_ref(l);
 
-  const auto cfg = launch_config_for(q, route);
+  auto cfg = launch_config_for(q, route);
+  cfg.shared_mem = generated_forward_shared_mem();
   lean_object* result = nullptr;
   if (route == FlashAttnRoute::TkMhaH1002Block) {
     result = lean_launch_Tyr_GPU_Kernels_tkMhaH100Fwd2Block(
@@ -291,7 +321,7 @@ static std::pair<torch::Tensor, torch::Tensor> native_forward(
   return {out, l};
 }
 
-static std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> native_backward(
+static std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> generated_backward(
     const torch::Tensor& query,
     const torch::Tensor& key,
     const torch::Tensor& value,
@@ -310,7 +340,7 @@ static std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> native_backward(
   const int64_t kv_blocks = kv_blocks_for(route);
   const auto f32_opts = q.options().dtype(torch::kFloat32);
 
-  auto dVec = torch::zeros({kv_blocks, 64}, f32_opts);
+  auto dVec = torch::empty({1, 1, 1, seq}, f32_opts);
   auto dQ = torch::zeros({1, 1, seq, 64}, f32_opts);
   auto dK = torch::zeros({1, 1, seq, 64}, f32_opts);
   auto dV = torch::zeros({1, 1, seq, 64}, f32_opts);
@@ -319,13 +349,23 @@ static std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> native_backward(
   LeanTensorRef o_ref(o);
   LeanTensorRef d_ref(dVec);
 
-  const auto cfg = launch_config_for(q, route);
+  auto cfg = launch_config_for(q, route);
+  auto prep_cfg = cfg;
+  prep_cfg.grid_x = 1;
+  prep_cfg.grid_y = static_cast<uint64_t>(seq / 64);
+  prep_cfg.block_x = 128;
+  prep_cfg.shared_mem = generated_backward_prep_shared_mem();
   auto prep_result = lean_launch_Tyr_GPU_Kernels_tkMhaH100BwdPrep2Block(
       dO_ref.obj, o_ref.obj, d_ref.obj,
       static_cast<uint64_t>(seq), static_cast<uint64_t>(q.size(3)),
-      cfg.grid_x, cfg.grid_y, cfg.grid_z,
-      cfg.block_x, cfg.block_y, cfg.block_z,
-      cfg.shared_mem, cfg.stream);
+      prep_cfg.grid_x, prep_cfg.grid_y, prep_cfg.grid_z,
+      prep_cfg.block_x, prep_cfg.block_y, prep_cfg.block_z,
+      prep_cfg.shared_mem, prep_cfg.stream);
+  auto bwd_cfg = cfg;
+  bwd_cfg.grid_x = kv_blocks / 2;
+  bwd_cfg.grid_y = 1;
+  bwd_cfg.block_x = 384;
+  bwd_cfg.shared_mem = generated_backward_sweep_shared_mem();
   throw_on_launcher_error(prep_result, "tkMhaH100BwdPrep2Block");
 
   LeanTensorRef q_ref(q);
@@ -338,42 +378,58 @@ static std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> native_backward(
 
   lean_object* bwd_result = nullptr;
   if (route == FlashAttnRoute::TkMhaH1002Block) {
-    bwd_result = lean_launch_Tyr_GPU_Kernels_tkMhaH100Bwd2BlockDq(
-        q_ref.obj, k_ref.obj, v_ref.obj, dO_ref.obj, l_ref.obj, d_ref.obj,
-        dQ_ref.obj,
-        static_cast<uint64_t>(seq), static_cast<uint64_t>(q.size(3)),
-        cfg.grid_x, cfg.grid_y, cfg.grid_z,
-        cfg.block_x, cfg.block_y, cfg.block_z,
-        cfg.shared_mem, cfg.stream);
-    throw_on_launcher_error(bwd_result, "tkMhaH100Bwd2BlockDq");
     bwd_result = lean_launch_Tyr_GPU_Kernels_tkMhaH100Bwd2BlockKvSweep(
         q_ref.obj, k_ref.obj, v_ref.obj, dO_ref.obj, l_ref.obj, d_ref.obj,
         dQ_ref.obj, dK_ref.obj, dV_ref.obj,
         static_cast<uint64_t>(seq), static_cast<uint64_t>(q.size(3)),
-        cfg.grid_x, cfg.grid_y, cfg.grid_z,
-        cfg.block_x, cfg.block_y, cfg.block_z,
-        cfg.shared_mem, cfg.stream);
+        bwd_cfg.grid_x, bwd_cfg.grid_y, bwd_cfg.grid_z,
+        bwd_cfg.block_x, bwd_cfg.block_y, bwd_cfg.block_z,
+        bwd_cfg.shared_mem, bwd_cfg.stream);
     throw_on_launcher_error(bwd_result, "tkMhaH100Bwd2BlockKvSweep");
   } else {
-    bwd_result = lean_launch_Tyr_GPU_Kernels_tkMhaH100Bwd12BlockDq(
-        q_ref.obj, k_ref.obj, v_ref.obj, dO_ref.obj, l_ref.obj, d_ref.obj,
-        dQ_ref.obj,
-        static_cast<uint64_t>(seq), static_cast<uint64_t>(q.size(3)),
-        cfg.grid_x, cfg.grid_y, cfg.grid_z,
-        cfg.block_x, cfg.block_y, cfg.block_z,
-        cfg.shared_mem, cfg.stream);
-    throw_on_launcher_error(bwd_result, "tkMhaH100Bwd12BlockDq");
     bwd_result = lean_launch_Tyr_GPU_Kernels_tkMhaH100Bwd12BlockKvSweep(
         q_ref.obj, k_ref.obj, v_ref.obj, dO_ref.obj, l_ref.obj, d_ref.obj,
         dQ_ref.obj, dK_ref.obj, dV_ref.obj,
         static_cast<uint64_t>(seq), static_cast<uint64_t>(q.size(3)),
-        cfg.grid_x, cfg.grid_y, cfg.grid_z,
-        cfg.block_x, cfg.block_y, cfg.block_z,
-        cfg.shared_mem, cfg.stream);
+        bwd_cfg.grid_x, bwd_cfg.grid_y, bwd_cfg.grid_z,
+        bwd_cfg.block_x, bwd_cfg.block_y, bwd_cfg.block_z,
+        bwd_cfg.shared_mem, bwd_cfg.stream);
     throw_on_launcher_error(bwd_result, "tkMhaH100Bwd12BlockKvSweep");
   }
 
   return {dQ, dK, dV};
+}
+
+static std::pair<torch::Tensor, torch::Tensor> vendored_tk_forward(
+    const torch::Tensor& query,
+    const torch::Tensor& key,
+    const torch::Tensor& value,
+    bool is_causal) {
+  const auto q = query.contiguous();
+  const auto k = key.contiguous();
+  const auto v = value.contiguous();
+  auto result = tyr_tk_attention_forward_nosync(q, k, v, is_causal);
+  TORCH_CHECK(result.size() == 2, "tyr::flash_attn: vendored TK forward returned unexpected tensor count");
+  return {result[0], result[1]};
+}
+
+static std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> vendored_tk_backward(
+    const torch::Tensor& query,
+    const torch::Tensor& key,
+    const torch::Tensor& value,
+    const torch::Tensor& out,
+    const torch::Tensor& l,
+    const torch::Tensor& grad_out,
+    bool is_causal) {
+  const auto q = query.contiguous();
+  const auto k = key.contiguous();
+  const auto v = value.contiguous();
+  const auto o = out.contiguous();
+  const auto l_saved = l.contiguous();
+  const auto dO = grad_out.contiguous();
+  auto result = tyr_tk_attention_backward_nosync(q, k, v, o, l_saved, dO, is_causal);
+  TORCH_CHECK(result.size() == 3, "tyr::flash_attn: vendored TK backward returned unexpected tensor count");
+  return {result[0], result[1], result[2]};
 }
 
 static torch::Tensor expand_kv_heads_for_gqa(
@@ -438,15 +494,19 @@ static torch::Tensor portable_flash_attn(
       q, k, v, expanded_mask, dropout_p, false);
 }
 
-template <FlashAttnRoute Route>
-class NativeFlashAttnFunction : public torch::autograd::Function<NativeFlashAttnFunction<Route>> {
+template <FlashAttnRoute Route, FlashAttnImpl Impl>
+class NativeFlashAttnFunction
+    : public torch::autograd::Function<NativeFlashAttnFunction<Route, Impl>> {
  public:
   static torch::Tensor forward(
       torch::autograd::AutogradContext* ctx,
       torch::Tensor query,
       torch::Tensor key,
       torch::Tensor value) {
-    auto [out, l] = native_forward(query, key, value, Route);
+    auto [out, l] =
+        Impl == FlashAttnImpl::Generated
+            ? generated_forward(query, key, value, Route)
+            : vendored_tk_forward(query, key, value, false);
     ctx->save_for_backward({query, key, value, out, l});
     return out;
   }
@@ -458,13 +518,18 @@ class NativeFlashAttnFunction : public torch::autograd::Function<NativeFlashAttn
     if (grad_outputs.empty() || !grad_outputs[0].defined()) {
       return {torch::Tensor(), torch::Tensor(), torch::Tensor()};
     }
-    auto [dQ, dK, dV] = native_backward(
-        saved[0], saved[1], saved[2], saved[3], saved[4], grad_outputs[0], Route);
+    auto [dQ, dK, dV] =
+        Impl == FlashAttnImpl::Generated
+            ? generated_backward(
+                  saved[0], saved[1], saved[2], saved[3], saved[4], grad_outputs[0], Route)
+            : vendored_tk_backward(
+                  saved[0], saved[1], saved[2], saved[3], saved[4], grad_outputs[0], false);
     return {dQ, dK, dV};
   }
 };
 
-torch::Tensor flash_attn_dispatch(
+template <FlashAttnImpl Impl>
+static torch::Tensor flash_attn_dispatch_impl(
     const torch::Tensor& query,
     const torch::Tensor& key,
     const torch::Tensor& value,
@@ -478,13 +543,53 @@ torch::Tensor flash_attn_dispatch(
   auto route = select_route(query, key, value, attn_mask, dropout_p, is_causal, scale, enable_gqa);
   switch (route) {
     case FlashAttnRoute::TkMhaH1002Block:
-      return NativeFlashAttnFunction<FlashAttnRoute::TkMhaH1002Block>::apply(query, key, value);
+      return NativeFlashAttnFunction<FlashAttnRoute::TkMhaH1002Block, FlashAttnImpl::Generated>::apply(
+          query, key, value);
     case FlashAttnRoute::TkMhaH10012Block:
-      return NativeFlashAttnFunction<FlashAttnRoute::TkMhaH10012Block>::apply(query, key, value);
+      return NativeFlashAttnFunction<FlashAttnRoute::TkMhaH10012Block, Impl>::apply(query, key, value);
     case FlashAttnRoute::Portable:
     default:
       return portable_flash_attn(query, key, value, attn_mask, dropout_p, is_causal, scale, enable_gqa);
   }
+}
+
+torch::Tensor flash_attn_dispatch(
+    const torch::Tensor& query,
+    const torch::Tensor& key,
+    const torch::Tensor& value,
+    const c10::optional<torch::Tensor>& attn_mask,
+    double dropout_p,
+    bool is_causal,
+    const c10::optional<double>& scale,
+    bool enable_gqa) {
+  return flash_attn_dispatch_impl<FlashAttnImpl::VendoredTk>(
+      query, key, value, attn_mask, dropout_p, is_causal, scale, enable_gqa);
+}
+
+torch::Tensor flash_attn_dispatch_generated(
+    const torch::Tensor& query,
+    const torch::Tensor& key,
+    const torch::Tensor& value,
+    const c10::optional<torch::Tensor>& attn_mask,
+    double dropout_p,
+    bool is_causal,
+    const c10::optional<double>& scale,
+    bool enable_gqa) {
+  return flash_attn_dispatch_impl<FlashAttnImpl::Generated>(
+      query, key, value, attn_mask, dropout_p, is_causal, scale, enable_gqa);
+}
+
+torch::Tensor flash_attn_dispatch_vendored_tk(
+    const torch::Tensor& query,
+    const torch::Tensor& key,
+    const torch::Tensor& value,
+    const c10::optional<torch::Tensor>& attn_mask,
+    double dropout_p,
+    bool is_causal,
+    const c10::optional<double>& scale,
+    bool enable_gqa) {
+  return flash_attn_dispatch_impl<FlashAttnImpl::VendoredTk>(
+      query, key, value, attn_mask, dropout_p, is_causal, scale, enable_gqa);
 }
 
 static lean_object* mk_io_error(const std::string& msg) {
