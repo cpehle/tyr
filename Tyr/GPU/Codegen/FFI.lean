@@ -112,6 +112,7 @@ def generateCppHeader : String :=
   "#include <lean/lean.h>\n" ++
   "#include <array>\n" ++
   "#include <stdexcept>\n" ++
+  "#include <type_traits>\n" ++
   "#include <kittens.cuh>\n" ++
   "#include <torch/torch.h>\n" ++
   "#include <cuda_runtime.h>\n" ++

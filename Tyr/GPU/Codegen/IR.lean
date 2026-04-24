@@ -47,14 +47,33 @@ def KScalarType.toCpp : KScalarType → String
   | .Float32 => "float"
   | .Bool => "uint8_t"
 
+/-- Concrete ThunderKittens tile descriptor shape required on a global pointer.
+
+Most generated kernels infer these from typed TMA load/store statements. Some
+kernel templates need to stage through C++ helper code or raw TK idioms while
+still using generated launch wrappers, so they need a declarative way to attach
+the same descriptor to the generated `gl<...>` parameter type. -/
+inductive GlobalTileDescriptor where
+  | st (dtype : GpuFloat) (rows cols : Nat)
+  | rowVecSt (dtype : GpuFloat) (rows cols : Nat)
+  | colVecSt (dtype : GpuFloat) (rows cols : Nat)
+  deriving Repr, Inhabited, BEq, Hashable
+
 /-- GPU kernel statement using VarId -/
 inductive KStmt where
   -- Tile declarations
   | declRT (v : VarId) (dtype : GpuFloat) (rows cols : Nat) (layout : TileLayout)
   | declST (v : VarId) (dtype : GpuFloat) (rows cols : Nat) (layout : TileLayout)
+  | declSTArray (v : VarId) (dtype : GpuFloat) (rows cols : Nat) (layout : TileLayout) (len : Nat)
+  | declSTAlias (v : VarId) (dtype : GpuFloat) (rows cols : Nat) (layout : TileLayout)
+      (src : VarId) (comment : String)
   | declRV (v : VarId) (dtype : GpuFloat) (len : Nat)
   | declSV (v : VarId) (dtype : GpuFloat) (len : Nat)
+  | declSTRowVec (v : VarId) (dtype : GpuFloat) (rows cols : Nat)
+  | declSTColVec (v : VarId) (dtype : GpuFloat) (rows cols : Nat)
+  | declSTColVecArray (v : VarId) (dtype : GpuFloat) (rows cols len : Nat)
   | declSemaphore (v : VarId)  -- Semaphore/barrier declaration
+  | declSemaphoreArray (v : VarId) (len : Nat)
 
   -- Tensor memory tile declarations (Blackwell SM100)
   | declTT (v : VarId) (dtype : GpuFloat) (rows cols : Nat)  -- TMEM tile (tt<dtype, rows, cols>)
@@ -71,12 +90,15 @@ inductive KStmt where
   | storeAdd (dst src : VarId)       -- Atomic add for gradient accumulation
   | storeAddAsync (dst src : VarId)  -- Async atomic add (TMA)
   | storeMinAsync (dst src : VarId)  -- Async atomic min (TMA)
+  | warpgroupStore (dst src : VarId) -- Warpgroup-wide store into shared memory
+  | warpgroupStoreIdx (dst dstIdx src : VarId)
   | tmaStoreCommitGroup              -- Commit TMA store group
   | tmaStoreAsyncWait                -- Wait for outstanding TMA stores
   | prefetch (src : VarId)           -- TMA prefetch
   | tmaExpect (barrier : VarId) (bytes : Nat)
   | blockSync                        -- CTA-wide __syncthreads()
   | groupSync (warps barrierId : Nat) -- ThunderKittens group<N>::sync(barrier)
+  | groupSyncVal (warps : Nat) (barrierId : VarId)
 
   -- TMA operations with global pointers (legacy single coord)
   | tmaLoad (dst src : VarId) (coord : VarId)      -- TMA load: shared ← global[coord]
@@ -86,8 +108,15 @@ inductive KStmt where
   | loadGlobal (dst src : VarId) (coordB coordD coordR coordC : VarId)
   | storeGlobal (dst src : VarId) (coordB coordD coordR coordC : VarId)
   | loadGlobalAsync (dst src : VarId) (coordB coordD coordR coordC sem : VarId)
+  | loadGlobalAsyncWarp (dst src : VarId) (coordB coordD coordR coordC sem : VarId)
+  | loadGlobalAsyncIdx (dst dstIdx src : VarId) (coordB coordD coordR coordC sem : VarId)
+  | loadGlobalAsyncIdxSemIdx (dst dstIdx src : VarId) (coordB coordD coordR coordC sem semIdx : VarId)
+  | loadGlobalAsyncWarpIdx (dst dstIdx src : VarId) (coordB coordD coordR coordC sem semIdx : VarId)
   | storeGlobalAsync (dst src : VarId) (coordB coordD coordR coordC : VarId)
+  | storeGlobalAsyncIdx (dst src srcIdx : VarId) (coordB coordD coordR coordC : VarId)
   | storeGlobalAdd (dst src : VarId) (coordB coordD coordR coordC : VarId)  -- Atomic add
+  | storeGlobalAddWarp (dst src : VarId) (coordB coordD coordR coordC : VarId)  -- Atomic add from current warp
+  | requireGlobalTma (ptr : VarId) (descriptor : GlobalTileDescriptor)
   | layoutDim (dst src : VarId) (axis : LayoutDimAxis)
 
   -- Vector global memory operations
@@ -110,6 +139,9 @@ inductive KStmt where
   | mm (trans : MMATranspose) (dst a b : VarId)
   | warpgroupMma (trans : MMATranspose) (dst a b : VarId)
   | warpgroupMm (trans : MMATranspose) (dst a b : VarId)
+  | warpgroupMmaIdx (trans : MMATranspose) (dst a aIdx b bIdx : VarId)
+  | warpgroupMmIdx (trans : MMATranspose) (dst a aIdx b bIdx : VarId)
+  | warpgroupMmaRhsIdx (trans : MMATranspose) (dst a b bIdx : VarId)
   | mmaFence (dst : VarId)
   | mmaCommitGroup
   | mmaAsyncWait (n : Nat)
@@ -193,7 +225,12 @@ inductive KStmt where
 
   -- Warp group operations (for warp specialization)
   | warpGroupIdx (dst : VarId)
+  | warpGroupLaneId (dst : VarId)
+  | warpId (dst : VarId)
+  | laneId (dst : VarId)
   | electOneSync (dst : VarId)
+  | warpgroupDecreaseRegisters (n : Nat)
+  | warpgroupIncreaseRegisters (n : Nat)
 
   -- Fence operations (for WGMMA pipelining)
   | fenceViewAsyncShared
@@ -201,6 +238,12 @@ inductive KStmt where
 
   -- Semaphore operations
   | semaphore (op : SemaphoreOp) (sem : VarId)
+  | semaphoreWarp (op : SemaphoreOp) (sem : VarId)
+  | semaphoreWaitVal (sem phase : VarId)
+  | semaphoreArray (op : SemaphoreOp) (sem idx : VarId)
+  | semaphoreArrayWarp (op : SemaphoreOp) (sem idx : VarId)
+  | semaphoreArrayWaitVal (sem idx phase : VarId)
+  | semaphoreArrayArrive (sem idx : VarId) (count : Nat)
 
   -- Control flow
   | forLoop (v : VarId) (lo hi : Nat) (body : Array KStmt)
@@ -243,6 +286,7 @@ structure Kernel where
   params : Array KParam
   body : Array KStmt
   sharedMemBytes : Nat := 0
+  launchBounds : Option (Nat × Nat) := none
   deriving Repr, Inhabited, BEq
 
 end Tyr.GPU.Codegen

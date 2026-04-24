@@ -378,6 +378,7 @@ def generateCppLauncherCode (kernel : Kernel) : String :=
   let externName := "lean_launch_" ++ name
   let archGuard := kernel.arch.toGuard
   let archMsg := toString kernel.arch
+  let defaultSharedMem := toString kernel.sharedMemBytes
   let paramTmaTypes := inferGlobalParamTmaTypes kernel
 
   let externParams := kernel.params.toList.map paramToCppExternAttr
@@ -407,11 +408,12 @@ def generateCppLauncherCode (kernel : Kernel) : String :=
   "    auto cuda_stream = reinterpret_cast<cudaStream_t>(stream);\n" ++
   "    dim3 grid(grid_x, grid_y, grid_z);\n" ++
   "    dim3 block(block_x, block_y, block_z);\n\n" ++
-  "    if (shared_mem > 0) {\n" ++
-  "      if (auto err = cudaFuncSetAttribute(" ++ name ++ ", cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(shared_mem)); err != cudaSuccess)\n" ++
+  "    uint64_t effective_shared_mem = shared_mem == 0 ? " ++ defaultSharedMem ++ "ull : shared_mem;\n" ++
+  "    if (effective_shared_mem > 0) {\n" ++
+  "      if (auto err = cudaFuncSetAttribute(" ++ name ++ ", cudaFuncAttributeMaxDynamicSharedMemorySize, static_cast<int>(effective_shared_mem)); err != cudaSuccess)\n" ++
   "        return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string(cudaGetErrorString(err))));\n" ++
   "    }\n\n" ++
-  "    " ++ name ++ "<<<grid, block, shared_mem, cuda_stream>>>(" ++ argStr ++ ");\n\n" ++
+  "    " ++ name ++ "<<<grid, block, effective_shared_mem, cuda_stream>>>(" ++ argStr ++ ");\n\n" ++
   "    if (auto err = cudaGetLastError(); err != cudaSuccess)\n" ++
   "      return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string(cudaGetErrorString(err))));\n" ++
   "    return lean_io_result_mk_ok(lean_box(0));\n" ++

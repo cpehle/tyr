@@ -32,6 +32,13 @@ structure ST (dtype : GpuFloat) (rows cols : Nat) (layout : TileLayout := .Row) 
   id : VarId
   deriving Repr
 
+/-- Shared memory tile array, matching ThunderKittens allocator arrays such as
+    `st_bf<128,64> (&k_smem)[4]`. -/
+structure STArray (dtype : GpuFloat) (rows cols : Nat) (layout : TileLayout := .Row)
+    (len : Nat) where
+  id : VarId
+  deriving Repr
+
 /-- Register vector -/
 structure RV (dtype : GpuFloat) (len : Nat) where
   id : VarId
@@ -39,6 +46,32 @@ structure RV (dtype : GpuFloat) (len : Nat) where
 
 /-- Shared vector -/
 structure SV (dtype : GpuFloat) (len : Nat) where
+  id : VarId
+  deriving Repr
+
+/-- Shared row vector associated with a shared tile descriptor.
+
+ThunderKittens represents `row_vec<st<T, rows, cols>>` as an `sv<T, cols>` in
+shared memory, but the descriptor shape matters for TMA vector loads/stores. -/
+structure STRowVec (dtype : GpuFloat) (rows cols : Nat) where
+  id : VarId
+  deriving Repr
+
+/-- Shared column vector associated with a shared tile descriptor.
+
+ThunderKittens represents `col_vec<st<T, rows, cols>>` as an `sv<T, rows>` in
+shared memory, but the descriptor shape matters for TMA vector loads/stores. -/
+structure STColVec (dtype : GpuFloat) (rows cols : Nat) where
+  id : VarId
+  deriving Repr
+
+/-- Shared column-vector tile array, used for per-consumer LSE staging. -/
+structure STColVecArray (dtype : GpuFloat) (rows cols len : Nat) where
+  id : VarId
+  deriving Repr
+
+/-- Shared semaphore array for TK ring buffers. -/
+structure SemaphoreArray (len : Nat) where
   id : VarId
   deriving Repr
 
@@ -86,11 +119,30 @@ def RT.varId {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
 def ST.varId {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
     (t : ST dtype rows cols layout) : VarId := t.id
 
+/-- Get VarId from shared tile array. -/
+def STArray.varId {dtype : GpuFloat} {rows cols len : Nat} {layout : TileLayout}
+    (t : STArray dtype rows cols layout len) : VarId := t.id
+
 /-- Get VarId from register vector -/
 def RV.varId {dtype : GpuFloat} {len : Nat} (v : RV dtype len) : VarId := v.id
 
 /-- Get VarId from shared vector -/
 def SV.varId {dtype : GpuFloat} {len : Nat} (v : SV dtype len) : VarId := v.id
+
+/-- Get VarId from shared row vector tile descriptor. -/
+def STRowVec.varId {dtype : GpuFloat} {rows cols : Nat}
+    (v : STRowVec dtype rows cols) : VarId := v.id
+
+/-- Get VarId from shared column vector tile descriptor. -/
+def STColVec.varId {dtype : GpuFloat} {rows cols : Nat}
+    (v : STColVec dtype rows cols) : VarId := v.id
+
+/-- Get VarId from shared column vector tile array descriptor. -/
+def STColVecArray.varId {dtype : GpuFloat} {rows cols len : Nat}
+    (v : STColVecArray dtype rows cols len) : VarId := v.id
+
+/-- Get VarId from a semaphore array. -/
+def SemaphoreArray.varId {len : Nat} (v : SemaphoreArray len) : VarId := v.id
 
 /-- Get VarId from tensor memory tile -/
 def TT.varId {dtype : GpuFloat} {rows cols : Nat} (t : TT dtype rows cols) : VarId := t.id
@@ -182,6 +234,18 @@ instance {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout} :
 
 instance {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout} :
     SharedTile (ST dtype rows cols layout) where
+  location_is_shared := rfl
+
+instance {dtype : GpuFloat} {rows cols len : Nat} {layout : TileLayout} :
+    Tile (STArray dtype rows cols layout len) where
+  dtype := dtype
+  rows := rows
+  cols := cols
+  location := .Shared
+  layout := layout
+
+instance {dtype : GpuFloat} {rows cols len : Nat} {layout : TileLayout} :
+    SharedTile (STArray dtype rows cols layout len) where
   location_is_shared := rfl
 
 end Tyr.GPU.Codegen
