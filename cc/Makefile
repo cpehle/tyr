@@ -17,6 +17,7 @@ TORCH_INC_FLAGS=-I$(TORCHDIR)/include -I$(TORCHDIR)/include/torch/csrc/api/inclu
 TORCH_LIBPATH=$(TORCHDIR)/lib
 TKDIR=../thirdparty/ThunderKittens
 TK_INC_FLAGS=-I$(TKDIR)/include -I$(TKDIR)/prototype
+PYTHON_INC_FLAGS ?= $(shell python3-config --includes 2>/dev/null)
 SOXR_DIR=../external/soxr
 SOXR_BUILD_DIR=build/soxr
 SOXR_INC_FLAGS=-I$(SOXR_DIR)/src -I$(SOXR_BUILD_DIR)
@@ -146,13 +147,14 @@ else
 APPLE_FRAMEWORK_FLAGS :=
 endif
 GPU_CODEGEN_MODULES := $(strip $(TYR_GPU_CODEGEN_MODULE))
+STATIC_CU_SRCS := $(SRC_DIR)/tk_vendor_mha_h100.cu
 ifeq ($(GPU_CODEGEN_MODULES),)
-CU_SRCS := $(wildcard $(SRC_DIR)/generated/*.cu)
+CU_SRCS := $(STATIC_CU_SRCS) $(wildcard $(SRC_DIR)/generated/*.cu)
 else ifeq ($(GPU_CODEGEN_MODULES),all)
-CU_SRCS := $(wildcard $(SRC_DIR)/generated/*.cu)
+CU_SRCS := $(STATIC_CU_SRCS) $(wildcard $(SRC_DIR)/generated/*.cu)
 else
 GPU_CODEGEN_CU_NAMES := $(addsuffix .cu,$(subst .,_,$(GPU_CODEGEN_MODULES)))
-CU_SRCS := $(addprefix $(SRC_DIR)/generated/,$(GPU_CODEGEN_CU_NAMES))
+CU_SRCS := $(STATIC_CU_SRCS) $(addprefix $(SRC_DIR)/generated/,$(GPU_CODEGEN_CU_NAMES))
 endif
 ifneq ($(HAS_NVCC),1)
 ifneq ($(strip $(CU_SRCS)),)
@@ -285,7 +287,7 @@ $(OUT_DIR)/%.o : $(SRC_DIR)/%.mm $(HDR_FILES) | check-submodules $(OUT_DIR)
 
 $(OUT_DIR)/%.o : $(SRC_DIR)/%.cu $(HDR_FILES) | check-submodules $(OUT_DIR)
 	@mkdir -p $(dir $@)
-	$(NVCC) -o $@ -c $< -I$(HDR_DIR) -I$(LEAN_INCLUDE) $(TORCH_INC_FLAGS) $(TK_INC_FLAGS) $(NVCCFLAGS)
+	$(NVCC) -o $@ -c $< -I$(HDR_DIR) -I$(LEAN_INCLUDE) $(TORCH_INC_FLAGS) $(TK_INC_FLAGS) $(PYTHON_INC_FLAGS) $(NVCCFLAGS)
 
 $(GPU_STUB_SRC): $(GPU_STUB_SCRIPT)
 	$(MKPATH) $(dir $@)
