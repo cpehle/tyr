@@ -55,6 +55,10 @@ structure RVLayoutState where
 private inductive TileKind where
   | RT
   | ST
+  | STArray
+  | STRowVec
+  | STColVec
+  | STColVecArray
   | TT  -- Tensor memory tile (Blackwell)
   deriving Repr, BEq, Hashable, Inhabited
 
@@ -64,6 +68,7 @@ private structure TileInfo where
   cols : Nat
   dtype : GpuFloat
   layout : TileLayout := .Row
+  len : Nat := 1
   deriving Repr, BEq, Inhabited
 
 private def addRvLayout (st : RVLayoutState) (v : VarId) (layout : RVLayout) : RVLayoutState :=
@@ -89,6 +94,11 @@ private def collectRtLayoutsStmt (acc : Std.HashMap VarId TileLayout) : KStmt �
 private def collectTileInfoStmt (acc : Std.HashMap VarId TileInfo) : KStmt → Std.HashMap VarId TileInfo
   | .declRT v dtype rows cols layout => acc.insert v { kind := .RT, rows := rows, cols := cols, dtype := dtype, layout := layout }
   | .declST v dtype rows cols layout => acc.insert v { kind := .ST, rows := rows, cols := cols, dtype := dtype, layout := layout }
+  | .declSTArray v dtype rows cols layout len => acc.insert v { kind := .STArray, rows := rows, cols := cols, dtype := dtype, layout := layout, len := len }
+  | .declSTAlias v dtype rows cols layout _ _ => acc.insert v { kind := .ST, rows := rows, cols := cols, dtype := dtype, layout := layout }
+  | .declSTRowVec v dtype rows cols => acc.insert v { kind := .STRowVec, rows := rows, cols := cols, dtype := dtype }
+  | .declSTColVec v dtype rows cols => acc.insert v { kind := .STColVec, rows := rows, cols := cols, dtype := dtype }
+  | .declSTColVecArray v dtype rows cols len => acc.insert v { kind := .STColVecArray, rows := rows, cols := cols, dtype := dtype, len := len }
   | .declTT v dtype rows cols => acc.insert v { kind := .TT, rows := rows, cols := cols, dtype := dtype }
   | .forLoop _ _ _ body => body.foldl collectTileInfoStmt acc
   | .forLoopVal _ _ _ body => body.foldl collectTileInfoStmt acc
@@ -220,15 +230,32 @@ private def inferTileInfo (k : Kernel) : Std.HashMap VarId TileInfo :=
     generated TMA load/store/store-add paths used by Hopper attention kernels. -/
 inductive GlobalParamTmaType where
   | st (dtype : GpuFloat) (rows cols : Nat)
+  | rowVecSt (dtype : GpuFloat) (rows cols : Nat)
+  | colVecSt (dtype : GpuFloat) (rows cols : Nat)
   deriving Repr, BEq, Hashable, Inhabited
 
 /-- Render a TMA descriptor type in ThunderKittens C++ syntax. -/
 def GlobalParamTmaType.toCpp : GlobalParamTmaType → String
   | .st dtype rows cols => s!"st<{dtype.toCpp}, {rows}, {cols}>"
+  | .rowVecSt dtype rows cols => s!"row_vec<st<{dtype.toCpp}, {rows}, {cols}>>"
+  | .colVecSt dtype rows cols => s!"col_vec<st<{dtype.toCpp}, {rows}, {cols}>>"
+
+private def descriptorToGlobalParamTmaType : GlobalTileDescriptor → GlobalParamTmaType
+  | GlobalTileDescriptor.st dtype rows cols => GlobalParamTmaType.st dtype rows cols
+  | GlobalTileDescriptor.rowVecSt dtype rows cols => GlobalParamTmaType.rowVecSt dtype rows cols
+  | GlobalTileDescriptor.colVecSt dtype rows cols => GlobalParamTmaType.colVecSt dtype rows cols
 
 private def tileInfoToGlobalParamTmaType? : TileInfo → Option GlobalParamTmaType
   | { kind := .ST, dtype := dtype, rows := rows, cols := cols, .. } =>
       some (.st dtype rows cols)
+  | { kind := .STArray, dtype := dtype, rows := rows, cols := cols, .. } =>
+      some (.st dtype rows cols)
+  | { kind := .STRowVec, dtype := dtype, rows := rows, cols := cols, .. } =>
+      some (.rowVecSt dtype rows cols)
+  | { kind := .STColVec, dtype := dtype, rows := rows, cols := cols, .. } =>
+      some (.colVecSt dtype rows cols)
+  | { kind := .STColVecArray, dtype := dtype, rows := rows, cols := cols, .. } =>
+      some (.colVecSt dtype rows cols)
   | _ => none
 
 private def insertGlobalParamTmaType
@@ -265,10 +292,24 @@ private partial def collectGlobalParamTmaTypesStmt
     KStmt → Std.HashMap Nat (Array GlobalParamTmaType)
   | .loadGlobalAsync dst src _ _ _ _ _ =>
       insertParamTmaFromTile params tileInfo acc src dst
+  | .loadGlobalAsyncWarp dst src _ _ _ _ _ =>
+      insertParamTmaFromTile params tileInfo acc src dst
+  | .loadGlobalAsyncIdx dst _ src _ _ _ _ _ =>
+      insertParamTmaFromTile params tileInfo acc src dst
+  | .loadGlobalAsyncIdxSemIdx dst _ src _ _ _ _ _ _ =>
+      insertParamTmaFromTile params tileInfo acc src dst
+  | .loadGlobalAsyncWarpIdx dst _ src _ _ _ _ _ _ =>
+      insertParamTmaFromTile params tileInfo acc src dst
   | .storeGlobalAsync dst src _ _ _ _ =>
+      insertParamTmaFromTile params tileInfo acc dst src
+  | .storeGlobalAsyncIdx dst src _ _ _ _ _ =>
       insertParamTmaFromTile params tileInfo acc dst src
   | .storeGlobalAdd dst src _ _ _ _ =>
       insertParamTmaFromTile params tileInfo acc dst src
+  | .storeGlobalAddWarp dst src _ _ _ _ =>
+      insertParamTmaFromTile params tileInfo acc dst src
+  | .requireGlobalTma ptr descriptor =>
+      insertGlobalParamTmaType acc ptr.idx (descriptorToGlobalParamTmaType descriptor)
   | .clusterTmaLoad dst src _ _ _ _ _ =>
       insertParamTmaFromTile params tileInfo acc src dst
   | .clusterTmaStore dst src _ _ _ _ =>
@@ -303,38 +344,111 @@ def renderGlobalParamCppType
     else ", " ++ String.intercalate ", " (tmaTypes.toList.map GlobalParamTmaType.toCpp)
   s!"gl<{p.dtype.toCpp}, 1, 1, -1, -1{tmaSuffix}>"
 
+private def renderGlobalCoord
+    (tileInfo : Std.HashMap VarId TileInfo)
+    (tileVar coordB coordD coordR coordC : VarId) : String :=
+  match tileInfo[tileVar]? with
+  | some { kind := .STRowVec, .. } =>
+      s!"kittens::coord<std::remove_reference_t<decltype({tileVar.toIdent})>>({coordB.toIdent}, {coordD.toIdent}, {coordR.toIdent}, {coordC.toIdent})"
+  | some { kind := .STColVec, .. } =>
+      s!"kittens::coord<std::remove_reference_t<decltype({tileVar.toIdent})>>({coordB.toIdent}, {coordD.toIdent}, {coordR.toIdent}, {coordC.toIdent})"
+  | some info =>
+      s!"kittens::coord<>({coordB.toIdent}, {coordD.toIdent}, ({coordR.toIdent} * {info.rows}), ({coordC.toIdent} * {info.cols}))"
+  | none =>
+      s!"kittens::coord<>({coordB.toIdent}, {coordD.toIdent}, {coordR.toIdent}, {coordC.toIdent})"
+
+private def renderGlobalCoordIdx
+    (tileInfo : Std.HashMap VarId TileInfo)
+    (tileVar idx coordB coordD coordR coordC : VarId) : String :=
+  match tileInfo[tileVar]? with
+  | some { kind := .STArray, .. } =>
+      s!"kittens::coord<std::remove_reference_t<decltype({tileVar.toIdent}[{idx.toIdent}])>>({coordB.toIdent}, {coordD.toIdent}, {coordR.toIdent}, {coordC.toIdent})"
+  | some { kind := .STColVecArray, .. } =>
+      s!"kittens::coord<std::remove_reference_t<decltype({tileVar.toIdent}[{idx.toIdent}])>>({coordB.toIdent}, {coordD.toIdent}, {coordR.toIdent}, {coordC.toIdent})"
+  | some info =>
+      s!"kittens::coord<>({coordB.toIdent}, {coordD.toIdent}, ({coordR.toIdent} * {info.rows}), ({coordC.toIdent} * {info.cols}))"
+  | none =>
+      s!"kittens::coord<>({coordB.toIdent}, {coordD.toIdent}, {coordR.toIdent}, {coordC.toIdent})"
+
 /-- Generate C++ for a single statement -/
 partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout)
     (rvVars : Std.HashSet VarId)
-    (tileInfo : Std.HashMap VarId TileInfo) (indent : String := "  ") : KStmt → String
+    (tileInfo : Std.HashMap VarId TileInfo)
+    (useDynamicShared : Bool := false)
+    (indent : String := "  ") : KStmt → String
   -- Declarations
   | .declRT v dtype rows cols layout =>
     s!"{indent}rt<{dtype.toCpp}, {rows}, {cols}, {layout.toCpp}> {v.toIdent};\n"
   | .declST v dtype rows cols layout =>
-    -- ThunderKittens shared tiles do not carry a row/col layout template
-    -- parameter (unlike rt<>): the `st<T, rows, cols, swizzle, swizzle_bytes>`
-    -- template only has swizzle parameters. Row- vs column-major traversal
-    -- is handled by the consuming ops (swap_layout, transpose, MMA transpose
-    -- flags, or by transposing the register tile that loads into/out of
-    -- this shared tile). We preserve the Lean-level layout annotation as a
-    -- source comment so the emitted C++ documents the intended semantics.
-    match layout with
-    | .Row =>
-      s!"{indent}__shared__ KITTENS_ALIGN_AS(1024) st<{dtype.toCpp}, {rows}, {cols}> {v.toIdent}; // layout: row_l\n"
-    | .Col =>
-      -- TK has no native col-layout shared tile; the tile is physically
-      -- row-major in SMEM and the Lean `.Col` annotation indicates the
-      -- producer/consumer loads it transposed (see RT col_l ops that pair
-      -- with this ST). Emit a tag comment so callers can audit this.
-      s!"{indent}__shared__ KITTENS_ALIGN_AS(1024) st<{dtype.toCpp}, {rows}, {cols}> {v.toIdent}; // layout: col_l (Tyr .Col; TK has no col-layout ST, traversed transposed)\n"
+    let ty := s!"st<{dtype.toCpp}, {rows}, {cols}>"
+    if useDynamicShared then
+      match layout with
+      | .Row =>
+        s!"{indent}auto &{v.toIdent} = al.allocate<{ty}>(); // layout: row_l\n"
+      | .Col =>
+        s!"{indent}auto &{v.toIdent} = al.allocate<{ty}>(); // layout: col_l (Tyr .Col; TK has no col-layout ST, traversed transposed)\n"
+    else
+      -- ThunderKittens shared tiles do not carry a row/col layout template
+      -- parameter (unlike rt<>): the `st<T, rows, cols, swizzle, swizzle_bytes>`
+      -- template only has swizzle parameters. Row- vs column-major traversal
+      -- is handled by the consuming ops (swap_layout, transpose, MMA transpose
+      -- flags, or by transposing the register tile that loads into/out of
+      -- this shared tile). We preserve the Lean-level layout annotation as a
+      -- source comment so the emitted C++ documents the intended semantics.
+      match layout with
+      | .Row =>
+        s!"{indent}__shared__ KITTENS_ALIGN_AS(1024) {ty} {v.toIdent}; // layout: row_l\n"
+      | .Col =>
+        -- TK has no native col-layout shared tile; the tile is physically
+        -- row-major in SMEM and the Lean `.Col` annotation indicates the
+        -- producer/consumer loads it transposed (see RT col_l ops that pair
+        -- with this ST). Emit a tag comment so callers can audit this.
+        s!"{indent}__shared__ KITTENS_ALIGN_AS(1024) {ty} {v.toIdent}; // layout: col_l (Tyr .Col; TK has no col-layout ST, traversed transposed)\n"
+  | .declSTArray v dtype rows cols layout len =>
+    let ty := s!"st<{dtype.toCpp}, {rows}, {cols}>"
+    let layoutComment := match layout with
+      | .Row => "layout: row_l"
+      | .Col => "layout: col_l (Tyr .Col; TK has no col-layout ST, traversed transposed)"
+    if useDynamicShared then
+      s!"{indent}{ty} (&{v.toIdent})[{len}] = al.allocate<{ty}, {len}>(); // {layoutComment}\n"
+    else
+      s!"{indent}__shared__ KITTENS_ALIGN_AS(1024) {ty} {v.toIdent}[{len}]; // {layoutComment}\n"
+  | .declSTAlias v dtype rows cols layout src comment =>
+    let ty := s!"st<{dtype.toCpp}, {rows}, {cols}>"
+    let layoutComment := match layout with
+      | .Row => "layout: row_l"
+      | .Col => "layout: col_l (Tyr .Col; TK has no col-layout ST, traversed transposed)"
+    let aliasComment :=
+      if comment.isEmpty then layoutComment else s!"{layoutComment}; {comment}"
+    s!"{indent}auto &{v.toIdent} = *reinterpret_cast<{ty}*>(&{src.toIdent}); // {aliasComment}\n"
   | .declRV v dtype len =>
     s!"{indent}rv<{dtype.toCpp}, {len}{rvLayoutSuffix rvLayouts v}> {v.toIdent};\n"
   | .declSV v dtype len =>
     s!"{indent}__shared__ sv<{dtype.toCpp}, {len}> {v.toIdent};\n"
+  | .declSTRowVec v dtype rows cols =>
+    let ty := s!"row_vec<st<{dtype.toCpp}, {rows}, {cols}>>"
+    if useDynamicShared then
+      s!"{indent}auto &{v.toIdent} = al.allocate<{ty}>();\n"
+    else
+      s!"{indent}__shared__ KITTENS_ALIGN_AS(1024) {ty} {v.toIdent};\n"
+  | .declSTColVec v dtype rows cols =>
+    let ty := s!"col_vec<st<{dtype.toCpp}, {rows}, {cols}>>"
+    if useDynamicShared then
+      s!"{indent}auto &{v.toIdent} = al.allocate<{ty}>();\n"
+    else
+      s!"{indent}__shared__ KITTENS_ALIGN_AS(1024) {ty} {v.toIdent};\n"
+  | .declSTColVecArray v dtype rows cols len =>
+    let ty := s!"col_vec<st<{dtype.toCpp}, {rows}, {cols}>>"
+    if useDynamicShared then
+      s!"{indent}{ty} (&{v.toIdent})[{len}] = al.allocate<{ty}, {len}>();\n"
+    else
+      s!"{indent}__shared__ KITTENS_ALIGN_AS(1024) {ty} {v.toIdent}[{len}];\n"
   | .declTT v dtype rows cols =>
     s!"{indent}tt<{dtype.toCpp}, {rows}, {cols}> {v.toIdent};\n"
   | .declSemaphore v =>
     s!"{indent}__shared__ semaphore {v.toIdent};\n"
+  | .declSemaphoreArray v len =>
+    s!"{indent}__shared__ semaphore {v.toIdent}[{len}];\n"
 
   -- Kernel parameter declarations (these are part of the signature, not body)
   -- When they appear in the body, just emit a comment for debugging
@@ -351,12 +465,15 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout)
   | .storeAdd dst src => s!"{indent}store_add({dst.toIdent}, {src.toIdent});\n"
   | .storeAddAsync dst src => s!"{indent}warp::tma::store_add_async({dst.toIdent}, {src.toIdent});\n"
   | .storeMinAsync dst src => s!"{indent}warp::tma::store_min_async({dst.toIdent}, {src.toIdent});\n"
+  | .warpgroupStore dst src => s!"{indent}warpgroup::store({dst.toIdent}, {src.toIdent});\n"
+  | .warpgroupStoreIdx dst dstIdx src => s!"{indent}warpgroup::store({dst.toIdent}[{dstIdx.toIdent}], {src.toIdent});\n"
   | .tmaStoreCommitGroup => s!"{indent}warp::tma::store_commit_group();\n"
   | .tmaStoreAsyncWait => s!"{indent}warp::tma::store_async_wait();\n"
   | .prefetch src => s!"{indent}warp::tma::prefetch({src.toIdent});\n"
   | .tmaExpect barrier bytes => s!"{indent}warp::tma::expect_bytes({barrier.toIdent}, {bytes});\n"
   | .blockSync => s!"{indent}__syncthreads();\n"
   | .groupSync warps barrierId => s!"{indent}group<{warps}>::sync({barrierId});\n"
+  | .groupSyncVal _ barrierId => s!"{indent}warpgroup::sync({barrierId.toIdent});\n"
 
   -- TMA operations with global pointers
   | .tmaLoad dst src coord =>
@@ -366,34 +483,48 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout)
 
   -- Global memory operations with 4D coordinates (ThunderKittens style)
   | .loadGlobal dst src coordB coordD coordR coordC =>
-    let (rowScale, colScale) := match tileInfo[dst]? with
-      | some info => (info.rows, info.cols)
-      | none => (1, 1)
-    s!"{indent}warp::load({dst.toIdent}, {src.toIdent}, kittens::coord<>({coordB.toIdent}, {coordD.toIdent}, ({coordR.toIdent} * {rowScale}), ({coordC.toIdent} * {colScale})));\n"
+    let coord := renderGlobalCoord tileInfo dst coordB coordD coordR coordC
+    s!"{indent}warp::load({dst.toIdent}, {src.toIdent}, {coord});\n"
   | .storeGlobal dst src coordB coordD coordR coordC =>
-    let (rowScale, colScale) := match tileInfo[src]? with
-      | some info => (info.rows, info.cols)
-      | none => (1, 1)
-    s!"{indent}warp::store({dst.toIdent}, {src.toIdent}, kittens::coord<>({coordB.toIdent}, {coordD.toIdent}, ({coordR.toIdent} * {rowScale}), ({coordC.toIdent} * {colScale})));\n"
+    let coord := renderGlobalCoord tileInfo src coordB coordD coordR coordC
+    s!"{indent}warp::store({dst.toIdent}, {src.toIdent}, {coord});\n"
   | .loadGlobalAsync dst src coordB coordD coordR coordC sem =>
-    let (rowScale, colScale) := match tileInfo[dst]? with
-      | some info => (info.rows, info.cols)
-      | none => (1, 1)
-    s!"{indent}if (kittens::warpid() == 0) \{\n" ++
-    s!"{indent}  warp::tma::load_async({dst.toIdent}, {src.toIdent}, kittens::coord<>({coordB.toIdent}, {coordD.toIdent}, ({coordR.toIdent} * {rowScale}), ({coordC.toIdent} * {colScale})), {sem.toIdent});\n" ++
+    let coord := renderGlobalCoord tileInfo dst coordB coordD coordR coordC
+    s!"{indent}if (threadIdx.x == 0) \{\n" ++
+    s!"{indent}  tma::load_async({dst.toIdent}, {src.toIdent}, {coord}, {sem.toIdent});\n" ++
     s!"{indent}}\n"
+  | .loadGlobalAsyncWarp dst src coordB coordD coordR coordC sem =>
+    let coord := renderGlobalCoord tileInfo dst coordB coordD coordR coordC
+    s!"{indent}warp::tma::load_async({dst.toIdent}, {src.toIdent}, {coord}, {sem.toIdent});\n"
+  | .loadGlobalAsyncIdx dst dstIdx src coordB coordD coordR coordC sem =>
+    let coord := renderGlobalCoordIdx tileInfo dst dstIdx coordB coordD coordR coordC
+    s!"{indent}if (threadIdx.x == 0) \{\n" ++
+    s!"{indent}  tma::load_async({dst.toIdent}[{dstIdx.toIdent}], {src.toIdent}, {coord}, {sem.toIdent});\n" ++
+    s!"{indent}}\n"
+  | .loadGlobalAsyncIdxSemIdx dst dstIdx src coordB coordD coordR coordC sem semIdx =>
+    let coord := renderGlobalCoordIdx tileInfo dst dstIdx coordB coordD coordR coordC
+    s!"{indent}if (threadIdx.x == 0) \{\n" ++
+    s!"{indent}  tma::load_async({dst.toIdent}[{dstIdx.toIdent}], {src.toIdent}, {coord}, {sem.toIdent}[{semIdx.toIdent}]);\n" ++
+    s!"{indent}}\n"
+  | .loadGlobalAsyncWarpIdx dst dstIdx src coordB coordD coordR coordC sem semIdx =>
+    let coord := renderGlobalCoordIdx tileInfo dst dstIdx coordB coordD coordR coordC
+    s!"{indent}warp::tma::load_async({dst.toIdent}[{dstIdx.toIdent}], {src.toIdent}, {coord}, {sem.toIdent}[{semIdx.toIdent}]);\n"
   | .storeGlobalAsync dst src coordB coordD coordR coordC =>
-    let (rowScale, colScale) := match tileInfo[src]? with
-      | some info => (info.rows, info.cols)
-      | none => (1, 1)
-    s!"{indent}warp::tma::store_async({dst.toIdent}, {src.toIdent}, kittens::coord<>({coordB.toIdent}, {coordD.toIdent}, ({coordR.toIdent} * {rowScale}), ({coordC.toIdent} * {colScale})));\n"
+    let coord := renderGlobalCoord tileInfo src coordB coordD coordR coordC
+    s!"{indent}warp::tma::store_async({dst.toIdent}, {src.toIdent}, {coord});\n"
+  | .storeGlobalAsyncIdx dst src srcIdx coordB coordD coordR coordC =>
+    let coord := renderGlobalCoordIdx tileInfo src srcIdx coordB coordD coordR coordC
+    s!"{indent}warp::tma::store_async({dst.toIdent}, {src.toIdent}[{srcIdx.toIdent}], {coord});\n"
   | .storeGlobalAdd dst src coordB coordD coordR coordC =>
-    let (rowScale, colScale) := match tileInfo[src]? with
-      | some info => (info.rows, info.cols)
-      | none => (1, 1)
+    let coord := renderGlobalCoord tileInfo src coordB coordD coordR coordC
     s!"{indent}if (kittens::warpid() == 0) \{\n" ++
-    s!"{indent}  warp::tma::store_add_async({dst.toIdent}, {src.toIdent}, kittens::coord<>({coordB.toIdent}, {coordD.toIdent}, ({coordR.toIdent} * {rowScale}), ({coordC.toIdent} * {colScale})));\n" ++
+    s!"{indent}  warp::tma::store_add_async({dst.toIdent}, {src.toIdent}, {coord});\n" ++
     s!"{indent}}\n"
+  | .storeGlobalAddWarp dst src coordB coordD coordR coordC =>
+    let coord := renderGlobalCoord tileInfo src coordB coordD coordR coordC
+    s!"{indent}warp::tma::store_add_async({dst.toIdent}, {src.toIdent}, {coord});\n"
+  | .requireGlobalTma _ _ =>
+    ""
   | .layoutDim dst src .Batch =>
     s!"{indent}auto {dst.toIdent} = {src.toIdent}.batch();\n"
   | .layoutDim dst src .Depth =>
@@ -441,6 +572,12 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout)
     s!"{indent}warpgroup::mma_{trans.toSuffix}({dst.toIdent}, {a.toIdent}, {b.toIdent});\n"
   | .warpgroupMm trans dst a b =>
     s!"{indent}warpgroup::mm_{trans.toSuffix}({dst.toIdent}, {a.toIdent}, {b.toIdent});\n"
+  | .warpgroupMmaIdx trans dst a aIdx b bIdx =>
+    s!"{indent}warpgroup::mma_{trans.toSuffix}({dst.toIdent}, {a.toIdent}[{aIdx.toIdent}], {b.toIdent}[{bIdx.toIdent}]);\n"
+  | .warpgroupMmIdx trans dst a aIdx b bIdx =>
+    s!"{indent}warpgroup::mm_{trans.toSuffix}({dst.toIdent}, {a.toIdent}[{aIdx.toIdent}], {b.toIdent}[{bIdx.toIdent}]);\n"
+  | .warpgroupMmaRhsIdx trans dst a b bIdx =>
+    s!"{indent}warpgroup::mma_{trans.toSuffix}({dst.toIdent}, {a.toIdent}, {b.toIdent}[{bIdx.toIdent}]);\n"
   | .mmaFence dst => s!"{indent}warpgroup::mma_fence({dst.toIdent});\n"
   | .mmaCommitGroup => s!"{indent}warpgroup::mma_commit_group();\n"
   | .mmaAsyncWait n => s!"{indent}warpgroup::mma_async_wait<{n}>();\n"
@@ -659,6 +796,7 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout)
         s!"{indent}\{\n" ++
         s!"{indent}static_assert({dstInfo.rows} == {numRows}, \"slice rows: dst rows mismatch\");\n" ++
         s!"{indent}static_assert({srcInfo.cols} == {dstInfo.cols}, \"slice rows: src/dst cols mismatch\");\n" ++
+        s!"{indent}static_assert({startRow} + {numRows} <= {srcInfo.rows}, \"slice rows: out of bounds\");\n" ++
         s!"{indent}auto _tk_src_sub = {src.toIdent}.template subtile<{numRows}, {srcInfo.cols}>(make_int2({startRow}, 0));\n" ++
         s!"{indent}kittens::warp::copy({dst.toIdent}, _tk_src_sub);\n" ++
         s!"{indent}}\n"
@@ -666,13 +804,15 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout)
         s!"{indent}\{\n" ++
         s!"{indent}static_assert({dstInfo.rows} == {numRows}, \"slice rows: dst rows mismatch\");\n" ++
         s!"{indent}static_assert({srcInfo.cols} == {dstInfo.cols}, \"slice rows: src/dst cols mismatch\");\n" ++
+        s!"{indent}static_assert({startRow} + {numRows} <= {srcInfo.rows}, \"slice rows: out of bounds\");\n" ++
         s!"{indent}auto _tk_src_sub = {src.toIdent}.template subtile<{numRows}, {srcInfo.cols}>(make_int2({startRow}, 0));\n" ++
         s!"{indent}kittens::warp::copy({dst.toIdent}, _tk_src_sub);\n" ++
         s!"{indent}}\n"
       | .ST, .RT =>
         s!"{indent}\{\n" ++
-        s!"{indent}static_assert({dstInfo.rows} == {numRows}, \"slice rows: dst rows mismatch\");\n" ++
+        s!"{indent}static_assert({srcInfo.rows} == {numRows}, \"slice rows: src rows mismatch\");\n" ++
         s!"{indent}static_assert({srcInfo.cols} == {dstInfo.cols}, \"slice rows: src/dst cols mismatch\");\n" ++
+        s!"{indent}static_assert({startRow} + {numRows} <= {dstInfo.rows}, \"slice rows: out of bounds\");\n" ++
         s!"{indent}auto _tk_dst_sub = {dst.toIdent}.template subtile<{numRows}, {dstInfo.cols}>(make_int2({startRow}, 0));\n" ++
         s!"{indent}kittens::warp::copy(_tk_dst_sub, {src.toIdent});\n" ++
         s!"{indent}}\n"
@@ -840,8 +980,18 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout)
   -- Warp group operations (for FA3 warp specialization)
   | .warpGroupIdx dst =>
     s!"{indent}int {dst.toIdent} = kittens::warpgroup::groupid();\n"
+  | .warpGroupLaneId dst =>
+    s!"{indent}int {dst.toIdent} = kittens::warpgroup::laneid();\n"
+  | .warpId dst =>
+    s!"{indent}int {dst.toIdent} = kittens::warpid();\n"
+  | .laneId dst =>
+    s!"{indent}int {dst.toIdent} = kittens::laneid();\n"
   | .electOneSync dst =>
     s!"{indent}bool {dst.toIdent} = (kittens::laneid() == (__ffs(__activemask()) - 1));\n"
+  | .warpgroupDecreaseRegisters n =>
+    s!"{indent}warpgroup::decrease_registers<{n}>();\n"
+  | .warpgroupIncreaseRegisters n =>
+    s!"{indent}warpgroup::increase_registers<{n}>();\n"
 
   -- Fence operations (for WGMMA pipelining)
   | .fenceViewAsyncShared =>
@@ -858,35 +1008,75 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout)
       s!"{indent}}\n"
     | .Invalidate => s!"{indent}invalidate_semaphore({sem.toIdent});\n"
     | .Expect bytes =>
-      s!"{indent}if (kittens::warpid() == 0) \{\n" ++
-      s!"{indent}  warp::tma::expect_bytes({sem.toIdent}, {bytes});\n" ++
+      s!"{indent}if (threadIdx.x == 0) \{\n" ++
+      s!"{indent}  tma::expect_bytes({sem.toIdent}, {bytes});\n" ++
       s!"{indent}}\n"
     | .Wait phase => s!"{indent}wait({sem.toIdent}, {phase});\n"
     | .Arrive count => s!"{indent}arrive({sem.toIdent}, {count});\n"
     | .ArriveAndWait => s!"{indent}arrive_and_wait({sem.toIdent});\n"
+  | .semaphoreWarp op sem =>
+    match op with
+    | .Init threadCount transactionCount =>
+      s!"{indent}init_semaphore({sem.toIdent}, {threadCount}, {transactionCount});\n"
+    | .Invalidate => s!"{indent}invalidate_semaphore({sem.toIdent});\n"
+    | .Expect bytes =>
+      s!"{indent}warp::tma::expect_bytes({sem.toIdent}, {bytes});\n"
+    | .Wait phase => s!"{indent}wait({sem.toIdent}, {phase});\n"
+    | .Arrive count => s!"{indent}arrive({sem.toIdent}, {count});\n"
+    | .ArriveAndWait => s!"{indent}arrive_and_wait({sem.toIdent});\n"
+  | .semaphoreWaitVal sem phase =>
+    s!"{indent}wait({sem.toIdent}, {phase.toIdent});\n"
+  | .semaphoreArray op sem idx =>
+    match op with
+    | .Init threadCount transactionCount =>
+      s!"{indent}if (threadIdx.x == 0) \{\n" ++
+      s!"{indent}  init_semaphore({sem.toIdent}[{idx.toIdent}], {threadCount}, {transactionCount});\n" ++
+      s!"{indent}}\n"
+    | .Invalidate => s!"{indent}invalidate_semaphore({sem.toIdent}[{idx.toIdent}]);\n"
+    | .Expect bytes =>
+      s!"{indent}if (threadIdx.x == 0) \{\n" ++
+      s!"{indent}  tma::expect_bytes({sem.toIdent}[{idx.toIdent}], {bytes});\n" ++
+      s!"{indent}}\n"
+    | .Wait phase => s!"{indent}wait({sem.toIdent}[{idx.toIdent}], {phase});\n"
+    | .Arrive count => s!"{indent}arrive({sem.toIdent}[{idx.toIdent}], {count});\n"
+    | .ArriveAndWait => s!"{indent}arrive_and_wait({sem.toIdent}[{idx.toIdent}]);\n"
+  | .semaphoreArrayWarp op sem idx =>
+    match op with
+    | .Init threadCount transactionCount =>
+      s!"{indent}init_semaphore({sem.toIdent}[{idx.toIdent}], {threadCount}, {transactionCount});\n"
+    | .Invalidate => s!"{indent}invalidate_semaphore({sem.toIdent}[{idx.toIdent}]);\n"
+    | .Expect bytes =>
+      s!"{indent}warp::tma::expect_bytes({sem.toIdent}[{idx.toIdent}], {bytes});\n"
+    | .Wait phase => s!"{indent}wait({sem.toIdent}[{idx.toIdent}], {phase});\n"
+    | .Arrive count => s!"{indent}arrive({sem.toIdent}[{idx.toIdent}], {count});\n"
+    | .ArriveAndWait => s!"{indent}arrive_and_wait({sem.toIdent}[{idx.toIdent}]);\n"
+  | .semaphoreArrayWaitVal sem idx phase =>
+    s!"{indent}wait({sem.toIdent}[{idx.toIdent}], {phase.toIdent});\n"
+  | .semaphoreArrayArrive sem idx count =>
+    s!"{indent}arrive({sem.toIdent}[{idx.toIdent}], {count});\n"
 
   -- Control flow
   | .forLoop v lo hi body =>
-    let bodyStr := body.toList.map (generateStmt rvLayouts rvVars tileInfo (indent ++ "  ")) |>.foldl (· ++ ·) ""
+    let bodyStr := body.toList.map (generateStmt rvLayouts rvVars tileInfo useDynamicShared (indent ++ "  ")) |>.foldl (· ++ ·) ""
     s!"{indent}for (int {v.toIdent} = {lo}; {v.toIdent} < {hi}; {v.toIdent}++) \{\n{bodyStr}{indent}}\n"
   | .forLoopVal v lo hi body =>
-    let bodyStr := body.toList.map (generateStmt rvLayouts rvVars tileInfo (indent ++ "  ")) |>.foldl (· ++ ·) ""
+    let bodyStr := body.toList.map (generateStmt rvLayouts rvVars tileInfo useDynamicShared (indent ++ "  ")) |>.foldl (· ++ ·) ""
     s!"{indent}for (int {v.toIdent} = {lo}; {v.toIdent} < {hi.toIdent}; {v.toIdent}++) \{\n{bodyStr}{indent}}\n"
   | .forLoopRev v lo hi body =>
-    let bodyStr := body.toList.map (generateStmt rvLayouts rvVars tileInfo (indent ++ "  ")) |>.foldl (· ++ ·) ""
+    let bodyStr := body.toList.map (generateStmt rvLayouts rvVars tileInfo useDynamicShared (indent ++ "  ")) |>.foldl (· ++ ·) ""
     s!"{indent}for (int {v.toIdent} = {hi}; {v.toIdent}-- > {lo}; ) \{\n{bodyStr}{indent}}\n"
   | .forLoopValRev v lo hi body =>
-    let bodyStr := body.toList.map (generateStmt rvLayouts rvVars tileInfo (indent ++ "  ")) |>.foldl (· ++ ·) ""
+    let bodyStr := body.toList.map (generateStmt rvLayouts rvVars tileInfo useDynamicShared (indent ++ "  ")) |>.foldl (· ++ ·) ""
     s!"{indent}for (int {v.toIdent} = {hi.toIdent}; {v.toIdent}-- > {lo}; ) \{\n{bodyStr}{indent}}\n"
   | .ifStmt cond thenBody elseBody =>
-    let thenStr := thenBody.toList.map (generateStmt rvLayouts rvVars tileInfo (indent ++ "  ")) |>.foldl (· ++ ·) ""
-    let elseStr := elseBody.toList.map (generateStmt rvLayouts rvVars tileInfo (indent ++ "  ")) |>.foldl (· ++ ·) ""
+    let thenStr := thenBody.toList.map (generateStmt rvLayouts rvVars tileInfo useDynamicShared (indent ++ "  ")) |>.foldl (· ++ ·) ""
+    let elseStr := elseBody.toList.map (generateStmt rvLayouts rvVars tileInfo useDynamicShared (indent ++ "  ")) |>.foldl (· ++ ·) ""
     if elseBody.isEmpty then
       s!"{indent}if ({cond.toIdent}) \{\n{thenStr}{indent}}\n"
     else
       s!"{indent}if ({cond.toIdent}) \{\n{thenStr}{indent}} else \{\n{elseStr}{indent}}\n"
   | .ifWarpGroup wgIdx body =>
-    let bodyStr := body.toList.map (generateStmt rvLayouts rvVars tileInfo (indent ++ "  ")) |>.foldl (· ++ ·) ""
+    let bodyStr := body.toList.map (generateStmt rvLayouts rvVars tileInfo useDynamicShared (indent ++ "  ")) |>.foldl (· ++ ·) ""
     s!"{indent}if (kittens::warpgroup::groupid() == {wgIdx}) \{\n{bodyStr}{indent}}\n"
   | .comment text => s!"{indent}// {text}\n"
 
@@ -980,23 +1170,31 @@ private partial def stmtUses (p : KStmt → Bool) : KStmt → Bool
       -- Leaf cases: no nested `KStmt`s. Listed explicitly so that adding a new
       -- `KStmt` constructor causes a non-exhaustive match error rather than
       -- silently falling through to `false`.
-      | .declRT .. | .declST .. | .declRV .. | .declSV .. | .declSemaphore ..
+      | .declRT .. | .declST .. | .declSTArray .. | .declSTAlias .. | .declRV .. | .declSV ..
+      | .declSTRowVec .. | .declSTColVec .. | .declSTColVecArray ..
+      | .declSemaphore .. | .declSemaphoreArray ..
       | .declTT ..
       | .declGPtr .. | .declKVal ..
       | .load .. | .store .. | .loadAsync .. | .storeAsync ..
       | .storeAdd .. | .storeAddAsync .. | .storeMinAsync ..
+      | .warpgroupStore .. | .warpgroupStoreIdx ..
       | .tmaStoreCommitGroup | .tmaStoreAsyncWait
       | .prefetch .. | .tmaExpect ..
-      | .blockSync | .groupSync ..
+      | .blockSync | .groupSync .. | .groupSyncVal ..
       | .tmaLoad .. | .tmaStore ..
       | .loadGlobal .. | .storeGlobal ..
-      | .loadGlobalAsync .. | .storeGlobalAsync .. | .storeGlobalAdd ..
+      | .loadGlobalAsync .. | .loadGlobalAsyncWarp ..
+      | .loadGlobalAsyncIdx .. | .loadGlobalAsyncIdxSemIdx .. | .loadGlobalAsyncWarpIdx ..
+      | .storeGlobalAsync .. | .storeGlobalAsyncIdx ..
+      | .storeGlobalAdd .. | .storeGlobalAddWarp ..
+      | .requireGlobalTma ..
       | .layoutDim ..
       | .loadVecGlobal .. | .storeVecGlobal .. | .storeVecGlobalAdd ..
       | .loadVecGlobalCoord .. | .storeVecGlobalCoord .. | .storeVecGlobalAddCoord ..
       | .loadScalarGlobal .. | .storeScalarGlobal ..
       | .multimemLoadReduce .. | .multimemStore .. | .multimemRed ..
       | .mma .. | .mm .. | .warpgroupMma .. | .warpgroupMm ..
+      | .warpgroupMmaIdx .. | .warpgroupMmIdx .. | .warpgroupMmaRhsIdx ..
       | .mmaFence .. | .mmaCommitGroup | .mmaAsyncWait ..
       | .tcgen05Mm .. | .tcgen05Mma .. | .tcgen05MmaScaled .. | .tcgen05Commit ..
       | .tmemAllocate .. | .tmemProvision .. | .tmemDeprovision ..
@@ -1015,9 +1213,12 @@ private partial def stmtUses (p : KStmt → Bool) : KStmt → Bool
       | .sliceRows .. | .sliceCols .. | .concatCols ..
       | .sync .. | .arrive .. | .arriveAndWait ..
       | .namedBarrierSync .. | .namedBarrierArrive ..
-      | .warpGroupIdx .. | .electOneSync ..
+      | .warpGroupIdx .. | .warpGroupLaneId .. | .warpId .. | .laneId .. | .electOneSync ..
+      | .warpgroupDecreaseRegisters .. | .warpgroupIncreaseRegisters ..
       | .fenceViewAsyncShared | .fenceProxyAsync
-      | .semaphore ..
+      | .semaphore .. | .semaphoreWarp .. | .semaphoreWaitVal ..
+      | .semaphoreArray .. | .semaphoreArrayWarp ..
+      | .semaphoreArrayWaitVal .. | .semaphoreArrayArrive ..
       | .comment ..
       | .getBlockIdx .. | .getThreadIdx ..
       | .constInt .. | .constFloat ..
@@ -1093,8 +1294,14 @@ private def sliceHelpers : String :=
   "        dst.tiles[i][j] = src.tiles[start_tile + i][j];\n" ++
   "      }\n" ++
   "    }\n" ++
+  "  } else if constexpr (kittens::ducks::st::all<DST> && kittens::ducks::rt::all<SRC>) {\n" ++
+  "    static_assert(SRC::rows == NUM_ROWS, \"slice rows: src rows mismatch\");\n" ++
+  "    static_assert(START_ROW + NUM_ROWS <= DST::rows, \"slice rows: out of bounds\");\n" ++
+  "    auto dst_sub = dst.template subtile<NUM_ROWS, DST::cols>(int2{START_ROW, 0});\n" ++
+  "    kittens::warp::copy(dst_sub, src);\n" ++
   "  } else if constexpr (kittens::ducks::st::all<SRC>) {\n" ++
   "    static_assert(DST::rows == NUM_ROWS, \"slice rows: dst rows mismatch\");\n" ++
+  "    static_assert(START_ROW + NUM_ROWS <= SRC::rows, \"slice rows: out of bounds\");\n" ++
   "    auto src_sub = src.template subtile<NUM_ROWS, SRC::cols>(int2{START_ROW, 0});\n" ++
   "    kittens::warp::copy(dst, src_sub);\n" ++
   "  }\n" ++
@@ -1260,18 +1467,22 @@ private def generateKernelDefinition (k : Kernel) (emitSharedDecl : Bool := fals
   let tileInfo := inferTileInfo k
   let archGuard := s!"#if defined({k.arch.toGuard})\n"
   let paramStr := if k.params.isEmpty then "/* empty parameter list */" else generateParams k
-  let signature := s!"__global__ void {k.name}({paramStr}) \{\n"
-  let sharedDecl := if emitSharedDecl && k.sharedMemBytes > 0
-    then s!"  extern __shared__ char smem[{k.sharedMemBytes}];\n"
+  let launchBounds := match k.launchBounds with
+    | some (maxThreads, minBlocks) => s!" __launch_bounds__({maxThreads}, {minBlocks})"
+    | none => ""
+  let signature := s!"__global__{launchBounds} void {k.name}({paramStr}) \{\n"
+  let useDynamicShared := emitSharedDecl && k.sharedMemBytes > 0
+  let sharedDecl := if useDynamicShared
+    then "  extern __shared__ int __shm[];\n  tma_swizzle_allocator al(__shm);\n"
     else ""
-  let body := k.body.toList.map (generateStmt rvState.layouts rvVars tileInfo "  ") |>.foldl (· ++ ·) ""
+  let body := k.body.toList.map (generateStmt rvState.layouts rvVars tileInfo useDynamicShared "  ") |>.foldl (· ++ ·) ""
   let footer := "}\n#endif\n"
   layoutDiagnostics rvState.conflicts ++ archGuard ++ signature ++ sharedDecl ++ body ++ footer
 
 /-- Generate emission metadata for a single kernel definition. -/
 def generateKernelEmitInfo (k : Kernel) : KernelEmitInfo :=
   {
-    definition := generateKernelDefinition k false
+    definition := generateKernelDefinition k (k.sharedMemBytes > 0)
     needsStoreAdd := usesStoreAdd k
     needsLegacyTma := usesLegacyTma k
     needsSlice := usesSlice k
@@ -1283,17 +1494,17 @@ def generateKernelEmitInfo (k : Kernel) : KernelEmitInfo :=
     Assumes CUDA/ThunderKittens headers are already included by the caller. -/
 def generateKernelDefinitions (kernels : Array Kernel) : String :=
   generateHelpersForKernels kernels ++
-  (kernels.toList.map (fun k => generateKernelDefinition k false) |> String.intercalate "\n")
+  (kernels.toList.map (fun k => generateKernelDefinition k (k.sharedMemBytes > 0)) |> String.intercalate "\n")
 
 /-- Generate full kernel C++ code -/
 def generateKernel (k : Kernel) : String :=
-  let header := "#include <kittens.cuh>\nusing namespace kittens;\n\n"
+  let header := "#include <type_traits>\n#include <kittens.cuh>\nusing namespace kittens;\n\n"
   header ++ generateKernelDefinitions #[k]
 
 /-- Generate kernel with extern shared memory declaration -/
 def generateKernelWithShared (k : Kernel) : String :=
   let header :=
-    "#include <kittens.cuh>\nusing namespace kittens;\n\n" ++
+    "#include <type_traits>\n#include <kittens.cuh>\nusing namespace kittens;\n\n" ++
     generateHelpers k
   header ++ generateKernelDefinition k true
 

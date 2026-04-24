@@ -300,6 +300,71 @@ def loadGlobalAsync {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
     : KernelM Unit := do
   emit (.loadGlobalAsync dst.id src.id coord.b coord.d coord.r coord.c sem)
 
+/-- Async TMA load into one indexed element of a shared tile array, guarded to
+    warp 0 like `loadGlobalAsync`. -/
+def loadGlobalAsyncArray {dtype : GpuFloat} {rows cols len : Nat} {layout : TileLayout}
+    (dst : STArray dtype rows cols layout len)
+    (dstIdx : KVal UInt32)
+    (src : GPtr dtype)
+    (coord : RTileCoord)
+    (sem : VarId)
+    : KernelM Unit := do
+  emit (.loadGlobalAsyncIdx dst.id dstIdx.id src.id coord.b coord.d coord.r coord.c sem)
+
+/-- Async TMA load into one indexed element of a shared tile array, guarded to
+    warp 0, with the semaphore also selected from an array. -/
+def loadGlobalAsyncArraySemArray {dtype : GpuFloat} {rows cols len arrLen : Nat} {layout : TileLayout}
+    (dst : STArray dtype rows cols layout len)
+    (dstIdx : KVal UInt32)
+    (src : GPtr dtype)
+    (coord : RTileCoord)
+    (sem : SemaphoreArray arrLen)
+    (semIdx : KVal UInt32)
+    : KernelM Unit := do
+  emit (.loadGlobalAsyncIdxSemIdx dst.id dstIdx.id src.id coord.b coord.d coord.r coord.c sem.id semIdx.id)
+
+/-- Async load from global to shared (TMA) issued by the currently active warp.
+    Usage: `loadGlobalAsyncWarp dst src coord sem` -/
+def loadGlobalAsyncWarp {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
+    (dst : ST dtype rows cols layout)
+    (src : GPtr dtype)
+    (coord : RTileCoord)
+    (sem : VarId)
+    : KernelM Unit := do
+  emit (.loadGlobalAsyncWarp dst.id src.id coord.b coord.d coord.r coord.c sem)
+
+/-- Async TMA load into one indexed element of a shared tile array, issued by
+    the currently active warp. The semaphore is also indexed with `semIdx`. -/
+def loadGlobalAsyncArrayWarp {dtype : GpuFloat} {rows cols len arrLen : Nat} {layout : TileLayout}
+    (dst : STArray dtype rows cols layout len)
+    (dstIdx : KVal UInt32)
+    (src : GPtr dtype)
+    (coord : RTileCoord)
+    (sem : SemaphoreArray arrLen)
+    (semIdx : KVal UInt32)
+    : KernelM Unit := do
+  emit (.loadGlobalAsyncWarpIdx dst.id dstIdx.id src.id coord.b coord.d coord.r coord.c sem.id semIdx.id)
+
+/-- Async TMA load from global to shared `row_vec<st<...>>`, issued by the
+    active warp. `coord.c` is a vector-block coordinate. -/
+def loadRowVecGlobalAsyncWarp {dtype : GpuFloat} {rows cols : Nat}
+    (dst : STRowVec dtype rows cols)
+    (src : GPtr dtype)
+    (coord : RTileCoord)
+    (sem : VarId)
+    : KernelM Unit := do
+  emit (.loadGlobalAsyncWarp dst.id src.id coord.b coord.d coord.r coord.c sem)
+
+/-- Async TMA load from global to shared `col_vec<st<...>>`, issued by the
+    active warp. `coord.c` is a vector-block coordinate. -/
+def loadColVecGlobalAsyncWarp {dtype : GpuFloat} {rows cols : Nat}
+    (dst : STColVec dtype rows cols)
+    (src : GPtr dtype)
+    (coord : RTileCoord)
+    (sem : VarId)
+    : KernelM Unit := do
+  emit (.loadGlobalAsyncWarp dst.id src.id coord.b coord.d coord.r coord.c sem)
+
 /-- Async store from shared to global (TMA).
     Usage: `storeGlobalAsync dst src coord` -/
 def storeGlobalAsync {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
@@ -309,6 +374,40 @@ def storeGlobalAsync {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
     : KernelM Unit := do
   emit (.storeGlobalAsync dst.id src.id coord.b coord.d coord.r coord.c)
 
+/-- Async TMA store from one indexed shared tile-array element. -/
+def storeGlobalAsyncArray {dtype : GpuFloat} {rows cols len : Nat} {layout : TileLayout}
+    (dst : GPtr dtype)
+    (src : STArray dtype rows cols layout len)
+    (srcIdx : KVal UInt32)
+    (coord : RTileCoord)
+    : KernelM Unit := do
+  emit (.storeGlobalAsyncIdx dst.id src.id srcIdx.id coord.b coord.d coord.r coord.c)
+
+/-- Async TMA store from a shared `row_vec<st<...>>` to global memory. -/
+def storeRowVecGlobalAsync {dtype : GpuFloat} {rows cols : Nat}
+    (dst : GPtr dtype)
+    (src : STRowVec dtype rows cols)
+    (coord : RTileCoord)
+    : KernelM Unit := do
+  emit (.storeGlobalAsync dst.id src.id coord.b coord.d coord.r coord.c)
+
+/-- Async TMA store from a shared `col_vec<st<...>>` to global memory. -/
+def storeColVecGlobalAsync {dtype : GpuFloat} {rows cols : Nat}
+    (dst : GPtr dtype)
+    (src : STColVec dtype rows cols)
+    (coord : RTileCoord)
+    : KernelM Unit := do
+  emit (.storeGlobalAsync dst.id src.id coord.b coord.d coord.r coord.c)
+
+/-- Async TMA store from one indexed shared column-vector array element. -/
+def storeColVecGlobalAsyncArray {dtype : GpuFloat} {rows cols len : Nat}
+    (dst : GPtr dtype)
+    (src : STColVecArray dtype rows cols len)
+    (srcIdx : KVal UInt32)
+    (coord : RTileCoord)
+    : KernelM Unit := do
+  emit (.storeGlobalAsyncIdx dst.id src.id srcIdx.id coord.b coord.d coord.r coord.c)
+
 /-- Atomic add store from shared to global (for gradient accumulation).
     Usage: `storeGlobalAdd dst src coord` -/
 def storeGlobalAdd {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
@@ -317,6 +416,15 @@ def storeGlobalAdd {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
     (coord : RTileCoord)
     : KernelM Unit := do
   emit (.storeGlobalAdd dst.id src.id coord.b coord.d coord.r coord.c)
+
+/-- Atomic add store from shared to global issued by the currently active warp.
+    Usage: `storeGlobalAddWarp dst src coord` -/
+def storeGlobalAddWarp {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
+    (dst : GPtr dtype)
+    (src : ST dtype rows cols layout)
+    (coord : RTileCoord)
+    : KernelM Unit := do
+  emit (.storeGlobalAddWarp dst.id src.id coord.b coord.d coord.r coord.c)
 
 /-! ## Vector Global Memory Operations (RTileCoord helpers)
 

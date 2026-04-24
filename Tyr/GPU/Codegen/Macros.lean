@@ -146,6 +146,36 @@ def onlineSoftmax {dtype : GpuFloat} {rows cols outCols : Nat}
   -- 7. Update running sum
   rowSumAccum state.rowSum scores state.rowSum
 
+/-- Online softmax update using TK's base-2 exponent convention.
+
+The running max is kept in the original score units. `scores` is converted
+in-place to probabilities using `exp2(score * scoreScaleLog2e - max *
+scoreScaleLog2e)`, and `state.rowSum` accumulates the corresponding base-2
+normalizer. This mirrors the H100 ThunderKittens attention kernels and avoids
+the slower natural-exponential path in the generated CUDA. -/
+def onlineSoftmaxLog2 {dtype : GpuFloat} {rows cols outCols : Nat}
+    (scores : RT dtype rows cols .Row)
+    (output : RT dtype rows outCols .Row)
+    (state : SoftmaxState dtype rows)
+    (scoreScaleLog2e : Float)
+    : KernelM Unit := do
+  copyVec state.prevMax state.rowMax
+  rowMaxAccum state.rowMax scores state.rowMax
+
+  let maxScaled ← allocRV dtype rows
+  scalarMulVec state.scale state.prevMax scoreScaleLog2e
+  scalarMulVec maxScaled state.rowMax scoreScaleLog2e
+  subVec state.scale state.scale maxScaled
+  exp2Vec state.scale state.scale
+
+  mulCol output output state.scale
+  mulVec state.rowSum state.rowSum state.scale
+
+  scalarMul scores scores scoreScaleLog2e
+  subCol scores scores maxScaled
+  exp2 scores scores
+  rowSumAccum state.rowSum scores state.rowSum
+
 /-- Finalize softmax: divide output by row sum -/
 def finalizeSoftmax {accDtype : GpuFloat} {rows cols : Nat}
     (output : RT accDtype rows cols .Row)
@@ -160,6 +190,20 @@ def computeLSE {dtype : GpuFloat} {rows : Nat}
   let lse ← allocRV dtype rows
   logVec lse state.rowSum
   addVec lse lse state.rowMax
+  pure lse
+
+/-- Compute natural log-sum-exp for `onlineSoftmaxLog2`.
+
+`rowSum` is a base-2 exponential sum but `log(rowSum)` is still natural log;
+the running max must therefore be rescaled by the original attention scale. -/
+def computeLSEScaled {dtype : GpuFloat} {rows : Nat}
+    (state : SoftmaxState dtype rows) (scoreScale : Float)
+    : KernelM (RV dtype rows) := do
+  let lse ← allocRV dtype rows
+  let maxScaled ← allocRV dtype rows
+  logVec lse state.rowSum
+  scalarMulVec maxScaled state.rowMax scoreScale
+  addVec lse lse maxScaled
   pure lse
 
 /-! ## Pipeline Iteration Pattern

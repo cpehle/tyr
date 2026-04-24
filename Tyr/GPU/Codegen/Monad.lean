@@ -34,6 +34,8 @@ structure KernelState where
   arch : GpuArch := .SM90
   /-- Shared memory usage tracking -/
   sharedMemBytes : Nat := 0
+  /-- Optional CUDA launch bounds: `(maxThreadsPerBlock, minBlocksPerSM)`. -/
+  launchBounds : Option (Nat × Nat) := none
   deriving Inhabited, Repr
 
 /-- Kernel builder monad - just standard StateM! -/
@@ -58,6 +60,10 @@ def comment (text : String) : KernelM Unit := do
 def setArch (arch : GpuArch) : KernelM Unit := do
   modify fun s => { s with arch := arch }
 
+/-- Attach CUDA `__launch_bounds__` metadata to the generated kernel. -/
+def setLaunchBounds (maxThreadsPerBlock minBlocksPerSM : Nat) : KernelM Unit := do
+  modify fun s => { s with launchBounds := some (maxThreadsPerBlock, minBlocksPerSM) }
+
 /-- Build a Kernel from the accumulated state -/
 def buildKernel (name : String) (params : Array KParam := #[]) : KernelM Kernel := do
   let s ← get
@@ -67,6 +73,7 @@ def buildKernel (name : String) (params : Array KParam := #[]) : KernelM Kernel 
     params := params
     body := s.body
     sharedMemBytes := s.sharedMemBytes
+    launchBounds := s.launchBounds
   }
 
 /-- Run the kernel builder and extract the result -/
@@ -104,6 +111,7 @@ def buildKernelM (name : String) (arch : GpuArch := .SM90)
     params := params
     body := state.body
     sharedMemBytes := state.sharedMemBytes
+    launchBounds := state.launchBounds
   }
   -- Warn (do not fail) if the shared-memory budget is exceeded. Some tests
   -- deliberately over-subscribe shared memory expecting dynamic allocation.
@@ -112,12 +120,36 @@ def buildKernelM (name : String) (arch : GpuArch := .SM90)
   | .error msg => dbg_trace s!"[tyr] warning: {msg}"; k
 
 /-- Capture loop body: saves state, runs body, extracts statements, restores -/
-def captureBody (body : KernelM Unit) : KernelM (Array KStmt) := do
+def captureBlock (body : KernelM α) : KernelM (α × Array KStmt) := do
   let savedBody := (← get).body
   modify fun s => { s with body := #[] }
-  body
+  let value ← body
   let capturedBody := (← get).body
   modify fun s => { s with body := savedBody }
+  pure (value, capturedBody)
+
+/-- Capture a statement block, discarding the action result. -/
+def captureBody (body : KernelM Unit) : KernelM (Array KStmt) := do
+  let (_, capturedBody) ← captureBlock body
   pure capturedBody
+
+/-- Emit one structured statement whose body is produced by a scoped builder. -/
+def emitScoped (wrap : Array KStmt → KStmt) (body : KernelM Unit) : KernelM Unit := do
+  let capturedBody ← captureBody body
+  emit (wrap capturedBody)
+
+/-- Emit an `if` statement from scoped builder actions. -/
+def emitIf (cond : VarId) (thenAction : KernelM Unit) : KernelM Unit :=
+  emitScoped (fun thenBody => .ifStmt cond thenBody #[]) thenAction
+
+/-- Emit an `if/else` statement from scoped builder actions. -/
+def emitIfElse (cond : VarId) (thenAction elseAction : KernelM Unit) : KernelM Unit := do
+  let thenBody ← captureBody thenAction
+  let elseBody ← captureBody elseAction
+  emit (.ifStmt cond thenBody elseBody)
+
+/-- Emit a warpgroup-specialized scoped block. -/
+def emitWarpGroup (wgIdx : Nat) (action : KernelM Unit) : KernelM Unit :=
+  emitScoped (fun body => .ifWarpGroup wgIdx body) action
 
 end Tyr.GPU.Codegen
