@@ -55,6 +55,51 @@ def allocST (dtype : GpuFloat) (rows cols : Nat) (layout : TileLayout := .Row)
   modify fun s => { s with sharedMemBytes := s.sharedMemBytes + bytes }
   pure ⟨v⟩
 
+/-- Allocate a ThunderKittens shared tile array in dynamic shared memory. -/
+def allocSTArray (dtype : GpuFloat) (rows cols : Nat) (layout : TileLayout := .Row)
+    (len : Nat) : KernelM (STArray dtype rows cols layout len) := do
+  let v ← freshVar
+  emit (.declSTArray v dtype rows cols layout len)
+  modify fun s => { s with sharedMemBytes := s.sharedMemBytes + len * rows * cols * dtype.bytes }
+  pure ⟨v⟩
+
+/-- Create a typed shared tile view over an existing shared-memory allocation.
+
+This models the ThunderKittens pattern of reusing a staging buffer for a later
+output tile after all users of the original tile have crossed a barrier. The
+alias is intentionally not counted as an additional shared-memory allocation. -/
+def aliasST {srcDtype : GpuFloat} {srcRows srcCols : Nat} {srcLayout : TileLayout}
+    (src : ST srcDtype srcRows srcCols srcLayout)
+    (dtype : GpuFloat) (rows cols : Nat) (layout : TileLayout := .Row)
+    (comment : String := "shared memory alias")
+    : KernelM (ST dtype rows cols layout) := do
+  let v ← freshVar
+  emit (.declSTAlias v dtype rows cols layout src.id comment)
+  pure ⟨v⟩
+
+/-! ## Global TMA Descriptor Requirements
+
+These helpers attach concrete ThunderKittens tile descriptors to generated
+`gl<...>` parameter types without forcing a dummy load/store into the kernel
+body. They are useful for kernels that lower a small region through raw TK C++
+or through helper templates while still relying on generated launch wrappers. -/
+
+def requireGlobalDescriptor {dtype : GpuFloat}
+    (ptr : GPtr dtype) (descriptor : GlobalTileDescriptor) : KernelM Unit := do
+  emit (KStmt.requireGlobalTma ptr.id descriptor)
+
+def requireGlobalST {dtype : GpuFloat}
+    (ptr : GPtr dtype) (rows cols : Nat) : KernelM Unit :=
+  requireGlobalDescriptor ptr (GlobalTileDescriptor.st dtype rows cols)
+
+def requireGlobalRowVecST {dtype : GpuFloat}
+    (ptr : GPtr dtype) (rows cols : Nat) : KernelM Unit :=
+  requireGlobalDescriptor ptr (GlobalTileDescriptor.rowVecSt dtype rows cols)
+
+def requireGlobalColVecST {dtype : GpuFloat}
+    (ptr : GPtr dtype) (rows cols : Nat) : KernelM Unit :=
+  requireGlobalDescriptor ptr (GlobalTileDescriptor.colVecSt dtype rows cols)
+
 /-- Allocate a register vector -/
 def allocRV (dtype : GpuFloat) (len : Nat) : KernelM (RV dtype len) := do
   let v ← freshVar
@@ -65,8 +110,39 @@ def allocRV (dtype : GpuFloat) (len : Nat) : KernelM (RV dtype len) := do
 def allocSV (dtype : GpuFloat) (len : Nat) : KernelM (SV dtype len) := do
   let v ← freshVar
   emit (.declSV v dtype len)
-  let bytes := len * dtype.bytes
-  modify fun s => { s with sharedMemBytes := s.sharedMemBytes + bytes }
+  pure ⟨v⟩
+
+/-- Bytes reserved by ThunderKittens for an `sv`, rounded to a 128-byte TMA
+    allocation unit on Hopper/Blackwell. -/
+private def sharedVecBytes (elements elemBytes : Nat) : Nat :=
+  ((elements * elemBytes + 127) / 128) * 128
+
+/-- Allocate a ThunderKittens shared `row_vec<st<T, rows, cols>>`.
+    The runtime storage is an `sv<T, cols>`, while the tile descriptor is kept
+    in the type so TMA vector IO can infer the matching global descriptor. -/
+def allocSTRowVec (dtype : GpuFloat) (rows cols : Nat)
+    : KernelM (STRowVec dtype rows cols) := do
+  let v ← freshVar
+  emit (.declSTRowVec v dtype rows cols)
+  modify fun s => { s with sharedMemBytes := s.sharedMemBytes + sharedVecBytes cols dtype.bytes }
+  pure ⟨v⟩
+
+/-- Allocate a ThunderKittens shared `col_vec<st<T, rows, cols>>`.
+    The runtime storage is an `sv<T, rows>`, while the tile descriptor is kept
+    in the type so TMA vector IO can infer the matching global descriptor. -/
+def allocSTColVec (dtype : GpuFloat) (rows cols : Nat)
+    : KernelM (STColVec dtype rows cols) := do
+  let v ← freshVar
+  emit (.declSTColVec v dtype rows cols)
+  modify fun s => { s with sharedMemBytes := s.sharedMemBytes + sharedVecBytes rows dtype.bytes }
+  pure ⟨v⟩
+
+/-- Allocate an array of ThunderKittens shared `col_vec<st<T, rows, cols>>`. -/
+def allocSTColVecArray (dtype : GpuFloat) (rows cols len : Nat)
+    : KernelM (STColVecArray dtype rows cols len) := do
+  let v ← freshVar
+  emit (.declSTColVecArray v dtype rows cols len)
+  modify fun s => { s with sharedMemBytes := s.sharedMemBytes + len * sharedVecBytes rows dtype.bytes }
   pure ⟨v⟩
 
 /-- Allocate a tensor memory tile (Blackwell TMEM).
@@ -161,6 +237,30 @@ def loadVec {dtype : GpuFloat} {len : Nat}
 def storeVec {dtype : GpuFloat} {len : Nat}
     (dst : SV dtype len)
     (src : RV dtype len) : KernelM Unit := do
+  emit (.store dst.id src.id)
+
+/-- Load a `row_vec<st<T, rows, cols>>` from shared memory into a register vector. -/
+def loadRowVec {dtype : GpuFloat} {rows cols : Nat}
+    (dst : RV dtype cols)
+    (src : STRowVec dtype rows cols) : KernelM Unit := do
+  emit (.load dst.id src.id)
+
+/-- Store a register vector into a shared `row_vec<st<T, rows, cols>>`. -/
+def storeRowVec {dtype : GpuFloat} {rows cols : Nat}
+    (dst : STRowVec dtype rows cols)
+    (src : RV dtype cols) : KernelM Unit := do
+  emit (.store dst.id src.id)
+
+/-- Load a `col_vec<st<T, rows, cols>>` from shared memory into a register vector. -/
+def loadColVec {dtype : GpuFloat} {rows cols : Nat}
+    (dst : RV dtype rows)
+    (src : STColVec dtype rows cols) : KernelM Unit := do
+  emit (.load dst.id src.id)
+
+/-- Store a register vector into a shared `col_vec<st<T, rows, cols>>`. -/
+def storeColVec {dtype : GpuFloat} {rows cols : Nat}
+    (dst : STColVec dtype rows cols)
+    (src : RV dtype rows) : KernelM Unit := do
   emit (.store dst.id src.id)
 
 /-! ## Scalar / Vector Runtime Helpers -/
@@ -327,6 +427,11 @@ def scalarAddVec {dtype : GpuFloat} {len : Nat}
 def expVec {dtype : GpuFloat} {len : Nat}
     (dst src : RV dtype len) : KernelM Unit := do
   emit (.unary .Exp dst.id src.id)
+
+/-- Vector base-2 exponent. -/
+def exp2Vec {dtype : GpuFloat} {len : Nat}
+    (dst src : RV dtype len) : KernelM Unit := do
+  emit (.unary .Exp2 dst.id src.id)
 
 /-- Vector log -/
 def logVec {dtype : GpuFloat} {len : Nat}
@@ -542,6 +647,63 @@ def warpgroupMmSharedT64x16 {K N : Nat} {inDtype accDtype : GpuFloat}
     : KernelM Unit := do
   let _ := hK; let _ := hN
   emit (.warpgroupMm .ABt dst.id a.id b.id)
+
+/-- Hopper WGMMA overwrite: `dst = a[idxA] @ b[idxB]^T`, both operands sourced
+    from shared tile arrays. This models TK forward's `q_smem[warpgroupid]`
+    and `k_smem[kv_idx % stages]` without cloning four stage branches. -/
+def warpgroupMmSharedArrayT64x16 {K N lenA lenB : Nat} {inDtype accDtype : GpuFloat}
+    {layoutA layoutB : TileLayout}
+    (dst : RT accDtype 16 N .Row)
+    (a : STArray inDtype 64 K layoutA lenA)
+    (aIdx : KVal UInt32)
+    (b : STArray inDtype N K layoutB lenB)
+    (bIdx : KVal UInt32)
+    (hK : K % 16 = 0 := by decide)
+    (hN : N % 16 = 0 := by decide)
+    : KernelM Unit := do
+  let _ := hK; let _ := hN
+  emit (.warpgroupMmIdx .ABt dst.id a.id aIdx.id b.id bIdx.id)
+
+/-- Hopper WGMMA accumulate: `dst += a @ b[idxB]`, with B sourced from a
+    shared tile array. This models TK forward's `v_smem[kv_idx % stages]`. -/
+def warpgroupMmaRhsArray {M K N lenB : Nat} {inDtype accDtype : GpuFloat}
+    {layoutB : TileLayout}
+    (dst : RT accDtype M N .Row)
+    (a : RT inDtype M K .Row)
+    (b : STArray inDtype K N layoutB lenB)
+    (bIdx : KVal UInt32)
+    (hM : M % 16 = 0 := by decide)
+    (hK : K % 16 = 0 := by decide)
+    (hN : N % 16 = 0 := by decide)
+    : KernelM Unit := do
+  let _ := hM; let _ := hK; let _ := hN
+  emit (.warpgroupMmaRhsIdx .AB dst.id a.id b.id bIdx.id)
+
+/-- Hopper WGMMA accumulate: `dst += a^T @ b`, with both inputs in shared memory.
+    This matches TK backward dQ accumulation: `warpgroup::mma_AtB(qg_reg, ds_smem, k_smem)`. -/
+def warpgroupMmaSharedAtB64x16 {K N : Nat} {inDtype accDtype : GpuFloat}
+    {layoutA layoutB : TileLayout}
+    (dst : RT accDtype 16 N .Row)
+    (a : ST inDtype K 64 layoutA)
+    (b : ST inDtype K N layoutB)
+    (hK : K % 16 = 0 := by decide)
+    (hN : N % 16 = 0 := by decide)
+    : KernelM Unit := do
+  let _ := hK; let _ := hN
+  emit (.warpgroupMma .AtB dst.id a.id b.id)
+
+/-- Hopper WGMMA overwrite: `dst = a^T @ b`, with both inputs in shared memory.
+    This matches TK backward dQ accumulation: `warpgroup::mm_AtB(qg_reg, ds_smem, k_smem)`. -/
+def warpgroupMmSharedAtB64x16 {K N : Nat} {inDtype accDtype : GpuFloat}
+    {layoutA layoutB : TileLayout}
+    (dst : RT accDtype 16 N .Row)
+    (a : ST inDtype K 64 layoutA)
+    (b : ST inDtype K N layoutB)
+    (hK : K % 16 = 0 := by decide)
+    (hN : N % 16 = 0 := by decide)
+    : KernelM Unit := do
+  let _ := hK; let _ := hN
+  emit (.warpgroupMm .AtB dst.id a.id b.id)
 
 /-! ## Ternary Operations (FMA) -/
 
@@ -967,6 +1129,49 @@ def sliceRows {dtype : GpuFloat} {dstRows srcRows cols : Nat} {layout : TileLayo
     (numRows : Nat := dstRows) : KernelM Unit := do
   emit (.sliceRows dst.id src.id startRow numRows)
 
+/-- Copy a register subtile into a row slice of a shared tile.
+    The emitter lowers this to a `subtile<...>` view on `dst` followed by
+    `warp::copy`, which is enough to model TK's per-warp `warpgroup::store`
+    into a 64-row shared tile. -/
+def storeRowsShared {dtype : GpuFloat} {dstRows srcRows cols : Nat} {layout : TileLayout}
+    (dst : ST dtype dstRows cols layout)
+    (src : RT dtype srcRows cols layout)
+    (startRow : Nat)
+    (numRows : Nat := srcRows) : KernelM Unit := do
+  emit (.sliceRows dst.id src.id startRow numRows)
+
+/-- ThunderKittens warpgroup store from a warpgroup register fragment into
+    shared memory. The source and destination dtypes may differ because TK
+    handles the FP32->BF16 conversion used by MHA output stores. -/
+def warpgroupStore {dstDtype srcDtype : GpuFloat} {dstRows srcRows cols : Nat}
+    {dstLayout srcLayout : TileLayout}
+    (dst : ST dstDtype dstRows cols dstLayout)
+    (src : RT srcDtype srcRows cols srcLayout) : KernelM Unit := do
+  emit (.warpgroupStore dst.id src.id)
+
+/-- ThunderKittens warpgroup store from a per-warp register column vector into a
+    shared column-vector tile. This models the `l_smem <- norm_vec` store in
+    the H100 forward kernel. -/
+def warpgroupStoreColVec {dtype : GpuFloat} {dstRows srcRows cols : Nat}
+    (dst : STColVec dtype dstRows cols)
+    (src : RV dtype srcRows) : KernelM Unit := do
+  emit (.warpgroupStore dst.id src.id)
+
+/-- Warpgroup store into an indexed shared-tile array element. -/
+def warpgroupStoreArray {dstDtype srcDtype : GpuFloat} {dstRows srcRows cols len : Nat}
+    {dstLayout srcLayout : TileLayout}
+    (dst : STArray dstDtype dstRows cols dstLayout len)
+    (dstIdx : KVal UInt32)
+    (src : RT srcDtype srcRows cols srcLayout) : KernelM Unit := do
+  emit (.warpgroupStoreIdx dst.id dstIdx.id src.id)
+
+/-- Warpgroup store into an indexed shared column-vector array element. -/
+def warpgroupStoreColVecArray {dtype : GpuFloat} {dstRows srcRows cols len : Nat}
+    (dst : STColVecArray dtype dstRows cols len)
+    (dstIdx : KVal UInt32)
+    (src : RV dtype srcRows) : KernelM Unit := do
+  emit (.warpgroupStoreIdx dst.id dstIdx.id src.id)
+
 /-- Slice columns from a tile. -/
 def sliceCols {dtype : GpuFloat} {rows dstCols srcCols : Nat} {layout : TileLayout}
     (dst : RT dtype rows dstCols layout)
@@ -1024,6 +1229,10 @@ def blockSync : KernelM Unit := do
 def groupSync (warps barrierId : Nat) : KernelM Unit := do
   emit (.groupSync warps barrierId)
 
+/-- ThunderKittens group synchronization with a runtime barrier id. -/
+def groupSyncVal (warps : Nat) (barrierId : KVal UInt32) : KernelM Unit := do
+  emit (.groupSyncVal warps barrierId.id)
+
 /-- TMA load from global pointer to shared tile -/
 def tmaLoad {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
     (dst : ST dtype rows cols layout)
@@ -1075,11 +1284,59 @@ def loadGlobalAsyncCoord {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayo
     : KernelM Unit := do
   emit (.loadGlobalAsync dst.id src.id coordB coordD coordR coordC sem.id)
 
+/-- Async load from global to shared with semaphore (TMA), issued by the
+    currently active warp rather than being implicitly restricted to warp 0. -/
+def loadGlobalAsyncWarpCoord {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
+    (dst : ST dtype rows cols layout)
+    (src : GPtr dtype)
+    (coordB coordD coordR coordC : VarId)
+    (sem : Semaphore)
+    : KernelM Unit := do
+  emit (.loadGlobalAsyncWarp dst.id src.id coordB coordD coordR coordC sem.id)
+
+/-- Async TMA load from global to a shared row-vector tile descriptor, issued by
+    the currently active warp. Coordinates are vector-block coordinates, not
+    element coordinates; the generated CUDA emits `coord<decltype(dst)>` so TK
+    applies the vector length scaling. -/
+def loadRowVecGlobalAsyncWarpCoord {dtype : GpuFloat} {rows cols : Nat}
+    (dst : STRowVec dtype rows cols)
+    (src : GPtr dtype)
+    (coordB coordD coordR coordC : VarId)
+    (sem : Semaphore)
+    : KernelM Unit := do
+  emit (.loadGlobalAsyncWarp dst.id src.id coordB coordD coordR coordC sem.id)
+
+/-- Async TMA load from global to a shared column-vector tile descriptor, issued
+    by the currently active warp. -/
+def loadColVecGlobalAsyncWarpCoord {dtype : GpuFloat} {rows cols : Nat}
+    (dst : STColVec dtype rows cols)
+    (src : GPtr dtype)
+    (coordB coordD coordR coordC : VarId)
+    (sem : Semaphore)
+    : KernelM Unit := do
+  emit (.loadGlobalAsyncWarp dst.id src.id coordB coordD coordR coordC sem.id)
+
 /-- Async store from shared to global (TMA).
     Emits: kittens::tma::store_async(dst, src, coord) -/
 def storeGlobalAsyncCoord {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
     (dst : GPtr dtype)
     (src : ST dtype rows cols layout)
+    (coordB coordD coordR coordC : VarId)
+    : KernelM Unit := do
+  emit (.storeGlobalAsync dst.id src.id coordB coordD coordR coordC)
+
+/-- Async TMA store from a shared row-vector tile descriptor to global memory. -/
+def storeRowVecGlobalAsyncCoord {dtype : GpuFloat} {rows cols : Nat}
+    (dst : GPtr dtype)
+    (src : STRowVec dtype rows cols)
+    (coordB coordD coordR coordC : VarId)
+    : KernelM Unit := do
+  emit (.storeGlobalAsync dst.id src.id coordB coordD coordR coordC)
+
+/-- Async TMA store from a shared column-vector tile descriptor to global memory. -/
+def storeColVecGlobalAsyncCoord {dtype : GpuFloat} {rows cols : Nat}
+    (dst : GPtr dtype)
+    (src : STColVec dtype rows cols)
     (coordB coordD coordR coordC : VarId)
     : KernelM Unit := do
   emit (.storeGlobalAsync dst.id src.id coordB coordD coordR coordC)
@@ -1092,6 +1349,15 @@ def storeGlobalAddCoord {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayou
     (coordB coordD coordR coordC : VarId)
     : KernelM Unit := do
   emit (.storeGlobalAdd dst.id src.id coordB coordD coordR coordC)
+
+/-- Atomic add store from shared to global (for gradient accumulation), issued
+    by the currently active warp rather than being implicitly restricted to warp 0. -/
+def storeGlobalAddWarpCoord {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
+    (dst : GPtr dtype)
+    (src : ST dtype rows cols layout)
+    (coordB coordD coordR coordC : VarId)
+    : KernelM Unit := do
+  emit (.storeGlobalAddWarp dst.id src.id coordB coordD coordR coordC)
 
 /-- Query a dynamic dimension from a global-layout kernel parameter. -/
 def layoutDim {dtype : GpuFloat}
@@ -1207,6 +1473,17 @@ def initSemaphore (sem : Semaphore) (threadCount : Nat := 1) (transactionCount :
     : KernelM Unit := do
   emit (.semaphore (.Init threadCount transactionCount) sem.id)
 
+/-- Allocate a shared semaphore array. -/
+def allocSemaphoreArray (len : Nat) : KernelM (SemaphoreArray len) := do
+  let v ← freshVar
+  emit (.declSemaphoreArray v len)
+  pure ⟨v⟩
+
+/-- Initialize one semaphore array element. -/
+def initSemaphoreArray {len : Nat} (sem : SemaphoreArray len) (idx : KVal UInt32)
+    (threadCount : Nat := 1) (transactionCount : Nat := 0) : KernelM Unit := do
+  emit (.semaphoreArray (.Init threadCount transactionCount) sem.id idx.id)
+
 /-- Invalidate semaphore -/
 def invalidateSemaphore (sem : Semaphore) : KernelM Unit := do
   emit (.semaphore .Invalidate sem.id)
@@ -1215,9 +1492,33 @@ def invalidateSemaphore (sem : Semaphore) : KernelM Unit := do
 def expectBytes (sem : Semaphore) (bytes : Nat) : KernelM Unit := do
   emit (.semaphore (.Expect bytes) sem.id)
 
+/-- Expect bytes on one semaphore-array element from warp 0. -/
+def expectBytesArray {len : Nat} (sem : SemaphoreArray len) (idx : KVal UInt32)
+    (bytes : Nat) : KernelM Unit := do
+  emit (.semaphoreArray (.Expect bytes) sem.id idx.id)
+
+/-- Expect bytes on a semaphore from the currently active warp. -/
+def expectBytesWarp (sem : Semaphore) (bytes : Nat) : KernelM Unit := do
+  emit (.semaphoreWarp (.Expect bytes) sem.id)
+
+/-- Expect bytes on one semaphore-array element from the currently active warp. -/
+def expectBytesArrayWarp {len : Nat} (sem : SemaphoreArray len) (idx : KVal UInt32)
+    (bytes : Nat) : KernelM Unit := do
+  emit (.semaphoreArrayWarp (.Expect bytes) sem.id idx.id)
+
 /-- Wait on semaphore phase bit. -/
 def waitSemaphorePhase (sem : Semaphore) (phase : Nat) : KernelM Unit := do
   emit (.semaphore (.Wait phase) sem.id)
+
+/-- Wait on a semaphore using a runtime phase value.
+    This matches TK's `wait(sem, phaseVar)` form used in pipelined loops. -/
+def waitSemaphorePhaseVal (sem : Semaphore) (phase : KVal UInt32) : KernelM Unit := do
+  emit (.semaphoreWaitVal sem.id phase.id)
+
+/-- Wait on one semaphore-array element using a runtime phase value. -/
+def waitSemaphoreArrayPhaseVal {len : Nat} (sem : SemaphoreArray len)
+    (idx phase : KVal UInt32) : KernelM Unit := do
+  emit (.semaphoreArrayWaitVal sem.id idx.id phase.id)
 
 /-- Wait on semaphore phase 0. -/
 def waitSemaphore (sem : Semaphore) : KernelM Unit := do
@@ -1226,6 +1527,15 @@ def waitSemaphore (sem : Semaphore) : KernelM Unit := do
 /-- Arrive at semaphore with transaction count -/
 def arriveSemaphore (sem : Semaphore) (count : Nat := 1) : KernelM Unit := do
   emit (.semaphore (.Arrive count) sem.id)
+
+/-- Arrive at a semaphore from the currently active warp. -/
+def arriveSemaphoreWarp (sem : Semaphore) (count : Nat := 1) : KernelM Unit := do
+  emit (.semaphoreWarp (.Arrive count) sem.id)
+
+/-- Arrive at one semaphore-array element from the currently active warp. -/
+def arriveSemaphoreArrayWarp {len : Nat} (sem : SemaphoreArray len)
+    (idx : KVal UInt32) (count : Nat := 1) : KernelM Unit := do
+  emit (.semaphoreArrayArrive sem.id idx.id count)
 
 /-- Arrive and wait at semaphore -/
 def arriveAndWait (barrier : Nat := 0) : KernelM Unit := do
@@ -1238,6 +1548,81 @@ def waitBarrier (barrier : Nat) : KernelM Unit := do
 /-- Signal a barrier (for FA3 specialization) -/
 def signalBarrier (barrier : Nat) : KernelM Unit := do
   emit (.arrive barrier)
+
+/-- Reduce the register allocation for the current warpgroup, matching TK's
+    explicit producer/loader warpgroup budgeting on Hopper. -/
+def warpgroupDecreaseRegisters (n : Nat) : KernelM Unit := do
+  emit (.warpgroupDecreaseRegisters n)
+
+/-- Increase the register allocation for the current warpgroup, matching TK's
+    explicit consumer warpgroup budgeting on Hopper. -/
+def warpgroupIncreaseRegisters (n : Nat) : KernelM Unit := do
+  emit (.warpgroupIncreaseRegisters n)
+
+/-- ThunderKittens-style lane streaming of a 64-element shared vector into one
+    16x64 register subtile. This matches `stream_tile` from the vendored H100
+    attention kernel. -/
+def streamTile16x64 (dst : RT GpuFloat.Float32 16 64 .Row) (src : SV GpuFloat.Float32 64)
+    : KernelM Unit := do
+  let code :=
+    "#pragma unroll\n" ++
+    "for(int i = 0; i < 4; i++) {\n" ++
+    "  int base_col = 16*i + 2*(kittens::laneid()%4);\n" ++
+    s!"  {dst.id.toIdent}.tiles[0][i].data[0] = *(float2*)&{src.id.toIdent}[base_col + 0];\n" ++
+    s!"  {dst.id.toIdent}.tiles[0][i].data[1] = *(float2*)&{src.id.toIdent}[base_col + 0];\n" ++
+    s!"  {dst.id.toIdent}.tiles[0][i].data[2] = *(float2*)&{src.id.toIdent}[base_col + 8];\n" ++
+    s!"  {dst.id.toIdent}.tiles[0][i].data[3] = *(float2*)&{src.id.toIdent}[base_col + 8];\n" ++
+    "}"
+  emit (.raw code)
+
+/-- ThunderKittens-style lane streaming from a shared row-vector tile into one
+    16x64 register subtile. This matches the H100 MHA backward helper's
+    `stream_tile(reg, row_vec_stage, tic)` after double-buffer indexing has
+    already selected the stage. -/
+def streamRowVecTile16x64 (dst : RT GpuFloat.Float32 16 64 .Row)
+    (src : STRowVec GpuFloat.Float32 64 64) : KernelM Unit := do
+  let code :=
+    "#pragma unroll\n" ++
+    "for(int i = 0; i < 4; i++) {\n" ++
+    "  int base_col = 16*i + 2*(kittens::laneid()%4);\n" ++
+    s!"  {dst.id.toIdent}.tiles[0][i].data[0] = *(float2*)&{src.id.toIdent}[base_col + 0];\n" ++
+    s!"  {dst.id.toIdent}.tiles[0][i].data[1] = *(float2*)&{src.id.toIdent}[base_col + 0];\n" ++
+    s!"  {dst.id.toIdent}.tiles[0][i].data[2] = *(float2*)&{src.id.toIdent}[base_col + 8];\n" ++
+    s!"  {dst.id.toIdent}.tiles[0][i].data[3] = *(float2*)&{src.id.toIdent}[base_col + 8];\n" ++
+    "}"
+  emit (.raw code)
+
+/-- ThunderKittens-style subtraction of a streamed 64-element shared vector from
+    one 16x64 register subtile. This matches `stream_sub_tile` from the
+    vendored H100 attention kernel. -/
+def streamSubTile16x64 (dst : RT GpuFloat.Float32 16 64 .Row) (src : SV GpuFloat.Float32 64)
+    : KernelM Unit := do
+  let code :=
+    "#pragma unroll\n" ++
+    "for(int i = 0; i < 4; i++) {\n" ++
+    "  int base_col = 16*i + 2*(kittens::laneid()%4);\n" ++
+    s!"  {dst.id.toIdent}.tiles[0][i].data[0] = base_ops::sub::template op<float2>({dst.id.toIdent}.tiles[0][i].data[0], *(float2*)&{src.id.toIdent}[base_col + 0]);\n" ++
+    s!"  {dst.id.toIdent}.tiles[0][i].data[1] = base_ops::sub::template op<float2>({dst.id.toIdent}.tiles[0][i].data[1], *(float2*)&{src.id.toIdent}[base_col + 0]);\n" ++
+    s!"  {dst.id.toIdent}.tiles[0][i].data[2] = base_ops::sub::template op<float2>({dst.id.toIdent}.tiles[0][i].data[2], *(float2*)&{src.id.toIdent}[base_col + 8]);\n" ++
+    s!"  {dst.id.toIdent}.tiles[0][i].data[3] = base_ops::sub::template op<float2>({dst.id.toIdent}.tiles[0][i].data[3], *(float2*)&{src.id.toIdent}[base_col + 8]);\n" ++
+    "}"
+  emit (.raw code)
+
+/-- ThunderKittens-style subtraction of a shared row-vector tile from one 16x64
+    register subtile. This avoids materializing an intermediate RV just to
+    broadcast D across the attention subtile. -/
+def streamSubRowVecTile16x64 (dst : RT GpuFloat.Float32 16 64 .Row)
+    (src : STRowVec GpuFloat.Float32 64 64) : KernelM Unit := do
+  let code :=
+    "#pragma unroll\n" ++
+    "for(int i = 0; i < 4; i++) {\n" ++
+    "  int base_col = 16*i + 2*(kittens::laneid()%4);\n" ++
+    s!"  {dst.id.toIdent}.tiles[0][i].data[0] = base_ops::sub::template op<float2>({dst.id.toIdent}.tiles[0][i].data[0], *(float2*)&{src.id.toIdent}[base_col + 0]);\n" ++
+    s!"  {dst.id.toIdent}.tiles[0][i].data[1] = base_ops::sub::template op<float2>({dst.id.toIdent}.tiles[0][i].data[1], *(float2*)&{src.id.toIdent}[base_col + 0]);\n" ++
+    s!"  {dst.id.toIdent}.tiles[0][i].data[2] = base_ops::sub::template op<float2>({dst.id.toIdent}.tiles[0][i].data[2], *(float2*)&{src.id.toIdent}[base_col + 8]);\n" ++
+    s!"  {dst.id.toIdent}.tiles[0][i].data[3] = base_ops::sub::template op<float2>({dst.id.toIdent}.tiles[0][i].data[3], *(float2*)&{src.id.toIdent}[base_col + 8]);\n" ++
+    "}"
+  emit (.raw code)
 
 /-! ## Synchronization -/
 
@@ -1362,6 +1747,25 @@ def getWarpGroupIdx : KernelM (KVal UInt32) := do
   emit (.warpGroupIdx v)
   pure ⟨v, "wg_idx"⟩
 
+/-- Read the lane id within the current warpgroup. ThunderKittens uses this for
+    one-thread-per-warpgroup barrier arrivals. -/
+def getWarpGroupLaneId (name : String := "wg_lane_id") : KernelM (KVal UInt32) := do
+  let v ← freshVar
+  emit (.warpGroupLaneId v)
+  pure ⟨v, name⟩
+
+/-- Read the current warp id within the CTA. -/
+def getWarpId (name : String := "warp_id") : KernelM (KVal UInt32) := do
+  let v ← freshVar
+  emit (.warpId v)
+  pure ⟨v, name⟩
+
+/-- Read the current lane id within the warp. -/
+def getLaneId (name : String := "lane_id") : KernelM (KVal UInt32) := do
+  let v ← freshVar
+  emit (.laneId v)
+  pure ⟨v, name⟩
+
 /-- Elect one thread per warp to execute a region
     Returns true for the elected thread -/
 def electOneSync : KernelM (KVal Bool) := do
@@ -1382,13 +1786,27 @@ def fenceProxyAsync : KernelM Unit := do
 /-- Execute a block of code only in the specified warp group
     Used for producer/consumer specialization in FA3 -/
 def ifWarpGroup (wgIdx : Nat) (action : KernelM Unit) : KernelM Unit := do
-  -- Capture the body statements
-  let startLen := (← get).body.size
-  action
-  let endLen := (← get).body.size
-  let bodyStmts := (← get).body.extract startLen endLen
-  -- Replace with ifWarpGroup construct
-  modify fun s => { s with body := s.body.extract 0 startLen |>.push (.ifWarpGroup wgIdx bodyStmts) }
+  emitWarpGroup wgIdx action
+
+/-- Execute a block of code only when the runtime boolean condition is true. -/
+def ifThen (cond : KVal Bool) (action : KernelM Unit) : KernelM Unit := do
+  emitIf cond.id action
+
+/-- Execute one of two blocks depending on a runtime boolean condition. -/
+def ifThenElse (cond : KVal Bool) (thenAction elseAction : KernelM Unit) : KernelM Unit := do
+  emitIfElse cond.id thenAction elseAction
+
+/-- Read `blockIdx.{x,y,z}` at runtime. -/
+def getBlockIdx (axis : Nat := 0) (name : String := "block_idx") : KernelM (KVal UInt32) := do
+  let v ← freshVar
+  emit (.getBlockIdx v axis)
+  pure ⟨v, name⟩
+
+/-- Read `threadIdx.{x,y,z}` at runtime. -/
+def getThreadIdx (axis : Nat := 0) (name : String := "thread_idx") : KernelM (KVal UInt32) := do
+  let v ← freshVar
+  emit (.getThreadIdx v axis)
+  pure ⟨v, name⟩
 
 /-! ## Complex Number Operations -/
 

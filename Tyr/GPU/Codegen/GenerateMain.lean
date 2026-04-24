@@ -98,9 +98,7 @@ unsafe def main (args : List String) : IO UInt32 := do
       -- Match LeanTest-style driver behavior: extension initializers must run
       -- so imported modules can register entries during import.
       Lean.enableInitializersExecution
-      let imports :=
-        #[({ module := `Tyr.GPU.Codegen.Attribute } : Import)] ++
-        cfg.modules.map (fun m => ({ module := m } : Import))
+      let imports := cfg.modules.map (fun m => ({ module := m } : Import))
       let env ← Lean.importModules imports {} (loadExts := true)
       let refs := collectKernelCompanionRefsFromEnvModules env cfg.modules
       let regs ← materializeKernelRefs env refs
