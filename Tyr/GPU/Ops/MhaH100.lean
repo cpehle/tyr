@@ -19,8 +19,8 @@ abbrev BF16 (seq : UInt64) : Type := T #[1, 1, seq, 64]
 /-- FP32 gradient/output tensor shape used by `mha_h100` kernels. -/
 abbrev F32 (seq : UInt64) : Type := T #[1, 1, seq, 64]
 
-/-- Per-query-tile L tensor shape: `[kvBlocks, 64]`. -/
-abbrev L (kvBlocks : UInt64) : Type := T #[kvBlocks, 64]
+/-- Per-query L/D vector tensor shape matching TK vector TMA layouts: `[1, 1, 1, seq]`. -/
+abbrev L (kvBlocks : UInt64) : Type := T #[1, 1, 1, kvBlocks * 64]
 
 /-- Launch configuration shared across wrapper entry points. -/
 structure LaunchCfg where
@@ -35,6 +35,14 @@ structure LaunchCfg where
 
 def LaunchCfg.default (kvBlocks stream : UInt64) : LaunchCfg :=
   { gridY := kvBlocks, stream := stream }
+
+def h100MaxDynamicSharedMem : UInt64 := 227 * 1024 - 1024
+
+def fwdSharedMem : UInt64 := h100MaxDynamicSharedMem
+
+def bwdPrepSharedMem : UInt64 := h100MaxDynamicSharedMem
+
+def bwdSweepSharedMem : UInt64 := 117760
 
 /-- Forward outputs reused by backward (`out`, `lOut`). -/
 structure FwdCtx (seq kvBlocks : UInt64) where
@@ -68,10 +76,6 @@ instance : Variant 128 2 where
       cfg.sharedMem cfg.stream
 
   launchBwd q k v dO lOut dVec dQ dK dV cfg := do
-    tkMhaH100Bwd2BlockDq.launch q k v dO lOut dVec dQ 128 64
-      cfg.gridX cfg.gridY cfg.gridZ
-      cfg.blockX cfg.blockY cfg.blockZ
-      cfg.sharedMem cfg.stream
     tkMhaH100Bwd2BlockKvSweep.launch q k v dO lOut dVec dQ dK dV 128 64
       cfg.gridX cfg.gridY cfg.gridZ
       cfg.blockX cfg.blockY cfg.blockZ
@@ -85,10 +89,6 @@ instance : Variant 768 12 where
       cfg.sharedMem cfg.stream
 
   launchBwd q k v dO lOut dVec dQ dK dV cfg := do
-    tkMhaH100Bwd12BlockDq.launch q k v dO lOut dVec dQ 768 64
-      cfg.gridX cfg.gridY cfg.gridZ
-      cfg.blockX cfg.blockY cfg.blockZ
-      cfg.sharedMem cfg.stream
     tkMhaH100Bwd12BlockKvSweep.launch q k v dO lOut dVec dQ dK dV 768 64
       cfg.gridX cfg.gridY cfg.gridZ
       cfg.blockX cfg.blockY cfg.blockZ
@@ -104,9 +104,9 @@ private def launchBwdPrep {seq kvBlocks : UInt64}
 /-- High-level forward op for supported `mha_h100` variants. -/
 def mhaFwd {seq kvBlocks : UInt64} [Variant seq kvBlocks]
     (q k v : BF16 seq) (stream : UInt64 := 0) : IO (FwdCtx seq kvBlocks) := do
-  let cfg := LaunchCfg.default kvBlocks stream
+  let cfg := { LaunchCfg.default kvBlocks stream with sharedMem := fwdSharedMem }
   let out := torch.zeros_like q
-  let lOut : L kvBlocks := torch.zeros #[kvBlocks, 64] false q.device
+  let lOut : L kvBlocks := torch.zeros #[1, 1, 1, kvBlocks * 64] false q.device
   Variant.launchFwd (seq := seq) (kvBlocks := kvBlocks) q k v out lOut cfg
   pure { out, lOut }
 
@@ -115,7 +115,8 @@ def mhaFwd {seq kvBlocks : UInt64} [Variant seq kvBlocks]
 def mhaBwd {seq kvBlocks : UInt64} [Variant seq kvBlocks]
     (q k v dO : BF16 seq) (ctx : FwdCtx seq kvBlocks) (stream : UInt64 := 0)
     : IO (F32 seq × F32 seq × F32 seq) := do
-  let cfg := LaunchCfg.default kvBlocks stream
+  let cfg := { LaunchCfg.default kvBlocks stream with sharedMem := bwdPrepSharedMem }
+  let bwdCfg := { cfg with gridX := kvBlocks / 2, gridY := 1, blockX := 384, sharedMem := bwdSweepSharedMem }
 
   let dVec : L kvBlocks := torch.mul_scalar ctx.lOut 0.0
   launchBwdPrep (seq := seq) (kvBlocks := kvBlocks) dO ctx.out dVec cfg
@@ -125,7 +126,7 @@ def mhaBwd {seq kvBlocks : UInt64} [Variant seq kvBlocks]
   let dV : F32 seq := torch.zeros #[1, 1, seq, 64] false q.device
 
   Variant.launchBwd (seq := seq) (kvBlocks := kvBlocks)
-    q k v dO ctx.lOut dVec dQ dK dV cfg
+    q k v dO ctx.lOut dVec dQ dK dV bwdCfg
   pure (dQ, dK, dV)
 
 private def sdpaFwdPortable {seq : UInt64}
