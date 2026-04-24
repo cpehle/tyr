@@ -225,6 +225,77 @@ def step [TensorStruct α] (opt : GradientTransformation α S) (params grads : �
   let (updates, newState) := opt.update params grads state
   (apply_updates params updates, newState)
 
+/-! ## Schedule-Based Scaling
+
+Optax-style schedule integration: schedules are `Nat → Float` functions that compose
+into gradient transformation chains via `scale_by_schedule`.
+-/
+
+/-- A schedule maps a step count to a scalar value (e.g., learning rate). -/
+abbrev Schedule := Nat → Float
+
+/-- State for schedule-based scaling (tracks step count). -/
+structure ScaleByScheduleState where
+  count : Nat
+  deriving Inhabited
+
+instance : TensorStruct ScaleByScheduleState where
+  map _ s := s
+  mapM _ s := pure s
+  zipWith _ s _ := s
+  fold _ acc _ := acc
+
+/-- Scale updates by a step-dependent schedule.
+
+    At each step, multiplies all updates by `schedule(count)` and increments
+    the internal counter. This is the primary mechanism for integrating
+    learning rate schedules into optimizer chains.
+
+    Example: `chain (scale_by_adam) (chain (scale_by_schedule mySchedule) (scale (-1.0)))` -/
+def scale_by_schedule [TensorStruct α] (schedule : Schedule)
+    : GradientTransformation α ScaleByScheduleState where
+  init _ := { count := 0 }
+  update _params grads state :=
+    let s := schedule state.count
+    let updates := TensorStruct.map (fun t => mul_scalar t s) grads
+    (updates, { count := state.count + 1 })
+
+/-! ## Schedule-Aware High-Level Optimizers -/
+
+/-- AdamW state type with schedule -/
+abbrev AdamWScheduleState (α : Type) :=
+  ChainState (ScaleByAdamState α) (ChainState EmptyState (ChainState ScaleByScheduleState EmptyState))
+
+/-- AdamW with a learning rate schedule.
+
+    Equivalent to: scale_by_adam → add_decayed_weights → scale_by_schedule(lr_schedule) → scale(-1)
+
+    The schedule receives the optimizer's internal step count and should return
+    the learning rate for that step. -/
+def adamw_schedule [TensorStruct α] (lr_schedule : Schedule)
+    (b1 : Float := 0.9) (b2 : Float := 0.999) (eps : Float := 1e-8)
+    (weight_decay : Float := 0.01) : GradientTransformation α (AdamWScheduleState α) :=
+  chain (scale_by_adam b1 b2 eps)
+    (chain (add_decayed_weights weight_decay)
+      (chain (scale_by_schedule lr_schedule)
+             (scale (-1.0))))
+
+/-- SGD state type with schedule -/
+abbrev SGDScheduleState (α : Type) :=
+  ChainState (TraceState α) (ChainState ScaleByScheduleState EmptyState)
+
+/-- SGD with momentum and a learning rate schedule. -/
+def sgd_momentum_schedule [TensorStruct α] (lr_schedule : Schedule) (momentum : Float := 0.9)
+    : GradientTransformation α (SGDScheduleState α) :=
+  chain (trace momentum)
+    (chain (scale_by_schedule lr_schedule)
+           (scale (-1.0)))
+
+/-- SGD (no momentum) with a learning rate schedule. -/
+def sgd_schedule [TensorStruct α] (lr_schedule : Schedule)
+    : GradientTransformation α (ChainState ScaleByScheduleState EmptyState) :=
+  chain (scale_by_schedule lr_schedule) (scale (-1.0))
+
 /-! ## Gradient Clipping (TODO)
 
 def clip_by_global_norm [TensorStruct α] (max_norm : Float) : GradientTransformation α EmptyState

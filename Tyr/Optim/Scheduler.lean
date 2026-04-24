@@ -1,50 +1,187 @@
 /-
   Tyr/Optim/Scheduler.lean
 
-  Learning rate schedulers following PyTorch patterns.
-  All schedulers are implemented as pure functions: (step : Nat) → Float
-  This enables easy resumption from checkpoints.
+  Composable learning rate and hyperparameter schedules.
+
+  All schedules are pure functions `Nat → Float`, matching the `Schedule` type
+  from `Tyr.Optim`. They can be:
+  - Used standalone to query a value at any step
+  - Composed into optimizer chains via `scale_by_schedule`
+  - Combined with schedule combinators (`join`, `scale_schedule`, etc.)
 -/
+import Tyr.Optim
+
 namespace torch.Optim.Scheduler
+
+open torch.Optim (Schedule)
 
 private def pi : Float := 3.14159265358979323846
 
 private def maxFloat (a b : Float) : Float := if a > b then a else b
 
-/-! ## Cosine Annealing with Warmup
+/-! ## Primitive Schedule Constructors
 
-Standard cosine annealing schedule with optional linear warmup.
+Each constructor returns a `Schedule` (i.e., `Nat → Float`) directly.
+-/
+
+/-- Constant schedule: returns the same value at every step. -/
+def constant (value : Float) : Schedule := fun _ => value
+
+/-- Cosine annealing with optional linear warmup.
+    - Warmup: linear increase from 0 to `peak`
+    - Annealing: cosine decay from `peak` to `end_value` -/
+def cosine_decay (peak : Float) (totalSteps : Nat) (end_value : Float := 0.0)
+    (warmupSteps : Nat := 0) : Schedule := fun step =>
+  if step < warmupSteps then
+    peak * (step.toFloat / maxFloat warmupSteps.toFloat 1.0)
+  else if step >= totalSteps then
+    end_value
+  else
+    let progress := (step - warmupSteps).toFloat / maxFloat (totalSteps - warmupSteps).toFloat 1.0
+    let coeff := 0.5 * (1.0 + Float.cos (pi * progress))
+    end_value + coeff * (peak - end_value)
+
+/-- Linear warmup then linear decay. -/
+def linear_decay (peak : Float) (totalSteps : Nat) (end_value : Float := 0.0)
+    (warmupSteps : Nat := 0) : Schedule := fun step =>
+  if step < warmupSteps then
+    peak * (step.toFloat / maxFloat warmupSteps.toFloat 1.0)
+  else if step >= totalSteps then
+    end_value
+  else
+    let progress := (step - warmupSteps).toFloat / maxFloat (totalSteps - warmupSteps).toFloat 1.0
+    peak - progress * (peak - end_value)
+
+/-- Step decay: value = initial * gamma^(step / stepSize) -/
+def step_decay (initial : Float) (gamma : Float := 0.1) (stepSize : Nat := 30) : Schedule :=
+  fun step =>
+    let numDecays := step / stepSize
+    initial * Float.pow gamma numDecays.toFloat
+
+/-- One-cycle policy (Smith & Topin, 2017).
+    - Phase 1 (pctStart): Linear increase from `min_value` to `peak`
+    - Phase 2 (remaining): Cosine decrease from `peak` to `min_value` -/
+def one_cycle (peak : Float) (totalSteps : Nat) (min_value : Float := 0.0)
+    (pctStart : Float := 0.3) : Schedule := fun step =>
+  if step >= totalSteps then
+    min_value
+  else
+    let warmupSteps := (pctStart * totalSteps.toFloat).toUInt64.toNat
+    if step < warmupSteps then
+      let progress := step.toFloat / maxFloat warmupSteps.toFloat 1.0
+      min_value + progress * (peak - min_value)
+    else
+      let progress := (step - warmupSteps).toFloat / maxFloat (totalSteps - warmupSteps).toFloat 1.0
+      let coeff := 0.5 * (1.0 + Float.cos (pi * progress))
+      min_value + coeff * (peak - min_value)
+
+/-- Warmup → Plateau → Cosine decay. -/
+def warmup_plateau_cosine (peak : Float) (totalSteps : Nat)
+    (warmupSteps : Nat) (plateauSteps : Nat) (end_value : Float := 0.0) : Schedule := fun step =>
+  let decayStart := warmupSteps + plateauSteps
+  if step < warmupSteps then
+    peak * (step.toFloat / maxFloat warmupSteps.toFloat 1.0)
+  else if step < decayStart then
+    peak
+  else if step >= totalSteps then
+    end_value
+  else
+    let progress := (step - decayStart).toFloat / maxFloat (totalSteps - decayStart).toFloat 1.0
+    let coeff := 0.5 * (1.0 + Float.cos (pi * progress))
+    end_value + coeff * (peak - end_value)
+
+/-- Exponential decay: value = initial * gamma^step -/
+def exponential_decay (initial : Float) (gamma : Float := 0.99) : Schedule :=
+  fun step => initial * Float.pow gamma step.toFloat
+
+/-- Polynomial decay: value = (initial - end_value) * (1 - step/total)^power + end_value -/
+def polynomial_decay (initial : Float) (totalSteps : Nat) (end_value : Float := 0.0)
+    (power : Float := 1.0) : Schedule := fun step =>
+  if step >= totalSteps then
+    end_value
+  else
+    let progress := step.toFloat / totalSteps.toFloat
+    let decay := Float.pow (1.0 - progress) power
+    end_value + decay * (initial - end_value)
+
+/-- Linear warmup only: ramps from 0 to `peak` over `warmupSteps`, then stays at `peak`. -/
+def warmup (peak : Float) (warmupSteps : Nat) : Schedule := fun step =>
+  if warmupSteps == 0 then peak
+  else if step < warmupSteps then
+    peak * (step.toFloat / warmupSteps.toFloat)
+  else peak
+
+/-! ## Schedule Combinators
+
+Combine schedules to build complex training policies.
+-/
+
+/-- Join two schedules at a boundary step.
+    Uses `s1` for steps `< boundary`, `s2` for steps `>= boundary`. -/
+def join (s1 s2 : Schedule) (boundary : Nat) : Schedule := fun step =>
+  if step < boundary then s1 step else s2 step
+
+/-- Sequentially compose schedules: run `s1` for `duration` steps, then `s2`
+    (with its step count starting from 0). -/
+def sequence (s1 : Schedule) (duration : Nat) (s2 : Schedule) : Schedule := fun step =>
+  if step < duration then s1 step else s2 (step - duration)
+
+/-- Multiply a schedule's output by a constant factor. -/
+def scale_schedule (s : Schedule) (factor : Float) : Schedule := fun step =>
+  s step * factor
+
+/-- Multiply two schedules pointwise. Useful for combining a base LR schedule
+    with a warmup multiplier. -/
+def multiply (s1 s2 : Schedule) : Schedule := fun step =>
+  s1 step * s2 step
+
+/-- Add two schedules pointwise. -/
+def add (s1 s2 : Schedule) : Schedule := fun step =>
+  s1 step + s2 step
+
+/-- Clamp a schedule's output between `lo` and `hi`. -/
+def clamp (s : Schedule) (lo hi : Float) : Schedule := fun step =>
+  let v := s step
+  if v < lo then lo else if v > hi then hi else v
+
+/-! ## Weight Decay Schedules -/
+
+/-- Linear weight decay: decays from baseWd to 0 over training.
+    Following nanochat's approach where weight decay goes to zero. -/
+def linear_weight_decay (baseWd : Float) (totalSteps : Nat) : Schedule := fun step =>
+  if step >= totalSteps then
+    0.0
+  else
+    baseWd * (1.0 - step.toFloat / totalSteps.toFloat)
+
+/-- Cosine weight decay: smooth decay from baseWd to 0. -/
+def cosine_weight_decay (baseWd : Float) (totalSteps : Nat) : Schedule := fun step =>
+  if step >= totalSteps then
+    0.0
+  else
+    let progress := step.toFloat / totalSteps.toFloat
+    baseWd * 0.5 * (1.0 + Float.cos (pi * progress))
+
+/-! ## Legacy Compatibility
+
+Struct-based configs and `getLr` dispatch for existing code.
 -/
 
 /-- Configuration for cosine annealing schedule -/
 structure CosineConfig where
-  baseLr : Float        -- Peak learning rate
-  minLr : Float         -- Minimum learning rate at end
-  warmupSteps : Nat     -- Steps for linear warmup (0 = no warmup)
-  totalSteps : Nat      -- Total training steps
+  baseLr : Float
+  minLr : Float
+  warmupSteps : Nat
+  totalSteps : Nat
   deriving Repr, Inhabited
 
-/-- Cosine annealing with warmup.
-    - Warmup: linear increase from 0 to baseLr
-    - Annealing: cosine decay from baseLr to minLr -/
-def cosineWithWarmup (cfg : CosineConfig) (step : Nat) : Float :=
-  if step < cfg.warmupSteps then
-    -- Linear warmup
-    cfg.baseLr * (step.toFloat / maxFloat cfg.warmupSteps.toFloat 1.0)
-  else if step >= cfg.totalSteps then
-    cfg.minLr
-  else
-    -- Cosine annealing
-    let progress := (step - cfg.warmupSteps).toFloat / maxFloat (cfg.totalSteps - cfg.warmupSteps).toFloat 1.0
-    let coeff := 0.5 * (1.0 + Float.cos (pi * progress))
-    cfg.minLr + coeff * (cfg.baseLr - cfg.minLr)
+/-- Create a `Schedule` from a `CosineConfig`. -/
+def CosineConfig.toSchedule (cfg : CosineConfig) : Schedule :=
+  cosine_decay cfg.baseLr cfg.totalSteps cfg.minLr cfg.warmupSteps
 
-/-! ## Linear Schedule
+/-- Legacy: cosine with warmup from config struct. -/
+def cosineWithWarmup (cfg : CosineConfig) : Schedule := cfg.toSchedule
 
-Linear warmup followed by linear decay.
--/
-
-/-- Configuration for linear schedule -/
 structure LinearConfig where
   baseLr : Float
   minLr : Float
@@ -52,168 +189,84 @@ structure LinearConfig where
   totalSteps : Nat
   deriving Repr, Inhabited
 
-/-- Linear warmup then linear decay -/
-def linearWithWarmup (cfg : LinearConfig) (step : Nat) : Float :=
-  if step < cfg.warmupSteps then
-    -- Linear warmup
-    cfg.baseLr * (step.toFloat / maxFloat cfg.warmupSteps.toFloat 1.0)
-  else if step >= cfg.totalSteps then
-    cfg.minLr
-  else
-    -- Linear decay
-    let progress := (step - cfg.warmupSteps).toFloat / maxFloat (cfg.totalSteps - cfg.warmupSteps).toFloat 1.0
-    cfg.baseLr - progress * (cfg.baseLr - cfg.minLr)
+def LinearConfig.toSchedule (cfg : LinearConfig) : Schedule :=
+  linear_decay cfg.baseLr cfg.totalSteps cfg.minLr cfg.warmupSteps
 
-/-! ## Step Decay
+def linearWithWarmup (cfg : LinearConfig) : Schedule := cfg.toSchedule
 
-Multiply learning rate by gamma every stepSize steps.
--/
-
-/-- Configuration for step decay schedule -/
 structure StepConfig where
   baseLr : Float
-  gamma : Float := 0.1   -- Multiplicative factor
-  stepSize : Nat := 30   -- Steps between decays
+  gamma : Float := 0.1
+  stepSize : Nat := 30
   deriving Repr, Inhabited
 
-/-- Step decay: lr = baseLr * gamma^(step / stepSize) -/
-def stepDecay (cfg : StepConfig) (step : Nat) : Float :=
-  let numDecays := step / cfg.stepSize
-  cfg.baseLr * Float.pow cfg.gamma numDecays.toFloat
+def StepConfig.toSchedule (cfg : StepConfig) : Schedule :=
+  step_decay cfg.baseLr cfg.gamma cfg.stepSize
 
-/-! ## One Cycle Policy
+def stepDecay (cfg : StepConfig) : Schedule := cfg.toSchedule
 
-Super-convergence via 1cycle learning rate policy (Smith & Topin, 2017).
-- Phase 1 (30%): Linear increase from minLr to maxLr
-- Phase 2 (70%): Cosine decrease from maxLr to minLr
--/
-
-/-- Configuration for one-cycle policy -/
 structure OneCycleConfig where
-  maxLr : Float           -- Maximum learning rate (peak)
-  minLr : Float           -- Starting and ending LR
+  maxLr : Float
+  minLr : Float
   totalSteps : Nat
-  pctStart : Float := 0.3 -- Fraction of steps for warmup phase
+  pctStart : Float := 0.3
   deriving Repr, Inhabited
 
-/-- One-cycle learning rate policy -/
-def oneCycle (cfg : OneCycleConfig) (step : Nat) : Float :=
-  if step >= cfg.totalSteps then
-    cfg.minLr
-  else
-    let warmupSteps := (cfg.pctStart * cfg.totalSteps.toFloat).toUInt64.toNat
-    if step < warmupSteps then
-      -- Phase 1: Linear warmup to maxLr
-      let progress := step.toFloat / maxFloat warmupSteps.toFloat 1.0
-      cfg.minLr + progress * (cfg.maxLr - cfg.minLr)
-    else
-      -- Phase 2: Cosine decay to minLr
-      let progress := (step - warmupSteps).toFloat / maxFloat (cfg.totalSteps - warmupSteps).toFloat 1.0
-      let coeff := 0.5 * (1.0 + Float.cos (pi * progress))
-      cfg.minLr + coeff * (cfg.maxLr - cfg.minLr)
+def OneCycleConfig.toSchedule (cfg : OneCycleConfig) : Schedule :=
+  one_cycle cfg.maxLr cfg.totalSteps cfg.minLr cfg.pctStart
 
-/-! ## Warmup + Plateau + Cosine Decay
-
-Common pattern: warmup → constant → cosine decay.
--/
-
-/-- Configuration for warmup-plateau-decay schedule -/
 structure WarmupPlateauConfig where
   baseLr : Float
   minLr : Float
   warmupSteps : Nat
-  plateauSteps : Nat    -- Steps at constant baseLr after warmup
+  plateauSteps : Nat
   totalSteps : Nat
   deriving Repr, Inhabited
 
-/-- Warmup → Plateau → Cosine decay -/
-def warmupPlateauCosine (cfg : WarmupPlateauConfig) (step : Nat) : Float :=
-  let decayStart := cfg.warmupSteps + cfg.plateauSteps
-  if step < cfg.warmupSteps then
-    -- Warmup phase
-    cfg.baseLr * (step.toFloat / maxFloat cfg.warmupSteps.toFloat 1.0)
-  else if step < decayStart then
-    -- Plateau phase
-    cfg.baseLr
-  else if step >= cfg.totalSteps then
-    cfg.minLr
-  else
-    -- Cosine decay phase
-    let progress := (step - decayStart).toFloat / maxFloat (cfg.totalSteps - decayStart).toFloat 1.0
-    let coeff := 0.5 * (1.0 + Float.cos (pi * progress))
-    cfg.minLr + coeff * (cfg.baseLr - cfg.minLr)
+def WarmupPlateauConfig.toSchedule (cfg : WarmupPlateauConfig) : Schedule :=
+  warmup_plateau_cosine cfg.baseLr cfg.totalSteps cfg.warmupSteps cfg.plateauSteps cfg.minLr
 
-/-! ## Exponential Decay -/
+def warmupPlateauCosine (cfg : WarmupPlateauConfig) : Schedule := cfg.toSchedule
 
-/-- Configuration for exponential decay -/
 structure ExponentialConfig where
   baseLr : Float
-  gamma : Float := 0.99  -- Decay factor per step
+  gamma : Float := 0.99
   deriving Repr, Inhabited
 
-/-- Exponential decay: lr = baseLr * gamma^step -/
-def exponentialDecay (cfg : ExponentialConfig) (step : Nat) : Float :=
-  cfg.baseLr * Float.pow cfg.gamma step.toFloat
+def ExponentialConfig.toSchedule (cfg : ExponentialConfig) : Schedule :=
+  exponential_decay cfg.baseLr cfg.gamma
 
-/-! ## Polynomial Decay -/
+def exponentialDecay (cfg : ExponentialConfig) : Schedule := cfg.toSchedule
 
-/-- Configuration for polynomial decay -/
 structure PolynomialConfig where
   baseLr : Float
   minLr : Float
   totalSteps : Nat
-  power : Float := 1.0  -- 1.0 = linear, 2.0 = quadratic, etc.
+  power : Float := 1.0
   deriving Repr, Inhabited
 
-/-- Polynomial decay: lr = (baseLr - minLr) * (1 - step/total)^power + minLr -/
-def polynomialDecay (cfg : PolynomialConfig) (step : Nat) : Float :=
-  if step >= cfg.totalSteps then
-    cfg.minLr
-  else
-    let progress := step.toFloat / cfg.totalSteps.toFloat
-    let decay := Float.pow (1.0 - progress) cfg.power
-    cfg.minLr + decay * (cfg.baseLr - cfg.minLr)
+def PolynomialConfig.toSchedule (cfg : PolynomialConfig) : Schedule :=
+  polynomial_decay cfg.baseLr cfg.totalSteps cfg.minLr cfg.power
 
-/-! ## Constant Schedule -/
+def polynomialDecay (cfg : PolynomialConfig) : Schedule := cfg.toSchedule
 
-/-- Constant learning rate (useful as baseline) -/
-def constant (lr : Float) (_step : Nat) : Float := lr
-
-/-! ## Weight Decay Scheduling
-
-nanochat uses linear decay to zero: wd = base_wd * (1 - step/total_steps)
--/
-
-/-- Configuration for weight decay schedule -/
 structure WeightDecayConfig where
-  baseWd : Float        -- Base weight decay value
-  totalSteps : Nat      -- Total training steps
+  baseWd : Float
+  totalSteps : Nat
   deriving Repr, Inhabited
 
-/-- Linear weight decay: decays from baseWd to 0 over training.
-    wd(step) = baseWd * (1 - step/totalSteps)
-    Following nanochat's approach where weight decay goes to zero. -/
+/-- Legacy: linear weight decay from config struct. -/
 def linearWeightDecay (cfg : WeightDecayConfig) (step : Nat) : Float :=
-  if step >= cfg.totalSteps then
-    0.0
-  else
-    cfg.baseWd * (1.0 - step.toFloat / cfg.totalSteps.toFloat)
+  linear_weight_decay cfg.baseWd cfg.totalSteps step
 
-/-- Cosine weight decay: smooth decay from baseWd to 0.
-    wd(step) = baseWd * 0.5 * (1 + cos(π * step/totalSteps)) -/
+/-- Legacy: cosine weight decay from config struct. -/
 def cosineWeightDecay (cfg : WeightDecayConfig) (step : Nat) : Float :=
-  if step >= cfg.totalSteps then
-    0.0
-  else
-    let progress := step.toFloat / cfg.totalSteps.toFloat
-    cfg.baseWd * 0.5 * (1.0 + Float.cos (pi * progress))
+  cosine_weight_decay cfg.baseWd cfg.totalSteps step
 
-/-- Constant weight decay (no scheduling) -/
+/-- Legacy: constant weight decay. -/
 def constantWeightDecay (wd : Float) (_step : Nat) : Float := wd
 
-/-! ## Helper: Create schedule from config -/
-
-/-- Union type for schedule configurations -/
+/-- Union type for schedule configurations (legacy). -/
 inductive ScheduleConfig where
   | cosine : CosineConfig → ScheduleConfig
   | linear : LinearConfig → ScheduleConfig
@@ -225,16 +278,19 @@ inductive ScheduleConfig where
   | const : Float → ScheduleConfig
   deriving Repr
 
-/-- Get learning rate for any schedule type -/
+/-- Convert a `ScheduleConfig` to a `Schedule`. -/
+def ScheduleConfig.toSchedule : ScheduleConfig → Schedule
+  | .cosine c => c.toSchedule
+  | .linear c => c.toSchedule
+  | .step c => c.toSchedule
+  | .oneCycle c => c.toSchedule
+  | .warmupPlateau c => c.toSchedule
+  | .exponential c => c.toSchedule
+  | .polynomial c => c.toSchedule
+  | .const lr => constant lr
+
+/-- Get learning rate for any schedule type (legacy). -/
 def getLr (cfg : ScheduleConfig) (step : Nat) : Float :=
-  match cfg with
-  | .cosine c => cosineWithWarmup c step
-  | .linear c => linearWithWarmup c step
-  | .step c => stepDecay c step
-  | .oneCycle c => oneCycle c step
-  | .warmupPlateau c => warmupPlateauCosine c step
-  | .exponential c => exponentialDecay c step
-  | .polynomial c => polynomialDecay c step
-  | .const lr => lr
+  cfg.toSchedule step
 
 end torch.Optim.Scheduler
