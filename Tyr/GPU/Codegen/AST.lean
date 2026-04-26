@@ -139,6 +139,10 @@ def BinaryOp.toCpp : BinaryOp → String
 inductive ScalarUnaryOp where
   | Neg
   | Exp
+  | Exp2
+  | Log
+  | Log2
+  | Rsqrt
   deriving Repr, BEq, Hashable, Inhabited, Lean.ToExpr
 
 /-- Scalar comparison operations on runtime indices/parameters. -/

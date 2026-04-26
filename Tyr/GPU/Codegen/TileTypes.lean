@@ -105,11 +105,24 @@ structure KVal (T : Type) where
   name : String
   deriving Repr
 
+/-- Linear shared-memory pointer produced by dynamic shared-memory allocation.
+
+    This models a TileLang-style `alloc_shared` for SIMT code whose extent is
+    runtime-sized. The backend owns the CUDA lowering; kernels manipulate it
+    through typed load/store primitives rather than raw code. -/
+structure KShared (T : Type) where
+  id : VarId
+  name : String
+  deriving Repr
+
 /-- Get VarId from global pointer -/
 def GPtr.varId {dtype : GpuFloat} (p : GPtr dtype) : VarId := p.id
 
 /-- Get VarId from kernel value -/
 def KVal.varId {T : Type} (v : KVal T) : VarId := v.id
+
+/-- Get VarId from dynamic shared-memory pointer. -/
+def KShared.varId {T : Type} (p : KShared T) : VarId := p.id
 
 /-- Get VarId from register tile -/
 def RT.varId {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
