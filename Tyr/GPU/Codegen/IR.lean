@@ -81,6 +81,7 @@ inductive KStmt where
   -- Kernel parameter declarations (used by attribute-generated code)
   | declGPtr (v : VarId) (dtype : GpuFloat) (name : String)  -- Global memory pointer param
   | declKVal (v : VarId) (dtype : GpuFloat) (name : String)  -- Scalar value param
+  | declScalar (v : VarId) (ty : KScalarType) (init : Option VarId)
 
   -- Memory operations
   | load (dst src : VarId)
@@ -128,6 +129,11 @@ inductive KStmt where
   | storeVecGlobalAddCoord (dst src : VarId) (coordB coordD coordR coordC : VarId)
   | loadScalarGlobal (dst src offset : VarId)
   | storeScalarGlobal (dst src offset : VarId)
+  | loadFlatGlobal (dst src offset : VarId) (srcDtype : GpuFloat) (dstTy : KScalarType)
+  | storeFlatGlobal (dst offset src : VarId) (dstDtype : GpuFloat) (srcTy : KScalarType)
+  | declSharedLinear (v offsetElems : VarId) (ty : KScalarType)
+  | loadSharedLinear (dst buf offset : VarId) (ty : KScalarType)
+  | storeSharedLinear (buf offset src : VarId) (ty : KScalarType)
 
   -- Distributed / Multimem operations
   | multimemLoadReduce (op : ReduceOp) (dst src : VarId)
@@ -208,6 +214,11 @@ inductive KStmt where
 
   -- Masking
   | mask (op : MaskOp) (dst src : VarId) (fillVal : Option Float)
+  -- Runtime-cutoff right_fill: mask cols >= colVar with fillVal. The compile-time
+  -- `MaskOp.RightFill` variant takes a Nat; this variant accepts a runtime
+  -- `KVal UInt32` (the underlying VarId). Used by decode-style attention where
+  -- the valid KV length within the last block is determined at runtime.
+  | maskRightFillVal (dst src colVar : VarId) (fillVal : Option Float)
 
   -- Tile slicing
   | sliceRows (dst src : VarId) (startRow numRows : Nat)
@@ -250,6 +261,7 @@ inductive KStmt where
   | forLoopVal (v : VarId) (lo : Nat) (hi : VarId) (body : Array KStmt)
   | forLoopRev (v : VarId) (lo hi : Nat) (body : Array KStmt)
   | forLoopValRev (v : VarId) (lo : Nat) (hi : VarId) (body : Array KStmt)
+  | forLoopStrideVal (v start hi step : VarId) (body : Array KStmt)
   | ifStmt (cond : VarId) (thenBody elseBody : Array KStmt)  -- Conditional
   | ifWarpGroup (wgIdx : Nat) (body : Array KStmt)           -- Execute only in specific warp group
   | comment (text : String)
@@ -257,6 +269,8 @@ inductive KStmt where
   -- Block/thread index accessors
   | getBlockIdx (dst : VarId) (axis : Nat)   -- axis: 0=x, 1=y, 2=z
   | getThreadIdx (dst : VarId) (axis : Nat)  -- axis: 0=x, 1=y, 2=z
+  | getGridDim (dst : VarId) (axis : Nat)    -- axis: 0=x, 1=y, 2=z
+  | getBlockDim (dst : VarId) (axis : Nat)   -- axis: 0=x, 1=y, 2=z
 
   -- Constants
   | constInt (dst : VarId) (value : Int)     -- Integer constant
@@ -265,6 +279,9 @@ inductive KStmt where
   | scalarCompare (op : ScalarCompareOp) (dst a b : VarId)
   | scalarBinary (op : ScalarBinaryOp) (dst a b : VarId)
   | scalarSelect (dst cond ifTrue ifFalse : VarId)
+  | scalarAssign (dst src : VarId)
+  | scalarCast (dst src : VarId) (dstTy : KScalarType)
+  | blockReduce (op : ReduceOp) (dst src : VarId) (ty : KScalarType)
   | vecIota (dst : VarId) (start step : Float)
   | vecFillScalar (dst scalar : VarId)
   | raw (code : String)                      -- Exact backend code escape hatch

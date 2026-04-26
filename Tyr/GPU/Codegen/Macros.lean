@@ -11,10 +11,43 @@ import Tyr.GPU.Codegen.IR
 import Tyr.GPU.Codegen.Monad
 import Tyr.GPU.Codegen.AST
 import Tyr.GPU.Codegen.Primitives
+import Tyr.GPU.Codegen.Loop
 
 namespace Tyr.GPU.Codegen
 
 open Tyr.GPU
+
+/-! ## TileLang-inspired SIMT conveniences
+
+These helpers intentionally build on existing Tyr concepts (`KVal`, `GPtr`,
+`RT/ST/RV`) instead of creating a parallel language layer. They cover the gaps
+that TileLang makes ergonomic for decode-style kernels: per-thread parallel
+iteration, mutable scalar state, and attention-specific scalar metadata. -/
+
+/-- Runtime per-thread linear iteration over `[0, extent)`.
+
+This is the small Tyr analogue of `T.Parallel(extent)`: each thread starts at
+`threadIdx.x` and advances by `blockDim.x`. -/
+def parallelThreadRange (extent : KVal UInt64) : KernelM KStrideRange := do
+  let tid ← getThreadIdx 0 "parallel_tid"
+  let blockThreads ← getBlockDim 0 "parallel_threads"
+  pure <| kstride tid extent blockThreads
+
+/-- Runtime default score scale in base-2 exponent units: `log2(e)/sqrt(D)`. -/
+def runtimeDefaultScoreScaleLog2e
+    (headDim : KVal UInt64)
+    : KernelM (KVal Float32) := do
+  let dF32 ← castFloat32 headDim "head_dim_f32"
+  let invSqrt ← scalarRsqrt dF32 "inv_sqrt_d"
+  let log2e ← constFloatVal 1.44269504089 "log2e"
+  scalarMulVal invSqrt log2e "score_scale_log2e"
+
+/-- Runtime GQA mapping from query head to KV head. Assumes validated divisibility. -/
+def runtimeGqaKvHead
+    (qHead qHeads kvHeads : KVal UInt64)
+    : KernelM (KVal UInt64) := do
+  let ratio ← scalarDivVal qHeads kvHeads "gqa_ratio"
+  scalarDivVal qHead ratio "kv_head"
 
 /-! ## Double Buffering Helper
 

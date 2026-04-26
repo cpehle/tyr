@@ -24,6 +24,34 @@ namespace Tyr.GPU.Codegen
 
 open Tyr.GPU
 
+/-- Zero literal for generated mutable scalar declarations. -/
+private def KScalarType.zeroCpp : KScalarType → String
+  | .Float | .Float32 => "0.0f"
+  | .Bool => "false"
+  | _ => "0"
+
+/-- Convert a flat global element into the requested scalar type. -/
+private def renderFlatGlobalLoadExpr (srcDtype : GpuFloat) (dstTy : KScalarType)
+    (src offset : VarId) : String :=
+  let value := s!"{src.toIdent}.raw_ptr[{offset.toIdent}]"
+  match srcDtype, dstTy with
+  | .BFloat16, .Float32 => s!"__bfloat162float({value})"
+  | .BFloat16, .Float => s!"static_cast<double>(__bfloat162float({value}))"
+  | .Float32, .Float32 => value
+  | .Float32, .Float => s!"static_cast<double>({value})"
+  | _, _ => s!"static_cast<{dstTy.toCpp}>({value})"
+
+/-- Convert a scalar value for a flat global store. -/
+private def renderFlatGlobalStoreExpr (dstDtype : GpuFloat) (srcTy : KScalarType)
+    (src : VarId) : String :=
+  let value := src.toIdent
+  match dstDtype, srcTy with
+  | .BFloat16, .Float32 => s!"__float2bfloat16(static_cast<float>({value}))"
+  | .BFloat16, .Float => s!"__float2bfloat16(static_cast<float>({value}))"
+  | .Float32, .Float32 => value
+  | .Float32, .Float => s!"static_cast<float>({value})"
+  | _, _ => s!"static_cast<{dstDtype.toCpp}>({value})"
+
 /-- Register vector layout for ThunderKittens row/col operations. -/
 inductive RVLayout where
   | Naive
@@ -85,6 +113,7 @@ private def collectRtLayoutsStmt (acc : Std.HashMap VarId TileLayout) : KStmt �
   | .forLoopVal _ _ _ body => body.foldl collectRtLayoutsStmt acc
   | .forLoopRev _ _ _ body => body.foldl collectRtLayoutsStmt acc
   | .forLoopValRev _ _ _ body => body.foldl collectRtLayoutsStmt acc
+  | .forLoopStrideVal _ _ _ _ body => body.foldl collectRtLayoutsStmt acc
   | .ifStmt _ thenBody elseBody =>
       let acc' := thenBody.foldl collectRtLayoutsStmt acc
       elseBody.foldl collectRtLayoutsStmt acc'
@@ -104,6 +133,7 @@ private def collectTileInfoStmt (acc : Std.HashMap VarId TileInfo) : KStmt → S
   | .forLoopVal _ _ _ body => body.foldl collectTileInfoStmt acc
   | .forLoopRev _ _ _ body => body.foldl collectTileInfoStmt acc
   | .forLoopValRev _ _ _ body => body.foldl collectTileInfoStmt acc
+  | .forLoopStrideVal _ _ _ _ body => body.foldl collectTileInfoStmt acc
   | .ifStmt _ thenBody elseBody =>
       let acc' := thenBody.foldl collectTileInfoStmt acc
       elseBody.foldl collectTileInfoStmt acc'
@@ -116,6 +146,7 @@ private def collectRvDeclsStmt (acc : Std.HashSet VarId) : KStmt → Std.HashSet
   | .forLoopVal _ _ _ body => body.foldl collectRvDeclsStmt acc
   | .forLoopRev _ _ _ body => body.foldl collectRvDeclsStmt acc
   | .forLoopValRev _ _ _ body => body.foldl collectRvDeclsStmt acc
+  | .forLoopStrideVal _ _ _ _ body => body.foldl collectRvDeclsStmt acc
   | .ifStmt _ thenBody elseBody =>
       let acc' := thenBody.foldl collectRvDeclsStmt acc
       elseBody.foldl collectRvDeclsStmt acc'
@@ -196,6 +227,7 @@ private def collectRvLayoutsStmt
   | .forLoopVal _ _ _ body => body.foldl (collectRvLayoutsStmt rtLayouts rvVars) st
   | .forLoopRev _ _ _ body => body.foldl (collectRvLayoutsStmt rtLayouts rvVars) st
   | .forLoopValRev _ _ _ body => body.foldl (collectRvLayoutsStmt rtLayouts rvVars) st
+  | .forLoopStrideVal _ _ _ _ body => body.foldl (collectRvLayoutsStmt rtLayouts rvVars) st
   | .ifStmt _ thenBody elseBody =>
       let st' := thenBody.foldl (collectRvLayoutsStmt rtLayouts rvVars) st
       elseBody.foldl (collectRvLayoutsStmt rtLayouts rvVars) st'
@@ -324,6 +356,8 @@ private partial def collectGlobalParamTmaTypesStmt
       body.foldl (collectGlobalParamTmaTypesStmt params tileInfo) acc
   | .forLoopValRev _ _ _ body =>
       body.foldl (collectGlobalParamTmaTypesStmt params tileInfo) acc
+  | .forLoopStrideVal _ _ _ _ body =>
+      body.foldl (collectGlobalParamTmaTypesStmt params tileInfo) acc
   | .ifStmt _ thenBody elseBody =>
       let acc' := thenBody.foldl (collectGlobalParamTmaTypesStmt params tileInfo) acc
       elseBody.foldl (collectGlobalParamTmaTypesStmt params tileInfo) acc'
@@ -344,7 +378,13 @@ def renderGlobalParamCppType
   let tmaSuffix :=
     if tmaTypes.isEmpty then ""
     else ", " ++ String.intercalate ", " (tmaTypes.toList.map GlobalParamTmaType.toCpp)
-  s!"gl<{p.dtype.toCpp}, 1, 1, -1, -1{tmaSuffix}>"
+  -- All four dims are runtime so the TMA descriptor (and gl operator[]) reflect
+  -- the actual tensor shape. Hard-coding batch/depth to compile-time 1 silently
+  -- discarded the launcher's `v{idx}_shape[0,1]` arguments (TK's
+  -- `make_unsafe_gl_arg<1>` returns nullptr), which made multi-batch /
+  -- multi-head kernels (e.g. decode) TMA-OOB-zero-fill any (batch>0, head>0)
+  -- coordinate.
+  s!"gl<{p.dtype.toCpp}, -1, -1, -1, -1{tmaSuffix}>"
 
 private def renderGlobalCoord
     (tileInfo : Std.HashMap VarId TileInfo)
@@ -458,6 +498,11 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout)
     s!"{indent}// param: {dtype.toCpp}* {name} (v{v.idx})\n"
   | .declKVal v dtype name =>
     s!"{indent}// param: {dtype.toCpp} {name} (v{v.idx})\n"
+  | .declScalar v ty init =>
+    let initExpr := match init with
+      | some src => src.toIdent
+      | none => ty.zeroCpp
+    s!"{indent}{ty.toCpp} {v.toIdent} = {initExpr};\n"
 
   -- Memory operations
   | .load dst src => s!"{indent}warp::load({dst.toIdent}, {src.toIdent});\n"
@@ -556,6 +601,16 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout)
     s!"{indent}auto {dst.toIdent} = {src.toIdent}[{offset.toIdent}];\n"
   | .storeScalarGlobal dst src offset =>
     s!"{indent}{dst.toIdent}[{offset.toIdent}] = {src.toIdent};\n"
+  | .loadFlatGlobal dst src offset srcDtype dstTy =>
+    s!"{indent}{dstTy.toCpp} {dst.toIdent} = {renderFlatGlobalLoadExpr srcDtype dstTy src offset};\n"
+  | .storeFlatGlobal dst offset src dstDtype srcTy =>
+    s!"{indent}{dst.toIdent}.raw_ptr[{offset.toIdent}] = {renderFlatGlobalStoreExpr dstDtype srcTy src};\n"
+  | .declSharedLinear v offsetElems ty =>
+    s!"{indent}{ty.toCpp}* {v.toIdent} = reinterpret_cast<{ty.toCpp}*>(__shm) + {offsetElems.toIdent};\n"
+  | .loadSharedLinear dst buf offset ty =>
+    s!"{indent}{ty.toCpp} {dst.toIdent} = {buf.toIdent}[{offset.toIdent}];\n"
+  | .storeSharedLinear buf offset src _ =>
+    s!"{indent}{buf.toIdent}[{offset.toIdent}] = {src.toIdent};\n"
 
   -- Distributed / Multimem operations
   | .multimemLoadReduce op dst src =>
@@ -766,6 +821,9 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout)
     | .UpperFill r => s!"{indent}warp::upper_fill({dst.toIdent}, {src.toIdent}, {r}{fillStr});\n"
     | .LowerFill r => s!"{indent}warp::lower_fill({dst.toIdent}, {src.toIdent}, {r}{fillStr});\n"
     | .UpperRightFill r c => s!"{indent}warp::upper_right_fill({dst.toIdent}, {src.toIdent}, {r}, {c}{fillStr});\n"
+  | .maskRightFillVal dst src colVar fillVal =>
+    let fillStr := fillVal.map (fun v => s!", {v}") |>.getD ""
+    s!"{indent}warp::right_fill({dst.toIdent}, {src.toIdent}, {colVar.toIdent}{fillStr});\n"
 
   -- Tile slicing
   | .sliceRows dst src startRow numRows =>
@@ -1070,6 +1128,9 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout)
   | .forLoopValRev v lo hi body =>
     let bodyStr := body.toList.map (generateStmt rvLayouts rvVars tileInfo useDynamicShared (indent ++ "  ")) |>.foldl (· ++ ·) ""
     s!"{indent}for (int {v.toIdent} = {hi.toIdent}; {v.toIdent}-- > {lo}; ) \{\n{bodyStr}{indent}}\n"
+  | .forLoopStrideVal v start hi step body =>
+    let bodyStr := body.toList.map (generateStmt rvLayouts rvVars tileInfo useDynamicShared (indent ++ "  ")) |>.foldl (· ++ ·) ""
+    s!"{indent}for (auto {v.toIdent} = {start.toIdent}; {v.toIdent} < {hi.toIdent}; {v.toIdent} += {step.toIdent}) \{\n{bodyStr}{indent}}\n"
   | .ifStmt cond thenBody elseBody =>
     let thenStr := thenBody.toList.map (generateStmt rvLayouts rvVars tileInfo useDynamicShared (indent ++ "  ")) |>.foldl (· ++ ·) ""
     let elseStr := elseBody.toList.map (generateStmt rvLayouts rvVars tileInfo useDynamicShared (indent ++ "  ")) |>.foldl (· ++ ·) ""
@@ -1089,6 +1150,12 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout)
   | .getThreadIdx dst axis =>
     let axisName := match axis with | 0 => "x" | 1 => "y" | _ => "z"
     s!"{indent}int {dst.toIdent} = threadIdx.{axisName};\n"
+  | .getGridDim dst axis =>
+    let axisName := match axis with | 0 => "x" | 1 => "y" | _ => "z"
+    s!"{indent}int {dst.toIdent} = gridDim.{axisName};\n"
+  | .getBlockDim dst axis =>
+    let axisName := match axis with | 0 => "x" | 1 => "y" | _ => "z"
+    s!"{indent}int {dst.toIdent} = blockDim.{axisName};\n"
 
   -- Constants
   | .constInt dst value =>
@@ -1099,6 +1166,14 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout)
     s!"{indent}auto {dst.toIdent} = -{src.toIdent};\n"
   | .scalarUnary .Exp dst src =>
     s!"{indent}auto {dst.toIdent} = ::expf(static_cast<float>({src.toIdent}));\n"
+  | .scalarUnary .Exp2 dst src =>
+    s!"{indent}auto {dst.toIdent} = ::exp2f(static_cast<float>({src.toIdent}));\n"
+  | .scalarUnary .Log dst src =>
+    s!"{indent}auto {dst.toIdent} = ::logf(static_cast<float>({src.toIdent}));\n"
+  | .scalarUnary .Log2 dst src =>
+    s!"{indent}auto {dst.toIdent} = ::log2f(static_cast<float>({src.toIdent}));\n"
+  | .scalarUnary .Rsqrt dst src =>
+    s!"{indent}auto {dst.toIdent} = ::rsqrtf(static_cast<float>({src.toIdent}));\n"
   | .scalarCompare .Eq dst a b =>
     s!"{indent}auto {dst.toIdent} = ({a.toIdent} == {b.toIdent});\n"
   | .scalarCompare .Lt dst a b =>
@@ -1125,6 +1200,43 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout)
     s!"{indent}auto {dst.toIdent} = ({a.toIdent} > {b.toIdent}) ? {a.toIdent} : {b.toIdent};\n"
   | .scalarSelect dst cond ifTrue ifFalse =>
     s!"{indent}auto {dst.toIdent} = {cond.toIdent} ? {ifTrue.toIdent} : {ifFalse.toIdent};\n"
+  | .scalarAssign dst src =>
+    s!"{indent}{dst.toIdent} = {src.toIdent};\n"
+  | .scalarCast dst src dstTy =>
+    s!"{indent}{dstTy.toCpp} {dst.toIdent} = static_cast<{dstTy.toCpp}>({src.toIdent});\n"
+  | .blockReduce .Sum dst src .Float32 =>
+    let stem := dst.toIdent
+    let x := s!"_tyr_reduce_x_{stem}"
+    let offset := s!"_tyr_reduce_offset_{stem}"
+    let warps := s!"_tyr_reduce_warps_{stem}"
+    let out := s!"_tyr_reduce_out_{stem}"
+    let lane := s!"_tyr_reduce_lane_{stem}"
+    let warp := s!"_tyr_reduce_warp_{stem}"
+    s!"{indent}float {dst.toIdent};\n" ++
+    s!"{indent}\{\n" ++
+    s!"{indent}  float {x} = static_cast<float>({src.toIdent});\n" ++
+    s!"{indent}  for (int {offset} = warpSize / 2; {offset} > 0; {offset} /= 2) \{\n" ++
+    s!"{indent}    {x} += __shfl_down_sync(0xffffffff, {x}, {offset});\n" ++
+    s!"{indent}  }\n" ++
+    s!"{indent}  __shared__ float {warps}[32];\n" ++
+    s!"{indent}  __shared__ float {out};\n" ++
+    s!"{indent}  const int {lane} = threadIdx.x & 31;\n" ++
+    s!"{indent}  const int {warp} = threadIdx.x >> 5;\n" ++
+    s!"{indent}  if ({lane} == 0) {warps}[{warp}] = {x};\n" ++
+    s!"{indent}  __syncthreads();\n" ++
+    s!"{indent}  {x} = (threadIdx.x < ((blockDim.x + 31) / 32)) ? {warps}[{lane}] : 0.0f;\n" ++
+    s!"{indent}  if ({warp} == 0) \{\n" ++
+    s!"{indent}    for (int {offset} = warpSize / 2; {offset} > 0; {offset} /= 2) \{\n" ++
+    s!"{indent}      {x} += __shfl_down_sync(0xffffffff, {x}, {offset});\n" ++
+    s!"{indent}    }\n" ++
+    s!"{indent}    if ({lane} == 0) {out} = {x};\n" ++
+    s!"{indent}  }\n" ++
+    s!"{indent}  __syncthreads();\n" ++
+    s!"{indent}  {dst.toIdent} = {out};\n" ++
+    s!"{indent}  __syncthreads();\n" ++
+    s!"{indent}}\n"
+  | .blockReduce op _ _ ty =>
+    s!"{indent}static_assert(false, \"unsupported blockReduce op/type: {repr op} {repr ty}\");\n"
   | .vecIota dst start step =>
     s!"{indent}warp::apply({dst.toIdent}, {dst.toIdent}, [] __device__ (int _i, auto _x) \{\n" ++
     s!"{indent}  return static_cast<decltype(_x)>({start}f + {step}f * static_cast<float>(_i));\n" ++
@@ -1166,6 +1278,7 @@ private partial def stmtUses (p : KStmt → Bool) : KStmt → Bool
       | .forLoopVal _ _ _ body => body.any (stmtUses p)
       | .forLoopRev _ _ _ body => body.any (stmtUses p)
       | .forLoopValRev _ _ _ body => body.any (stmtUses p)
+      | .forLoopStrideVal _ _ _ _ body => body.any (stmtUses p)
       | .ifStmt _ thenBody elseBody =>
         thenBody.any (stmtUses p) || elseBody.any (stmtUses p)
       | .ifWarpGroup _ body => body.any (stmtUses p)
@@ -1177,6 +1290,7 @@ private partial def stmtUses (p : KStmt → Bool) : KStmt → Bool
       | .declSemaphore .. | .declSemaphoreArray ..
       | .declTT ..
       | .declGPtr .. | .declKVal ..
+      | .declScalar ..
       | .load .. | .store .. | .loadAsync .. | .storeAsync ..
       | .storeAdd .. | .storeAddAsync .. | .storeMinAsync ..
       | .warpgroupStore .. | .warpgroupStoreIdx ..
@@ -1194,6 +1308,8 @@ private partial def stmtUses (p : KStmt → Bool) : KStmt → Bool
       | .loadVecGlobal .. | .storeVecGlobal .. | .storeVecGlobalAdd ..
       | .loadVecGlobalCoord .. | .storeVecGlobalCoord .. | .storeVecGlobalAddCoord ..
       | .loadScalarGlobal .. | .storeScalarGlobal ..
+      | .loadFlatGlobal .. | .storeFlatGlobal ..
+      | .declSharedLinear .. | .loadSharedLinear .. | .storeSharedLinear ..
       | .multimemLoadReduce .. | .multimemStore .. | .multimemRed ..
       | .mma .. | .mm .. | .warpgroupMma .. | .warpgroupMm ..
       | .warpgroupMmaIdx .. | .warpgroupMmIdx .. | .warpgroupMmaRhsIdx ..
@@ -1211,7 +1327,7 @@ private partial def stmtUses (p : KStmt → Bool) : KStmt → Bool
       | .cumsum .. | .cumprod ..
       | .outer ..
       | .swapLayout .. | .transpose .. | .convert ..
-      | .mask ..
+      | .mask .. | .maskRightFillVal ..
       | .sliceRows .. | .sliceCols .. | .concatCols ..
       | .sync .. | .arrive .. | .arriveAndWait ..
       | .namedBarrierSync .. | .namedBarrierArrive ..
@@ -1222,9 +1338,10 @@ private partial def stmtUses (p : KStmt → Bool) : KStmt → Bool
       | .semaphoreArray .. | .semaphoreArrayWarp ..
       | .semaphoreArrayWaitVal .. | .semaphoreArrayArrive ..
       | .comment ..
-      | .getBlockIdx .. | .getThreadIdx ..
+      | .getBlockIdx .. | .getThreadIdx .. | .getGridDim .. | .getBlockDim ..
       | .constInt .. | .constFloat ..
       | .scalarUnary .. | .scalarCompare .. | .scalarBinary .. | .scalarSelect ..
+      | .scalarAssign .. | .scalarCast .. | .blockReduce ..
       | .vecIota .. | .vecFillScalar ..
       | .raw .. => false
 
@@ -1254,6 +1371,11 @@ private def usesOuter (k : Kernel) : Bool :=
 private def usesEqMask (k : Kernel) : Bool :=
   bodyUses (fun s => match s with
     | .eqMask .. => true
+    | _ => false) k.body
+
+private def usesSharedLinear (k : Kernel) : Bool :=
+  bodyUses (fun s => match s with
+    | .declSharedLinear .. | .loadSharedLinear .. | .storeSharedLinear .. => true
     | _ => false) k.body
 
 private def storeAddHelpers : String :=
@@ -1473,7 +1595,7 @@ private def generateKernelDefinition (k : Kernel) (emitSharedDecl : Bool := fals
     | some (maxThreads, minBlocks) => s!" __launch_bounds__({maxThreads}, {minBlocks})"
     | none => ""
   let signature := s!"__global__{launchBounds} void {k.name}({paramStr}) \{\n"
-  let useDynamicShared := emitSharedDecl && k.sharedMemBytes > 0
+  let useDynamicShared := emitSharedDecl
   let sharedDecl := if useDynamicShared
     then "  extern __shared__ int __shm[];\n  tma_swizzle_allocator al(__shm);\n"
     else ""
@@ -1484,7 +1606,7 @@ private def generateKernelDefinition (k : Kernel) (emitSharedDecl : Bool := fals
 /-- Generate emission metadata for a single kernel definition. -/
 def generateKernelEmitInfo (k : Kernel) : KernelEmitInfo :=
   {
-    definition := generateKernelDefinition k (k.sharedMemBytes > 0)
+    definition := generateKernelDefinition k (k.sharedMemBytes > 0 || usesSharedLinear k)
     needsStoreAdd := usesStoreAdd k
     needsLegacyTma := usesLegacyTma k
     needsSlice := usesSlice k
@@ -1496,7 +1618,7 @@ def generateKernelEmitInfo (k : Kernel) : KernelEmitInfo :=
     Assumes CUDA/ThunderKittens headers are already included by the caller. -/
 def generateKernelDefinitions (kernels : Array Kernel) : String :=
   generateHelpersForKernels kernels ++
-  (kernels.toList.map (fun k => generateKernelDefinition k (k.sharedMemBytes > 0)) |> String.intercalate "\n")
+  (kernels.toList.map (fun k => generateKernelDefinition k (k.sharedMemBytes > 0 || usesSharedLinear k)) |> String.intercalate "\n")
 
 /-- Generate full kernel C++ code -/
 def generateKernel (k : Kernel) : String :=
