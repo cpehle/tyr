@@ -7,6 +7,7 @@
 
    The current specialization matrix is intentionally small:
 
+   - `tkMhaH100Decode`   : one-H100, BF16, decode (`qSeq=1`), runtime heads/KV length/head dim
    - `tkMhaH1002Block`   : one-H100, BF16, dense prefill, `seq=128`, `headDim=64`
    - `tkMhaH10012Block`  : one-H100, BF16, dense prefill, `seq=768`, `headDim=64`
    - `portable`          : everything else
@@ -77,6 +78,7 @@ structure AttentionRoutingMetadata where
 /-- Current native specialization set known to the runtime operator layer. -/
 inductive AttentionSpecialization where
   | portable
+  | tkMhaH100Decode
   | tkMhaH1002Block
   | tkMhaH10012Block
   deriving Repr, Inhabited, BEq
@@ -91,6 +93,7 @@ def isNative : AttentionSpecialization → Bool
 /-- Tile-block count for the current H100 MHA specializations, when applicable. -/
 def kvBlocks? : AttentionSpecialization → Option UInt64
   | .portable => none
+  | .tkMhaH100Decode => none
   | .tkMhaH1002Block => some 2
   | .tkMhaH10012Block => some 12
 
@@ -301,13 +304,45 @@ def currentTkBaseEligible (problem : AttentionProblem) : Bool :=
     !problem.isCausal
   deviceOk && dtypeOk && modeOk && semanticsOk && shapeOk
 
+/-- Whether the current one-H100 decode selector may consider this problem.
+
+    V1 of the TK-style decode kernel supports any positive `kvSeq` (the kernel
+    iterates `ceil(kvSeq / 64)` blocks and applies a runtime tail mask via
+    ThunderKittens' `right_fill`). `headDim` is one of {64, 128} — the C++
+    launcher dispatches to `tkMhaH100DecodeFwd` or `tkMhaH100DecodeFwd64` based
+    on the tensor's head dim. Other head dims fall back to portable SDPA. -/
+def currentTkDecodeEligible (problem : AttentionProblem) : Bool :=
+  let deviceOk := problem.isCuda && problem.arch == .SM90
+  let dtypeOk := problem.dtype == .BFloat16
+  let modeOk := problem.mode == .decode && problem.qSeq == 1
+  let gqaOk :=
+    match problem.gqaClass with
+    | .equal => true
+    | .grouped _ => problem.enableGqa
+    | .invalid => false
+  let semanticsOk :=
+    problem.maskKind == .none &&
+    problem.dropoutP == 0.0 &&
+    !problem.isCausal &&
+    problem.scaleMatchesDefault
+  let shapeOk :=
+    problem.batch > 0 &&
+    problem.numQHeads > 0 &&
+    problem.numKVHeads > 0 &&
+    problem.kvSeq > 0 &&
+    (problem.headDim == 128 || problem.headDim == 64) &&
+    gqaOk
+  deviceOk && dtypeOk && modeOk && semanticsOk && shapeOk
+
 /-- Current specialization selector.
 
     This is intentionally conservative. It centralizes the existing native
     coverage and portable fallback decision in one place so the wrappers do not
     each re-encode the same fixed-shape logic. -/
 def currentSpecialization (problem : AttentionProblem) : AttentionSpecialization :=
-  if !currentTkBaseEligible problem then
+  if currentTkDecodeEligible problem then
+    .tkMhaH100Decode
+  else if !currentTkBaseEligible problem then
     .portable
   else if problem.qSeq == 128 then
     .tkMhaH1002Block

@@ -40,6 +40,22 @@ extern "C" lean_object* lean_launch_Tyr_GPU_Kernels_tkMhaH100Fwd12Block(
     uint64_t grid_x, uint64_t grid_y, uint64_t grid_z,
     uint64_t block_x, uint64_t block_y, uint64_t block_z,
     uint64_t shared_mem, uint64_t stream);
+extern "C" lean_object* lean_launch_Tyr_GPU_Kernels_tkMhaH100DecodeFwd(
+    b_lean_obj_arg q_ptr, b_lean_obj_arg k_ptr, b_lean_obj_arg v_ptr,
+    b_lean_obj_arg o_ptr,
+    uint64_t batch, uint64_t q_heads, uint64_t kv_heads,
+    uint64_t kv_seq, uint64_t head_dim,
+    uint64_t grid_x, uint64_t grid_y, uint64_t grid_z,
+    uint64_t block_x, uint64_t block_y, uint64_t block_z,
+    uint64_t shared_mem, uint64_t stream);
+extern "C" lean_object* lean_launch_Tyr_GPU_Kernels_tkMhaH100DecodeFwd64(
+    b_lean_obj_arg q_ptr, b_lean_obj_arg k_ptr, b_lean_obj_arg v_ptr,
+    b_lean_obj_arg o_ptr,
+    uint64_t batch, uint64_t q_heads, uint64_t kv_heads,
+    uint64_t kv_seq, uint64_t head_dim,
+    uint64_t grid_x, uint64_t grid_y, uint64_t grid_z,
+    uint64_t block_x, uint64_t block_y, uint64_t block_z,
+    uint64_t shared_mem, uint64_t stream);
 extern "C" lean_object* lean_launch_Tyr_GPU_Kernels_tkMhaH100BwdPrep2Block(
     b_lean_obj_arg dO_ptr, b_lean_obj_arg o_ptr, b_lean_obj_arg d_ptr,
     uint64_t seq_len, uint64_t head_dim,
@@ -105,6 +121,7 @@ namespace tyr_ops {
 
 enum class FlashAttnRoute {
   Portable,
+  TkMhaH100Decode,
   TkMhaH1002Block,
   TkMhaH10012Block,
 };
@@ -164,6 +181,46 @@ static inline bool scale_matches_default(
   return std::abs(scale.value() - default_scale_for_dim(head_dim)) <= 1.0e-6;
 }
 
+static inline bool native_decode_autograd_safe(
+    const torch::Tensor& query,
+    const torch::Tensor& key,
+    const torch::Tensor& value) {
+  return !(query.requires_grad() || key.requires_grad() || value.requires_grad());
+}
+
+static inline bool valid_gqa_heads(int64_t q_heads, int64_t kv_heads, bool enable_gqa) {
+  if (q_heads <= 0 || kv_heads <= 0) {
+    return false;
+  }
+  if (q_heads == kv_heads) {
+    return true;
+  }
+  return enable_gqa && q_heads % kv_heads == 0;
+}
+
+static uint64_t generated_decode_shared_mem(
+    int64_t head_dim,
+    uint64_t block_threads = 256) {
+  return (block_threads + 2 * static_cast<uint64_t>(head_dim)) * sizeof(float);
+}
+
+// Shared-memory budget for the TK-style tile-based decode kernel.
+// Tiles: qShared/kShared/vShared/oShared at 64x128 BF16 each = 4 * 64 * 128 * 2 = 64 KiB,
+// plus a small overhead for semaphores and tile metadata. Held well under the
+// generated_forward_shared_mem() ceiling.
+static uint64_t generated_decode_tk_shared_mem(int64_t head_dim) {
+  const uint64_t bf16_bytes = sizeof(uint16_t);
+  const uint64_t tile_m = 64;
+  const uint64_t tile_n = 64;
+  const uint64_t hdim = static_cast<uint64_t>(head_dim);
+  const uint64_t tiles_bytes =
+      (tile_m * hdim + tile_n * hdim + tile_n * hdim + tile_m * hdim) * bf16_bytes;
+  // 4 KiB headroom for semaphores, padding, and TMA descriptors.
+  return tiles_bytes + 4096;
+}
+
+static uint64_t generated_forward_shared_mem();
+
 static void check_flash_attn_args(
     const torch::Tensor& query,
     const torch::Tensor& key,
@@ -204,6 +261,27 @@ static inline FlashAttnRoute select_route(
   const bool mask_ok = !(attn_mask.has_value() && attn_mask->defined());
   const bool device_ok = query.is_cuda();
   const bool dtype_ok = query.scalar_type() == torch::kBFloat16;
+  // V1 of the TK-style decode kernel supports head_dim ∈ {64, 128} and any
+  // positive KV sequence length; the kernel iterates ceil(kv_seq/64) blocks
+  // and applies a runtime tail mask (TK `right_fill`) on the last block.
+  const bool decode_shape_ok =
+      query.size(2) == 1 &&
+      key.size(2) == value.size(2) &&
+      key.size(2) > 0 &&
+      query.size(3) == key.size(3) &&
+      (query.size(3) == 128 || query.size(3) == 64) &&
+      valid_gqa_heads(query.size(1), key.size(1), enable_gqa);
+  const bool decode_semantics_ok =
+      mask_ok &&
+      dropout_p == 0.0 &&
+      !is_causal &&
+      scale_matches_default(query.size(3), scale) &&
+      native_decode_autograd_safe(query, key, value) &&
+      generated_decode_tk_shared_mem(query.size(3)) <= generated_forward_shared_mem();
+  if (device_ok && dtype_ok && decode_shape_ok && decode_semantics_ok) {
+    return FlashAttnRoute::TkMhaH100Decode;
+  }
+
   const bool shape_ok =
       query.size(0) == 1 &&
       query.size(1) == 1 &&
@@ -319,6 +397,52 @@ static std::pair<torch::Tensor, torch::Tensor> generated_forward(
   }
 
   return {out, l};
+}
+
+static torch::Tensor generated_decode_forward(
+    const torch::Tensor& query,
+    const torch::Tensor& key,
+    const torch::Tensor& value) {
+  const auto q = query.contiguous();
+  const auto k = key.contiguous();
+  const auto v = value.contiguous();
+  auto out = torch::empty_like(q);
+
+  LeanTensorRef q_ref(q);
+  LeanTensorRef k_ref(k);
+  LeanTensorRef v_ref(v);
+  LeanTensorRef out_ref(out);
+
+  LaunchConfig cfg;
+  // One CTA per (batch, q_head); single warpgroup of 128 threads. KV reads
+  // across a GQA group rely on L2 reuse in V1; a packed-Q variant is V2 work.
+  cfg.grid_x = static_cast<uint64_t>(q.size(0) * q.size(1));
+  cfg.block_x = 128;
+  cfg.shared_mem = generated_decode_tk_shared_mem(q.size(3));
+  cfg.stream = current_stream_handle(q);
+
+  const int64_t head_dim = q.size(3);
+  auto launch = [&](auto fn, const char* name) {
+    auto result = fn(
+        q_ref.obj, k_ref.obj, v_ref.obj, out_ref.obj,
+        static_cast<uint64_t>(q.size(0)),
+        static_cast<uint64_t>(q.size(1)),
+        static_cast<uint64_t>(k.size(1)),
+        static_cast<uint64_t>(k.size(2)),
+        static_cast<uint64_t>(q.size(3)),
+        cfg.grid_x, cfg.grid_y, cfg.grid_z,
+        cfg.block_x, cfg.block_y, cfg.block_z,
+        cfg.shared_mem, cfg.stream);
+    throw_on_launcher_error(result, name);
+  };
+  if (head_dim == 64) {
+    launch(lean_launch_Tyr_GPU_Kernels_tkMhaH100DecodeFwd64,
+           "tkMhaH100DecodeFwd64");
+  } else {
+    launch(lean_launch_Tyr_GPU_Kernels_tkMhaH100DecodeFwd,
+           "tkMhaH100DecodeFwd");
+  }
+  return out;
 }
 
 static std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> generated_backward(
@@ -542,6 +666,8 @@ static torch::Tensor flash_attn_dispatch_impl(
 
   auto route = select_route(query, key, value, attn_mask, dropout_p, is_causal, scale, enable_gqa);
   switch (route) {
+    case FlashAttnRoute::TkMhaH100Decode:
+      return generated_decode_forward(query, key, value);
     case FlashAttnRoute::TkMhaH1002Block:
       return NativeFlashAttnFunction<FlashAttnRoute::TkMhaH1002Block, FlashAttnImpl::Generated>::apply(
           query, key, value);
