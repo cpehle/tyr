@@ -255,15 +255,28 @@ else ifeq ($(GPU_CODEGEN_MODULES),all)
 CU_SRCS := $(STATIC_CU_SRCS) $(wildcard $(SRC_DIR)/generated/*.cu)
 else
 GPU_CODEGEN_CU_NAMES := $(addsuffix .cu,$(subst .,_,$(GPU_CODEGEN_MODULES)))
-CU_SRCS := $(STATIC_CU_SRCS) $(addprefix $(SRC_DIR)/generated/,$(GPU_CODEGEN_CU_NAMES))
+# Use $(wildcard ...) so that .cu files which haven't been generated yet are
+# silently dropped from CU_SRCS rather than producing "no rule to make target"
+# errors. The outer libtyr build orchestrates codegen *before* this make runs,
+# so all expected .cu files exist by the time we need them. Inner sub-builds
+# (those that skip codegen, used to build GenerateGpuKernels itself) don't
+# need any kernel symbols and tolerate missing .cu files.
+CU_SRCS := $(STATIC_CU_SRCS) $(foreach name,$(GPU_CODEGEN_CU_NAMES),$(wildcard $(SRC_DIR)/generated/$(name)))
 endif
 ifneq ($(HAS_NVCC),1)
 ifneq ($(strip $(CU_SRCS)),)
 $(warning NVCC not found; disabling CUDA kernel compilation and using CPU stubs)
 endif
 CU_SRCS :=
-SRCS += generated/tyr_gpu_kernel_stubs.cpp
 endif
+# Always include the kernel-launcher stubs in libTyrC.a. The stubs declare
+# every `lean_launch_Tyr_GPU_Kernels_...` symbol with `__attribute__((weak))`,
+# so when the corresponding generated .cu compiles to a strong definition,
+# that wins; otherwise the weak stub provides the symbol so any link
+# referencing it (e.g. `tyr_ops.cpp`) succeeds. This breaks the
+# chicken-and-egg between `GenerateGpuKernels` (needs libTyrC.a to link, but
+# is also what produces the kernels' .cu files) without any conditional.
+SRCS += generated/tyr_gpu_kernel_stubs.cpp
 REQUIRES_TK := $(if $(strip $(CU_SRCS)),1,0)
 
 LIB_NAME := TyrC
@@ -277,9 +290,16 @@ SHARED_FLAG := -shared
 endif
 
 CPP_OBJ_FILES := $(addprefix $(OUT_DIR)/,$(SRCS:.cpp=.o))
+# Pull the stubs object out of CPP_OBJ_FILES so we can put it LAST in the
+# archive. Static-archive symbol resolution scans members in order; the
+# stubs declare weak versions of every kernel launcher, so if they appear
+# before the strong definitions emitted from generated CUDA, the stubs
+# would be picked first and the real kernels never linked.
+GPU_STUB_OBJ := $(OUT_DIR)/generated/tyr_gpu_kernel_stubs.o
+CPP_OBJ_FILES_NO_STUBS := $(filter-out $(GPU_STUB_OBJ),$(CPP_OBJ_FILES))
 MM_OBJ_FILES := $(addprefix $(OUT_DIR)/,$(MM_SRCS:.mm=.o))
 CU_OBJ_FILES := $(patsubst $(SRC_DIR)/%.cu,$(OUT_DIR)/%.o,$(CU_SRCS))
-OBJ_FILES := $(CPP_OBJ_FILES) $(MM_OBJ_FILES) $(CU_OBJ_FILES)
+OBJ_FILES := $(CPP_OBJ_FILES_NO_STUBS) $(MM_OBJ_FILES) $(CU_OBJ_FILES) $(GPU_STUB_OBJ)
 HDR_FILES := $(addprefix $(HDR_DIR)/,$(HDRS))
 
 # Lean runtime library

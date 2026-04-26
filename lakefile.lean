@@ -375,10 +375,16 @@ extern_lib libtyr pkg := do
   let gpuKernelSrcRoot := pkg.dir / "Tyr" / "GPU" / "Kernels"
   let generatedCudaDir := pkg.dir / "cc" / "src" / "generated"
   let gpuCodegenConfigPath := pkg.buildDir / "libtyr_gpu_codegen.env"
+  -- TYR_GPU_CODEGEN_MODULE may be a single module name OR a space-separated
+  -- list of module names. The latter is convenient when a build needs more
+  -- than one kernel module's CUDA emitted, e.g.
+  -- `TYR_GPU_CODEGEN_MODULE="Tyr.GPU.Kernels.MhaH100 Tyr.GPU.Kernels.MhaH100Decode"`.
   let gpuCodegenModule :=
     match (← IO.getEnv "TYR_GPU_CODEGEN_MODULE") with
     | some moduleName => (nonEmptyTrimmed? moduleName).getD "Tyr.GPU.Kernels.MhaH100"
     | none => "Tyr.GPU.Kernels.MhaH100"
+  let gpuCodegenModules : Array String :=
+    (gpuCodegenModule.splitOn " ").toArray.filterMap (fun s => nonEmptyTrimmed? s)
   let skipGpuCodegenValue := (← IO.getEnv "TYR_SKIP_GPU_CODEGEN").getD ""
   let buildTyrCDylibValue := (← IO.getEnv "TYR_BUILD_TYRC_DYLIB").getD ""
   let gpuCodegenConfig :=
@@ -399,8 +405,13 @@ extern_lib libtyr pkg := do
       p.toString.endsWith ".cu" || p.toString.endsWith ".h"
   let toolJob ← inputDir (pkg.dir / "cc" / "tools") (text := true) fun p =>
     p.toString.endsWith ".py"
-  let gpuKernelSrcJob ← inputDir gpuKernelSrcRoot (text := true) fun p =>
-    p.toString.endsWith ".lean"
+  -- Note: we deliberately do NOT watch `gpuKernelSrcRoot` (the kernel `.lean`
+  -- source tree). Changes to a kernel `.lean` file flow through Lean
+  -- compilation to its `.c.o.export`, which `gpuIrJob` already watches with
+  -- the right scope (only the active codegen module's IR triggers a rebuild).
+  -- Watching the whole `Tyr/GPU/Kernels/` directory caused every kernel-edit
+  -- in the workspace to invalidate the libtyr build cascade.
+  let _ := gpuKernelSrcRoot
   -- Fresh checkouts do not have the generated GPU IR tree yet.
   -- Create it so the optional IR scan can track later `.c.o.export` files instead of failing early.
   IO.FS.createDirAll gpuIrRoot
@@ -430,7 +441,7 @@ extern_lib libtyr pkg := do
     else
       inputDir gpuIrRoot (text := false) fun p =>
         p.toString.endsWith ".c.o.export"
-  let depJob := makefileJob.mix gpuCodegenConfigJob |>.mix srcJob |>.mix toolJob |>.mix gpuKernelSrcJob |>.mix gpuIrJob
+  let depJob := makefileJob.mix gpuCodegenConfigJob |>.mix srcJob |>.mix toolJob |>.mix gpuIrJob
 
   buildFileAfterDep tyrCLib depJob fun _ => do
     let sysroot ← getLeanSysroot
@@ -465,10 +476,9 @@ extern_lib libtyr pkg := do
           relinkBuiltExecutableToTmp pkg.dir "GenerateGpuKernels"
       proc {
         cmd := "lake"
-        args := #[
-          "-R", "env", runnableGeneratorExe.toString,
-          gpuCodegenModule, "--out-dir", generatedCudaDir.toString
-        ]
+        args := #["-R", "env", runnableGeneratorExe.toString]
+                  ++ gpuCodegenModules
+                  ++ #["--out-dir", generatedCudaDir.toString]
         cwd := pkg.dir
         env := #[("LEAN_HOME", some sysroot.toString), ("TYR_SKIP_GPU_CODEGEN", some "1")] ++ extraEnv
       }
@@ -492,7 +502,29 @@ extern_lib libtyr pkg := do
 
 /-! ## Lean Library -/
 
-/-- Main Lean library containing all Tyr modules -/
+/-- Codegen-only sub-library.
+
+    Owns `Tyr.GPU.Codegen.*` plus the small set of `Tyr.GPU.*` modules they
+    depend on (Types, Capabilities, Tile) and `Tyr.Basic`. These modules are
+    pure Lean — no FFI, no libtorch — so we explicitly disable
+    `precompileModules`. That way `lean_exe GenerateGpuKernels` (whose root
+    is `Tyr.GPU.Codegen.GenerateMain`) doesn't trigger the per-module `.so`
+    cascade across all of `Tyr.*` whenever a kernel `.lean` file is touched. -/
+lean_lib TyrCodegen where
+  roots := #[
+    `Tyr.GPU.Codegen,
+    `Tyr.GPU.Types,
+    `Tyr.GPU.Capabilities,
+    `Tyr.GPU.Tile,
+    `Tyr.Basic
+  ]
+  precompileModules := false
+
+/-- Main Lean library containing all Tyr modules.
+
+    `roots := #[\`Tyr]` claims everything under `Tyr.*` that isn't already
+    owned by `TyrCodegen` (a more specific match for `Tyr.GPU.Codegen.*`
+    etc. wins per Lake's lib resolution). -/
 @[default_target]
 lean_lib Tyr where
   roots := #[`Tyr]
@@ -522,10 +554,32 @@ lean_exe test_runner where
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
-/-- Generate CUDA translation units from registered @[gpu_kernel] declarations. -/
+/-- Extra link args for `GenerateGpuKernels`. The auto-attached
+    `libtyr.static` references CUDA driver API symbols
+    (`cuTensorMapEncodeTiled`, `cuGetErrorString`) via `tk_vendor_mha_h100.o`,
+    which the package-default flags don't pick up. CUDA toolchains ship a
+    link-time stub for `libcuda.so` at `$CUDA_HOME/lib64/stubs`. -/
+def codegenExeLinkArgs : Array String := run_io do
+  if System.Platform.isOSX then return #[] else
+  let stubsDir ←
+    match (← IO.getEnv "CUDA_HOME") with
+    | some home => pure s!"{home}/lib64/stubs"
+    | none =>
+      pure "/grid/it/easybuild/easybuild5/software/CUDA/12.9.1/stubs/lib64"
+  return #[s!"-L{stubsDir}", "-lcuda"]
+
+/-- Generate CUDA translation units from registered @[gpu_kernel] declarations.
+
+    Its root `Tyr.GPU.Codegen.GenerateMain` lives in the codegen-only sub-lib
+    `TyrCodegen` (above) so the per-module `.so` cascade across `Tyr.*` is
+    skipped. `moreLinkArgs := codegenExeLinkArgs` overrides the package
+    default — drops the heavy libtorch/arrow/parquet flags (we don't need
+    them in a pure-Lean codegen tool) but keeps `-lcuda` so the auto-
+    attached libtyr.static can resolve its CUDA driver-API references. -/
 lean_exe GenerateGpuKernels where
   root := `Tyr.GPU.Codegen.GenerateMain
   supportInterpreter := true
+  moreLinkArgs := codegenExeLinkArgs
 
 /-- Compile registered @[tileir_kernel] declarations through NVIDIA TileIR tooling. -/
 lean_exe GenerateTileIRKernels where
@@ -809,6 +863,20 @@ lean_exe RunFlashAttnOp where
 /-- One-H100 benchmark scaffold for the `tyr::flash_attn` bring-up. -/
 lean_exe RunFlashAttnBench where
   root := `Examples.GPU.RunFlashAttnBench
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
+/-- Numerical correctness harness for the TK-style decode kernel.
+
+    Generates random Q/K/V plus a torch SDPA reference for several decode
+    shapes (Llama-3 head_dim=128, Qwen3-4B head_dim=64, tail-mask case,
+    single-block case, batch>1) and asserts kernel parity within BF16
+    tolerance. Also runs a cache-vs-no-cache parity test against
+    `Cache.attendLayer`.
+
+    Usage: `lake exe RunMhaH100Decode [--regen|--gen-only]`. -/
+lean_exe RunMhaH100Decode where
+  root := `Examples.GPU.RunMhaH100Decode
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
