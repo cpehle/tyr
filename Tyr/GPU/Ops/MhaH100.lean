@@ -160,8 +160,10 @@ def recommendedKernelSeqs : List UInt64 := [128, 768]
 
 /-- Current kernel coverage predicate used by dispatch helpers. -/
 def supportsKernelShape (seq : UInt64) (isCausal : Bool := false) : Bool :=
-  AttentionProblem.hasNativeKernel <|
-    AttentionProblem.selfAttention seq 64 (.CUDA 0) .BFloat16 isCausal .SM90
+  match AttentionProblem.currentSpecialization <|
+      AttentionProblem.selfAttention seq 64 (.CUDA 0) .BFloat16 isCausal .SM90 with
+  | .tkMhaH1002Block | .tkMhaH10012Block => true
+  | .portable | .tkMhaH100Decode => false
 
 /-- ThunderKittens-style explicit dispatch:
     - use kernels for non-causal `seq=128` and `seq=768`
@@ -171,6 +173,8 @@ def mhaFwdDispatch {seq : UInt64}
     : IO (FwdCtxDispatch seq) := do
   let problem := AttentionProblem.ofQKV q k v none 0.0 isCausal none false none .SM90
   match AttentionProblem.currentSpecialization problem with
+  | .tkMhaH100Decode =>
+      pure { out := sdpaFwdPortable q k v isCausal }
   | .tkMhaH1002Block =>
       let fwdCtx ← mhaFwd (seq := 128) (kvBlocks := 2) q k v stream
       pure { out := fwdCtx.out, selection := .tkMhaH1002Block, lOut2 := some fwdCtx.lOut }
@@ -189,6 +193,8 @@ def mhaBwdDispatch {seq : UInt64}
     : IO (F32 seq × F32 seq × F32 seq) := do
   match ctx.selection with
   | .portable =>
+      sdpaBwdPortable q k v dO isCausal
+  | .tkMhaH100Decode =>
       sdpaBwdPortable q k v dO isCausal
   | .tkMhaH1002Block =>
       match ctx.lOut2 with
