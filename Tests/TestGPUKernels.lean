@@ -11,8 +11,11 @@ import Tyr.GPU.Codegen.IR
 import Tyr.GPU.Codegen.Monad
 import Tyr.GPU.Codegen.Primitives
 import Tyr.GPU.Codegen.Loop
+import Tyr.GPU.Codegen.Macros
 import Tyr.GPU.Codegen.EmitNew
 import Tyr.GPU.Codegen.Attribute
+import Tyr.GPU.Kernels.MhaH100Decode
+import Tyr.GPU.Ops.AttentionProblem
 import LeanTest
 
 namespace Tests.GPUKernels
@@ -41,6 +44,17 @@ private def assertContainsAll (code : String) (checks : Array (String × String)
 
 private def assertNotContains (code : String) (needle msg : String) : IO Unit := do
   assertTrue (!(code.containsSubstr needle)) msg
+
+private partial def stmtHasRaw : KStmt → Bool
+  | .raw _ => true
+  | .forLoop _ _ _ body => body.any stmtHasRaw
+  | .forLoopVal _ _ _ body => body.any stmtHasRaw
+  | .forLoopRev _ _ _ body => body.any stmtHasRaw
+  | .forLoopValRev _ _ _ body => body.any stmtHasRaw
+  | .forLoopStrideVal _ _ _ _ body => body.any stmtHasRaw
+  | .ifStmt _ thenBody elseBody => thenBody.any stmtHasRaw || elseBody.any stmtHasRaw
+  | .ifWarpGroup _ body => body.any stmtHasRaw
+  | _ => false
 
 /-! ## Basic Tile Allocation Tests -/
 
@@ -636,6 +650,105 @@ def testKernelParams : IO Unit := do
   assertTrue (code.containsSubstr "gl<bf16, 1, 1, -1, -1> v0") "Should have bf16 global descriptor param"
   assertTrue (code.containsSubstr "gl<float, 1, 1, -1, -1> v1") "Should have float global descriptor param"
   assertTrue (code.containsSubstr "uint64_t v2") "Should have scalar param"
+
+/-- Test the shared SIMT helpers used by decode-style kernels. -/
+@[test]
+def testDecodeSimtHelperCodegen : IO Unit := do
+  let kernel := buildKernelM "decode_helper_test" .SM90 #[] do
+    let dim ← constUInt64Val 64 "head_dim"
+    let _scale ← runtimeDefaultScoreScaleLog2e dim
+    for _ in (← parallelThreadRange dim) do
+      blockSync
+
+  let code := generateKernel kernel
+  assertTrue (code.containsSubstr "threadIdx.x")
+    "parallelThreadRange should use the current thread index"
+  assertTrue (code.containsSubstr "blockDim.x")
+    "parallelThreadRange should stride by the CTA size"
+  assertTrue (code.containsSubstr "::rsqrtf")
+    "runtimeDefaultScoreScaleLog2e should lower through scalar rsqrt"
+  assertTrue (code.containsSubstr "1.44269504089")
+    "runtimeDefaultScoreScaleLog2e should include log2(e)"
+
+/-- Decode attention should be authored through the DSL, not raw CUDA snippets.
+
+    The TK-style tile-based decode kernel (V1) lowers QK^T and PV through
+    WGMMA, K/V loads through TMA, and uses online softmax in `log2` form. -/
+@[test]
+noncomputable def testDecodeKernelDslCodegen : IO Unit := do
+  let kernel := Tyr.GPU.Kernels.tkMhaH100DecodeFwd.kernel
+  assertTrue (!kernel.body.any stmtHasRaw)
+    "Decode kernel IR should not contain raw backend escape statements"
+
+  let code := generateKernel kernel
+  assertTrue (code.containsSubstr "extern __shared__ int __shm[]")
+    "Dynamic shared-memory views should emit a shared-memory arena"
+  assertTrue (code.containsSubstr "mma_ABt(")
+    "QK^T should lower through warpgroup MMA (mma_ABt)"
+  assertTrue (code.containsSubstr "mma_AB(")
+    "PV should lower through warpgroup MMA (mma_AB)"
+  assertTrue (code.containsSubstr "tma::load_async")
+    "K/V loads should lower through TMA async loads"
+  assertTrue (code.containsSubstr "wait(")
+    "Pipeline semaphores should lower through kittens::wait"
+  assertTrue (code.containsSubstr "exp2")
+    "Online softmax should use base-2 exponent (TK convention)"
+  assertTrue (code.containsSubstr "right_fill(")
+    "Tail-block scores should be masked via TK right_fill so non-multiple-of-64 kv_seq works"
+
+/-- The head_dim=64 decode variant emits the same TK-style structure. -/
+@[test]
+noncomputable def testDecodeKernelDslCodegen64 : IO Unit := do
+  let kernel := Tyr.GPU.Kernels.tkMhaH100DecodeFwd64.kernel
+  assertTrue (!kernel.body.any stmtHasRaw)
+    "Decode-64 kernel IR should not contain raw backend escape statements"
+  let code := generateKernel kernel
+  assertTrue (code.containsSubstr "mma_ABt(")
+    "QK^T should still lower through warpgroup MMA in the 64-dim variant"
+  assertTrue (code.containsSubstr "mma_AB(")
+    "PV should still lower through warpgroup MMA in the 64-dim variant"
+  assertTrue (code.containsSubstr "tma::load_async")
+    "K/V loads should still lower through TMA async loads in the 64-dim variant"
+  assertTrue (code.containsSubstr "right_fill(")
+    "Tail-block masking should also be present in the 64-dim variant"
+
+/-- Eligibility predicate routes Llama-3-8B decode shapes to the TK kernel. -/
+@[test]
+def testDecodeEligibilityLlama3 : IO Unit := do
+  -- Llama-3-8B: 32 q heads, 8 kv heads (GQA ratio 4), head_dim=128, BF16, decode.
+  let llama3 : Tyr.GPU.Ops.AttentionProblem := {
+    batch := 1, numQHeads := 32, numKVHeads := 8, qSeq := 1, kvSeq := 2048,
+    headDim := 128, dtype := .BFloat16, device := .CUDA 0, arch := .SM90,
+    mode := .decode, enableGqa := true,
+  }
+  assertTrue (Tyr.GPU.Ops.AttentionProblem.currentSpecialization llama3
+              == Tyr.GPU.Ops.AttentionSpecialization.tkMhaH100Decode)
+    "Llama-3-8B decode shape should select tkMhaH100Decode"
+
+  -- head_dim=64 should also select decode (Qwen3-4B style shape via the 64-dim variant).
+  let qwen4b := { llama3 with numQHeads := 32, numKVHeads := 8, headDim := 64 }
+  assertTrue (Tyr.GPU.Ops.AttentionProblem.currentSpecialization qwen4b
+              == Tyr.GPU.Ops.AttentionSpecialization.tkMhaH100Decode)
+    "head_dim=64 with GQA should also select tkMhaH100Decode (64-dim variant)"
+
+  -- Other head dims still fall back to portable.
+  let llama3D256 := { llama3 with headDim := 256 }
+  assertTrue (Tyr.GPU.Ops.AttentionProblem.currentSpecialization llama3D256
+              == Tyr.GPU.Ops.AttentionSpecialization.portable)
+    "head_dim=256 should fall back to portable (only 64 and 128 are V1-supported)"
+
+  -- Non-multiple-of-64 kv_seq should still select decode; the kernel handles
+  -- the tail with a runtime right_fill mask.
+  let llama3Tail := { llama3 with kvSeq := 2049 }
+  assertTrue (Tyr.GPU.Ops.AttentionProblem.currentSpecialization llama3Tail
+              == Tyr.GPU.Ops.AttentionSpecialization.tkMhaH100Decode)
+    "kv_seq=2049 should still select tkMhaH100Decode (tail mask handles the partial block)"
+
+  -- qSeq>1 is not single-token decode and must fall through.
+  let llama3Prefill := { llama3 with qSeq := 16, mode := .densePrefill }
+  assertTrue (Tyr.GPU.Ops.AttentionProblem.currentSpecialization llama3Prefill
+              == Tyr.GPU.Ops.AttentionSpecialization.portable)
+    "qSeq>1 should fall back to portable (decode requires qSeq=1)"
 
 /-! ## Integration Tests -/
 
