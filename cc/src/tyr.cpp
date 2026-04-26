@@ -75,6 +75,19 @@
 #include <lean/lean.h>
 #include <torch/torch.h>
 #include <ATen/ATen.h>
+
+namespace tyr_ops {
+torch::Tensor flash_attn_dispatch(
+    const torch::Tensor& query,
+    const torch::Tensor& key,
+    const torch::Tensor& value,
+    const c10::optional<torch::Tensor>& attn_mask,
+    double dropout_p,
+    bool is_causal,
+    const c10::optional<double>& scale,
+    bool enable_gqa);
+}
+
 #if defined(__has_include)
 #if __has_include(<soxr.h>)
 #define TYR_HAS_SOXR 1
@@ -4051,8 +4064,8 @@ lean_object* lean_torch_timestep_embedding(
 // K, V: [batch, n_kv_head, seq, head_dim]
 lean_object* lean_torch_sdpa_gqa(
   uint64_t /*batch*/,
-  uint64_t n_head,
-  uint64_t n_kv_head,
+  uint64_t /*n_head*/,
+  uint64_t /*n_kv_head*/,
   uint64_t /*seq*/,
   uint64_t /*head_dim*/,
   b_lean_obj_arg query,
@@ -4066,23 +4079,8 @@ lean_object* lean_torch_sdpa_gqa(
   auto k = borrowTensor(key);
   auto v = borrowTensor(value);
 
-  // Handle GQA by expanding KV heads to match Q heads
-  if (enable_gqa) {
-    if (n_head != n_kv_head && n_kv_head > 0) {
-      // Repeat KV heads: [batch, n_kv_head, seq, head_dim] -> [batch, n_head, seq, head_dim]
-      auto repeat_factor = n_head / n_kv_head;
-      // Use repeat_interleave along dim 1 (head dimension)
-      k = k.repeat_interleave(repeat_factor, 1);
-      v = v.repeat_interleave(repeat_factor, 1);
-    }
-  }
-
-  auto result_ = torch::scaled_dot_product_attention(
-    q, k, v,
-    c10::nullopt,  // attn_mask
-    dropout_p,
-    is_causal
-  );
+  auto result_ = tyr_ops::flash_attn_dispatch(
+    q, k, v, c10::nullopt, dropout_p, is_causal != 0, c10::nullopt, enable_gqa != 0);
 
   return fromTorchTensor(result_);
 }
@@ -4286,8 +4284,8 @@ LEAN_EXPORT lean_object* lean_torch_sdpa_gqa_mask_qkv(
 // K, V: [batch, n_kv_head, kv_seq, head_dim]
 lean_object* lean_torch_sdpa_gqa_qkv(
   uint64_t /*batch*/,
-  uint64_t n_head,
-  uint64_t n_kv_head,
+  uint64_t /*n_head*/,
+  uint64_t /*n_kv_head*/,
   uint64_t /*q_seq*/,
   uint64_t /*kv_seq*/,
   uint64_t /*head_dim*/,
@@ -4302,20 +4300,8 @@ lean_object* lean_torch_sdpa_gqa_qkv(
   auto k = borrowTensor(key);
   auto v = borrowTensor(value);
 
-  if (enable_gqa) {
-    if (n_head != n_kv_head && n_kv_head > 0) {
-      auto repeat_factor = n_head / n_kv_head;
-      k = k.repeat_interleave(repeat_factor, 1);
-      v = v.repeat_interleave(repeat_factor, 1);
-    }
-  }
-
-  auto result_ = torch::scaled_dot_product_attention(
-    q, k, v,
-    c10::nullopt,  // attn_mask
-    dropout_p,
-    is_causal
-  );
+  auto result_ = tyr_ops::flash_attn_dispatch(
+    q, k, v, c10::nullopt, dropout_p, is_causal != 0, c10::nullopt, enable_gqa != 0);
   return fromTorchTensor(result_);
 }
 
