@@ -57,22 +57,13 @@ def persistentLoop (cfg : PersistentConfig) (totalWork : VarId)
   | .fixedStride =>
     comment "Persistent loop (fixed stride)"
     -- workId starts at blockIdx.x, strides by gridDim.x
-    let blockIdxX ← freshVar
-    emit (.getBlockIdx blockIdxX 0)
-    -- We use a forLoopVal with stride emulated via raw code
-    -- Emit: for (int workId = blockIdx.x; workId < totalWork; workId += gridDim.x)
-    let workId ← freshVar
+    let blockIdxX ← getBlockIdx 0 "work_block"
+    let gridDimX ← getGridDim 0 "work_grid"
     let isValid ← freshVar
     emit (.constInt isValid 1)  -- always valid in fixed stride (loop condition checks)
-    let bodyStmts ← captureBody (body { workId, isValid })
-    -- Emit the strided for loop using raw code for the stride pattern
-    let wid := VarId.toIdent workId
-    let bid := VarId.toIdent blockIdxX
-    let tw := VarId.toIdent totalWork
-    emit (.raw s!"for (int {wid} = {bid}; {wid} < {tw}; {wid} += gridDim.x) \{")
-    for stmt in bodyStmts do
-      emit stmt
-    emit (.raw "}")
+    let total : KVal UInt32 := ⟨totalWork, "total_work"⟩
+    for workId in kstride blockIdxX total gridDimX do
+      body { workId := workId.id, isValid }
 
   | .atomicCounter =>
     comment "Persistent loop (atomic counter)"

@@ -59,6 +59,17 @@ structure KValRange where
   hi : VarId
   deriving Repr, Inhabited
 
+/-- Runtime range with runtime start and stride.
+
+This is the Tyr analogue of a simple TileLang `T.Parallel(n)` partition:
+each CUDA thread can iterate `threadIdx.x, threadIdx.x + blockDim.x, ...`
+over a dynamic extent without hand-written backend code. -/
+structure KStrideRange where
+  start : VarId
+  hi : VarId
+  step : VarId
+  deriving Repr, Inhabited
+
 /-- Create a kernel range.
     Usage: `for i in krange 0 numBlocks do ...` -/
 def krange (lo hi : Nat) : KRange := ⟨lo, hi⟩
@@ -66,6 +77,11 @@ def krange (lo hi : Nat) : KRange := ⟨lo, hi⟩
 /-- Create a kernel range with a runtime upper bound.
     Usage: `for i in kvrange 0 numBlocks do ...` where `numBlocks : KVal UInt32`. -/
 def kvrange (lo : Nat) (hi : KVal UInt32) : KValRange := ⟨lo, hi.id⟩
+
+/-- Create a runtime range with runtime start and stride.
+    Typical usage: `for d in kstride tid headDim blockThreads do ...`. -/
+def kstride {A B C : Type} (start : KVal A) (hi : KVal B) (step : KVal C) : KStrideRange :=
+  ⟨start.id, hi.id, step.id⟩
 
 /-- Notation for kernel ranges: gpu[lo:hi]
     Alternative syntax using brackets -/
@@ -124,6 +140,17 @@ instance : ForIn KernelM KValRange KIdx where
       let _ ← f idx init
       pure ()
     emit (.forLoopVal loopVar range.lo range.hi capturedBody)
+    pure init
+
+/-- ForIn instance for runtime strided loops. -/
+instance : ForIn KernelM KStrideRange (KVal UInt64) where
+  forIn range init f := do
+    let loopVar ← freshVar
+    let idx : KVal UInt64 := ⟨loopVar, "stride_idx"⟩
+    let capturedBody ← captureBody do
+      let _ ← f idx init
+      pure ()
+    emit (.forLoopStrideVal loopVar range.start range.hi range.step capturedBody)
     pure init
 
 /-! ## Legacy Loop Functions

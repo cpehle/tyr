@@ -271,11 +271,51 @@ def constIntVal (value : Int) (name : String := "const") : KernelM (KVal UInt32)
   emit (.constInt v value)
   pure ⟨v, name⟩
 
+/-- Materialize an integer constant as a UInt64 runtime scalar. -/
+def constUInt64Val (value : Int) (name : String := "const_u64") : KernelM (KVal UInt64) := do
+  let v ← freshVar
+  emit (.constInt v value)
+  pure ⟨v, name⟩
+
 /-- Materialize a Float32 constant as a runtime scalar. -/
 def constFloatVal (value : Float) (name : String := "const_f") : KernelM (KVal Float32) := do
   let v ← freshVar
   emit (.constFloat v value)
   pure ⟨v, name⟩
+
+/-- Allocate a mutable runtime scalar, optionally initialized from another scalar.
+
+This is the scalar analogue of TileLang's `T.alloc_var`: it gives kernels a
+named local variable for loop-carried state without leaving the typed DSL. -/
+def allocScalar (ty : KScalarType) (name : String := "scalar")
+    (init : Option (KVal T) := none) : KernelM (KVal T) := do
+  let v ← freshVar
+  emit (.declScalar v ty (init.map (·.id)))
+  pure ⟨v, name⟩
+
+/-- Allocate a mutable Float32 scalar. -/
+def allocFloat32Scalar (init : Option (KVal Float32) := none)
+    (name : String := "f32") : KernelM (KVal Float32) :=
+  allocScalar .Float32 name init
+
+/-- Assign a runtime scalar variable. -/
+def assignScalar {T : Type} (dst src : KVal T) : KernelM Unit := do
+  emit (.scalarAssign dst.id src.id)
+
+/-- Cast a runtime scalar to a different scalar type. -/
+def castScalar {A B : Type} (dstTy : KScalarType)
+    (src : KVal A) (name : String := "cast") : KernelM (KVal B) := do
+  let v ← freshVar
+  emit (.scalarCast v src.id dstTy)
+  pure ⟨v, name⟩
+
+/-- Cast a runtime scalar to UInt64. -/
+def castUInt64 {A : Type} (src : KVal A) (name : String := "u64") : KernelM (KVal UInt64) :=
+  castScalar .UInt64 src name
+
+/-- Cast a runtime scalar to Float32. -/
+def castFloat32 {A : Type} (src : KVal A) (name : String := "f32") : KernelM (KVal Float32) :=
+  castScalar .Float32 src name
 
 /-- Load one Float32 scalar from global memory at a runtime offset. -/
 def loadFloat32Scalar
@@ -294,6 +334,55 @@ def storeFloat32Scalar
     (src : KVal Float32)
     : KernelM Unit := do
   emit (.storeScalarGlobal dst.id src.id offset.id)
+
+/-- Load one BF16 global element by flat element offset and convert it to Float32. -/
+def loadBFloat16FlatAsFloat32
+    (src : GPtr GpuFloat.BFloat16)
+    (offset : KVal UInt64)
+    (name : String := "load_bf16_f32")
+    : KernelM (KVal Float32) := do
+  let v ← freshVar
+  emit (.loadFlatGlobal v src.id offset.id .BFloat16 .Float32)
+  pure ⟨v, name⟩
+
+/-- Store one Float32 scalar to a BF16 global element by flat element offset. -/
+def storeBFloat16FlatFromFloat32
+    (dst : GPtr GpuFloat.BFloat16)
+    (offset : KVal UInt64)
+    (src : KVal Float32)
+    : KernelM Unit := do
+  emit (.storeFlatGlobal dst.id offset.id src.id .BFloat16 .Float32)
+
+/-- Allocate a dynamic linear Float32 shared-memory view at an element offset.
+
+The launch wrapper supplies the total dynamic shared-memory byte count. This
+mirrors the ergonomic role of TileLang `T.alloc_shared` for runtime extents,
+while keeping the offset arithmetic explicit and checkable in Tyr. -/
+def sharedFloat32At
+    (offsetElems : KVal UInt64)
+    (name : String := "shared_f32")
+    : KernelM (KShared Float32) := do
+  let v ← freshVar
+  emit (.declSharedLinear v offsetElems.id .Float32)
+  pure ⟨v, name⟩
+
+/-- Load one Float32 from a dynamic linear shared-memory view. -/
+def loadSharedFloat32
+    (src : KShared Float32)
+    (offset : KVal UInt64)
+    (name : String := "load_shared_f32")
+    : KernelM (KVal Float32) := do
+  let v ← freshVar
+  emit (.loadSharedLinear v src.id offset.id .Float32)
+  pure ⟨v, name⟩
+
+/-- Store one Float32 into a dynamic linear shared-memory view. -/
+def storeSharedFloat32
+    (dst : KShared Float32)
+    (offset : KVal UInt64)
+    (src : KVal Float32)
+    : KernelM Unit := do
+  emit (.storeSharedLinear dst.id offset.id src.id .Float32)
 
 /-- Apply a scalar unary operation to a runtime scalar. -/
 def scalarUnary {T : Type} (op : ScalarUnaryOp)
@@ -330,6 +419,18 @@ def scalarNeg (src : KVal Float32) (name : String := "neg") : KernelM (KVal Floa
 /-- Exponentiate a runtime scalar. -/
 def scalarExp (src : KVal Float32) (name : String := "exp") : KernelM (KVal Float32) :=
   scalarUnary .Exp src name
+
+/-- Base-2 exponentiate a runtime Float32 scalar. -/
+def scalarExp2 (src : KVal Float32) (name : String := "exp2") : KernelM (KVal Float32) :=
+  scalarUnary .Exp2 src name
+
+/-- Base-2 logarithm of a runtime Float32 scalar. -/
+def scalarLog2 (src : KVal Float32) (name : String := "log2") : KernelM (KVal Float32) :=
+  scalarUnary .Log2 src name
+
+/-- Reciprocal square root of a runtime Float32 scalar. -/
+def scalarRsqrt (src : KVal Float32) (name : String := "rsqrt") : KernelM (KVal Float32) :=
+  scalarUnary .Rsqrt src name
 
 /-- Add two runtime scalars. -/
 def scalarAddVal {T : Type} (a b : KVal T) (name : String := "add") : KernelM (KVal T) :=
@@ -370,6 +471,23 @@ def scalarDivVal {T : Type} (a b : KVal T) (name : String := "div") : KernelM (K
 /-- Compute the remainder of two runtime scalars. -/
 def scalarMod {T : Type} (a b : KVal T) (name : String := "mod") : KernelM (KVal T) :=
   scalarBinary .Mod a b name
+
+/-- Runtime scalar minimum. -/
+def scalarMin {T : Type} (a b : KVal T) (name : String := "min") : KernelM (KVal T) :=
+  scalarBinary .Min a b name
+
+/-- Runtime scalar maximum. -/
+def scalarMax {T : Type} (a b : KVal T) (name : String := "max") : KernelM (KVal T) :=
+  scalarBinary .Max a b name
+
+/-- CTA-wide Float32 sum reduction. All threads receive the same result. -/
+def blockReduceSumFloat32
+    (src : KVal Float32)
+    (name : String := "block_sum")
+    : KernelM (KVal Float32) := do
+  let v ← freshVar
+  emit (.blockReduce .Sum v src.id .Float32)
+  pure ⟨v, name⟩
 
 /-- Fill a vector with an arithmetic progression. -/
 def iotaVec {dtype : GpuFloat} {len : Nat}
@@ -1098,6 +1216,19 @@ def rightFill {dtype : GpuFloat} {rows cols : Nat}
     (fillVal : Option Float := none) : KernelM Unit := do
   emit (.mask (.RightFill colIdx) dst.id src.id fillVal)
 
+/-- Right fill with a runtime cutoff: fill columns `colVar..end` with `fillVal`.
+
+This is the runtime-parameterized analogue of `rightFill`. ThunderKittens'
+`warp::right_fill` already accepts a runtime `int col_idx`; this primitive
+threads a Lean `KVal UInt32` through the IR. Used by decode-style attention
+where the valid KV length within the last block is determined at runtime
+(see `Tyr.GPU.Kernels.tkMhaH100DecodeFwd`). -/
+def rightFillVal {dtype : GpuFloat} {rows cols : Nat}
+    (dst src : RT dtype rows cols .Row)
+    (colVar : KVal UInt32)
+    (fillVal : Option Float := none) : KernelM Unit := do
+  emit (.maskRightFillVal dst.id src.id colVar.id fillVal)
+
 /-- Upper fill: fill rows 0..rowIdx with value -/
 def upperFill {dtype : GpuFloat} {rows cols : Nat}
     (dst src : RT dtype rows cols .Row)
@@ -1806,6 +1937,18 @@ def getBlockIdx (axis : Nat := 0) (name : String := "block_idx") : KernelM (KVal
 def getThreadIdx (axis : Nat := 0) (name : String := "thread_idx") : KernelM (KVal UInt32) := do
   let v ← freshVar
   emit (.getThreadIdx v axis)
+  pure ⟨v, name⟩
+
+/-- Read `gridDim.{x,y,z}` at runtime. -/
+def getGridDim (axis : Nat := 0) (name : String := "grid_dim") : KernelM (KVal UInt32) := do
+  let v ← freshVar
+  emit (.getGridDim v axis)
+  pure ⟨v, name⟩
+
+/-- Read `blockDim.{x,y,z}` at runtime. -/
+def getBlockDim (axis : Nat := 0) (name : String := "block_dim") : KernelM (KVal UInt32) := do
+  let v ← freshVar
+  emit (.getBlockDim v axis)
   pure ⟨v, name⟩
 
 /-! ## Complex Number Operations -/
