@@ -5,6 +5,7 @@ import Tyr.GPU.Kernels.FlashAttnBwd
 import Tyr.GPU.Kernels.LinearAttn
 import Tyr.GPU.Kernels.LinearAttnBwd
 import Tyr.GPU.Kernels.MhaH100
+import Tyr.GPU.Kernels.MhaH100Decode
 import Tyr.GPU.Kernels.MhaH100LCF
 import Tyr.GPU.Kernels.RingAttn
 import Tyr.GPU.Kernels.RingAttnBwd
