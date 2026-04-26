@@ -147,13 +147,21 @@ def forward {batch seq hidden_size num_heads num_kv_heads head_dim : UInt64}
   linear3d attn_out attn.o_proj
 
 /-- Incremental attention step with KV cache.
-    Input query is one token `[batch,1,hidden]`; cache grows by one KV step. -/
+    Input query is one token `[batch,1,hidden]`; cache grows by one KV step.
+
+    When `useTyrFlashAttn` is true (default false), routes the cached
+    attention through `nn.tyrFlashAttn4d` instead of `scaledDotProductAttentionGQAQKV`.
+    The C++ `tyr::flash_attn` dispatcher then routes shape-eligible decode
+    problems (BF16 + qSeq=1 + head_dim=128 or 64 + GQA-valid) to the native
+    TK kernel `tkMhaH100DecodeFwd[64]`, and falls back to PyTorch SDPA
+    otherwise — so this flag is safe to flip on for any shape. -/
 def forwardStep {batch hidden_size num_heads num_kv_heads head_dim : UInt64}
     (attn : QwenAttention hidden_size num_heads num_kv_heads head_dim)
     (x : T #[batch, 1, hidden_size])
     (cos : T #[1, head_dim / 2])
     (sin : T #[1, head_dim / 2])
     (cache : KVCache batch num_kv_heads head_dim)
+    (useTyrFlashAttn : Bool := false)
     : T #[batch, 1, hidden_size] × KVCache batch num_kv_heads head_dim :=
   -- Project current token to Q/K/V.
   let q0 := linear3d x attn.q_proj
@@ -197,7 +205,10 @@ def forwardStep {batch hidden_size num_heads num_kv_heads head_dim : UInt64}
 
     -- Use q_len=1, kv_len=(seq+1). Causal masking is unnecessary because KV has no future tokens.
     let attnOut : T #[batch, num_heads, 1, head_dim] :=
-      nn.scaledDotProductAttentionGQAQKV qh kAll vAll 0.0 false true
+      if useTyrFlashAttn then
+        nn.tyrFlashAttn4d qh kAll vAll none 0.0 false none true
+      else
+        nn.scaledDotProductAttentionGQAQKV qh kAll vAll 0.0 false true
     let attnOut : T #[batch, 1, num_heads, head_dim] := nn.transpose_from_attention attnOut
     let attnOut : T #[batch, 1, num_heads * head_dim] := reshape attnOut #[batch, 1, num_heads * head_dim]
     let out : T #[batch, 1, hidden_size] := linear3d attnOut attn.o_proj
@@ -223,7 +234,10 @@ def forwardStep {batch hidden_size num_heads num_kv_heads head_dim : UInt64}
     let kAll : T #[batch, num_kv_heads, kvLen, head_dim] := data.slice kStore' 2 0 kvLen
     let vAll : T #[batch, num_kv_heads, kvLen, head_dim] := data.slice vStore' 2 0 kvLen
     let attnOut : T #[batch, num_heads, 1, head_dim] :=
-      nn.scaledDotProductAttentionGQAQKV qh kAll vAll 0.0 false true
+      if useTyrFlashAttn then
+        nn.tyrFlashAttn4d qh kAll vAll none 0.0 false none true
+      else
+        nn.scaledDotProductAttentionGQAQKV qh kAll vAll 0.0 false true
     let attnOut : T #[batch, 1, num_heads, head_dim] := nn.transpose_from_attention attnOut
     let attnOut : T #[batch, 1, num_heads * head_dim] := reshape attnOut #[batch, 1, num_heads * head_dim]
     let out : T #[batch, 1, hidden_size] := linear3d attnOut attn.o_proj
