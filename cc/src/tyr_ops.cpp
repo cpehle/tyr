@@ -56,6 +56,14 @@ extern "C" lean_object* lean_launch_Tyr_GPU_Kernels_tkMhaH100DecodeFwd64(
     uint64_t grid_x, uint64_t grid_y, uint64_t grid_z,
     uint64_t block_x, uint64_t block_y, uint64_t block_z,
     uint64_t shared_mem, uint64_t stream);
+extern "C" lean_object* lean_launch_Tyr_GPU_Kernels_tkMhaH100DecodeFwd256(
+    b_lean_obj_arg q_ptr, b_lean_obj_arg k_ptr, b_lean_obj_arg v_ptr,
+    b_lean_obj_arg o_ptr,
+    uint64_t batch, uint64_t q_heads, uint64_t kv_heads,
+    uint64_t kv_seq, uint64_t head_dim,
+    uint64_t grid_x, uint64_t grid_y, uint64_t grid_z,
+    uint64_t block_x, uint64_t block_y, uint64_t block_z,
+    uint64_t shared_mem, uint64_t stream);
 extern "C" lean_object* lean_launch_Tyr_GPU_Kernels_tkMhaH100BwdPrep2Block(
     b_lean_obj_arg dO_ptr, b_lean_obj_arg o_ptr, b_lean_obj_arg d_ptr,
     uint64_t seq_len, uint64_t head_dim,
@@ -261,15 +269,16 @@ static inline FlashAttnRoute select_route(
   const bool mask_ok = !(attn_mask.has_value() && attn_mask->defined());
   const bool device_ok = query.is_cuda();
   const bool dtype_ok = query.scalar_type() == torch::kBFloat16;
-  // V1 of the TK-style decode kernel supports head_dim ∈ {64, 128} and any
-  // positive KV sequence length; the kernel iterates ceil(kv_seq/64) blocks
-  // and applies a runtime tail mask (TK `right_fill`) on the last block.
+  // V1 of the TK-style decode kernel supports head_dim ∈ {64, 128, 256} and
+  // any positive KV sequence length; the kernel iterates ceil(kv_seq/64)
+  // blocks and applies a runtime tail mask (TK `right_fill`) on the last
+  // block. head_dim=256 covers the Qwen 3.5/3.6 family and Gemma-2 27B.
   const bool decode_shape_ok =
       query.size(2) == 1 &&
       key.size(2) == value.size(2) &&
       key.size(2) > 0 &&
       query.size(3) == key.size(3) &&
-      (query.size(3) == 128 || query.size(3) == 64) &&
+      (query.size(3) == 128 || query.size(3) == 64 || query.size(3) == 256) &&
       valid_gqa_heads(query.size(1), key.size(1), enable_gqa);
   const bool decode_semantics_ok =
       mask_ok &&
@@ -438,6 +447,9 @@ static torch::Tensor generated_decode_forward(
   if (head_dim == 64) {
     launch(lean_launch_Tyr_GPU_Kernels_tkMhaH100DecodeFwd64,
            "tkMhaH100DecodeFwd64");
+  } else if (head_dim == 256) {
+    launch(lean_launch_Tyr_GPU_Kernels_tkMhaH100DecodeFwd256,
+           "tkMhaH100DecodeFwd256");
   } else {
     launch(lean_launch_Tyr_GPU_Kernels_tkMhaH100DecodeFwd,
            "tkMhaH100DecodeFwd");
