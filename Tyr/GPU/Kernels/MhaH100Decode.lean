@@ -73,17 +73,34 @@ private def asyncLoadDecodePair {dtype : GpuFloat} {rows cols : Nat}
   loadGlobalAsync dstB srcB coordB sem.id
   waitSemaphore sem
 
-/-- Shared kernel body for both head-dim specializations.
+/-- Shared kernel body for all head-dim specializations.
 
-    `hdim` is a compile-time `Nat` (64 or 128) that determines the WGMMA tile
-    head dimension and the corresponding score scale `scoreScaleLog2e`. The
-    body is otherwise identical for both specializations. -/
+    `hdim` is a compile-time `Nat` (64, 128, or 256) that determines the
+    WGMMA tile head dimension and the corresponding score scale
+    `scoreScaleLog2e`. The body is otherwise identical for all
+    specializations.
+
+    Tile-row strategy: shared tiles are 64 rows (the full warpgroup-level
+    WGMMA m=64), but per-warp register tiles are 16 rows — each warp owns
+    1/4 of the warpgroup output. This matches the TK reference structure
+    (`mha_h100_lcf.cu` uses `rt_fl<16, qo_tile::cols>` for the
+    accumulator) and was the missing piece for d=256: per-warp
+    `rt<float, 64, 256>` was 512 fp32/thread, exactly the
+    65536/128-thread budget under `__launch_bounds__(128, 1)`, so q/p/state
+    pushed it over the limit and ptxas reported `wgmma.mma_async
+    instructions are serialized due to insufficient register resources`.
+
+    Q stays in shared throughout (`warpgroupMmaSharedT64x16` consumes Q
+    directly from `qShared`); avoiding the `load q qShared` step keeps
+    register usage flat for the Q tile, since with qSeq=1 only one Q row
+    is real anyway. -/
 private def decodeFwdBodyImpl (hdim : Nat) (scoreScaleLog2e : Float)
     (hHdim : hdim % 16 = 0)
     (q_ptr k_ptr v_ptr o_ptr : GPtr GpuFloat.BFloat16)
     (q_heads kv_heads kv_seq : KVal UInt64) : KernelM Unit := do
-  let tileM : Nat := 64
-  let tileN : Nat := 64
+  let tileM : Nat := 64       -- warpgroup-level M (shared tile rows)
+  let tileMWarp : Nat := 16   -- per-warp register tile rows (warpgroup distributes 64 rows across 4 warps × 16)
+  let tileN : Nat := 64       -- KV block (kv positions per WGMMA inner loop)
   setLaunchBounds 128 1
 
   let blockId32 ← getBlockIdx 0 "decode_block"
@@ -96,10 +113,11 @@ private def decodeFwdBodyImpl (hdim : Nat) (scoreScaleLog2e : Float)
   let qCoord := makeRTileCoord batchId.id qHead.id zero.id zero.id
   let oCoord := qCoord
 
-  let q ← allocRT .BFloat16 tileM hdim
-  let o ← zeroRT .Float32 tileM hdim
-  let softmaxState ← allocSoftmaxState .Float32 tileM
+  -- Per-warp register tiles (16 rows = warp's slice of the 64-row warpgroup output)
+  let o ← zeroRT .Float32 tileMWarp hdim
+  let softmaxState ← allocSoftmaxState .Float32 tileMWarp
 
+  -- Shared tiles (64 rows for warpgroup-level WGMMA)
   let qShared ← allocST .BFloat16 tileM hdim
   let kShared ← allocST .BFloat16 tileN hdim
   let vShared ← allocST .BFloat16 tileN hdim .Col
@@ -108,7 +126,7 @@ private def decodeFwdBodyImpl (hdim : Nat) (scoreScaleLog2e : Float)
   let kvSem ← allocSemaphore
 
   asyncLoadDecodeTile qShared q_ptr qCoord qSem
-  load q qShared
+  -- Q stays in shared; consumed via `warpgroupMmSharedT64x16` below.
 
   let blockN64 ← constUInt64Val (tileN : Int) "block_n"
   let blockNMinusOne ← constUInt64Val ((tileN - 1 : Nat) : Int) "block_n_minus_one"
@@ -120,33 +138,34 @@ private def decodeFwdBodyImpl (hdim : Nat) (scoreScaleLog2e : Float)
 
   -- Loop-peel the last KV block out of the inner loop. Even an `if`-guarded
   -- `right_fill` keeps the unrolled mask body in the inner-loop function and
-  -- disrupts WGMMA register scheduling for the 64-row warpgroup score tile,
-  -- breaking d=64 multi-iter parity (verified empirically). Inner iterations
-  -- never need the mask (cutoff >= tileN), so emit them with no mask code at
-  -- all. The single peeled-out tail iteration carries the conditional mask.
+  -- disrupts WGMMA register scheduling, breaking d=64 multi-iter parity
+  -- (verified empirically). Inner iterations never need the mask
+  -- (cutoff >= tileN); the single peeled-out tail iteration carries it.
   let oneU32 ← constIntVal (1 : Int) "one_u32"
   let numKvBlocksMinusOne ← scalarSub numKvBlocks32 oneU32 "n_kv_blocks_minus_one"
 
   for kvIdx in kvrange 0 numKvBlocksMinusOne do
-    let s ← zeroRT .Float32 tileM tileN
-    let p ← allocRT .BFloat16 tileM tileN
+    let s ← zeroRT .Float32 tileMWarp tileN
+    let p ← allocRT .BFloat16 tileMWarp tileN
     let kvCoord := makeRTileCoord batchId.id kvHead.id kvIdx.id zero.id
 
     asyncLoadDecodePair kShared k_ptr kvCoord vShared v_ptr kvCoord kvSem
-    warpgroupMmT s q kShared (hK := hHdim)
+    -- Shared/shared mma_ABt: dst per-warp 16×64 ← qShared (64×hdim) @ kShared^T
+    warpgroupMmSharedT64x16 s qShared kShared (hK := hHdim)
     mmaAsyncWait
     onlineSoftmaxLog2 s o softmaxState scoreScaleLog2e
     convert p s
+    -- Register/shared mma_AB: dst per-warp 16×hdim ← p (16×64) @ vShared (64×hdim)
     warpgroupMma o p vShared (hN := hHdim)
     mmaAsyncWait
 
   -- Peeled tail iteration: same body, plus the runtime-guarded right_fill.
-  let s ← zeroRT .Float32 tileM tileN
-  let p ← allocRT .BFloat16 tileM tileN
+  let s ← zeroRT .Float32 tileMWarp tileN
+  let p ← allocRT .BFloat16 tileMWarp tileN
   let kvCoord := makeRTileCoord batchId.id kvHead.id numKvBlocksMinusOne.id zero.id
 
   asyncLoadDecodePair kShared k_ptr kvCoord vShared v_ptr kvCoord kvSem
-  warpgroupMmT s q kShared (hK := hHdim)
+  warpgroupMmSharedT64x16 s qShared kShared (hK := hHdim)
   mmaAsyncWait
   let kvBase ← scalarMulVal numKvBlocksMinusOne blockN32 "kv_base_tail"
   let cutoff ← scalarSub kvSeq32 kvBase "tail_cutoff"
@@ -160,16 +179,17 @@ private def decodeFwdBodyImpl (hdim : Nat) (scoreScaleLog2e : Float)
 
   finalizeSoftmax o softmaxState
 
-  let oBf16 ← allocRT .BFloat16 tileM hdim
+  let oBf16 ← allocRT .BFloat16 tileMWarp hdim
   convert oBf16 o
-  store oShared oBf16
+  -- Warpgroup-distributed store: each warp's 16 rows → its strip of the
+  -- 64-row shared tile, then a single TMA store writes all 64 rows.
+  warpgroupStore oShared oBf16
   -- Use a TMA store (vs. non-TMA `warp::store`) so OOB writes get dropped.
-  -- The 64xD tile only has 1 valid query row (row 0); rows 1..63 came from
-  -- TMA OOB-zero-fill on the Q load and produce garbage softmax outputs that
-  -- must NOT be written to global. With a non-TMA `warp::store` they would
-  -- spill into the next q_head's row 0 (since [B,Hq,1,D] has stride S*D=D
-  -- between heads), corrupting all output. TMA stores drop OOB writes
-  -- automatically because the global gl is configured with q_seq=1.
+  -- The 64×D shared tile has only 1 valid query row (row 0 of warp 0);
+  -- rows 1..63 came from TMA OOB-zero-fill on the Q load and produce
+  -- garbage softmax outputs that must NOT be written to global. TMA stores
+  -- drop OOB writes automatically because the global gl is configured with
+  -- q_seq=1.
   storeGlobalAsync o_ptr oShared oCoord
   tmaStoreCommitGroup
   tmaStoreAsyncWait
