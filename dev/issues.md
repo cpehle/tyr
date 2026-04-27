@@ -80,11 +80,16 @@ Longer-form rationale per item in `dev/decode_kernel_v2_plan.md`.
   tile dimensions and indexing change.
 - Sequence after D02 (bench V1 first to know what we're improving on).
 
-### D02: Benchmark V1 vs SDPA
-- **Issue**: No measured perf number yet for any decode shape.
-- **Plan**: Mirror `Examples/GPU/RunFlashAttnBench.lean` shape onto the
-  decode fixtures, emit JSONL to `benchmarks/results/decode_*.jsonl`.
-  ~half day.
+### D02: Benchmark V1 vs SDPA — **done**
+- Landed in `test(gpu): forward-only decode benchmark vs PyTorch SDPA`.
+  `Examples/GPU/RunDecodeBench.lean` runs Tyr decode + SDPA on the
+  decode fixtures and emits JSONL.
+- **First numbers** (H100 NVL,
+  `benchmarks/results/decode_v1_bench.jsonl`): B=4 d=128 kv=2048 is
+  **5.17×** faster than SDPA; B=1 cases at d∈{64,128,256} kv=2048 tie
+  at 1.00×; **`qwen36_35B_kv8k` is 0.48×** (2× slower than SDPA) —
+  register-spill on d=256 hurts most at long kv_seq where WGMMA
+  pipelining actually matters. Motivates D01b and D03.
 
 ### D03: GQA-group Q-packing
 - **Issue**: At Llama-3 batch=1, grid is `batch * q_heads = 32` CTAs
