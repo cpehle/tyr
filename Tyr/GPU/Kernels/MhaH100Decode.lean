@@ -1,12 +1,13 @@
 /- ThunderKittens-style decode-attention forward kernels for BF16 Q/K/V on H100.
 
-Two specializations covering the head dims that matter in practice:
+Three specializations covering the head dims that matter in practice:
 
-- `tkMhaH100DecodeFwd`   : `head_dim = 128` (Llama-3, Qwen2-7B, Mistral-7B)
-- `tkMhaH100DecodeFwd64` : `head_dim = 64`  (Qwen3-4B, Llama-2-7B/13B variants)
+- `tkMhaH100DecodeFwd`    : `head_dim = 128` (Llama-3, Qwen2-7B, Mistral-7B)
+- `tkMhaH100DecodeFwd64`  : `head_dim = 64`  (Qwen3-4B, Llama-2-7B/13B variants)
+- `tkMhaH100DecodeFwd256` : `head_dim = 256` (Qwen 3.5/3.6 family, Gemma-2 27B)
 
-Both share the same schedule (factored into `decodeFwdBodyImpl`) — only the
-WGMMA tile head dim and the score scale change.
+All three share the same schedule (factored into `decodeFwdBodyImpl`) — only
+the WGMMA tile head dim and the score scale change.
 
 Semantics:
 - Q/O layout: [batch, q_heads, 1, head_dim]
@@ -212,6 +213,36 @@ def tkMhaH100DecodeFwd64
     (_head_dim : KVal UInt64) : KernelM Unit :=
   -- 1/sqrt(64) * log2(e) = 0.125 * 1.44269504 = 0.18033688011125
   decodeFwdBodyImpl 64 0.18033688011125 (by decide)
+    q_ptr k_ptr v_ptr o_ptr q_heads kv_heads kv_seq
+
+/-- Decode attention forward, head_dim = 256.
+
+    Targets Qwen 3.5/3.6 (`head_dim=256`, `q_heads/kv_heads = 8` GQA ratio)
+    and Gemma-2 27B. Launch configuration: `gridX = batch * q_heads`,
+    `blockX = 128`. One CTA per `(batch, q_head)`.
+
+    SMEM: 4 × 64 × 256 × 2 = 128 KiB tile area + ~4 KiB headroom — fits in
+    the 227 KiB H100 dynamic SMEM cap.
+
+    Register pressure: per-warp `rt<float, 64, 256>` is 512 fp32/thread
+    plus q/p tiles + softmax state. With `__launch_bounds__(128, 1)` the
+    thread reg budget is 65536/128 = 512, so this almost certainly spills
+    to local memory. Correctness holds; perf is capped until we refactor
+    to 16-row warp tiles (TK reference structure). Tracked in
+    `dev/issues.md` D01b. -/
+@[gpu_kernel .SM90]
+def tkMhaH100DecodeFwd256
+    (q_ptr : GPtr GpuFloat.BFloat16)
+    (k_ptr : GPtr GpuFloat.BFloat16)
+    (v_ptr : GPtr GpuFloat.BFloat16)
+    (o_ptr : GPtr GpuFloat.BFloat16)
+    (_batch : KVal UInt64)
+    (q_heads : KVal UInt64)
+    (kv_heads : KVal UInt64)
+    (kv_seq : KVal UInt64)
+    (_head_dim : KVal UInt64) : KernelM Unit :=
+  -- 1/sqrt(256) * log2(e) = 0.0625 * 1.44269504 = 0.090168440034
+  decodeFwdBodyImpl 256 0.090168440034 (by decide)
     q_ptr k_ptr v_ptr o_ptr q_heads kv_heads kv_seq
 
 end Tyr.GPU.Kernels

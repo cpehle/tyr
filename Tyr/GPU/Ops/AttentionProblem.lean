@@ -308,9 +308,11 @@ def currentTkBaseEligible (problem : AttentionProblem) : Bool :=
 
     V1 of the TK-style decode kernel supports any positive `kvSeq` (the kernel
     iterates `ceil(kvSeq / 64)` blocks and applies a runtime tail mask via
-    ThunderKittens' `right_fill`). `headDim` is one of {64, 128} — the C++
-    launcher dispatches to `tkMhaH100DecodeFwd` or `tkMhaH100DecodeFwd64` based
-    on the tensor's head dim. Other head dims fall back to portable SDPA. -/
+    ThunderKittens' `right_fill`). `headDim` is one of {64, 128, 256} — the
+    C++ launcher dispatches to `tkMhaH100DecodeFwd`, `tkMhaH100DecodeFwd64`,
+    or `tkMhaH100DecodeFwd256` based on the tensor's head dim. head_dim=256
+    targets the Qwen 3.5/3.6 family and Gemma-2 27B; other head dims fall
+    back to portable SDPA. -/
 def currentTkDecodeEligible (problem : AttentionProblem) : Bool :=
   let deviceOk := problem.isCuda && problem.arch == .SM90
   let dtypeOk := problem.dtype == .BFloat16
@@ -330,7 +332,7 @@ def currentTkDecodeEligible (problem : AttentionProblem) : Bool :=
     problem.numQHeads > 0 &&
     problem.numKVHeads > 0 &&
     problem.kvSeq > 0 &&
-    (problem.headDim == 128 || problem.headDim == 64) &&
+    (problem.headDim == 128 || problem.headDim == 64 || problem.headDim == 256) &&
     gqaOk
   deviceOk && dtypeOk && modeOk && semanticsOk && shapeOk
 
