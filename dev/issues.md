@@ -66,19 +66,16 @@ Longer-form rationale per item in `dev/decode_kernel_v2_plan.md`.
   selects `tkMhaH100Decode`; head_dim=192 (and other unsupported
   dims) still route to portable.
 
-### D01b: refactor decode kernel to 16-row warp tiles — **pending**
-- **Issue**: V1 uses 64-row warpgroup tiles. Per-warp
-  `rt<float, 64, 256>` is 512 fp32/thread plus q/p/state, which
-  exceeds the 65536/128 = 512 32-bit reg/thread budget under
-  `launch_bounds(128, 1)` and spills to local memory. ptxas confirms:
-  `wgmma.mma_async instructions are serialized due to insufficient
-  register resources`. Correctness holds; perf is capped.
-- **Plan**: mirror the TK reference (`mha_h100_lcf.cu`) structure —
-  per-warp `rt_fl<16, hdim>` accumulator, warpgroup distributes 64
-  rows across 4 warps × 16. Q is loaded once into shared and each
-  warp pulls its 16-row strip. Same online softmax math; only the
-  tile dimensions and indexing change.
-- Sequence after D02 (bench V1 first to know what we're improving on).
+### D01b: refactor decode kernel to 16-row warp tiles — **done**
+- Landed in `perf(gpu-kernels): D01b — 16-row per-warp tiles for
+  decode kernel`. o/s/p register tiles are now per-warp 16 rows (TK
+  reference structure); shared tiles stay 64 rows for warpgroup
+  WGMMA. Q stays in shared (consumed via `warpgroupMmSharedT64x16`).
+  Output goes through `warpgroupStore` then a single TMA store.
+- **Result** (vs V1): 4.6×–15× faster on Tyr-internal across all
+  shapes; the `qwen36_35B_kv8k` 0.48× SDPA regression is gone (now
+  1.00×). All 6 parity shapes + cache parity still pass at the
+  prior tolerances.
 
 ### D02: Benchmark V1 vs SDPA — **done**
 - Landed in `test(gpu): forward-only decode benchmark vs PyTorch SDPA`.
