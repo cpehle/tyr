@@ -55,19 +55,30 @@ V1 of the TK-style H100 decode kernel landed (`tkMhaH100DecodeFwd[64]` in
 `Tyr/GPU/Kernels/MhaH100Decode.lean`). Tracker for the remaining work.
 Longer-form rationale per item in `dev/decode_kernel_v2_plan.md`.
 
-### D01: head_dim=256 (unblock Qwen 3.6 / Gemma-2 27B) — **in progress**
-- **Issue**: V1 dispatch only routes `head_dim ∈ {64, 128}`. Qwen 3.6
-  35B-A3B (and the rest of the Qwen 3.5/3.6 family in
-  `Tyr/Model/Qwen35/Config.lean`) all use `head_dim=256` with GQA
-  ratio 8 — falls back to PyTorch SDPA today.
-- **Acceptance**: `tkMhaH100DecodeFwd256` lands; dispatch routes
-  `head_dim=256` to it; new `qwen36_35B` shape in `RunMhaH100Decode`
-  parity-passes vs SDPA at the existing 2.5e-2 atol/rtol.
-- **Risk**: per-warp `rt<float, 64, 256>` is 512 fp32/thread plus q/p
-  tiles, will likely spill to local memory under
-  `__launch_bounds__(128, 1)`. Correctness should hold; perf is capped
-  until we refactor to 16-row warp tiles. Track the perf refactor as
-  D01b — do not block D01 on it.
+### D01: head_dim=256 (unblock Qwen 3.6 / Gemma-2 27B) — **done**
+- Landed in `feat(gpu-kernels): head_dim=256 decode kernel for Qwen
+  3.5/3.6 family`. `tkMhaH100DecodeFwd256` calls `decodeFwdBodyImpl`
+  with `hdim=256` and `scoreScaleLog2e = 1/sqrt(256) * log2(e)`.
+- Verified: `qwen36_35B` (B=1, qHeads=16, kvHeads=2, kvSeq=2048,
+  head_dim=256) parity-passes vs SDPA at mae≈4.4e-5, max_abs≈4.9e-4
+  — same precision as head_dim=128 cases.
+- Eligibility test in `TestGPUKernels.lean` updated: head_dim=256
+  selects `tkMhaH100Decode`; head_dim=192 (and other unsupported
+  dims) still route to portable.
+
+### D01b: refactor decode kernel to 16-row warp tiles — **pending**
+- **Issue**: V1 uses 64-row warpgroup tiles. Per-warp
+  `rt<float, 64, 256>` is 512 fp32/thread plus q/p/state, which
+  exceeds the 65536/128 = 512 32-bit reg/thread budget under
+  `launch_bounds(128, 1)` and spills to local memory. ptxas confirms:
+  `wgmma.mma_async instructions are serialized due to insufficient
+  register resources`. Correctness holds; perf is capped.
+- **Plan**: mirror the TK reference (`mha_h100_lcf.cu`) structure —
+  per-warp `rt_fl<16, hdim>` accumulator, warpgroup distributes 64
+  rows across 4 warps × 16. Q is loaded once into shared and each
+  warp pulls its 16-row strip. Same online softmax math; only the
+  tile dimensions and indexing change.
+- Sequence after D02 (bench V1 first to know what we're improving on).
 
 ### D02: Benchmark V1 vs SDPA
 - **Issue**: No measured perf number yet for any decode shape.
