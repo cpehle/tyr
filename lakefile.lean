@@ -880,6 +880,19 @@ lean_exe RunMhaH100Decode where
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
+/-- Decode-specific perf benchmark: timed forward over the same shape
+    matrix as `RunMhaH100Decode`, reporting p50 latency vs PyTorch SDPA
+    plus a couple of long-context (kv_seq=8k) rows. Forward-only
+    (decode is inference, no backward).
+
+    Usage: `lake exe RunDecodeBench [--case all|<id>] [--backend all|tyr|sdpa]
+                                    [--warmup N] [--iters N] [--repeats N]
+                                    [--jsonl-out path]`. -/
+lean_exe RunDecodeBench where
+  root := `Examples.GPU.RunDecodeBench
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
 /-- End-to-end ThunderKittens `mha_h100` forward/backward fixture validation. -/
 lean_exe RunMhaH100 where
   root := `Examples.GPU.RunMhaH100
