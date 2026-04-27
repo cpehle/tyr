@@ -48,3 +48,71 @@ This document tracks architectural, performance, and correctness issues identifi
 ### C02: Device Consistency
 - **Issue**: Some FFI calls (like `rand`, `full`) take an optional `device`, but most ops assume all inputs are on the same device. Mismatches lead to hard Torch crashes.
 - **Recommendation**: Add a `Device` index to the `T` type: `T (s : Shape) (d : Device)`. This would provide compile-time guarantees for device-locality.
+
+## ⚡ Decode kernel — open issues
+
+V1 of the TK-style H100 decode kernel landed (`tkMhaH100DecodeFwd[64]` in
+`Tyr/GPU/Kernels/MhaH100Decode.lean`). Tracker for the remaining work.
+Longer-form rationale per item in `dev/decode_kernel_v2_plan.md`.
+
+### D01: head_dim=256 (unblock Qwen 3.6 / Gemma-2 27B) — **in progress**
+- **Issue**: V1 dispatch only routes `head_dim ∈ {64, 128}`. Qwen 3.6
+  35B-A3B (and the rest of the Qwen 3.5/3.6 family in
+  `Tyr/Model/Qwen35/Config.lean`) all use `head_dim=256` with GQA
+  ratio 8 — falls back to PyTorch SDPA today.
+- **Acceptance**: `tkMhaH100DecodeFwd256` lands; dispatch routes
+  `head_dim=256` to it; new `qwen36_35B` shape in `RunMhaH100Decode`
+  parity-passes vs SDPA at the existing 2.5e-2 atol/rtol.
+- **Risk**: per-warp `rt<float, 64, 256>` is 512 fp32/thread plus q/p
+  tiles, will likely spill to local memory under
+  `__launch_bounds__(128, 1)`. Correctness should hold; perf is capped
+  until we refactor to 16-row warp tiles. Track the perf refactor as
+  D01b — do not block D01 on it.
+
+### D02: Benchmark V1 vs SDPA
+- **Issue**: No measured perf number yet for any decode shape.
+- **Plan**: Mirror `Examples/GPU/RunFlashAttnBench.lean` shape onto the
+  decode fixtures, emit JSONL to `benchmarks/results/decode_*.jsonl`.
+  ~half day.
+
+### D03: GQA-group Q-packing
+- **Issue**: At Llama-3 batch=1, grid is `batch * q_heads = 32` CTAs
+  (~25% util on 132-SM H100); each GQA group's R sibling CTAs
+  redundantly load the same K/V tiles.
+- **Plan**: Pack the R = `q_heads/kv_heads` query heads of each group
+  into the first R rows of one 64-row Q tile. Grid drops to
+  `batch * kv_heads`, KV bandwidth drops R×, output write becomes a
+  per-row scatter. ~2 days. Detail in `decode_kernel_v2_plan.md` §1.
+- **Expected**: ~3× on Llama-3-8B batch=1.
+
+### D04: Producer/consumer + 2-stage KV ring buffer
+- **Issue**: V1 is single-buffer; load and compute are only one stage
+  deep, so long-`kv_seq` decode spends measurable time waiting on
+  KV transfers.
+- **Plan**: 1 producer + 1 consumer warpgroup, `STArray BFloat16 64
+  hdim 2`, per-stage `SemaphoreArray 2`. All required primitives are
+  already in `Tyr/GPU/Codegen/Primitives.lean`; main effort is
+  semaphore phase-bit ergonomics. ~3 days. Detail in §2.
+- **Expected**: 1.5–2× for `kv_seq ≥ 1k`.
+
+### D05: Split-KV reduction
+- **Issue**: At batch=1, kv_seq=16k, even with GQA packing each CTA
+  processes 256 KV blocks sequentially while ~124 SMs sit idle.
+- **Plan**: Split kv_seq across 8–16 CTAs writing partial
+  `(max, sum, acc)` to scratch; tiny combine kernel applies the
+  streaming softmax-rescale recurrence. ~3 days. Detail in §3.
+- **Expected**: ~10× at batch=1, kv_seq=16k.
+
+### D06 (deferred): Paged KV cache
+- vLLM-style block-table indirection. Detail in §4. Defer until a
+  concrete serving user lands.
+
+### D07 (deferred): FP8 K/V cache
+- Halves KV bandwidth on Hopper at the cost of one scale-factor
+  multiply per block. Detail in §6. Defer until a target model demands
+  it (Llama-3 / Qwen 3.6 still in BF16 today).
+
+### D08 (cross-cutting): Decode backward
+- Decode forward only. Decode is typically inference-time so backward
+  isn't needed yet, but the kernel doc-comment should call it out
+  explicitly.
