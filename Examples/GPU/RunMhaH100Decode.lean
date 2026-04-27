@@ -47,7 +47,13 @@ def decodeShapes : Array DecodeShape := #[
   { name := "llama3_one_block", batch := 1, qHeads := 32, kvHeads := 8,
     kvSeq := 64, headDim := 128 },
   { name := "qwen3_4b_d64", batch := 1, qHeads := 32, kvHeads := 8,
-    kvSeq := 2048, headDim := 64 }
+    kvSeq := 2048, headDim := 64 },
+  -- Qwen 3.5/3.6 family (35B-A3B and friends): head_dim=256, GQA ratio 8
+  -- (16 q heads, 2 kv heads). Larger atol because the per-warp 64×256
+  -- accumulator likely spills to local memory under launch_bounds(128, 1)
+  -- — see dev/issues.md D01b.
+  { name := "qwen36_35B", batch := 1, qHeads := 16, kvHeads := 2,
+    kvSeq := 2048, headDim := 256, atol := 5.0e-2, rtol := 5.0e-2 }
 ]
 
 def decodeFixtureDir (shape : DecodeShape) : System.FilePath :=

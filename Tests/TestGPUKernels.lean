@@ -731,11 +731,17 @@ def testDecodeEligibilityLlama3 : IO Unit := do
               == Tyr.GPU.Ops.AttentionSpecialization.tkMhaH100Decode)
     "head_dim=64 with GQA should also select tkMhaH100Decode (64-dim variant)"
 
-  -- Other head dims still fall back to portable.
-  let llama3D256 := { llama3 with headDim := 256 }
-  assertTrue (Tyr.GPU.Ops.AttentionProblem.currentSpecialization llama3D256
+  -- head_dim=256 selects decode now (Qwen 3.5/3.6 family, Gemma-2 27B).
+  let qwen36 := { llama3 with numQHeads := 16, numKVHeads := 2, headDim := 256 }
+  assertTrue (Tyr.GPU.Ops.AttentionProblem.currentSpecialization qwen36
+              == Tyr.GPU.Ops.AttentionSpecialization.tkMhaH100Decode)
+    "head_dim=256 with GQA should select tkMhaH100Decode (256-dim variant)"
+
+  -- Truly unsupported head dims still fall back to portable.
+  let llama3D192 := { llama3 with headDim := 192 }
+  assertTrue (Tyr.GPU.Ops.AttentionProblem.currentSpecialization llama3D192
               == Tyr.GPU.Ops.AttentionSpecialization.portable)
-    "head_dim=256 should fall back to portable (only 64 and 128 are V1-supported)"
+    "head_dim=192 should fall back to portable (V1 supports 64/128/256)"
 
   -- Non-multiple-of-64 kv_seq should still select decode; the kernel handles
   -- the tail with a runtime right_fill mask.
