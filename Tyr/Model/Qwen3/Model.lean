@@ -9,6 +9,7 @@
   - greedy generation (cached + uncached)
 -/
 import Tyr.Torch
+import Tyr.Tensor
 import Tyr.TensorStruct
 import Tyr.Module.Core
 import Tyr.Module.Derive
@@ -73,6 +74,14 @@ def embedTokens {batch seq : UInt64}
     (inputIds : T #[batch, seq])
     : T #[batch, seq, cfg.hidden_size] :=
   nn.embedding inputIds m.model.embed_tokens
+
+/-- Typed token embedding lookup. The ids tensor is dtype-pinned to
+    `.Int64`, output inherits the embedding weight's metadata. -/
+def embedTokensT {tm : TensorMeta} {batch seq : UInt64}
+    (m : Qwen3ForCausalLM cfg)
+    (inputIds : Tensor { tm with dtype := .Int64 } #[batch, seq])
+    : Tensor tm #[batch, seq, cfg.hidden_size] :=
+  Tensor.embedding (Tensor.unsafeOfT tm m.model.embed_tokens) inputIds
 
 /-- Forward from pre-computed input embeddings. -/
 def forwardEmbeds {batch seq : UInt64}
