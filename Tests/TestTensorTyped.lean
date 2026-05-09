@@ -55,6 +55,27 @@ def testTensorMetaShape : IO Unit := do
   let m := Tensor.tensorMeta a
   assertTrue (m == cpuF32) "tensorMeta should equal type-level index"
 
+@[test]
+def testRMSNormTypedForward : IO Unit := do
+  -- RMSNorm.forward3dT preserves the input's TensorMeta at the type level.
+  let rn : RMSNorm 4 := torch.RMSNorm.init 4 1e-6
+  let x : Tensor cpuF32 #[1, 2, 4] := Tensor.ones #[1, 2, 4] cpuF32
+  let y : Tensor cpuF32 #[1, 2, 4] := rn.forward3dT x
+  -- Sum should be finite and roughly the number of elements (8) since
+  -- RMSNorm-of-ones is approximately ones (after normalization).
+  let s := torch.nn.sumDim (Tensor.toT (Tensor.reshape y #[8])) 0 false
+  let total : Float := nn.item s
+  assertTrue (total > 0.0 && total < 100.0) s!"RMSNorm output sum out of range: {total}"
+
+@[test]
+def testLinearTypedForward : IO Unit := do
+  -- Linear.forward3dT preserves TensorMeta and changes only the shape index.
+  let lin : Linear 4 3 ← torch.Linear.init 4 3 (withBias := true)
+  let x : Tensor cpuF32 #[1, 2, 4] := Tensor.zeros #[1, 2, 4] cpuF32
+  let y : Tensor cpuF32 #[1, 2, 3] := lin.forward3dT x
+  -- Shape projection confirms the type-level shape change took effect.
+  assertEqual (Tensor.shape y) (#[1, 2, 3] : Shape) "Linear forward should produce out_dim=3"
+
 end Tests.TensorTyped
 
 /-- The Lean type checker rejects adding tensors with different metadata —

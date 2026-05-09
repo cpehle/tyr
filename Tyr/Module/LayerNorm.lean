@@ -40,6 +40,11 @@ def forward3d {dim batch seq : UInt64} (ln : LayerNorm dim)
     (x : T #[batch, seq, dim]) : T #[batch, seq, dim] :=
   nn.layer_norm x ln.weight ln.bias ln.eps.val
 
+/-- 3D typed forward — preserves device + dtype of `x`. -/
+@[inline] def forward3dT {m : TensorMeta} {dim batch seq : UInt64}
+    (ln : LayerNorm dim) (x : Tensor m #[batch, seq, dim]) : Tensor m #[batch, seq, dim] :=
+  Tensor.unsafeOfT m (ln.forward3d (Tensor.toT x))
+
 end LayerNorm
 
 /-- Module instance for 3D forward pass -/
