@@ -99,7 +99,24 @@ def testTransposeShapeIndex : IO Unit := do
   -- transposeShape #[2, 3] 0 1 = #[3, 2]
   assertEqual (Tensor.shape y) (#[3, 2] : Shape) "transpose should swap dims at type level"
 
+@[test]
+def testAttentionTransposeRoundTrip : IO Unit := do
+  -- transposeForAttention then transposeFromAttention recovers shape.
+  let x : Tensor cpuF32 #[1, 2, 3, 4] := Tensor.zeros #[1, 2, 3, 4] cpuF32
+  let y : Tensor cpuF32 #[1, 3, 2, 4] := Tensor.transposeForAttention x
+  let z : Tensor cpuF32 #[1, 2, 3, 4] := Tensor.transposeFromAttention y
+  assertEqual (Tensor.shape z) (#[1, 2, 3, 4] : Shape) "round-trip should recover shape"
+
 end Tests.TensorTyped
+
+/-- Embedding requires Int64 ids — calling with a Float32 ids tensor must
+    fail to elaborate. -/
+private def Tests.TensorTyped.cpuI64' : torch.TensorMeta :=
+  { device := .CPU, dtype := .Int64 }
+
+#check_failure (fun (w : torch.Tensor Tests.TensorTyped.cpuF32' #[10, 4])
+                    (badIds : torch.Tensor Tests.TensorTyped.cpuF32' #[1, 2]) =>
+                  torch.Tensor.embedding w badIds)
 
 /-- The Lean type checker rejects adding tensors with different metadata —
     this is the core property of the typed API. `#check_failure` fails the
