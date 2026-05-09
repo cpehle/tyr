@@ -2,6 +2,7 @@
 import Tyr.Basic
 import Tyr.Log
 import Tyr.Torch
+import Tyr.Tensor
 import Tyr.SafeTensors
 import Tyr.TensorStruct
 import Tyr.Mctx
