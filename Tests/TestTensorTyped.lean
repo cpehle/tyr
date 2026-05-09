@@ -107,6 +107,45 @@ def testAttentionTransposeRoundTrip : IO Unit := do
   let z : Tensor cpuF32 #[1, 2, 3, 4] := Tensor.transposeFromAttention y
   assertEqual (Tensor.shape z) (#[1, 2, 3, 4] : Shape) "round-trip should recover shape"
 
+/-- A minimal typed transformer block: project x to Q/K/V via three
+    Linear layers, reshape to attention layout, transpose, transpose
+    back. Exercises Linear.forward3dT, Tensor.reshape, and the
+    transposeForAttention/From pair through a realistic model-style
+    pipeline.
+
+    The point is *type-level*: every intermediate has its `TensorMeta`
+    and shape pinned in the type, so any mistake in the wiring would
+    fail to elaborate. -/
+private def typedAttnBlock {m : TensorMeta}
+    {batch seq num_heads head_dim hidden : UInt64}
+    (qProj kProj vProj : Linear hidden (num_heads * head_dim))
+    (x : Tensor m #[batch, seq, hidden])
+    : IO (Tensor m #[batch, seq, num_heads * head_dim]) := do
+  let q : Tensor m #[batch, seq, num_heads * head_dim] := qProj.forward3dT x
+  let k : Tensor m #[batch, seq, num_heads * head_dim] := kProj.forward3dT x
+  let v : Tensor m #[batch, seq, num_heads * head_dim] := vProj.forward3dT x
+  -- Reshape into [batch, seq, num_heads, head_dim] then to attention layout.
+  let q4 : Tensor m #[batch, seq, num_heads, head_dim] := Tensor.reshape q #[batch, seq, num_heads, head_dim]
+  let k4 : Tensor m #[batch, seq, num_heads, head_dim] := Tensor.reshape k #[batch, seq, num_heads, head_dim]
+  let v4 : Tensor m #[batch, seq, num_heads, head_dim] := Tensor.reshape v #[batch, seq, num_heads, head_dim]
+  let _qa : Tensor m #[batch, num_heads, seq, head_dim] := Tensor.transposeForAttention q4
+  let _ka : Tensor m #[batch, num_heads, seq, head_dim] := Tensor.transposeForAttention k4
+  let va : Tensor m #[batch, num_heads, seq, head_dim] := Tensor.transposeForAttention v4
+  -- Skip the actual scaled-dot-product step (not yet wrapped) — round-trip
+  -- shape via transposeFromAttention to demonstrate composability.
+  let vBack : Tensor m #[batch, seq, num_heads, head_dim] := Tensor.transposeFromAttention va
+  pure (Tensor.reshape vBack #[batch, seq, num_heads * head_dim])
+
+@[test]
+def testTypedAttentionBlock : IO Unit := do
+  let qProj : Linear 8 4 ← torch.Linear.init 8 4
+  let kProj : Linear 8 4 ← torch.Linear.init 8 4
+  let vProj : Linear 8 4 ← torch.Linear.init 8 4
+  let x : Tensor cpuF32 #[2, 3, 8] := Tensor.zeros #[2, 3, 8] cpuF32
+  -- num_heads=2, head_dim=2, num_heads*head_dim=4
+  let y : Tensor cpuF32 #[2, 3, 2 * 2] ← typedAttnBlock (num_heads := 2) (head_dim := 2) qProj kProj vProj x
+  assertEqual (Tensor.shape y) (#[2, 3, 4] : Shape) "attn block output shape"
+
 end Tests.TensorTyped
 
 /-- Embedding requires Int64 ids — calling with a Float32 ids tensor must
