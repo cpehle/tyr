@@ -4,6 +4,7 @@
   Native Whisper encoder-decoder model in Tyr.
 -/
 import Tyr.Torch
+import Tyr.Tensor
 import Tyr.TensorStruct
 import Tyr.Module.LayerNorm
 import Tyr.Model.Whisper.Config
@@ -101,6 +102,18 @@ def forwardWithProjectedKV {batch qSeq kvSeq : UInt64}
   let out : T #[batch, qSeq, dModel] := reshape out #[batch, qSeq, dModel]
   affine3d out m.outProjWeight m.outProjBias
 
+/-- Typed `forwardWithProjectedKV` — preserves TensorMeta of activations. -/
+@[inline] def forwardWithProjectedKVT {tm : TensorMeta} {batch qSeq kvSeq : UInt64}
+    (m : WhisperAttention dModel nHeads)
+    (queryStates : Tensor tm #[batch, qSeq, dModel])
+    (keyStates : Tensor tm #[batch, nHeads, kvSeq, dModel / nHeads])
+    (valueStates : Tensor tm #[batch, nHeads, kvSeq, dModel / nHeads])
+    (isCausal : Bool := false)
+    : Tensor tm #[batch, qSeq, dModel] :=
+  Tensor.unsafeOfT tm
+    (m.forwardWithProjectedKV (Tensor.toT queryStates) (Tensor.toT keyStates)
+      (Tensor.toT valueStates) isCausal)
+
 def forwardCross {batch qSeq kvSeq : UInt64}
     (m : WhisperAttention dModel nHeads)
     (queryStates : T #[batch, qSeq, dModel])
@@ -110,12 +123,30 @@ def forwardCross {batch qSeq kvSeq : UInt64}
   let (kh, vh) := projectKV m keyValueStates
   forwardWithProjectedKV m queryStates kh vh isCausal
 
+/-- Typed `forwardCross` — preserves TensorMeta of activations. -/
+@[inline] def forwardCrossT {tm : TensorMeta} {batch qSeq kvSeq : UInt64}
+    (m : WhisperAttention dModel nHeads)
+    (queryStates : Tensor tm #[batch, qSeq, dModel])
+    (keyValueStates : Tensor tm #[batch, kvSeq, dModel])
+    (isCausal : Bool := false)
+    : Tensor tm #[batch, qSeq, dModel] :=
+  Tensor.unsafeOfT tm
+    (m.forwardCross (Tensor.toT queryStates) (Tensor.toT keyValueStates) isCausal)
+
 def forwardSelf {batch seq : UInt64}
     (m : WhisperAttention dModel nHeads)
     (x : T #[batch, seq, dModel])
     (isCausal : Bool := false)
     : T #[batch, seq, dModel] :=
   forwardCross m x x isCausal
+
+/-- Typed `forwardSelf` — preserves TensorMeta of activations. -/
+@[inline] def forwardSelfT {tm : TensorMeta} {batch seq : UInt64}
+    (m : WhisperAttention dModel nHeads)
+    (x : Tensor tm #[batch, seq, dModel])
+    (isCausal : Bool := false)
+    : Tensor tm #[batch, seq, dModel] :=
+  Tensor.unsafeOfT tm (m.forwardSelf (Tensor.toT x) isCausal)
 
 /-- Incremental one-token self-attention step with KV cache update. -/
 def forwardSelfStep {batch : UInt64}
@@ -197,6 +228,16 @@ def forwardSelfStep {batch : UInt64}
     }
     (out, cache')
 
+/-- Typed `forwardSelfStep` — preserves TensorMeta of the activation
+    through the cached single-token decode. Body delegates to legacy. -/
+@[inline] def forwardSelfStepT {tm : TensorMeta} {batch : UInt64}
+    (m : WhisperAttention dModel nHeads)
+    (x : Tensor tm #[batch, 1, dModel])
+    (cache : KVCache batch nHeads (dModel / nHeads))
+    : Tensor tm #[batch, 1, dModel] × KVCache batch nHeads (dModel / nHeads) :=
+  let (out, cache') := m.forwardSelfStep (Tensor.toT x) cache
+  (Tensor.unsafeOfT tm out, cache')
+
 end WhisperAttention
 
 structure WhisperEncoderLayer (cfg : WhisperConfig) where
@@ -233,6 +274,13 @@ def forward {batch seq : UInt64}
   let h4 := activate cfg.activationFunction h3
   let h5 : T #[batch, seq, cfg.dModel] := affine3d h4 m.fc2Weight m.fc2Bias
   x1 + h5
+
+/-- Typed `forward` — preserves TensorMeta of activations. -/
+@[inline] def forwardT {tm : TensorMeta} {batch seq : UInt64}
+    (m : WhisperEncoderLayer cfg)
+    (x : Tensor tm #[batch, seq, cfg.dModel])
+    : Tensor tm #[batch, seq, cfg.dModel] :=
+  Tensor.unsafeOfT tm (m.forward (Tensor.toT x))
 
 end WhisperEncoderLayer
 
@@ -289,6 +337,14 @@ def forward {batch seq encSeq : UInt64}
   let h7 : T #[batch, seq, cfg.dModel] := affine3d h6 m.fc2Weight m.fc2Bias
   x2 + h7
 
+/-- Typed `forward` — preserves TensorMeta of activations. -/
+@[inline] def forwardT {tm : TensorMeta} {batch seq encSeq : UInt64}
+    (m : WhisperDecoderLayer cfg)
+    (x : Tensor tm #[batch, seq, cfg.dModel])
+    (encoderHidden : Tensor tm #[batch, encSeq, cfg.dModel])
+    : Tensor tm #[batch, seq, cfg.dModel] :=
+  Tensor.unsafeOfT tm (m.forward (Tensor.toT x) (Tensor.toT encoderHidden))
+
 /-- One-token decoder layer step with incremental self KV cache and precomputed cross KV. -/
 def forwardStepCached {batch encSeq : UInt64}
     (m : WhisperDecoderLayer cfg)
@@ -308,6 +364,17 @@ def forwardStepCached {batch encSeq : UInt64}
   let h6 := activate cfg.activationFunction h5
   let h7 : T #[batch, 1, cfg.dModel] := affine3d h6 m.fc2Weight m.fc2Bias
   (x2 + h7, selfCache')
+
+/-- Typed `forwardStepCached` — preserves TensorMeta of activations. -/
+@[inline] def forwardStepCachedT {tm : TensorMeta} {batch encSeq : UInt64}
+    (m : WhisperDecoderLayer cfg)
+    (x : Tensor tm #[batch, 1, cfg.dModel])
+    (crossK : Tensor tm #[batch, cfg.decoderAttentionHeads, encSeq, cfg.dModel / cfg.decoderAttentionHeads])
+    (crossV : Tensor tm #[batch, cfg.decoderAttentionHeads, encSeq, cfg.dModel / cfg.decoderAttentionHeads])
+    (selfCache : WhisperAttention.KVCache batch cfg.decoderAttentionHeads (cfg.dModel / cfg.decoderAttentionHeads))
+    : Tensor tm #[batch, 1, cfg.dModel] × WhisperAttention.KVCache batch cfg.decoderAttentionHeads (cfg.dModel / cfg.decoderAttentionHeads) :=
+  let (out, cache') := m.forwardStepCached (Tensor.toT x) (Tensor.toT crossK) (Tensor.toT crossV) selfCache
+  (Tensor.unsafeOfT tm out, cache')
 
 end WhisperDecoderLayer
 
@@ -406,6 +473,23 @@ def decode {batch seq encSeq : UInt64}
     h := layer.forward h encoderHidden
   pure (m.decoderLayerNorm.forward3d h)
 
+/-- Typed `encode` — preserves TensorMeta of mel input through encoder activations. -/
+@[inline] def encodeT {tm : TensorMeta} {batch frames : UInt64}
+    (m : WhisperModel cfg)
+    (inputFeatures : Tensor tm #[batch, cfg.numMelBins, frames])
+    : IO (Tensor tm #[batch, WhisperConfig.conv2OutputSeq frames, cfg.dModel]) := do
+  let out ← m.encode (Tensor.toT inputFeatures)
+  pure (Tensor.unsafeOfT tm out)
+
+/-- Typed `decode` — token IDs are Int64-pinned; activations carry `tm`. -/
+@[inline] def decodeT {tm : TensorMeta} {batch seq encSeq : UInt64}
+    (m : WhisperModel cfg)
+    (inputIds : Tensor { tm with dtype := .Int64 } #[batch, seq])
+    (encoderHidden : Tensor tm #[batch, encSeq, cfg.dModel])
+    : IO (Tensor tm #[batch, seq, cfg.dModel]) := do
+  let out ← m.decode (Tensor.toT inputIds) (Tensor.toT encoderHidden)
+  pure (Tensor.unsafeOfT tm out)
+
 end WhisperModel
 
 structure WhisperForConditionalGeneration (cfg : WhisperConfig) where
@@ -435,6 +519,14 @@ def encode {batch frames : UInt64}
     : IO (T #[batch, WhisperConfig.conv2OutputSeq frames, cfg.dModel]) :=
   m.model.encode inputFeatures
 
+/-- Typed `encode` — preserves TensorMeta of mel input through encoder activations. -/
+@[inline] def encodeT {tm : TensorMeta} {batch frames : UInt64}
+    (m : WhisperForConditionalGeneration cfg)
+    (inputFeatures : Tensor tm #[batch, cfg.numMelBins, frames])
+    : IO (Tensor tm #[batch, WhisperConfig.conv2OutputSeq frames, cfg.dModel]) := do
+  let out ← m.encode (Tensor.toT inputFeatures)
+  pure (Tensor.unsafeOfT tm out)
+
 def decode {batch seq encSeq : UInt64}
     (m : WhisperForConditionalGeneration cfg)
     (inputIds : T #[batch, seq])
@@ -442,6 +534,15 @@ def decode {batch seq encSeq : UInt64}
     : IO (T #[batch, seq, cfg.vocabSize]) := do
   let hidden ← m.model.decode inputIds encoderHidden
   pure (linear3d hidden m.projOut)
+
+/-- Typed `decode` — token IDs are Int64-pinned; activations carry `tm`. -/
+@[inline] def decodeT {tm : TensorMeta} {batch seq encSeq : UInt64}
+    (m : WhisperForConditionalGeneration cfg)
+    (inputIds : Tensor { tm with dtype := .Int64 } #[batch, seq])
+    (encoderHidden : Tensor tm #[batch, encSeq, cfg.dModel])
+    : IO (Tensor tm #[batch, seq, cfg.vocabSize]) := do
+  let out ← m.decode (Tensor.toT inputIds) (Tensor.toT encoderHidden)
+  pure (Tensor.unsafeOfT tm out)
 
 /-- Initialize one self-attention KV cache per decoder layer. -/
 def initLayerKVCaches {batch : UInt64}
@@ -509,6 +610,17 @@ def decodeStepWithCache {batch encSeq : UInt64}
   let logits3 : T #[batch, 1, cfg.vocabSize] := linear3d hiddenNorm m.projOut
   let logits2 : T #[batch, cfg.vocabSize] := reshape logits3 #[batch, cfg.vocabSize]
   pure (logits2, nextCaches)
+
+/-- Typed `decodeStepWithCache` — token IDs Int64-pinned, activations carry `tm`. -/
+@[inline] def decodeStepWithCacheT {tm : TensorMeta} {batch encSeq : UInt64}
+    (m : WhisperForConditionalGeneration cfg)
+    (tokenIds : Tensor { tm with dtype := .Int64 } #[batch, 1])
+    (position : UInt64)
+    (crossCaches : Array (LayerCrossCache cfg))
+    (selfCaches : Array (LayerKVCache cfg batch))
+    : IO (Tensor tm #[batch, cfg.vocabSize] × Array (LayerKVCache cfg batch)) := do
+  let (logits, nextCaches) ← @decodeStepWithCache cfg batch encSeq m (Tensor.toT tokenIds) position crossCaches selfCaches
+  pure (Tensor.unsafeOfT tm logits, nextCaches)
 
 end WhisperForConditionalGeneration
 

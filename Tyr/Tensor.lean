@@ -351,6 +351,29 @@ Useful when porting code that calls `nn.layer_norm x w b eps` directly. -/
     (eps : Float := 1e-5) : Tensor m #[batch, seq, n] :=
   Tensor.unsafeOfT m (torch.nn.layer_norm (Tensor.toT x) (Tensor.toT weight) (Tensor.toT bias) eps)
 
+/-! ## Training-time helpers
+
+Dropout (IO due to RNG), cross-entropy loss. Metadata preserving. -/
+
+@[inline] def dropout {m : TensorMeta} {s : Shape} (t : Tensor m s) (p : Float := 0.5) (training : Bool := true)
+    : IO (Tensor m s) := do
+  let raw ← torch.nn.dropout (Tensor.toT t) p training
+  return Tensor.unsafeOfT m raw
+
+/-- Cross-entropy loss with class-index targets.
+    `logits : Tensor m #[n, c]`, `targets : Tensor { m with dtype := .Int64 } #[n]`,
+    output is a scalar (`#[]`) on `m`. -/
+@[inline] def crossEntropy {m : TensorMeta} {n c : UInt64}
+    (logits : Tensor m #[n, c]) (targets : Tensor { m with dtype := .Int64 } #[n])
+    : Tensor m #[] :=
+  Tensor.unsafeOfT m (torch.nn.cross_entropy (Tensor.toT logits) (Tensor.toT targets))
+
+/-- Per-row cross-entropy (no reduction), output `Tensor m #[n]`. -/
+@[inline] def crossEntropyNone {m : TensorMeta} {n c : UInt64}
+    (logits : Tensor m #[n, c]) (targets : Tensor { m with dtype := .Int64 } #[n])
+    : Tensor m #[n] :=
+  Tensor.unsafeOfT m (torch.nn.cross_entropy_none (Tensor.toT logits) (Tensor.toT targets))
+
 /-! ## SafeTensors / FFI ingress
 
 Loading from a SafeTensors file. Two patterns:

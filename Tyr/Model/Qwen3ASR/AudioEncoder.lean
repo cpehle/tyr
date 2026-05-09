@@ -8,6 +8,7 @@
   - output projection to thinker hidden space
 -/
 import Tyr.Torch
+import Tyr.Tensor
 import Tyr.TensorStruct
 import Tyr.Module.Core
 import Tyr.Module.Derive
@@ -463,6 +464,24 @@ def forward {batch frames : UInt64}
   let hidden : T #[batch, t3, cfg.dModel] := affine3d hidden m.proj1Weight m.proj1Bias
   let hidden := activate cfg.activationFunction hidden
   affine3d hidden m.proj2Weight m.proj2Bias
+
+/-- Typed sibling of `forward`. Activations carry `tm`. -/
+def forwardT {tm : TensorMeta} {batch frames : UInt64}
+    (m : AudioEncoder cfg)
+    (inputFeatures : Tensor tm #[batch, cfg.numMelBins, frames])
+    (attnMask : Option (Tensor tm #[batch, AudioEncoderConfig.framesAfterConv3 cfg frames]) := none)
+    : Tensor tm #[batch, AudioEncoderConfig.framesAfterConv3 cfg frames, cfg.outputDim] :=
+  Tensor.unsafeOfT tm
+    (m.forward (Tensor.toT inputFeatures) (attnMask.map Tensor.toT))
+
+/-- Typed sibling of `forwardVarLen`. Activations carry `tm`. -/
+def forwardVarLenT {tm : TensorMeta} {batch frames : UInt64}
+    (m : AudioEncoder cfg)
+    (inputFeatures : Tensor tm #[batch, cfg.numMelBins, frames])
+    (featureLens : Array UInt64)
+    : Tensor tm #[batch, AudioEncoderConfig.framesAfterConv3 cfg frames, cfg.outputDim] :=
+  Tensor.unsafeOfT tm
+    (m.forwardVarLen (Tensor.toT inputFeatures) featureLens)
 
 end AudioEncoder
 

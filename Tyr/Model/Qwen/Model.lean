@@ -4,6 +4,7 @@
   Full Qwen3 model for text encoding.
 -/
 import Tyr.Torch
+import Tyr.Tensor
 import Tyr.TensorStruct
 import Tyr.Module.Core
 import Tyr.Module.Derive
@@ -108,6 +109,16 @@ def forward {batch seq : UInt64} (cfg : QwenConfig)
   -- Final normalization
   model.norm.forward3d finalH
 
+/-- Typed `forward` — preserves TensorMeta on the output hidden state.
+    `input_ids` remains an untyped integer tensor. -/
+@[inline] def forwardT {tm : TensorMeta} {batch seq : UInt64} (cfg : QwenConfig)
+    (model : Qwen3Model cfg)
+    (input_ids : T #[batch, seq])
+    (cos : T #[seq, cfg.head_dim / 2])
+    (sin : T #[seq, cfg.head_dim / 2])
+    : Tensor tm #[batch, seq, cfg.hidden_size] :=
+  Tensor.unsafeOfT tm (Qwen3Model.forward cfg model input_ids cos sin)
+
 def forwardMasked {batch seq : UInt64} (cfg : QwenConfig)
     (model : Qwen3Model cfg)
     (input_ids : T #[batch, seq])
@@ -123,6 +134,16 @@ def forwardMasked {batch seq : UInt64} (cfg : QwenConfig)
     hidden
   -- Final normalization
   model.norm.forward3d finalH
+
+/-- Typed `forwardMasked` — preserves TensorMeta on the output hidden state. -/
+@[inline] def forwardMaskedT {tm : TensorMeta} {batch seq : UInt64} (cfg : QwenConfig)
+    (model : Qwen3Model cfg)
+    (input_ids : T #[batch, seq])
+    (cos : T #[seq, cfg.head_dim / 2])
+    (sin : T #[seq, cfg.head_dim / 2])
+    (attn_mask : T #[batch, seq])
+    : Tensor tm #[batch, seq, cfg.hidden_size] :=
+  Tensor.unsafeOfT tm (Qwen3Model.forwardMasked cfg model input_ids cos sin attn_mask)
 
 end Qwen3Model
 

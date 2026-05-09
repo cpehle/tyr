@@ -16,12 +16,29 @@
 #define TYR_OPS_HAS_CUDA_STREAM 1
 #include <c10/cuda/CUDAStream.h>
 #include <c10/cuda/CUDAFunctions.h>
+#include <ATen/cuda/CUDAContext.h>
 #else
 #define TYR_OPS_HAS_CUDA_STREAM 0
 #endif
 #else
 #define TYR_OPS_HAS_CUDA_STREAM 0
 #endif
+
+namespace tyr_ops {
+// The TK H100 attention/decode kernels emit `wgmma.*` instructions which are
+// sm_90a-only — they fail to JIT on Blackwell devices (e.g. GB10/B200,
+// compute cap 10/12). Gate the native routes on Hopper.
+static bool device_supports_tk_hopper(const torch::Tensor& t) {
+#if TYR_OPS_HAS_CUDA_STREAM
+  if (!t.is_cuda()) return false;
+  auto* props = at::cuda::getDeviceProperties(t.get_device());
+  return props != nullptr && props->major == 9;
+#else
+  (void)t;
+  return false;
+#endif
+}
+} // namespace tyr_ops
 
 // Shared tensor/Lean interop helpers defined in tyr.cpp.
 torch::Tensor borrowTensor(b_lean_obj_arg o);
@@ -267,7 +284,7 @@ static inline FlashAttnRoute select_route(
     const c10::optional<double>& scale,
     bool enable_gqa) {
   const bool mask_ok = !(attn_mask.has_value() && attn_mask->defined());
-  const bool device_ok = query.is_cuda();
+  const bool device_ok = query.is_cuda() && device_supports_tk_hopper(query);
   const bool dtype_ok = query.scalar_type() == torch::kBFloat16;
   // V1 of the TK-style decode kernel supports head_dim ∈ {64, 128, 256} and
   // any positive KV sequence length; the kernel iterates ceil(kv_seq/64)

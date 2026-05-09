@@ -9,6 +9,7 @@
   - Final 1x1 projection to speaker embedding
 -/
 import Tyr.Torch
+import Tyr.Tensor
 import Tyr.TensorStruct
 import Tyr.Module.Core
 import Tyr.Module.Derive
@@ -307,6 +308,12 @@ def forward {batch frames : UInt64}
     reshape (nn.conv1d pooled m.fcWeight 1 0 1) #[batch, cfg.encDim, 1]
   let y1 := addBias3d y0 m.fcBias
   reshape y1 #[batch, cfg.encDim]
+
+/-- Typed sibling of `forward` — preserves TensorMeta of activations. -/
+def forwardT {tm : TensorMeta} {batch frames : UInt64}
+    (m : SpeakerEncoder cfg)
+    (mel : Tensor tm #[batch, frames, cfg.melDim]) : Tensor tm #[batch, cfg.encDim] :=
+  Tensor.unsafeOfT tm (forward m (Tensor.toT mel))
 
 end SpeakerEncoder
 

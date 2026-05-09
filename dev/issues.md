@@ -2,7 +2,7 @@
 
 This document tracks architectural, performance, and correctness issues identified during deep semantic review.
 
-## 🚀 Performance Bottlenecks
+## Performance Bottlenecks
 
 ### P01: Recursive KV-Cache Prefill
 - **Issue**: `prefillCachesFromEmbeds` in `Qwen35/Model.lean` was performing $N$ separate forward passes for a prompt of length $N$.
@@ -22,7 +22,7 @@ This document tracks architectural, performance, and correctness issues identifi
 - **Issue**: `Tyr/AutoGrad.lean` uses heavy Lean IR rewriting. Tuple packing/unpacking for multiple gradients creates excessive allocations in the generated C code.
 - **Recommendation**: Optimize `unpackTupleValues` and `mkTupleReturn` to avoid intermediate list/array allocations where possible.
 
-## 🏛️ Architectural Refactoring
+## Architectural Refactoring
 
 ### A01: Monolithic `Tyr/Torch.lean`
 - **Issue**: `Torch.lean` is 1450+ lines, mixing low-level FFI, high-level wrappers, and domain-specific submodules (`rotary`, `nn`, `linalg`).
@@ -39,7 +39,7 @@ This document tracks architectural, performance, and correctness issues identifi
 - **Issue**: `lean_torch_linear`, `lean_torch_linear3d`, `lean_torch_affine`, and `lean_torch_affine3d` all map to the same `torch::linear` call in C++.
 - **Recommendation**: Consolidate into a single polymorphic `torch.linear` in Lean that handles rank-2 and rank-3 via dependent types.
 
-## ⚖️ Correctness & Type Safety
+## Correctness & Type Safety
 
 ### C01: Shape Inference Runtime Checks
 - **Issue**: Complex shapes (e.g. `matmulShape`) are computed at runtime and then "cast" via `reshape`. This deferment hides shape errors until execution.
@@ -49,7 +49,7 @@ This document tracks architectural, performance, and correctness issues identifi
 - **Issue**: Some FFI calls (like `rand`, `full`) take an optional `device`, but most ops assume all inputs are on the same device. Mismatches lead to hard Torch crashes.
 - **Recommendation**: Add a `Device` index to the `T` type: `T (s : Shape) (d : Device)`. This would provide compile-time guarantees for device-locality.
 
-## ⚡ Decode kernel — open issues
+## Decode kernel — open issues
 
 V1 of the TK-style H100 decode kernel landed (`tkMhaH100DecodeFwd[64]` in
 `Tyr/GPU/Kernels/MhaH100Decode.lean`). Tracker for the remaining work.
@@ -129,3 +129,44 @@ Longer-form rationale per item in `dev/decode_kernel_v2_plan.md`.
 - Decode forward only. Decode is typically inference-time so backward
   isn't needed yet, but the kernel doc-comment should call it out
   explicitly.
+
+## Release Readiness
+
+Legend: `[ ]` not started · `[~]` in progress / partial · `[x]` done.
+
+### R0: Hard blockers (must fix before any public release)
+- [ ] **R0.1** Add a `LICENSE` (file is empty; Readme.md:350 says "TBD"). Owner decision — do not auto-pick.
+- [ ] **R0.2** Resolve `thirdparty/ThunderKittens` submodule story: either vendor it as a real submodule with a pinned SHA, or document the stubbed path (`cc/src/tk_vendor_stubs.cpp`) as the supported configuration. Currently Readme.md:209-211 acknowledges the empty dir.
+- [~] **R0.3** Land or stash the 7 modified + 3 untracked working-tree files (`lakefile.lean`, `cc/src/tyr_ops.cpp`, `cc/Makefile`, Qwen35 model files, `tk_vendor_stubs.cpp`, stray `sigma-model-server-link`, `.cache/`). `.cache/` and `sigma-model-server-link` added to `.gitignore`; remaining modified files still need to be committed or stashed by the owner.
+
+### R1: CI / build hygiene
+- [~] **R1.1** CI exists (`.github/workflows/ci.yml`) for `macos-latest` + `ubuntu-24.04`, CPU-only. Pages workflow also present. Hardening landed: `concurrency` group cancels superseded PR runs, `timeout-minutes: 90`, elan toolchain cached, `sorry` check now fails the build (TODO/FIXME demoted to informational), `pages.yml` pins `cpehle/doc-gen4` to SHA `093b0e5`.
+- [x] **R1.2** Reconcile LibTorch version: CI bumped to `2.10.0` to match Readme and `dependencies_macos.sh`.
+- [ ] **R1.3** Add a CUDA smoke job (self-hosted or one-shot) — large GPU surface (`Tyr/GPU/`, decode kernels, parity harnesses) is currently exercised only manually via `scripts/gpu/test_parity_suite.sh`.
+- [ ] **R1.4** Audit `lakefile.lean` glibc 2.34 workaround (zero-defining `__libc_csu_init/fini`). Document why; consider upstreaming or guarding behind a Lean version check.
+- [x] **R1.5** `TORCHRUN_BIN` now defaults to `command -v torchrun` in all three `scripts/nanochat/*.sh` launchers; Readme updated. Cluster path remains available via the `TORCHRUN_BIN=...` override.
+
+### R2: Documentation
+- [x] **R2.1** README covers install, build, env setup, examples, key concepts, FFI, dev workflow.
+- [x] **R2.2** `docs/gpu/thunderkittens-porting-status.md` tracks GPU porting progress.
+- [ ] **R2.3** Drop the "Very much WIP" framing once R0 is closed; replace with an explicit stability statement (e.g. "experimental; APIs may change before 1.0").
+- [ ] **R2.4** Add a `CHANGELOG.md` and a `CONTRIBUTING.md`. Commit-message rules currently live only in Readme.md:319-346.
+- [ ] **R2.5** Document supported hardware matrix (Hopper / Blackwell / GB10 / B200 are referenced across commits but not summarized in user-facing docs).
+
+### R3: Code-quality cleanup
+- [ ] **R3.1** Audit the 54 `panic!`/`unreachable!` sites in `Tyr/`; convert to `Except`/`IO` errors at API boundaries.
+- [ ] **R3.2** Resolve TODO placeholders in `Tyr/GPU/Codegen/Tests.lean` (`/* TODO: params */` in 8+ generated kernels) — codegen surface looks unfinished.
+- [ ] **R3.3** Implement gradient clipping (`Tyr/Optim.lean` "Gradient Clipping (TODO)" header).
+- [ ] **R3.4** Apply A03: consolidate `lean_torch_linear` / `linear3d` / `affine` / `affine3d` (all map to the same `torch::linear`).
+- [~] **R3.5** Apply A01: split `Tyr/Torch.lean` (1450+ lines) into `Tyr/FFI.lean` + `Tyr/Ops.lean` + `Tyr/NN/*`.
+
+### R4: Distribution
+- [ ] **R4.1** Tag a `v0.1.0-preview` once R0 closes.
+- [ ] **R4.2** Provide a Docker image or devcontainer that bundles LibTorch + CUDA + Lean toolchain for reproducible builds.
+- [ ] **R4.3** Add release artifacts: prebuilt `libtyr` for at least one CPU and one CUDA target.
+- [ ] **R4.4** Decide on Lake registry submission (Reservoir / lean4-package-index).
+
+### R5: Security / supply chain
+- [ ] **R5.1** Pin remaining submodules with explicit SHAs in CI (currently only `external/soxr` is initialized in CI).
+- [x] **R5.2** SafeTensors loader rejects unsafe shard paths (absolute / `..` traversal) — Readme.md:288.
+- [ ] **R5.3** Add `cargo-audit`-style dependency scan for the LibTorch / Arrow versions.

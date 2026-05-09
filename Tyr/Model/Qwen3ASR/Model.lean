@@ -8,6 +8,7 @@
   - rope-delta helpers + greedy generation utilities
 -/
 import Tyr.Torch
+import Tyr.Tensor
 import Tyr.TensorStruct
 import Tyr.Module.Core
 import Tyr.Module.Derive
@@ -887,6 +888,98 @@ def forwardFromMel {batch frames textSeq : UInt64}
   let audio := m.encodeAudio inputFeatures
   m.forwardAudioText audio textIds attnMask
 
+/-! ## Typed (`Tensor m s`) entry-point siblings -/
+
+/-- Typed sibling of `embedText`. -/
+def embedTextT {tm : TensorMeta} {batch textSeq : UInt64}
+    (m : Qwen3ASRThinkerForConditionalGeneration cfg)
+    (textIds : Tensor { tm with dtype := .Int64 } #[batch, textSeq])
+    : Tensor tm #[batch, textSeq, cfg.textConfig.hiddenSize] :=
+  Tensor.unsafeOfT tm (m.embedText (Tensor.toT textIds))
+
+/-- Typed sibling of `projectAudio`. -/
+def projectAudioT {tm : TensorMeta} {batch audioSeq : UInt64}
+    (m : Qwen3ASRThinkerForConditionalGeneration cfg)
+    (audioFeatures : Tensor tm #[batch, audioSeq, cfg.audioConfig.outputDim])
+    : Tensor tm #[batch, audioSeq, cfg.textConfig.hiddenSize] :=
+  Tensor.unsafeOfT tm (m.projectAudio (Tensor.toT audioFeatures))
+
+/-- Typed sibling of `forwardEmbeds`. -/
+def forwardEmbedsT {tm : TensorMeta} {batch seq : UInt64}
+    (m : Qwen3ASRThinkerForConditionalGeneration cfg)
+    (inputsEmbeds : Tensor tm #[batch, seq, cfg.textConfig.hiddenSize])
+    (attnMask : Option (Tensor tm #[batch, seq]) := none)
+    : Tensor tm #[batch, seq, ThinkerLmVocabSize cfg] :=
+  Tensor.unsafeOfT tm
+    (m.forwardEmbeds (Tensor.toT inputsEmbeds) (attnMask.map Tensor.toT))
+
+/-- Typed sibling of `forwardText`. -/
+def forwardTextT {tm : TensorMeta} {batch textSeq : UInt64}
+    (m : Qwen3ASRThinkerForConditionalGeneration cfg)
+    (textIds : Tensor { tm with dtype := .Int64 } #[batch, textSeq])
+    (attnMask : Option (Tensor { tm with dtype := .Int64 } #[batch, textSeq]) := none)
+    : Tensor tm #[batch, textSeq, ThinkerLmVocabSize cfg] :=
+  Tensor.unsafeOfT tm
+    (m.forwardText (Tensor.toT textIds) (attnMask.map Tensor.toT))
+
+/-- Typed sibling of `forwardAudioText`. -/
+def forwardAudioTextT {tm : TensorMeta} {batch audioSeq textSeq : UInt64}
+    (m : Qwen3ASRThinkerForConditionalGeneration cfg)
+    (audioFeatures : Tensor tm #[batch, audioSeq, cfg.audioConfig.outputDim])
+    (textIds : Tensor { tm with dtype := .Int64 } #[batch, textSeq])
+    (attnMask : Option (Tensor { tm with dtype := .Int64 } #[batch, audioSeq + textSeq]) := none)
+    : Tensor tm #[batch, audioSeq + textSeq, ThinkerLmVocabSize cfg] :=
+  Tensor.unsafeOfT tm
+    (m.forwardAudioText (Tensor.toT audioFeatures) (Tensor.toT textIds)
+      (attnMask.map Tensor.toT))
+
+/-- Typed sibling of `encodeAudio`. -/
+def encodeAudioT {tm : TensorMeta} {batch frames : UInt64}
+    (m : Qwen3ASRThinkerForConditionalGeneration cfg)
+    (inputFeatures : Tensor tm #[batch, cfg.audioConfig.numMelBins, frames])
+    (attnMask : Option (Tensor tm #[batch, AudioEncoderConfig.framesAfterConv3 cfg.audioConfig frames]) := none)
+    : Tensor tm #[batch, AudioEncoderConfig.framesAfterConv3 cfg.audioConfig frames, cfg.audioConfig.outputDim] :=
+  Tensor.unsafeOfT tm
+    (m.encodeAudio (Tensor.toT inputFeatures) (attnMask.map Tensor.toT))
+
+/-- Typed sibling of `encodeAudioVarLen`. -/
+def encodeAudioVarLenT {tm : TensorMeta} {batch frames : UInt64}
+    (m : Qwen3ASRThinkerForConditionalGeneration cfg)
+    (inputFeatures : Tensor tm #[batch, cfg.audioConfig.numMelBins, frames])
+    (featureLens : Array UInt64)
+    : Tensor tm #[batch, AudioEncoderConfig.framesAfterConv3 cfg.audioConfig frames, cfg.audioConfig.outputDim] :=
+  Tensor.unsafeOfT tm
+    (m.encodeAudioVarLen (Tensor.toT inputFeatures) featureLens)
+
+/-- Typed sibling of `forward`. Ids/masks are dtype-pinned to `.Int64`; activations carry `tm`. -/
+def forwardT {tm : TensorMeta} {batch seq frames : UInt64}
+    (m : Qwen3ASRThinkerForConditionalGeneration cfg)
+    (inputIds : Tensor { tm with dtype := .Int64 } #[batch, seq])
+    (inputFeatures : Option (Tensor tm #[batch, cfg.audioConfig.numMelBins, frames]) := none)
+    (featureAttentionMask : Option (Tensor { tm with dtype := .Int64 } #[batch, frames]) := none)
+    (attentionMask : Option (Tensor { tm with dtype := .Int64 } #[batch, seq]) := none)
+    : IO (Tensor tm #[batch, seq, ThinkerLmVocabSize cfg]) := do
+  let raw ← m.forward
+    (Tensor.toT inputIds)
+    (inputFeatures.map Tensor.toT)
+    (featureAttentionMask.map Tensor.toT)
+    (attentionMask.map Tensor.toT)
+  pure (Tensor.unsafeOfT tm raw)
+
+/-- Typed sibling of `forwardFromMel`. -/
+def forwardFromMelT {tm : TensorMeta} {batch frames textSeq : UInt64}
+    (m : Qwen3ASRThinkerForConditionalGeneration cfg)
+    (inputFeatures : Tensor tm #[batch, cfg.audioConfig.numMelBins, frames])
+    (textIds : Tensor { tm with dtype := .Int64 } #[batch, textSeq])
+    (attnMask : Option (Tensor { tm with dtype := .Int64 }
+        #[batch, AudioEncoderConfig.framesAfterConv3 cfg.audioConfig frames + textSeq]) := none)
+    : Tensor tm
+        #[batch, AudioEncoderConfig.framesAfterConv3 cfg.audioConfig frames + textSeq,
+          ThinkerLmVocabSize cfg] :=
+  Tensor.unsafeOfT tm
+    (m.forwardFromMel (Tensor.toT inputFeatures) (Tensor.toT textIds)
+      (attnMask.map Tensor.toT))
+
 end Qwen3ASRThinkerForConditionalGeneration
 
 /-- Top-level Qwen3-ASR model wrapper (thinker-only inference in this Lean port). -/
@@ -1031,6 +1124,38 @@ def alignPrepared {batch seq frames : UInt64}
     : IO (Array ForcedAlignResult) := do
   let logits ← m.forward inputIds inputFeatures featureAttentionMask attentionMask
   m.alignFromLogits inputIds logits wordLists timestampTokenId timestampSegmentTime
+
+/-! ## Typed (`Tensor m s`) entry-point siblings -/
+
+/-- Typed sibling of `forwardText`. -/
+def forwardTextT {tm : TensorMeta} {batch textSeq : UInt64}
+    (m : Qwen3ASRForConditionalGeneration cfg)
+    (textIds : Tensor { tm with dtype := .Int64 } #[batch, textSeq])
+    (attnMask : Option (Tensor { tm with dtype := .Int64 } #[batch, textSeq]) := none)
+    : Tensor tm #[batch, textSeq, ThinkerLmVocabSize cfg.thinkerConfig] :=
+  m.thinker.forwardTextT textIds attnMask
+
+/-- Typed sibling of `forwardFromMel`. -/
+def forwardFromMelT {tm : TensorMeta} {batch frames textSeq : UInt64}
+    (m : Qwen3ASRForConditionalGeneration cfg)
+    (inputFeatures : Tensor tm #[batch, cfg.thinkerConfig.audioConfig.numMelBins, frames])
+    (textIds : Tensor { tm with dtype := .Int64 } #[batch, textSeq])
+    (attnMask : Option (Tensor { tm with dtype := .Int64 }
+        #[batch, AudioEncoderConfig.framesAfterConv3 cfg.thinkerConfig.audioConfig frames + textSeq]) := none)
+    : Tensor tm
+        #[batch, AudioEncoderConfig.framesAfterConv3 cfg.thinkerConfig.audioConfig frames + textSeq,
+          ThinkerLmVocabSize cfg.thinkerConfig] :=
+  m.thinker.forwardFromMelT inputFeatures textIds attnMask
+
+/-- Typed sibling of `forward`. -/
+def forwardT {tm : TensorMeta} {batch seq frames : UInt64}
+    (m : Qwen3ASRForConditionalGeneration cfg)
+    (inputIds : Tensor { tm with dtype := .Int64 } #[batch, seq])
+    (inputFeatures : Option (Tensor tm #[batch, cfg.thinkerConfig.audioConfig.numMelBins, frames]) := none)
+    (featureAttentionMask : Option (Tensor { tm with dtype := .Int64 } #[batch, frames]) := none)
+    (attentionMask : Option (Tensor { tm with dtype := .Int64 } #[batch, seq]) := none)
+    : IO (Tensor tm #[batch, seq, ThinkerLmVocabSize cfg.thinkerConfig]) :=
+  m.thinker.forwardT inputIds inputFeatures featureAttentionMask attentionMask
 
 end Qwen3ASRForConditionalGeneration
 

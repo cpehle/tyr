@@ -16,9 +16,12 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
     env:
-      LIBTORCH_VERSION: 2.9.1
+      LIBTORCH_VERSION: 2.10.0
+      DOC_GEN4_REPO: https://github.com/cpehle/doc-gen4.git
+      DOC_GEN4_REV: 093b0e5486b438c1f5afbe9888c8df598921f6e2
 
     steps:
       - uses: actions/checkout@v4
@@ -31,6 +34,13 @@ jobs:
         run: |
           curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf | sh -s -- -y --default-toolchain none
           echo "$HOME/.elan/bin" >> $GITHUB_PATH
+
+      - name: Cache elan toolchain
+        id: cache-elan
+        uses: actions/cache@v4
+        with:
+          path: ~/.elan
+          key: elan-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('lean-toolchain') }}
 
       - name: Set up Lean toolchain
         run: |
@@ -70,7 +80,8 @@ jobs:
       - name: Prepare doc-gen4 path dependency
         run: |
           rm -rf "$GITHUB_WORKSPACE/../doc-gen4"
-          git clone --depth 1 https://github.com/cpehle/doc-gen4.git "$GITHUB_WORKSPACE/../doc-gen4"
+          git clone "${DOC_GEN4_REPO}" "$GITHUB_WORKSPACE/../doc-gen4"
+          git -C "$GITHUB_WORKSPACE/../doc-gen4" checkout --detach "${DOC_GEN4_REV}"
 
       - name: Create docbuild package
         run: |
