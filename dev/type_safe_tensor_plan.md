@@ -1,5 +1,14 @@
 # Type-Safe Tensor Frontend — Tracking Device and DType in `T`
 
+> **Status (branch `type-safe-tensor-meta`)**: Phase 0 (foundations + typed
+> API surface) and Phase 1 (Module-layer typed wrappers + instances)
+> complete. Phase 3 (FFI ingress Σ-types) partially complete for
+> SafeTensors. Phase 2 (model-file migrations) is **incremental and
+> ongoing** — one entry-point migration landed (`Qwen3ForCausalLM.embedTokensT`)
+> as a template; bulk model-file migration remains follow-up work. See
+> commit history on the branch for landed work and the bottom of this
+> file for what's next.
+
 ## Context
 
 Today `T : Shape → Type` (`Tyr/Basic.lean:107-108`) carries only shape at the
@@ -359,3 +368,100 @@ correctly and the FFI boundary still works.
   doable with refined types but a different axis of safety.
 - Compile-time shape checking that goes beyond what `Shape` already
   provides (the `matmulShape` style functions stay as today).
+
+## Branch status — what landed on `type-safe-tensor-meta`
+
+13 commits, all build-green, 12/12 tests pass.
+
+### Phase 0: Foundations + typed API ✅
+
+  - `Tyr/Basic.lean`: `TensorMeta` struct, `Tensor m s` phantom-typed
+    alias for `TSpec.type`, `Tensor.unsafeOfT` / `Tensor.toT` adapters,
+    `DecidableEq` on `Device`.
+  - `Tyr/Tensor.lean`: ~50 ops covering constructors, conversion,
+    arithmetic + scalar variants + HAdd/HSub/HMul/HDiv instances,
+    activations (sigmoid/silu/softmax/rsqrt/relu/gelu/softplus/tanh/
+    exp/log/abs/sqrt), reductions (sumDim/meanDim/argmax),
+    shape (reshape/transpose/expand/cat/unsqueeze/squeeze),
+    linalg (matmul/linear2d/linear3d/affine3d), slicing
+    (slice/sliceScatter), attention transposes
+    (transposeForAttention/transposeFromAttention), embedding (with
+    Int64 ids constraint), SDPA family (sdpaGQA/sdpaGQAQKV/
+    tyrFlashAttn4d), functional module ops (rmsNormWeighted/layerNorm),
+    logical/comparison (eqScalar/whereSelect/logicalNot/logicalOr/anyB/
+    fullInt).
+
+### Phase 1: Module-layer typed wrappers ✅
+
+  - `Tyr/Module/RMSNorm.lean`: forward2dT/3dT/4dT/5dT + typed Module
+    instances
+  - `Tyr/Module/LayerNorm.lean`: forward3dT + typed Module instance
+  - `Tyr/Module/Linear.lean`: forward2dT/3dT + typed Module instances
+  - `Tyr/Module/Affine.lean`: stepT
+  - `Tyr/Module.lean`: fixed missing `import Tyr.Module.RMSNorm`
+
+  The `m |> x` infix syntax dispatches correctly on typed inputs.
+
+### Phase 3: FFI ingress (partial — SafeTensors only) ✅
+
+  - `Tensor.loadSafeTensor`: caller-asserted-meta variant
+  - `Tensor.loadSafeTensorAuto`: Σ-typed `(m : TensorMeta) × Tensor m s`
+    with runtime device/dtype detection
+  - `Tensor.viewAs`: cast at FFI boundaries
+
+### Tests ✅
+
+  `Tests/TestTensorTyped.lean` — 12 runtime tests + 2 compile-time
+  `#check_failure` negative tests:
+
+    - constructor metadata round-trip
+    - arithmetic preserves metadata
+    - `toFloat32` updates dtype index
+    - shape / tensorMeta projections
+    - `RMSNorm`/`Linear` typed forwards
+    - activations preserve metadata
+    - transpose updates shape index
+    - attention transpose round-trip
+    - typed `Module |> x` dispatch
+    - end-to-end typed attention block (Q/K/V/reshape/transpose pipeline)
+    - end-to-end typed MLP (`Examples/TypedTensor/MiniMLP.lean`)
+    - mismatched-meta `add` rejected at compile time
+    - non-Int64 ids rejected by `embedding` at compile time
+
+### Phase 2: Model-file migrations (started, mostly remaining)
+
+  - `Tyr/Model/Qwen3/Model.lean`: `embedTokensT` added as the first
+    in-place model migration template. Legacy `embedTokens` kept for
+    backwards compatibility.
+
+  **Remaining**: ~50 model files / 4-5K `T #[…]` sites. Migration is
+  per-file, follows the pattern from `embedTokensT`:
+
+    1. `import Tyr.Tensor` in the model file.
+    2. Add typed sibling methods with `T` suffix that delegate to the
+       legacy `T s` impl via `Tensor.unsafeOfT` / `.toT`.
+    3. Once all callers in a model are migrated, drop the legacy
+       sibling.
+    4. As intermediate `T s` site annotations are migrated to
+       `Tensor m s`, the call sites pin metadata at the type level and
+       Lean catches mismatches.
+
+  The largest model files by `T #[…]` site count: KittenTTS (542),
+  Gemma4 (538), Qwen35 (374). Plan ~1 PR per model family; expect
+  elaborator-tuning passes when shape-arithmetic-heavy code (e.g.
+  `cfg.head_dim / 2`) is exposed to the new index.
+
+### Phase 4: Tighten polymorphic ops (not started)
+
+  Once enough of the codebase is migrated, sweep for `{m : TensorMeta}`
+  binders that should be pinned to specific dtype constraints:
+
+    - all token-ID tensors → pin `dtype := .Int64`
+    - position embeddings → typically pin device to match weights
+    - attention masks → `.Bool` or `.Int64`
+    - mixed-precision training: parameters at `.BFloat16`,
+      gradients/optimizer state at `.Float32` — explicit conversion
+      sites become type-checked.
+
+  Add lints / CI checks: forbid `{m : TensorMeta}` in functions whose
+  semantics require a specific dtype.
