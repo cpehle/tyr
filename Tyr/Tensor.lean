@@ -162,6 +162,40 @@ Output shape via `reduceShape`. -/
     : Tensor m (reduceShape s dim keepdim) :=
   Tensor.unsafeOfT m (torch.nn.meanDim (Tensor.toT t) dim keepdim)
 
+/-- `argmax` returns indices, dtype shifts to `.Int64` regardless of input. -/
+@[inline] def argmax {m : TensorMeta} {s : Shape} (t : Tensor m s) (dim : UInt64)
+    : Tensor { m with dtype := .Int64 } (reduceShape s dim.toNat false) :=
+  Tensor.unsafeOfT _ (torch.nn.argmax (Tensor.toT t) dim)
+
+/-! ## Logical / comparison
+
+Boolean-valued ops that semantically produce a Bool-dtype tensor.
+`eq_scalar` returns a same-dtype tensor in PyTorch (via cast-back), so
+metadata-preserving here. -/
+
+@[inline] def eqScalar {m : TensorMeta} {s : Shape} (t : Tensor m s) (scalar : Int64)
+    : Tensor m s :=
+  Tensor.unsafeOfT m (torch.eq_scalar (Tensor.toT t) scalar)
+
+@[inline] def whereSelect {m : TensorMeta} {s : Shape}
+    (cond : Tensor m s) (x y : Tensor m s) : Tensor m s :=
+  Tensor.unsafeOfT m (torch.where_ (Tensor.toT cond) (Tensor.toT x) (Tensor.toT y))
+
+@[inline] def logicalNot {m : TensorMeta} {s : Shape} (t : Tensor m s) : Tensor m s :=
+  Tensor.unsafeOfT m (torch.logical_not (Tensor.toT t))
+
+@[inline] def logicalOr {m : TensorMeta} {s : Shape} (a b : Tensor m s) : Tensor m s :=
+  Tensor.unsafeOfT m (torch.logicalOr (Tensor.toT a) (Tensor.toT b))
+
+@[inline] def anyB {m : TensorMeta} {s : Shape} (t : Tensor m s) : Bool :=
+  torch.any (Tensor.toT t)
+
+/-- Tensor-of-Int64 constant, useful for token-id constants alongside
+    embedding/argmax outputs. The result claims `.Int64` dtype. -/
+@[inline] def fullInt (s : Shape) (m : TensorMeta) (value : Int64)
+    : Tensor { m with dtype := .Int64 } s :=
+  Tensor.unsafeOfT _ ((torch.full_int s value).to m.device)
+
 /-! ## Shape transforms
 
 Shape-changing, metadata-preserving. Output shape is determined by
