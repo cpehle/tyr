@@ -9,6 +9,7 @@
   and `restoreInputDType` are already provided by `Tyr.Torch`.
 -/
 import Tyr.Torch
+import Tyr.Tensor
 
 namespace torch.Model
 
@@ -23,5 +24,22 @@ def initWeight (shape : Shape) (fanIn : UInt64) : IO (T shape) := do
 /-- Zero bias tensor with requires_grad=true. -/
 def initBias (shape : Shape) : T shape :=
   autograd.set_requires_grad (torch.zeros shape) true
+
+/-! ## Typed initialization helpers
+
+Produce `Tensor m s` directly from random init routines so callers
+can keep parameter dtype/device pinned at construction. -/
+
+/-- Typed Kaiming-like init. The result tensor lives on `m.device` with
+    `m.dtype` claimed at the type level. The randn/scaling is performed
+    in the legacy float path then transferred. -/
+def initWeightT (shape : Shape) (fanIn : UInt64) (m : TensorMeta) : IO (Tensor m shape) := do
+  let w ← initWeight shape fanIn
+  let w := T.to w m.device
+  return Tensor.unsafeOfT m w
+
+/-- Typed bias init — zero tensor with requires_grad=true on `m.device`. -/
+def initBiasT (shape : Shape) (m : TensorMeta) : Tensor m shape :=
+  Tensor.unsafeOfT m (T.to (initBias shape) m.device)
 
 end torch.Model
