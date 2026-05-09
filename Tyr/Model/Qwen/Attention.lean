@@ -5,6 +5,7 @@
   Uses fewer key-value heads than query heads for efficiency.
 -/
 import Tyr.Torch
+import Tyr.Tensor
 import Tyr.TensorStruct
 import Tyr.Module.Core
 import Tyr.Module.Derive
@@ -146,22 +147,28 @@ def forward {batch seq hidden_size num_heads num_kv_heads head_dim : UInt64}
   -- Output projection
   linear3d attn_out attn.o_proj
 
-/-- Incremental attention step with KV cache.
-    Input query is one token `[batch,1,hidden]`; cache grows by one KV step.
+/-- Typed `forward` — preserves TensorMeta of the activation through
+    the attention block. Body delegates to the legacy `forward`. -/
+@[inline] def forwardT {tm : TensorMeta} {batch seq hidden_size num_heads num_kv_heads head_dim : UInt64}
+    (attn : QwenAttention hidden_size num_heads num_kv_heads head_dim)
+    (x : Tensor tm #[batch, seq, hidden_size])
+    (cos : T #[seq, head_dim / 2])
+    (sin : T #[seq, head_dim / 2])
+    (is_causal : Bool := true)
+    : Tensor tm #[batch, seq, hidden_size] :=
+  Tensor.unsafeOfT tm (attn.forward (Tensor.toT x) cos sin is_causal)
 
-    When `useTyrFlashAttn` is true (default false), routes the cached
-    attention through `nn.tyrFlashAttn4d` instead of `scaledDotProductAttentionGQAQKV`.
-    The C++ `tyr::flash_attn` dispatcher then routes shape-eligible decode
-    problems (BF16 + qSeq=1 + head_dim=128 or 64 + GQA-valid) to the native
-    TK kernel `tkMhaH100DecodeFwd[64]`, and falls back to PyTorch SDPA
-    otherwise — so this flag is safe to flip on for any shape. -/
+/-- Incremental attention step with KV cache. Input query is one token
+    `[batch,1,hidden]`; cache grows by one KV step. Cached attention is
+    dispatched through `nn.tyrFlashAttn4d`; the C++ side (`select_route` in
+    `cc/src/tyr_ops.cpp`) routes Hopper + BF16 + qSeq=1 to the TK decode
+    kernel and falls back to PyTorch SDPA otherwise. -/
 def forwardStep {batch hidden_size num_heads num_kv_heads head_dim : UInt64}
     (attn : QwenAttention hidden_size num_heads num_kv_heads head_dim)
     (x : T #[batch, 1, hidden_size])
     (cos : T #[1, head_dim / 2])
     (sin : T #[1, head_dim / 2])
     (cache : KVCache batch num_kv_heads head_dim)
-    (useTyrFlashAttn : Bool := false)
     : T #[batch, 1, hidden_size] × KVCache batch num_kv_heads head_dim :=
   -- Project current token to Q/K/V.
   let q0 := linear3d x attn.q_proj
@@ -205,10 +212,7 @@ def forwardStep {batch hidden_size num_heads num_kv_heads head_dim : UInt64}
 
     -- Use q_len=1, kv_len=(seq+1). Causal masking is unnecessary because KV has no future tokens.
     let attnOut : T #[batch, num_heads, 1, head_dim] :=
-      if useTyrFlashAttn then
-        nn.tyrFlashAttn4d qh kAll vAll none 0.0 false none true
-      else
-        nn.scaledDotProductAttentionGQAQKV qh kAll vAll 0.0 false true
+      nn.tyrFlashAttn4d qh kAll vAll none 0.0 false none true
     let attnOut : T #[batch, 1, num_heads, head_dim] := nn.transpose_from_attention attnOut
     let attnOut : T #[batch, 1, num_heads * head_dim] := reshape attnOut #[batch, 1, num_heads * head_dim]
     let out : T #[batch, 1, hidden_size] := linear3d attnOut attn.o_proj
@@ -234,10 +238,7 @@ def forwardStep {batch hidden_size num_heads num_kv_heads head_dim : UInt64}
     let kAll : T #[batch, num_kv_heads, kvLen, head_dim] := data.slice kStore' 2 0 kvLen
     let vAll : T #[batch, num_kv_heads, kvLen, head_dim] := data.slice vStore' 2 0 kvLen
     let attnOut : T #[batch, num_heads, 1, head_dim] :=
-      if useTyrFlashAttn then
-        nn.tyrFlashAttn4d qh kAll vAll none 0.0 false none true
-      else
-        nn.scaledDotProductAttentionGQAQKV qh kAll vAll 0.0 false true
+      nn.tyrFlashAttn4d qh kAll vAll none 0.0 false none true
     let attnOut : T #[batch, 1, num_heads, head_dim] := nn.transpose_from_attention attnOut
     let attnOut : T #[batch, 1, num_heads * head_dim] := reshape attnOut #[batch, 1, num_heads * head_dim]
     let out : T #[batch, 1, hidden_size] := linear3d attnOut attn.o_proj
@@ -248,6 +249,18 @@ def forwardStep {batch hidden_size num_heads num_kv_heads head_dim : UInt64}
       maxLen := cache.maxLen
     }
     (out, cache')
+
+/-- Typed `forwardStep` — preserves TensorMeta of the activation
+    through the cached single-token decode. Body delegates to legacy. -/
+@[inline] def forwardStepT {tm : TensorMeta} {batch hidden_size num_heads num_kv_heads head_dim : UInt64}
+    (attn : QwenAttention hidden_size num_heads num_kv_heads head_dim)
+    (x : Tensor tm #[batch, 1, hidden_size])
+    (cos : T #[1, head_dim / 2])
+    (sin : T #[1, head_dim / 2])
+    (cache : KVCache batch num_kv_heads head_dim)
+    : Tensor tm #[batch, 1, hidden_size] × KVCache batch num_kv_heads head_dim :=
+  let (out, cache') := attn.forwardStep (Tensor.toT x) cos sin cache
+  (Tensor.unsafeOfT tm out, cache')
 
 def forwardMasked {batch seq hidden_size num_heads num_kv_heads head_dim : UInt64}
     (attn : QwenAttention hidden_size num_heads num_kv_heads head_dim)
