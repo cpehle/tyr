@@ -102,10 +102,35 @@ inductive Device where
 | CUDA : UInt64 → Device
 | CPU
 | MPS
-deriving Repr, Inhabited, BEq
+deriving Repr, Inhabited, BEq, DecidableEq
+
+/-- Type-level tensor metadata: device + dtype. Carried as a phantom index
+    on `Tensor` so that mismatched device or dtype is a Lean type error.
+    Erased at runtime; the underlying handle is `TSpec.type` regardless. -/
+structure TensorMeta where
+  device : Device
+  dtype  : DType
+deriving Repr, Inhabited, BEq, DecidableEq
 
 opaque TSpec : NonemptyType
-def T (_ : Shape) : Type :=  TSpec.type
+
+/-- Legacy shape-only tensor handle. New code should use `Tensor m s` to
+    additionally pin device + dtype at the type level. Both reduce to the
+    same opaque FFI handle. -/
+def T (_ : Shape) : Type := TSpec.type
+
+/-- Tensor with type-level device + dtype tracking. Phantom indices erase
+    at runtime — `Tensor m s` and `T s` share the same underlying handle
+    `TSpec.type`. See `dev/type_safe_tensor_plan.md`. -/
+def Tensor (_m : TensorMeta) (_s : Shape) : Type := TSpec.type
+
+/-- Cast between the typed and legacy tensor views. Unsafe in the sense
+    that it does not verify the runtime tensor's actual device/dtype
+    match `m` — used at FFI boundaries where the metadata is asserted
+    by construction. Both representations share a single FFI handle. -/
+@[inline] def Tensor.unsafeOfT {s : Shape} (m : TensorMeta) (t : T s) : Tensor m s := t
+
+@[inline] def Tensor.toT {m : TensorMeta} {s : Shape} (t : Tensor m s) : T s := t
 
 /-! ## Shape Manipulation Helpers -/
 
