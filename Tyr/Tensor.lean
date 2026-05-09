@@ -125,6 +125,43 @@ Elementwise ops over a single tensor — shape and metadata preserved. -/
 @[inline] def rsqrt {m : TensorMeta} {s : Shape} (t : Tensor m s) : Tensor m s :=
   Tensor.unsafeOfT m (torch.rsqrt (Tensor.toT t))
 
+@[inline] def relu {m : TensorMeta} {s : Shape} (t : Tensor m s) : Tensor m s :=
+  Tensor.unsafeOfT m (torch.relu (Tensor.toT t))
+
+@[inline] def gelu {m : TensorMeta} {s : Shape} (t : Tensor m s) : Tensor m s :=
+  Tensor.unsafeOfT m (torch.nn.gelu (Tensor.toT t))
+
+@[inline] def softplus {m : TensorMeta} {s : Shape} (t : Tensor m s) : Tensor m s :=
+  Tensor.unsafeOfT m (torch.nn.softplus (Tensor.toT t))
+
+@[inline] def tanh {m : TensorMeta} {s : Shape} (t : Tensor m s) : Tensor m s :=
+  Tensor.unsafeOfT m (torch.nn.tanh (Tensor.toT t))
+
+@[inline] def exp {m : TensorMeta} {s : Shape} (t : Tensor m s) : Tensor m s :=
+  Tensor.unsafeOfT m (torch.nn.exp (Tensor.toT t))
+
+@[inline] def log {m : TensorMeta} {s : Shape} (t : Tensor m s) : Tensor m s :=
+  Tensor.unsafeOfT m (torch.nn.log (Tensor.toT t))
+
+@[inline] def abs {m : TensorMeta} {s : Shape} (t : Tensor m s) : Tensor m s :=
+  Tensor.unsafeOfT m (torch.nn.abs (Tensor.toT t))
+
+@[inline] def sqrt {m : TensorMeta} {s : Shape} (t : Tensor m s) : Tensor m s :=
+  Tensor.unsafeOfT m (torch.nn.sqrt (Tensor.toT t))
+
+/-! ## Reductions
+
+Reduce along a dimension, optionally keeping it as size 1.
+Output shape via `reduceShape`. -/
+
+@[inline] def sumDim {m : TensorMeta} {s : Shape} (t : Tensor m s) (dim : Nat) (keepdim : Bool := false)
+    : Tensor m (reduceShape s dim keepdim) :=
+  Tensor.unsafeOfT m (torch.nn.sumDim (Tensor.toT t) dim keepdim)
+
+@[inline] def meanDim {m : TensorMeta} {s : Shape} (t : Tensor m s) (dim : Nat) (keepdim : Bool := false)
+    : Tensor m (reduceShape s dim keepdim) :=
+  Tensor.unsafeOfT m (torch.nn.meanDim (Tensor.toT t) dim keepdim)
+
 /-! ## Shape transforms
 
 Shape-changing, metadata-preserving. Output shape is determined by
@@ -139,6 +176,14 @@ Shape-changing, metadata-preserving. Output shape is determined by
 
 @[inline] def expand {m : TensorMeta} {s : Shape} (t : Tensor m s) (target : Shape) : Tensor m target :=
   Tensor.unsafeOfT m (torch.nn.expand (Tensor.toT t) target)
+
+@[inline] def unsqueeze {m : TensorMeta} {s : Shape} (t : Tensor m s) (dim : Nat)
+    : Tensor m (unsqueezeShape s dim) :=
+  Tensor.unsafeOfT m (torch.nn.unsqueeze (Tensor.toT t) dim)
+
+@[inline] def squeeze {m : TensorMeta} {s : Shape} (t : Tensor m s) (dim : Nat)
+    : Tensor m (squeezeShape s dim) :=
+  Tensor.unsafeOfT m (torch.nn.squeeze (Tensor.toT t) dim)
 
 @[inline] def cat {m : TensorMeta} {s1 s2 : Shape}
     (a : Tensor m s1) (b : Tensor m s2) (dim : Nat)
@@ -215,6 +260,62 @@ type level via a dtype-pinned input parameter. -/
     (ids : Tensor { m with dtype := .Int64 } #[batch, seq])
     : Tensor m #[batch, seq, embed] :=
   Tensor.unsafeOfT m (torch.nn.embedding (Tensor.toT ids) (Tensor.toT weight))
+
+/-! ## Scaled Dot-Product Attention
+
+GQA-aware SDPA variants. All preserve metadata across Q/K/V/out. -/
+
+/-- SDPA-GQA with Q/K/V sharing kv_seq = q_seq. -/
+@[inline] def sdpaGQA {m : TensorMeta} {batch n_head n_kv_head seq head_dim : UInt64}
+    (query : Tensor m #[batch, n_head, seq, head_dim])
+    (key : Tensor m #[batch, n_kv_head, seq, head_dim])
+    (value : Tensor m #[batch, n_kv_head, seq, head_dim])
+    (dropout_p : Float := 0.0) (is_causal : Bool := true) (enable_gqa : Bool := false)
+    : Tensor m #[batch, n_head, seq, head_dim] :=
+  Tensor.unsafeOfT m
+    (torch.nn.scaledDotProductAttentionGQA (Tensor.toT query) (Tensor.toT key) (Tensor.toT value)
+      dropout_p is_causal enable_gqa)
+
+/-- SDPA-GQA with separate q_seq vs kv_seq (KV-cache decode). -/
+@[inline] def sdpaGQAQKV {m : TensorMeta} {batch n_head n_kv_head q_seq kv_seq head_dim : UInt64}
+    (query : Tensor m #[batch, n_head, q_seq, head_dim])
+    (key : Tensor m #[batch, n_kv_head, kv_seq, head_dim])
+    (value : Tensor m #[batch, n_kv_head, kv_seq, head_dim])
+    (dropout_p : Float := 0.0) (is_causal : Bool := false) (enable_gqa : Bool := false)
+    : Tensor m #[batch, n_head, q_seq, head_dim] :=
+  Tensor.unsafeOfT m
+    (torch.nn.scaledDotProductAttentionGQAQKV (Tensor.toT query) (Tensor.toT key) (Tensor.toT value)
+      dropout_p is_causal enable_gqa)
+
+/-- Tyr/TK FlashAttention dispatcher. C++ side (`select_route`) routes
+    Hopper + BF16 + qSeq=1 problems to the TK decode kernel and falls
+    back to PyTorch SDPA otherwise. -/
+@[inline] def tyrFlashAttn4d {m : TensorMeta}
+    {batch n_head n_kv_head q_seq kv_seq head_dim : UInt64}
+    (query : Tensor m #[batch, n_head, q_seq, head_dim])
+    (key : Tensor m #[batch, n_kv_head, kv_seq, head_dim])
+    (value : Tensor m #[batch, n_kv_head, kv_seq, head_dim])
+    (attn_mask : Option (Tensor m #[batch, kv_seq]) := none)
+    (dropout_p : Float := 0.0) (is_causal : Bool := false)
+    (scale : Option Float := none) (enable_gqa : Bool := false)
+    : Tensor m #[batch, n_head, q_seq, head_dim] :=
+  Tensor.unsafeOfT m
+    (torch.nn.tyrFlashAttn4d (Tensor.toT query) (Tensor.toT key) (Tensor.toT value)
+      (attn_mask.map Tensor.toT) dropout_p is_causal scale enable_gqa)
+
+/-! ## Module-level helpers (functional)
+
+Direct functional-form access to module ops without the Module wrapper.
+Useful when porting code that calls `nn.layer_norm x w b eps` directly. -/
+
+@[inline] def rmsNormWeighted {m : TensorMeta} {s w : Shape}
+    (x : Tensor m s) (weight : Tensor m w) (eps : Float := 1e-6) : Tensor m s :=
+  Tensor.unsafeOfT m (torch.nn.rmsNormWeighted (Tensor.toT x) (Tensor.toT weight) eps)
+
+@[inline] def layerNorm {m : TensorMeta} {batch seq n : UInt64}
+    (x : Tensor m #[batch, seq, n]) (weight : Tensor m #[n]) (bias : Tensor m #[n])
+    (eps : Float := 1e-5) : Tensor m #[batch, seq, n] :=
+  Tensor.unsafeOfT m (torch.nn.layer_norm (Tensor.toT x) (Tensor.toT weight) (Tensor.toT bias) eps)
 
 /-! ## Inspection
 
