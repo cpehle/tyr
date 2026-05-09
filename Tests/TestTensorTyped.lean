@@ -12,6 +12,7 @@
 -/
 import Tyr
 import LeanTest
+import Examples.TypedTensor.MiniMLP
 
 open torch
 open LeanTest
@@ -144,6 +145,15 @@ def testTypedModuleApply : IO Unit := do
   let x : Tensor cpuF32 #[1, 2, 4] := Tensor.zeros #[1, 2, 4] cpuF32
   let y : Tensor cpuF32 #[1, 2, 3] := lin |> x
   assertEqual (Tensor.shape y) (#[1, 2, 3] : Shape) "module-apply on Tensor preserves type discipline"
+
+@[test]
+def testMiniMLPRunsTyped : IO Unit := do
+  -- Full typed MLP end-to-end: Linear → RMSNorm → SiLU gate → Linear,
+  -- with `Tensor m s` flowing through every intermediate. Smoke-test
+  -- only — verifies the pipeline executes and produces a finite result.
+  let s ← examples.typed.MiniMLP.run 8 16 1 4 cpuF32
+  -- Zero input → MLP-of-zeros → sum-squared = 0.
+  assertTrue (s >= 0.0 && s < 1e6) s!"MLP output sum-of-squares out of range: {s}"
 
 @[test]
 def testTypedAttentionBlock : IO Unit := do
