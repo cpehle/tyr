@@ -17,6 +17,7 @@
   - mono waveform tensor `[batch, 1, samples]` at 24kHz.
 -/
 import Tyr.Torch
+import Tyr.Tensor
 import Tyr.TensorStruct
 import Tyr.Model.Qwen.RoPE
 import Tyr.Model.Qwen3TTS.SpeechTokenizer
@@ -758,6 +759,41 @@ def pushEncodeStreamDynamic
       history := nextHist
   }
   return (st', codeGroups, valsKeep)
+
+/-! ## Typed entry-point siblings
+
+Audio activations carry the caller's TensorMeta; emitted codec IDs are
+dtype-pinned to `.Int64`. -/
+
+/-- Typed sibling of `encodeWithRoPEOffset`. -/
+def encodeWithRoPEOffsetT {tm : TensorMeta} {batch samples : UInt64}
+    (m : SpeechTokenizer12HzEncoder)
+    (audio : Tensor tm #[batch, 1, samples])
+    (ropeStartPos : UInt64 := 0)
+    : Tensor { tm with dtype := .Int64 } #[batch, 16, encodedFrames samples] :=
+  Tensor.unsafeOfT _ (encodeWithRoPEOffset m (Tensor.toT audio) ropeStartPos)
+
+/-- Typed sibling of `encode`. -/
+def encodeT {tm : TensorMeta} {batch samples : UInt64}
+    (m : SpeechTokenizer12HzEncoder)
+    (audio : Tensor tm #[batch, 1, samples])
+    : Tensor { tm with dtype := .Int64 } #[batch, 16, encodedFrames samples] :=
+  Tensor.unsafeOfT _ (encode m (Tensor.toT audio))
+
+/-- Typed sibling of `encodeMonoFrameMajorWithRoPEOffset`. -/
+def encodeMonoFrameMajorWithRoPEOffsetT {tm : TensorMeta} {samples : UInt64}
+    (m : SpeechTokenizer12HzEncoder)
+    (audio : Tensor tm #[samples])
+    (ropeStartPos : UInt64 := 0)
+    : Tensor { tm with dtype := .Int64 } #[encodedFrames samples, 16] :=
+  Tensor.unsafeOfT _ (encodeMonoFrameMajorWithRoPEOffset m (Tensor.toT audio) ropeStartPos)
+
+/-- Typed sibling of `encodeMonoFrameMajor`. -/
+def encodeMonoFrameMajorT {tm : TensorMeta} {samples : UInt64}
+    (m : SpeechTokenizer12HzEncoder)
+    (audio : Tensor tm #[samples])
+    : Tensor { tm with dtype := .Int64 } #[encodedFrames samples, 16] :=
+  Tensor.unsafeOfT _ (encodeMonoFrameMajor m (Tensor.toT audio))
 
 end SpeechTokenizer12HzEncoder
 

@@ -9,6 +9,7 @@
   - greedy generation (cached + uncached)
 -/
 import Tyr.Torch
+import Tyr.Tensor
 import Tyr.TensorStruct
 import Tyr.Module.Core
 import Tyr.Module.Derive
@@ -74,6 +75,14 @@ def embedTokens {batch seq : UInt64}
     : T #[batch, seq, cfg.hidden_size] :=
   nn.embedding inputIds m.model.embed_tokens
 
+/-- Typed token embedding lookup. The ids tensor is dtype-pinned to
+    `.Int64`, output inherits the embedding weight's metadata. -/
+def embedTokensT {tm : TensorMeta} {batch seq : UInt64}
+    (m : Qwen3ForCausalLM cfg)
+    (inputIds : Tensor { tm with dtype := .Int64 } #[batch, seq])
+    : Tensor tm #[batch, seq, cfg.hidden_size] :=
+  Tensor.embedding (Tensor.unsafeOfT tm m.model.embed_tokens) inputIds
+
 /-- Forward from pre-computed input embeddings. -/
 def forwardEmbeds {batch seq : UInt64}
     (m : Qwen3ForCausalLM cfg)
@@ -101,6 +110,24 @@ def forward {batch seq : UInt64}
     (attnMask : Option (T #[batch, seq]) := none)
     : T #[batch, seq, cfg.vocab_size] :=
   m.forwardEmbeds (m.embedTokens inputIds) attnMask
+
+/-- Typed forward from pre-computed input embeddings. Activations carry `tm`. -/
+def forwardEmbedsT {tm : TensorMeta} {batch seq : UInt64}
+    (m : Qwen3ForCausalLM cfg)
+    (inputsEmbeds : Tensor tm #[batch, seq, cfg.hidden_size])
+    (attnMask : Option (Tensor tm #[batch, seq]) := none)
+    : Tensor tm #[batch, seq, cfg.vocab_size] :=
+  Tensor.unsafeOfT tm
+    (m.forwardEmbeds (Tensor.toT inputsEmbeds) (attnMask.map Tensor.toT))
+
+/-- Typed standard forward pass from token IDs. Ids are dtype-pinned to `.Int64`. -/
+def forwardT {tm : TensorMeta} {batch seq : UInt64}
+    (m : Qwen3ForCausalLM cfg)
+    (inputIds : Tensor { tm with dtype := .Int64 } #[batch, seq])
+    (attnMask : Option (Tensor { tm with dtype := .Int64 } #[batch, seq]) := none)
+    : Tensor tm #[batch, seq, cfg.vocab_size] :=
+  Tensor.unsafeOfT tm
+    (m.forward (Tensor.toT inputIds) (attnMask.map Tensor.toT))
 
 /-- Forward pass that also returns per-layer hidden states. -/
 def forwardWithHiddenStates {batch seq : UInt64}
@@ -305,6 +332,17 @@ def generateGreedy {batch seq : UInt64}
   let (lastLogits, cachesPrefill) ←
     prefillCachesFromEmbeds m cosAll sinAll inputsEmbeds caches1 1 logits0
   greedyLoopCached m cosAll sinAll eosTokenIds eosVector maxNewTokens.toNat cachesPrefill lastLogits none inputIds
+
+/-- Typed greedy generation. Token-id tensors are dtype-pinned to `.Int64`,
+    activation metadata is carried by `tm`. -/
+def generateGreedyT {tm : TensorMeta} {batch seq : UInt64}
+    (m : Qwen3ForCausalLM cfg)
+    (inputIds : Tensor { tm with dtype := .Int64 } #[batch, seq])
+    (maxNewTokens : UInt64 := 512)
+    (eosTokenIds : Array UInt64 := #[])
+    : IO (Sigma (fun outSeq => Tensor { tm with dtype := .Int64 } #[batch, outSeq])) := do
+  let ⟨outSeq, raw⟩ ← m.generateGreedy (Tensor.toT inputIds) maxNewTokens eosTokenIds
+  pure ⟨outSeq, Tensor.unsafeOfT _ raw⟩
 
 /-- Reference greedy generation by full re-forward on each decode step. -/
 def generateGreedyUncached {batch seq : UInt64}

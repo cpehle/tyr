@@ -49,6 +49,16 @@ def forward3d {in_dim out_dim batch seq : UInt64} (lin : Linear in_dim out_dim)
   | some b => affine3d x lin.weight b
   | none => linear3d x lin.weight
 
+/-- 2D typed forward — preserves the input's device + dtype. -/
+@[inline] def forward2dT {m : TensorMeta} {in_dim out_dim batch : UInt64}
+    (lin : Linear in_dim out_dim) (x : Tensor m #[batch, in_dim]) : Tensor m #[batch, out_dim] :=
+  Tensor.unsafeOfT m (lin.forward2d (Tensor.toT x))
+
+/-- 3D typed forward — preserves the input's device + dtype. -/
+@[inline] def forward3dT {m : TensorMeta} {in_dim out_dim batch seq : UInt64}
+    (lin : Linear in_dim out_dim) (x : Tensor m #[batch, seq, in_dim]) : Tensor m #[batch, seq, out_dim] :=
+  Tensor.unsafeOfT m (lin.forward3d (Tensor.toT x))
+
 end Linear
 
 /-- Module instance for 2D forward pass -/
@@ -60,5 +70,14 @@ instance {in_dim out_dim batch : UInt64} :
 instance {in_dim out_dim batch seq : UInt64} :
     Module (Linear in_dim out_dim) (T #[batch, seq, in_dim]) (T #[batch, seq, out_dim]) where
   forward := Linear.forward3d
+
+/-- Typed Module instances. -/
+instance {tm : TensorMeta} {in_dim out_dim batch : UInt64} :
+    Module (Linear in_dim out_dim) (Tensor tm #[batch, in_dim]) (Tensor tm #[batch, out_dim]) where
+  forward := Linear.forward2dT
+
+instance {tm : TensorMeta} {in_dim out_dim batch seq : UInt64} :
+    Module (Linear in_dim out_dim) (Tensor tm #[batch, seq, in_dim]) (Tensor tm #[batch, seq, out_dim]) where
+  forward := Linear.forward3dT
 
 end torch

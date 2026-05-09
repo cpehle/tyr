@@ -226,6 +226,9 @@ SRCS := \
 	tyr_parquet.cpp\
 	tyr_execution.cpp\
 	float_buffer.cpp
+ifneq ($(GPU),H100)
+SRCS += tk_vendor_stubs.cpp
+endif
 MM_SRCS :=
 ifeq ($(UNAME_S),Darwin)
 MM_SRCS += apple_mps.mm
@@ -247,7 +250,15 @@ APPLE_FRAMEWORK_FLAGS := \
 else
 APPLE_FRAMEWORK_FLAGS :=
 endif
+# tk_vendor_mha_h100.cu emits Hopper `wgmma` instructions; ptxas rejects it for
+# sm_10x/sm_12x (Blackwell) targets like B200/GB10. The launcher stubs are
+# weak so the runtime dispatcher's Hopper-arch gate routes those problems to
+# the portable SDPA fallback when the kernels are absent.
+ifeq ($(GPU),H100)
 STATIC_CU_SRCS := $(SRC_DIR)/tk_vendor_mha_h100.cu
+else
+STATIC_CU_SRCS :=
+endif
 GPU_CODEGEN_MODULES := $(strip $(TYR_GPU_CODEGEN_MODULE))
 ifeq ($(GPU_CODEGEN_MODULES),)
 CU_SRCS := $(STATIC_CU_SRCS) $(wildcard $(SRC_DIR)/generated/*.cu)

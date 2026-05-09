@@ -8,6 +8,7 @@
   - Final speech-probability head
 -/
 import Tyr.Torch
+import Tyr.Tensor
 import Tyr.TensorStruct
 import Tyr.Module.Core
 import Tyr.Module.Derive
@@ -244,6 +245,16 @@ def forwardPrepared
   let y2 : T #[1, 1, 1] := nn.sigmoid y1
   let y : T #[1, 1] := reshape y2 #[1, 1]
   (y, state')
+
+/-- Typed sibling of `forwardPrepared` — preserves TensorMeta of audio
+    activations. The LSTM state's tensors are passed through unchanged. -/
+def forwardPreparedT {tm : TensorMeta}
+    (m : SileroVAD)
+    (xPrepared : Tensor tm #[1, preparedInputSamples.toUInt64])
+    (state : VADLstmState)
+    : Tensor tm #[1, 1] × VADLstmState :=
+  let (y, state') := m.forwardPrepared (Tensor.toT xPrepared) state
+  (Tensor.unsafeOfT tm y, state')
 
 end SileroVAD
 

@@ -1,4 +1,5 @@
 import Tests.Test
+import Tests.TestTensorTyped
 import Tests.TestDataLoader
 import Tests.TestModdedGPT
 import Tests.TestCheckpoint

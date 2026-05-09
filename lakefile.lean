@@ -36,6 +36,30 @@ def linuxSystemLinkDirs : Array String :=
     "-L/usr/lib"
   ]
 
+/-- CUDA link flags for Linux: vendored `libtorch_cuda` / `libc10_cuda` and the
+    system `libcudart` are needed because `cc/build/libTyrC.a` whole-archives
+    CUDA-using objects (TK kernels). Returns `#[]` if the vendored libtorch
+    doesn't ship CUDA support — this keeps a CPU-only checkout linking. -/
+def linuxCudaLinkArgs : Array String := run_io do
+  let torchCudaCandidates : Array System.FilePath := #[
+    ⟨(__dir__ / "external" / "libtorch" / "lib" / "libtorch_cuda.so").toString⟩,
+    ⟨(__dir__ / "external" / "libtorch" / "lib" / "libtorch_cuda.dylib").toString⟩
+  ]
+  let hasTorchCuda ← torchCudaCandidates.anyM (·.pathExists)
+  if hasTorchCuda then
+    pure #["-ltorch_cuda", "-lc10_cuda", "-lcudart", "-lcuda"]
+  else
+    pure #[]
+
+/-- Lean v4.29's bundled `Scrt1.o` references `__libc_csu_init` / `__libc_csu_fini`,
+    which were removed from glibc 2.34 (Ubuntu 24.04 ships glibc 2.39). Define
+    both as zero so the link succeeds; glibc 2.34+ `__libc_start_main` ignores
+    the legacy init/fini function-pointer arguments, so the symbols are never
+    actually dereferenced. Scoped to Linux. -/
+def linuxGlibc234CompatLinkArgs : Array String :=
+  if System.Platform.isOSX then #[] else
+    #["-Wl,--defsym=__libc_csu_init=0", "-Wl,--defsym=__libc_csu_fini=0"]
+
 def linuxArrowLinkArgs : Array String := run_io do
   let candidates : Array System.FilePath := #[
     ⟨"/usr/lib/aarch64-linux-gnu/libarrow.so"⟩,
@@ -159,6 +183,19 @@ def soxrLinkArgs : Array String :=
 def linuxTorchLibDir : String :=
   (__dir__ / "external" / "libtorch" / "lib").toString
 
+/-- Common Linux link tail shared by `packageLinkArgs` and `commonLinkArgs`:
+    libtorch + CUDA (if vendored) + arrow/soxr + glibc-2.34 compat + rpath. -/
+def linuxLinkTail : Array String :=
+  #[
+    s!"-L{__dir__ / "external" / "libtorch" / "lib"}",
+    "-ltorch", "-ltorch_cpu", "-lc10"
+  ] ++ linuxCudaLinkArgs ++ linuxSystemLinkDirs ++ soxrLinkArgs ++ linuxArrowLinkArgs
+    ++ linuxGlibc234CompatLinkArgs ++ #[
+    "-l:libgomp.so.1", "-l:libstdc++.so.6",
+    s!"-Wl,-rpath,{linuxTorchLibDir}",
+    "-Wl,-rpath,$ORIGIN/../../../external/libtorch/lib"
+  ]
+
 def packageLinkArgs : Array String :=
   if System.Platform.isOSX then
     #[
@@ -173,15 +210,7 @@ def packageLinkArgs : Array String :=
       s!"-Wl,-rpath,{tyrLeanSharedLibRPath}"
     ]
   else
-    #[
-      s!"-L{__dir__ / "external" / "libtorch" / "lib"}",
-      "-ltorch", "-ltorch_cpu", "-lc10"
-    ] ++ linuxSystemLinkDirs ++ soxrLinkArgs ++ linuxArrowLinkArgs ++ #[
-      "-l:libgomp.so.1", "-l:libstdc++.so.6",
-      "-larrow", "-lparquet",
-      s!"-Wl,-rpath,{linuxTorchLibDir}",
-      "-Wl,-rpath,$ORIGIN/../../../external/libtorch/lib"
-    ]
+    linuxLinkTail
 
 def commonLinkArgs : Array String :=
   if System.Platform.isOSX then
@@ -197,16 +226,7 @@ def commonLinkArgs : Array String :=
       "-Wl,-rpath,/opt/homebrew/lib"
     ]
   else
-    #[
-      s!"{__dir__ / "cc" / "build" / "libTyrC.a"}",
-      s!"-L{__dir__ / "external" / "libtorch" / "lib"}",
-      "-ltorch", "-ltorch_cpu", "-lc10"
-    ] ++ linuxSystemLinkDirs ++ soxrLinkArgs ++ linuxArrowLinkArgs ++ #[
-      "-l:libgomp.so.1", "-l:libstdc++.so.6",
-      "-larrow", "-lparquet",
-      s!"-Wl,-rpath,{linuxTorchLibDir}",
-      "-Wl,-rpath,$ORIGIN/../../../external/libtorch/lib"
-    ]
+    #[s!"{__dir__ / "cc" / "build" / "libTyrC.a"}"] ++ linuxLinkTail
 
 package tyr where
   srcDir := "."
@@ -566,7 +586,7 @@ def codegenExeLinkArgs : Array String := run_io do
     | some home => pure s!"{home}/lib64/stubs"
     | none =>
       pure "/grid/it/easybuild/easybuild5/software/CUDA/12.9.1/stubs/lib64"
-  return #[s!"-L{stubsDir}", "-lcuda"]
+  return #[s!"-L{stubsDir}", "-lcuda"] ++ linuxGlibc234CompatLinkArgs
 
 /-- Generate CUDA translation units from registered @[gpu_kernel] declarations.
 
@@ -680,6 +700,12 @@ lean_exe TestDiffusion where
 /-- DataLoader test executable -/
 lean_exe TestDataLoader where
   root := `Tests.RunTestDataLoader
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
+/-- Typed-tensor (`Tensor m s`) smoke test executable. -/
+lean_exe TestTensorTyped where
+  root := `Tests.RunTestTensorTyped
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 

@@ -11,6 +11,7 @@
   and concatenates their soft tokens, instead of batching padded patch tensors.
 -/
 import Tyr.Torch
+import Tyr.Tensor
 import Tyr.TensorStruct
 import Tyr.Module.Core
 import Tyr.Module.Derive
@@ -573,6 +574,72 @@ def generateStream {batch seq : UInt64}
     strategy
     eosTokenIds
     prefillMasks
+
+/-! ### Typed `Tensor m s` siblings for the multimodal entry points.
+
+These mirror the public legacy API but flow `TensorMeta` through the type
+system. Token-ID tensors are pinned to `.Int64`; activation/feature tensors
+inherit `tm`. Bodies cast to legacy `T` via `Tensor.toT`, call the existing
+implementation, and re-wrap results with `Tensor.unsafeOfT`. -/
+
+/-- Typed image feature extractor: vision tower + multimodal embedder. -/
+def getImageFeaturesT {tm : TensorMeta} {patchRows patchCols : UInt64}
+    (cfg : VLConfig)
+    (m : Gemma4ForConditionalGeneration cfg)
+    (patchGrid : Tensor tm #[patchRows, patchCols, VisionConfig.patchDim cfg.vision_config])
+    : Tensor tm
+        #[(patchRows / cfg.vision_config.pooling_kernel_size) *
+            (patchCols / cfg.vision_config.pooling_kernel_size),
+          cfg.text_config.hidden_size] :=
+  Tensor.unsafeOfT tm (m.getImageFeatures cfg (Tensor.toT patchGrid))
+
+/-- Typed text-only forward: identical to the language model's typed forward,
+    but routes through the multimodal wrapper. -/
+def forwardTextT {tm : TensorMeta} {batch seq : UInt64}
+    (cfg : VLConfig)
+    (m : Gemma4ForConditionalGeneration cfg)
+    (inputIds : Tensor { tm with dtype := .Int64 } #[batch, seq])
+    : Tensor tm #[batch, seq, cfg.text_config.vocab_size] :=
+  Tensor.unsafeOfT tm (m.forwardText cfg (Tensor.toT inputIds))
+
+/-- Typed forward with already-extracted image features. -/
+def forwardWithImageFeaturesT {tm : TensorMeta} {batch seq featTokens : UInt64}
+    (cfg : VLConfig)
+    (m : Gemma4ForConditionalGeneration cfg)
+    (inputIds : Tensor { tm with dtype := .Int64 } #[batch, seq])
+    (imageFeatures : Tensor tm #[featTokens, cfg.text_config.hidden_size])
+    : IO (Tensor tm #[batch, seq, cfg.text_config.vocab_size]) := do
+  let out ← m.forwardWithImageFeatures cfg (Tensor.toT inputIds) (Tensor.toT imageFeatures)
+  pure (Tensor.unsafeOfT tm out)
+
+/-- Typed multimodal generate. Returns Int64 token IDs. -/
+def generateT {tm : TensorMeta} {batch seq : UInt64}
+    (cfg : VLConfig)
+    (m : Gemma4ForConditionalGeneration cfg)
+    (inputIds : Tensor { tm with dtype := .Int64 } #[batch, seq])
+    (maxNewTokens : UInt64 := 256)
+    (strategy : SamplingStrategy := .greedy)
+    (eosTokenIds : Array UInt64 := #[])
+    (imageFeatures : Option (ImageFeatures cfg) := none)
+    : IO (Sigma (fun outSeq => Tensor { tm with dtype := .Int64 } #[batch, outSeq])) := do
+  let ⟨outSeq, ids⟩ ←
+    m.generate cfg (Tensor.toT inputIds) maxNewTokens strategy eosTokenIds imageFeatures
+  pure ⟨outSeq, Tensor.unsafeOfT _ ids⟩
+
+/-- Typed multimodal streaming generate. Returns Int64 token IDs. -/
+def generateStreamT {tm : TensorMeta} {batch seq : UInt64}
+    (cfg : VLConfig)
+    (m : Gemma4ForConditionalGeneration cfg)
+    (inputIds : Tensor { tm with dtype := .Int64 } #[batch, seq])
+    (onStep : StreamCallback batch)
+    (maxNewTokens : UInt64 := 256)
+    (strategy : SamplingStrategy := .greedy)
+    (eosTokenIds : Array UInt64 := #[])
+    (imageFeatures : Option (ImageFeatures cfg) := none)
+    : IO (Sigma (fun outSeq => Tensor { tm with dtype := .Int64 } #[batch, outSeq])) := do
+  let ⟨outSeq, ids⟩ ←
+    m.generateStream cfg (Tensor.toT inputIds) onStep maxNewTokens strategy eosTokenIds imageFeatures
+  pure ⟨outSeq, Tensor.unsafeOfT _ ids⟩
 
 end Gemma4ForConditionalGeneration
 

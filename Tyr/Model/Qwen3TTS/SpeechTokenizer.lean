@@ -14,6 +14,7 @@
   (16 quantizers, 1024 latent dim, 2x convnext upsample, 4 decoder blocks).
 -/
 import Tyr.Torch
+import Tyr.Tensor
 import Tyr.TensorStruct
 import Tyr.Module.RMSNorm
 import Tyr.Model.Qwen.RoPE
@@ -848,6 +849,43 @@ def decodeFrameMajorChunkedToWav {frames : UInt64}
     : IO Unit := do
   let wav : T #[1, 1, frames * 1920] := decodeFrameMajorChunked m codes chunkSize leftContextSize
   data.saveWav wav wavPath m.outputSampleRate
+
+/-! ## Typed entry-point siblings
+
+Codec token IDs (`codes`) are dtype-pinned to `.Int64`; waveform
+activations preserve TensorMeta. -/
+
+/-- Typed sibling of `decode`. -/
+def decodeT {tm : TensorMeta} {batch frames : UInt64}
+    (m : SpeechTokenizer12HzDecoder)
+    (codes : Tensor { tm with dtype := .Int64 } #[batch, 16, frames])
+    : Tensor tm #[batch, 1, frames * 1920] :=
+  Tensor.unsafeOfT tm (decode m (Tensor.toT codes))
+
+/-- Typed sibling of `decodeChunked`. -/
+def decodeChunkedT {tm : TensorMeta} {batch frames : UInt64}
+    (m : SpeechTokenizer12HzDecoder)
+    (codes : Tensor { tm with dtype := .Int64 } #[batch, 16, frames])
+    (chunkSize : UInt64 := 300)
+    (leftContextSize : UInt64 := 25)
+    : Tensor tm #[batch, 1, frames * 1920] :=
+  Tensor.unsafeOfT tm (decodeChunked m (Tensor.toT codes) chunkSize leftContextSize)
+
+/-- Typed sibling of `decodeFrameMajor`. -/
+def decodeFrameMajorT {tm : TensorMeta} {frames : UInt64}
+    (m : SpeechTokenizer12HzDecoder)
+    (codes : Tensor { tm with dtype := .Int64 } #[frames, 16])
+    : Tensor tm #[1, 1, frames * 1920] :=
+  Tensor.unsafeOfT tm (decodeFrameMajor m (Tensor.toT codes))
+
+/-- Typed sibling of `decodeFrameMajorChunked`. -/
+def decodeFrameMajorChunkedT {tm : TensorMeta} {frames : UInt64}
+    (m : SpeechTokenizer12HzDecoder)
+    (codes : Tensor { tm with dtype := .Int64 } #[frames, 16])
+    (chunkSize : UInt64 := 300)
+    (leftContextSize : UInt64 := 25)
+    : Tensor tm #[1, 1, frames * 1920] :=
+  Tensor.unsafeOfT tm (decodeFrameMajorChunked m (Tensor.toT codes) chunkSize leftContextSize)
 
 end SpeechTokenizer12HzDecoder
 

@@ -41,3 +41,5 @@ cc/src/generated/
 .claude/
 .codex/
 .runpod-state/
+.cache/
+sigma-model-server-link

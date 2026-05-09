@@ -6,14 +6,19 @@ on:
   pull_request:
     branches: [main]
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   build-and-test:
+    timeout-minutes: 90
     env:
-      LIBTORCH_VERSION: 2.9.1
+      LIBTORCH_VERSION: 2.10.0
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-22.04]
+        os: [macos-latest, ubuntu-24.04]
     runs-on: ${{ matrix.os }}
 
     steps:
@@ -26,6 +31,13 @@ jobs:
         run: |
           curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf | sh -s -- -y --default-toolchain none
           echo "$HOME/.elan/bin" >> $GITHUB_PATH
+
+      - name: Cache elan toolchain
+        id: cache-elan
+        uses: actions/cache@v4
+        with:
+          path: ~/.elan
+          key: elan-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('lean-toolchain') }}
 
       - name: Set up Lean toolchain
         run: |
@@ -232,20 +244,17 @@ jobs:
             ./scripts/check-commit-messages.sh "${commit}^!"
           done
 
-      - name: Check for TODO/FIXME comments
+      - name: Report TODO/FIXME comments (informational)
         run: |
-          echo "Checking for TODO/FIXME comments..."
-          if rg -n "(--|/-).*\\b(TODO|FIXME)\\b" Tyr/ Examples/ Tests/ -g "*.lean"; then
-            echo "Found TODO/FIXME comments in Lean sources"
-          else
-            echo "No TODO/FIXME found"
-          fi
+          echo "Listing TODO/FIXME comments (informational, does not fail the build)..."
+          rg -n "(--|/-).*\\b(TODO|FIXME)\\b" Tyr/ Examples/ Tests/ -g "*.lean" || echo "No TODO/FIXME found"
 
       - name: Check for sorry
         run: |
           echo "Checking for sorry (incomplete proofs)..."
-          if rg -n "\\bsorry\\b" Tyr/ Examples/ Tests/ -g "*.lean" -g "!Tyr/Tokenizer/SpecialTokens.lean"; then
-            echo "Found sorry in Lean sources"
+          if rg -n "\\bsorry\\b" Tyr/ Examples/ Tests/ -g "*.lean" -g "!Tyr/Tokenizer/SpecialTokens.lean" -g "!Tests/TestGPUTileIR.lean"; then
+            echo "ERROR: found sorry in Lean sources"
+            exit 1
           else
             echo "No sorry found"
           fi

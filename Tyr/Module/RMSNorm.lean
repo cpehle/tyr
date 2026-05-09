@@ -49,6 +49,36 @@ def forward5d {batch n_head seq head_dim : UInt64} (rn : RMSNorm head_dim)
     (x : T #[batch, n_head, seq, head_dim]) : T #[batch, n_head, seq, head_dim] :=
   nn.rmsNormWeighted x rn.weight rn.eps.val
 
+/-! ## Typed forward variants
+
+`Tensor m s` thread the device + dtype index through the module call.
+The runtime is identical to the legacy `T s` versions — the indices
+erase. -/
+
+/-- 2D typed forward. -/
+@[inline] def forward2dT {m : TensorMeta} {dim seq : UInt64}
+    (rn : RMSNorm dim) (x : Tensor m #[seq, dim]) : Tensor m #[seq, dim] :=
+  Tensor.unsafeOfT m (rn.forward2d (Tensor.toT x))
+
+/-- 3D typed forward. -/
+@[inline] def forward3dT {m : TensorMeta} {dim batch seq : UInt64}
+    (rn : RMSNorm dim) (x : Tensor m #[batch, seq, dim]) : Tensor m #[batch, seq, dim] :=
+  Tensor.unsafeOfT m (rn.forward3d (Tensor.toT x))
+
+/-- 4D typed forward. -/
+@[inline] def forward4dT {m : TensorMeta} {batch seq n_head head_dim : UInt64}
+    (rn : RMSNorm head_dim)
+    (x : Tensor m #[batch, seq, n_head, head_dim])
+    : Tensor m #[batch, seq, n_head, head_dim] :=
+  Tensor.unsafeOfT m (rn.forward4d (Tensor.toT x))
+
+/-- 5D typed forward (attention layout). -/
+@[inline] def forward5dT {m : TensorMeta} {batch n_head seq head_dim : UInt64}
+    (rn : RMSNorm head_dim)
+    (x : Tensor m #[batch, n_head, seq, head_dim])
+    : Tensor m #[batch, n_head, seq, head_dim] :=
+  Tensor.unsafeOfT m (rn.forward5d (Tensor.toT x))
+
 end RMSNorm
 
 /-- Module instance for 2D forward pass -/
@@ -60,5 +90,14 @@ instance {dim seq : UInt64} :
 instance {dim batch seq : UInt64} :
     Module (RMSNorm dim) (T #[batch, seq, dim]) (T #[batch, seq, dim]) where
   forward := RMSNorm.forward3d
+
+/-- Typed Module instance — `rn |> x` produces a `Tensor m s` when `x` is one. -/
+instance {tm : TensorMeta} {dim seq : UInt64} :
+    Module (RMSNorm dim) (Tensor tm #[seq, dim]) (Tensor tm #[seq, dim]) where
+  forward := RMSNorm.forward2dT
+
+instance {tm : TensorMeta} {dim batch seq : UInt64} :
+    Module (RMSNorm dim) (Tensor tm #[batch, seq, dim]) (Tensor tm #[batch, seq, dim]) where
+  forward := RMSNorm.forward3dT
 
 end torch

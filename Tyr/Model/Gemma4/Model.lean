@@ -9,6 +9,7 @@
   - Dense and MoE feed-forward variants
 -/
 import Tyr.Torch
+import Tyr.Tensor
 import Tyr.TensorStruct
 import Tyr.Module.Core
 import Tyr.Module.Derive
@@ -1931,6 +1932,176 @@ def generateFromEmbedsStreamWithPerLayerInputs {batch seq : UInt64}
     : IO (Sigma (fun outSeq => T #[batch, outSeq])) :=
   generateFromEmbedsCoreWithPerLayerInputs
     cfg m inputIds inputsEmbeds perLayerInputs maxNewTokens strategy eosTokenIds (some onStep) prefillMasks
+
+/-! ### Typed `Tensor m s` siblings of public entry points.
+
+These mirror the legacy `T #[…]` API but carry a `TensorMeta` parameter so that
+device + dtype information flows through the type system.  The bodies cast
+typed inputs to legacy via `Tensor.toT`, call the legacy implementation, and
+wrap outputs via `Tensor.unsafeOfT`.  Token-ID tensors are dtype-pinned to
+`.Int64`; activation tensors inherit `tm`. -/
+
+/-- Typed token embedding lookup. -/
+def embedTokensT {tm : TensorMeta} {batch seq : UInt64}
+    (cfg : Config)
+    (m : Gemma4ForCausalLM cfg)
+    (inputIds : Tensor { tm with dtype := .Int64 } #[batch, seq])
+    : Tensor tm #[batch, seq, cfg.hidden_size] :=
+  Tensor.unsafeOfT tm (m.embedTokens cfg (Tensor.toT inputIds))
+
+/-- Typed standard forward pass from token IDs. -/
+def forwardT {tm : TensorMeta} {batch seq : UInt64}
+    (cfg : Config)
+    (m : Gemma4ForCausalLM cfg)
+    (inputIds : Tensor { tm with dtype := .Int64 } #[batch, seq])
+    : Tensor tm #[batch, seq, cfg.vocab_size] :=
+  Tensor.unsafeOfT tm (m.forward cfg (Tensor.toT inputIds))
+
+/-- Typed forward from pre-computed input embeddings. -/
+def forwardEmbedsT {tm : TensorMeta} {batch seq : UInt64}
+    (cfg : Config)
+    (m : Gemma4ForCausalLM cfg)
+    (inputIds : Tensor { tm with dtype := .Int64 } #[batch, seq])
+    (inputsEmbeds : Tensor tm #[batch, seq, cfg.hidden_size])
+    : Tensor tm #[batch, seq, cfg.vocab_size] :=
+  Tensor.unsafeOfT tm
+    (m.forwardEmbeds cfg (Tensor.toT inputIds) (Tensor.toT inputsEmbeds))
+
+/-- Typed forward from embeds with optional per-layer inputs. -/
+def forwardEmbedsWithPerLayerInputsT {tm : TensorMeta} {batch seq : UInt64}
+    (cfg : Config)
+    (m : Gemma4ForCausalLM cfg)
+    (inputIds : Tensor { tm with dtype := .Int64 } #[batch, seq])
+    (inputsEmbeds : Tensor tm #[batch, seq, cfg.hidden_size])
+    (perLayerInputs : Option (Tensor tm #[batch, seq, cfg.num_hidden_layers, cfg.hidden_size_per_layer_input]))
+    : Tensor tm #[batch, seq, cfg.vocab_size] :=
+  Tensor.unsafeOfT tm
+    (m.forwardEmbedsWithPerLayerInputs cfg
+      (Tensor.toT inputIds)
+      (Tensor.toT inputsEmbeds)
+      (perLayerInputs.map Tensor.toT))
+
+/-- Typed bidirectional-vision forward variant. -/
+def forwardEmbedsWithPerLayerInputsBidirectionalVisionT {tm : TensorMeta} {batch seq : UInt64}
+    (cfg : Config)
+    (m : Gemma4ForCausalLM cfg)
+    (inputIds : Tensor { tm with dtype := .Int64 } #[batch, seq])
+    (inputsEmbeds : Tensor tm #[batch, seq, cfg.hidden_size])
+    (perLayerInputs : Option (Tensor tm #[batch, seq, cfg.num_hidden_layers, cfg.hidden_size_per_layer_input]))
+    (slidingAttnMask : Tensor tm #[batch, seq, seq])
+    (fullAttnMask : Tensor tm #[batch, seq, seq])
+    : Tensor tm #[batch, seq, cfg.vocab_size] :=
+  Tensor.unsafeOfT tm
+    (m.forwardEmbedsWithPerLayerInputsBidirectionalVision cfg
+      (Tensor.toT inputIds)
+      (Tensor.toT inputsEmbeds)
+      (perLayerInputs.map Tensor.toT)
+      (Tensor.toT slidingAttnMask)
+      (Tensor.toT fullAttnMask))
+
+/-- Typed greedy/sampling generation from token IDs. Returns Int64 token IDs. -/
+def generateT {tm : TensorMeta} {batch seq : UInt64}
+    (cfg : Config)
+    (m : Gemma4ForCausalLM cfg)
+    (inputIds : Tensor { tm with dtype := .Int64 } #[batch, seq])
+    (maxNewTokens : UInt64 := 256)
+    (strategy : SamplingStrategy := .greedy)
+    (eosTokenIds : Array UInt64 := #[])
+    : IO (Sigma (fun outSeq => Tensor { tm with dtype := .Int64 } #[batch, outSeq])) := do
+  let ⟨outSeq, ids⟩ ← m.generate cfg (Tensor.toT inputIds) maxNewTokens strategy eosTokenIds
+  pure ⟨outSeq, Tensor.unsafeOfT _ ids⟩
+
+/-- Typed generation from pre-computed embeddings. -/
+def generateFromEmbedsT {tm : TensorMeta} {batch seq : UInt64}
+    (cfg : Config)
+    (m : Gemma4ForCausalLM cfg)
+    (inputIds : Tensor { tm with dtype := .Int64 } #[batch, seq])
+    (inputsEmbeds : Tensor tm #[batch, seq, cfg.hidden_size])
+    (maxNewTokens : UInt64 := 256)
+    (strategy : SamplingStrategy := .greedy)
+    (eosTokenIds : Array UInt64 := #[])
+    : IO (Sigma (fun outSeq => Tensor { tm with dtype := .Int64 } #[batch, outSeq])) := do
+  let ⟨outSeq, ids⟩ ←
+    m.generateFromEmbeds cfg
+      (Tensor.toT inputIds) (Tensor.toT inputsEmbeds)
+      maxNewTokens strategy eosTokenIds
+  pure ⟨outSeq, Tensor.unsafeOfT _ ids⟩
+
+/-- Typed generation from embeds with optional per-layer inputs. -/
+def generateFromEmbedsWithPerLayerInputsT {tm : TensorMeta} {batch seq : UInt64}
+    (cfg : Config)
+    (m : Gemma4ForCausalLM cfg)
+    (inputIds : Tensor { tm with dtype := .Int64 } #[batch, seq])
+    (inputsEmbeds : Tensor tm #[batch, seq, cfg.hidden_size])
+    (perLayerInputs : Option (Tensor tm #[batch, seq, cfg.num_hidden_layers, cfg.hidden_size_per_layer_input]))
+    (maxNewTokens : UInt64 := 256)
+    (strategy : SamplingStrategy := .greedy)
+    (eosTokenIds : Array UInt64 := #[])
+    (prefillMasks : Option (Tensor tm #[batch, seq, seq] × Tensor tm #[batch, seq, seq]) := none)
+    : IO (Sigma (fun outSeq => Tensor { tm with dtype := .Int64 } #[batch, outSeq])) := do
+  let prefillMasks' : Option (T #[batch, seq, seq] × T #[batch, seq, seq]) :=
+    prefillMasks.map (fun p => (Tensor.toT p.1, Tensor.toT p.2))
+  let ⟨outSeq, ids⟩ ←
+    m.generateFromEmbedsWithPerLayerInputs cfg
+      (Tensor.toT inputIds)
+      (Tensor.toT inputsEmbeds)
+      (perLayerInputs.map Tensor.toT)
+      maxNewTokens strategy eosTokenIds prefillMasks'
+  pure ⟨outSeq, Tensor.unsafeOfT _ ids⟩
+
+/-- Typed streaming greedy/sampling generation. -/
+def generateStreamT {tm : TensorMeta} {batch seq : UInt64}
+    (cfg : Config)
+    (m : Gemma4ForCausalLM cfg)
+    (inputIds : Tensor { tm with dtype := .Int64 } #[batch, seq])
+    (onStep : StreamCallback batch)
+    (maxNewTokens : UInt64 := 256)
+    (strategy : SamplingStrategy := .greedy)
+    (eosTokenIds : Array UInt64 := #[])
+    : IO (Sigma (fun outSeq => Tensor { tm with dtype := .Int64 } #[batch, outSeq])) := do
+  let ⟨outSeq, ids⟩ ←
+    m.generateStream cfg (Tensor.toT inputIds) onStep maxNewTokens strategy eosTokenIds
+  pure ⟨outSeq, Tensor.unsafeOfT _ ids⟩
+
+/-- Typed streaming generation from pre-computed embeddings. -/
+def generateFromEmbedsStreamT {tm : TensorMeta} {batch seq : UInt64}
+    (cfg : Config)
+    (m : Gemma4ForCausalLM cfg)
+    (inputIds : Tensor { tm with dtype := .Int64 } #[batch, seq])
+    (inputsEmbeds : Tensor tm #[batch, seq, cfg.hidden_size])
+    (onStep : StreamCallback batch)
+    (maxNewTokens : UInt64 := 256)
+    (strategy : SamplingStrategy := .greedy)
+    (eosTokenIds : Array UInt64 := #[])
+    : IO (Sigma (fun outSeq => Tensor { tm with dtype := .Int64 } #[batch, outSeq])) := do
+  let ⟨outSeq, ids⟩ ←
+    m.generateFromEmbedsStream cfg
+      (Tensor.toT inputIds) (Tensor.toT inputsEmbeds)
+      onStep maxNewTokens strategy eosTokenIds
+  pure ⟨outSeq, Tensor.unsafeOfT _ ids⟩
+
+/-- Typed streaming generation from embeds with optional per-layer inputs. -/
+def generateFromEmbedsStreamWithPerLayerInputsT {tm : TensorMeta} {batch seq : UInt64}
+    (cfg : Config)
+    (m : Gemma4ForCausalLM cfg)
+    (inputIds : Tensor { tm with dtype := .Int64 } #[batch, seq])
+    (inputsEmbeds : Tensor tm #[batch, seq, cfg.hidden_size])
+    (perLayerInputs : Option (Tensor tm #[batch, seq, cfg.num_hidden_layers, cfg.hidden_size_per_layer_input]))
+    (onStep : StreamCallback batch)
+    (maxNewTokens : UInt64 := 256)
+    (strategy : SamplingStrategy := .greedy)
+    (eosTokenIds : Array UInt64 := #[])
+    (prefillMasks : Option (Tensor tm #[batch, seq, seq] × Tensor tm #[batch, seq, seq]) := none)
+    : IO (Sigma (fun outSeq => Tensor { tm with dtype := .Int64 } #[batch, outSeq])) := do
+  let prefillMasks' : Option (T #[batch, seq, seq] × T #[batch, seq, seq]) :=
+    prefillMasks.map (fun p => (Tensor.toT p.1, Tensor.toT p.2))
+  let ⟨outSeq, ids⟩ ←
+    m.generateFromEmbedsStreamWithPerLayerInputs cfg
+      (Tensor.toT inputIds)
+      (Tensor.toT inputsEmbeds)
+      (perLayerInputs.map Tensor.toT)
+      onStep maxNewTokens strategy eosTokenIds prefillMasks'
+  pure ⟨outSeq, Tensor.unsafeOfT _ ids⟩
 
 end Gemma4ForCausalLM
 
