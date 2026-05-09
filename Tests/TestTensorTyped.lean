@@ -137,6 +137,15 @@ private def typedAttnBlock {m : TensorMeta}
   pure (Tensor.reshape vBack #[batch, seq, num_heads * head_dim])
 
 @[test]
+def testTypedModuleApply : IO Unit := do
+  -- The `Module |> x` infix syntax dispatches on Tensor instance, so
+  -- a typed input flows through cleanly without explicit `.forward3dT`.
+  let lin : Linear 4 3 ← torch.Linear.init 4 3
+  let x : Tensor cpuF32 #[1, 2, 4] := Tensor.zeros #[1, 2, 4] cpuF32
+  let y : Tensor cpuF32 #[1, 2, 3] := lin |> x
+  assertEqual (Tensor.shape y) (#[1, 2, 3] : Shape) "module-apply on Tensor preserves type discipline"
+
+@[test]
 def testTypedAttentionBlock : IO Unit := do
   let qProj : Linear 8 4 ← torch.Linear.init 8 4
   let kProj : Linear 8 4 ← torch.Linear.init 8 4

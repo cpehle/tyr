@@ -52,4 +52,9 @@ instance {dim batch seq : UInt64} :
     Module (LayerNorm dim) (T #[batch, seq, dim]) (T #[batch, seq, dim]) where
   forward := LayerNorm.forward3d
 
+/-- Typed Module instance. -/
+instance {tm : TensorMeta} {dim batch seq : UInt64} :
+    Module (LayerNorm dim) (Tensor tm #[batch, seq, dim]) (Tensor tm #[batch, seq, dim]) where
+  forward := LayerNorm.forward3dT
+
 end torch
