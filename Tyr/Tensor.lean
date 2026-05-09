@@ -161,6 +161,18 @@ cross device or dtype boundaries. -/
     : Tensor m #[batch, out_dim] :=
   Tensor.unsafeOfT m (torch.linear (Tensor.toT x) (Tensor.toT w))
 
+@[inline] def linear3d {m : TensorMeta} {batch seq in_dim out_dim : UInt64}
+    (x : Tensor m #[batch, seq, in_dim]) (w : Tensor m #[out_dim, in_dim])
+    : Tensor m #[batch, seq, out_dim] :=
+  Tensor.unsafeOfT m (torch.linear3d (Tensor.toT x) (Tensor.toT w))
+
+@[inline] def affine3d {m : TensorMeta} {batch seq in_dim out_dim : UInt64}
+    (x : Tensor m #[batch, seq, in_dim])
+    (w : Tensor m #[out_dim, in_dim])
+    (b : Tensor m #[out_dim])
+    : Tensor m #[batch, seq, out_dim] :=
+  Tensor.unsafeOfT m (torch.affine3d (Tensor.toT x) (Tensor.toT w) (Tensor.toT b))
+
 /-! ## Slicing
 
 Metadata-preserving, shape-changing. -/
@@ -168,6 +180,13 @@ Metadata-preserving, shape-changing. -/
 @[inline] def slice {m : TensorMeta} {s : Shape} (t : Tensor m s) (dim : UInt64) (start len : UInt64)
     : Tensor m (torch.data.sliceShape s dim len) :=
   Tensor.unsafeOfT m (torch.data.slice (Tensor.toT t) dim start len)
+
+/-- Replace a slice of `data` along `dim` (starting at `start`) with `src`.
+    Output shape matches `data`; metadata must match between `data` and `src`. -/
+@[inline] def sliceScatter {m : TensorMeta} {s src : Shape}
+    (data : Tensor m s) (dim : UInt64) (start : UInt64) (src : Tensor m src)
+    : Tensor m s :=
+  Tensor.unsafeOfT m (torch.data.sliceScatter (Tensor.toT data) dim start (Tensor.toT src))
 
 /-! ## Attention helpers
 
