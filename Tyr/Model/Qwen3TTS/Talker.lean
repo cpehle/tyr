@@ -10,6 +10,7 @@
   and interfaces, while using Tyr's existing transformer primitives.
 -/
 import Tyr.Torch
+import Tyr.Tensor
 import Tyr.TensorStruct
 import Tyr.Module.Core
 import Tyr.Module.Derive
@@ -153,6 +154,38 @@ def forwardCodecIds {batch seq : UInt64} (cfg : TalkerConfig)
     (attnMask : Option (T #[batch, seq]) := none)
     : T #[batch, seq, cfg.hiddenSize] :=
   forwardEmbeds cfg m (embedCodec m codecIds) attnMask
+
+/-! ## Typed entry-point siblings -/
+
+/-- Typed sibling of `embedCodec`; ids dtype-pinned to `.Int64`. -/
+def embedCodecT {tm : TensorMeta} {batch seq : UInt64} (m : TalkerModel cfg)
+    (codecIds : Tensor { tm with dtype := .Int64 } #[batch, seq])
+    : Tensor tm #[batch, seq, cfg.hiddenSize] :=
+  Tensor.unsafeOfT tm (embedCodec m (Tensor.toT codecIds))
+
+/-- Typed sibling of `embedText`; ids dtype-pinned to `.Int64`. -/
+def embedTextT {tm : TensorMeta} {batch seq : UInt64} (m : TalkerModel cfg)
+    (textIds : Tensor { tm with dtype := .Int64 } #[batch, seq])
+    : Tensor tm #[batch, seq, cfg.hiddenSize] :=
+  Tensor.unsafeOfT tm (embedText m (Tensor.toT textIds))
+
+/-- Typed sibling of `forwardEmbeds`. -/
+def forwardEmbedsT {tm : TensorMeta} {batch seq : UInt64} (cfg : TalkerConfig)
+    (m : TalkerModel cfg)
+    (inputsEmbeds : Tensor tm #[batch, seq, cfg.hiddenSize])
+    (attnMask : Option (Tensor tm #[batch, seq]) := none)
+    : Tensor tm #[batch, seq, cfg.hiddenSize] :=
+  Tensor.unsafeOfT tm
+    (forwardEmbeds cfg m (Tensor.toT inputsEmbeds) (attnMask.map Tensor.toT))
+
+/-- Typed sibling of `forwardCodecIds`; ids dtype-pinned to `.Int64`. -/
+def forwardCodecIdsT {tm : TensorMeta} {batch seq : UInt64} (cfg : TalkerConfig)
+    (m : TalkerModel cfg)
+    (codecIds : Tensor { tm with dtype := .Int64 } #[batch, seq])
+    (attnMask : Option (Tensor tm #[batch, seq]) := none)
+    : Tensor tm #[batch, seq, cfg.hiddenSize] :=
+  Tensor.unsafeOfT tm
+    (forwardCodecIds cfg m (Tensor.toT codecIds) (attnMask.map Tensor.toT))
 
 end TalkerModel
 
@@ -750,6 +783,43 @@ def generateCodes {batch seq : UInt64} (cfg : TalkerConfig)
     trailingTextHidden ttsPadEmbed
     subtalkerTemperaturesByGroup subtalkerTopKsByGroup subtalkerTopPsByGroup
   pure out.codes
+
+/-! ## Typed entry-point siblings -/
+
+/-- Typed sibling of `forward`. -/
+def forwardT {tm : TensorMeta} {batch seq : UInt64} (cfg : TalkerConfig)
+    (m : TalkerForConditionalGeneration cfg)
+    (talkerInputs : Tensor tm #[batch, seq, cfg.hiddenSize])
+    (attnMask : Option (Tensor tm #[batch, seq]) := none)
+    : Tensor tm #[batch, seq, cfg.vocabSize] :=
+  Tensor.unsafeOfT tm
+    (forward cfg m (Tensor.toT talkerInputs) (attnMask.map Tensor.toT))
+
+/-- Typed sibling of `generateCodes`; emitted codes are dtype-pinned to `.Int64`. -/
+def generateCodesT {tm : TensorMeta} {batch seq : UInt64} (cfg : TalkerConfig)
+    (m : TalkerForConditionalGeneration cfg)
+    (talkerInputs : Tensor tm #[batch, seq, cfg.hiddenSize])
+    (maxFrames : UInt64 := 256)
+    (minNewTokens : UInt64 := 2)
+    (temperature : Float := 0.9)
+    (topK : UInt64 := 50)
+    (topP : Float := 1.0)
+    (subtalkerTemperature : Float := 0.9)
+    (subtalkerTopK : UInt64 := 50)
+    (subtalkerTopP : Float := 1.0)
+    (repetitionPenalty : Float := 1.05)
+    (suppressTail : UInt64 := 1024)
+    (subtalkerTemperaturesByGroup : Option (Array Float) := none)
+    (subtalkerTopKsByGroup : Option (Array UInt64) := none)
+    (subtalkerTopPsByGroup : Option (Array Float) := none)
+    : IO (Tensor { tm with dtype := .Int64 } #[batch, maxFrames, cfg.numCodeGroups]) := do
+  let raw ← generateCodes cfg m (Tensor.toT talkerInputs) maxFrames minNewTokens
+    temperature topK topP
+    subtalkerTemperature subtalkerTopK subtalkerTopP
+    repetitionPenalty suppressTail
+    none none
+    subtalkerTemperaturesByGroup subtalkerTopKsByGroup subtalkerTopPsByGroup
+  return Tensor.unsafeOfT _ raw
 
 end TalkerForConditionalGeneration
 

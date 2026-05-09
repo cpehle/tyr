@@ -7,6 +7,7 @@
   - Conditional generation wrapper over existing Qwen35 text model
 -/
 import Tyr.Torch
+import Tyr.Tensor
 import Tyr.TensorStruct
 import Tyr.Module.Core
 import Tyr.Module.Derive
@@ -570,6 +571,145 @@ partial def generateUncached {batch seq : UInt64}
       loop (remaining - 1) appended
 
   loop maxNewTokens.toNat inputIds
+
+/-! ### Typed `Tensor m s` entry-point siblings
+
+Public-API typed wrappers. Activation tensors carry a free `TensorMeta`;
+token-id tensors are dtype-pinned to `.Int64`. Bodies cast typed inputs
+to legacy via `Tensor.toT`, call the legacy method, and wrap the output
+via `Tensor.unsafeOfT`. -/
+
+/-- Typed image-feature extraction. Pixel values + features inherit `tm`. -/
+def getImageFeaturesT {tm : TensorMeta} {nPatches : UInt64}
+    (cfg : VLConfig)
+    (m : Qwen35ForConditionalGeneration cfg)
+    (pixelValues : Tensor tm #[nPatches, VisionConfig.patchDim cfg.vision_config])
+    : IO (Tensor tm #[VisionConfig.mergedTokenCount cfg.vision_config nPatches, cfg.vision_config.out_hidden_size]) := do
+  let out ← m.getImageFeatures cfg (Tensor.toT pixelValues)
+  pure (Tensor.unsafeOfT tm out)
+
+/-- Typed video-feature extraction. -/
+def getVideoFeaturesT {tm : TensorMeta} {nPatches : UInt64}
+    (cfg : VLConfig)
+    (m : Qwen35ForConditionalGeneration cfg)
+    (pixelValuesVideos : Tensor tm #[nPatches, VisionConfig.patchDim cfg.vision_config])
+    : IO (Tensor tm #[VisionConfig.mergedTokenCount cfg.vision_config nPatches, cfg.vision_config.out_hidden_size]) := do
+  let out ← m.getVideoFeatures cfg (Tensor.toT pixelValuesVideos)
+  pure (Tensor.unsafeOfT tm out)
+
+/-- Typed text-only forward. -/
+def forwardTextT {tm : TensorMeta} {batch seq : UInt64}
+    (cfg : VLConfig)
+    (m : Qwen35ForConditionalGeneration cfg)
+    (inputIds : Tensor { tm with dtype := .Int64 } #[batch, seq])
+    (attnMask : Option (Tensor { tm with dtype := .Int64 } #[batch, seq]) := none)
+    : Tensor tm #[batch, seq, cfg.text_config.vocab_size] :=
+  Tensor.unsafeOfT tm
+    (m.forwardText cfg (Tensor.toT inputIds) (attnMask.map Tensor.toT))
+
+/-- Typed forward with pre-extracted image features. -/
+def forwardWithImageFeaturesT {tm : TensorMeta} {batch seq featTokens : UInt64}
+    (cfg : VLConfig)
+    (m : Qwen35ForConditionalGeneration cfg)
+    (inputIds : Tensor { tm with dtype := .Int64 } #[batch, seq])
+    (imageFeatures : Tensor tm #[featTokens, cfg.vision_config.out_hidden_size])
+    (attnMask : Option (Tensor { tm with dtype := .Int64 } #[batch, seq]) := none)
+    : IO (Tensor tm #[batch, seq, cfg.text_config.vocab_size]) := do
+  let out ← m.forwardWithImageFeatures cfg (Tensor.toT inputIds) (Tensor.toT imageFeatures)
+    (attnMask.map Tensor.toT)
+  pure (Tensor.unsafeOfT tm out)
+
+/-- Typed forward with pre-extracted image + video features. -/
+def forwardWithImageAndVideoFeaturesT {tm : TensorMeta}
+    {batch seq imageTokens videoTokens : UInt64}
+    (cfg : VLConfig)
+    (m : Qwen35ForConditionalGeneration cfg)
+    (inputIds : Tensor { tm with dtype := .Int64 } #[batch, seq])
+    (imageFeatures : Tensor tm #[imageTokens, cfg.vision_config.out_hidden_size])
+    (videoFeatures : Tensor tm #[videoTokens, cfg.vision_config.out_hidden_size])
+    (attnMask : Option (Tensor { tm with dtype := .Int64 } #[batch, seq]) := none)
+    : IO (Tensor tm #[batch, seq, cfg.text_config.vocab_size]) := do
+  let out ← m.forwardWithImageAndVideoFeatures cfg (Tensor.toT inputIds)
+    (Tensor.toT imageFeatures) (Tensor.toT videoFeatures) (attnMask.map Tensor.toT)
+  pure (Tensor.unsafeOfT tm out)
+
+/-- Typed forward with image patches (extracts features internally). -/
+def forwardWithImagePatchesT {tm : TensorMeta} {batch seq nPatches : UInt64}
+    (cfg : VLConfig)
+    (m : Qwen35ForConditionalGeneration cfg)
+    (inputIds : Tensor { tm with dtype := .Int64 } #[batch, seq])
+    (pixelValues : Tensor tm #[nPatches, VisionConfig.patchDim cfg.vision_config])
+    (attnMask : Option (Tensor { tm with dtype := .Int64 } #[batch, seq]) := none)
+    : IO (Tensor tm #[batch, seq, cfg.text_config.vocab_size]) := do
+  let out ← m.forwardWithImagePatches cfg (Tensor.toT inputIds) (Tensor.toT pixelValues)
+    (attnMask.map Tensor.toT)
+  pure (Tensor.unsafeOfT tm out)
+
+/-- Typed forward with image + video patches. -/
+def forwardWithImageAndVideoPatchesT {tm : TensorMeta}
+    {batch seq nImagePatches nVideoPatches : UInt64}
+    (cfg : VLConfig)
+    (m : Qwen35ForConditionalGeneration cfg)
+    (inputIds : Tensor { tm with dtype := .Int64 } #[batch, seq])
+    (pixelValues : Tensor tm #[nImagePatches, VisionConfig.patchDim cfg.vision_config])
+    (pixelValuesVideos : Tensor tm #[nVideoPatches, VisionConfig.patchDim cfg.vision_config])
+    (attnMask : Option (Tensor { tm with dtype := .Int64 } #[batch, seq]) := none)
+    : IO (Tensor tm #[batch, seq, cfg.text_config.vocab_size]) := do
+  let out ← m.forwardWithImageAndVideoPatches cfg (Tensor.toT inputIds)
+    (Tensor.toT pixelValues) (Tensor.toT pixelValuesVideos) (attnMask.map Tensor.toT)
+  pure (Tensor.unsafeOfT tm out)
+
+/-- Typed cached multimodal generation. -/
+def generateT {tm : TensorMeta} {batch seq : UInt64}
+    (cfg : VLConfig)
+    (m : Qwen35ForConditionalGeneration cfg)
+    (inputIds : Tensor { tm with dtype := .Int64 } #[batch, seq])
+    (maxNewTokens : UInt64 := 256)
+    (strategy : SamplingStrategy := .greedy)
+    (eosTokenIds : Array UInt64 := #[])
+    (imageFeatures : Option (Sigma (fun n => Tensor tm #[n, cfg.vision_config.out_hidden_size])) := none)
+    (videoFeatures : Option (Sigma (fun n => Tensor tm #[n, cfg.vision_config.out_hidden_size])) := none)
+    : IO (Sigma (fun outSeq => Tensor { tm with dtype := .Int64 } #[batch, outSeq])) := do
+  let imageFeatures' := imageFeatures.map (fun ⟨n, t⟩ => ⟨n, Tensor.toT t⟩)
+  let videoFeatures' := videoFeatures.map (fun ⟨n, t⟩ => ⟨n, Tensor.toT t⟩)
+  let ⟨outSeq, ids⟩ ← m.generate cfg (Tensor.toT inputIds) maxNewTokens strategy eosTokenIds
+    imageFeatures' videoFeatures'
+  pure ⟨outSeq, Tensor.unsafeOfT _ ids⟩
+
+/-- Typed streaming multimodal generation. -/
+def generateStreamT {tm : TensorMeta} {batch seq : UInt64}
+    (cfg : VLConfig)
+    (m : Qwen35ForConditionalGeneration cfg)
+    (inputIds : Tensor { tm with dtype := .Int64 } #[batch, seq])
+    (onStep : StreamCallback batch)
+    (maxNewTokens : UInt64 := 256)
+    (strategy : SamplingStrategy := .greedy)
+    (eosTokenIds : Array UInt64 := #[])
+    (imageFeatures : Option (Sigma (fun n => Tensor tm #[n, cfg.vision_config.out_hidden_size])) := none)
+    (videoFeatures : Option (Sigma (fun n => Tensor tm #[n, cfg.vision_config.out_hidden_size])) := none)
+    : IO (Sigma (fun outSeq => Tensor { tm with dtype := .Int64 } #[batch, outSeq])) := do
+  let imageFeatures' := imageFeatures.map (fun ⟨n, t⟩ => ⟨n, Tensor.toT t⟩)
+  let videoFeatures' := videoFeatures.map (fun ⟨n, t⟩ => ⟨n, Tensor.toT t⟩)
+  let ⟨outSeq, ids⟩ ← m.generateStream cfg (Tensor.toT inputIds) onStep maxNewTokens strategy eosTokenIds
+    imageFeatures' videoFeatures'
+  pure ⟨outSeq, Tensor.unsafeOfT _ ids⟩
+
+/-- Typed uncached multimodal generation. -/
+def generateUncachedT {tm : TensorMeta} {batch seq : UInt64}
+    (cfg : VLConfig)
+    (m : Qwen35ForConditionalGeneration cfg)
+    (inputIds : Tensor { tm with dtype := .Int64 } #[batch, seq])
+    (maxNewTokens : UInt64 := 256)
+    (strategy : SamplingStrategy := .greedy)
+    (eosTokenIds : Array UInt64 := #[])
+    (imageFeatures : Option (Sigma (fun n => Tensor tm #[n, cfg.vision_config.out_hidden_size])) := none)
+    (videoFeatures : Option (Sigma (fun n => Tensor tm #[n, cfg.vision_config.out_hidden_size])) := none)
+    : IO (Sigma (fun outSeq => Tensor { tm with dtype := .Int64 } #[batch, outSeq])) := do
+  let imageFeatures' := imageFeatures.map (fun ⟨n, t⟩ => ⟨n, Tensor.toT t⟩)
+  let videoFeatures' := videoFeatures.map (fun ⟨n, t⟩ => ⟨n, Tensor.toT t⟩)
+  let ⟨outSeq, ids⟩ ← m.generateUncached cfg (Tensor.toT inputIds) maxNewTokens strategy eosTokenIds
+    imageFeatures' videoFeatures'
+  pure ⟨outSeq, Tensor.unsafeOfT _ ids⟩
 
 end Qwen35ForConditionalGeneration
 

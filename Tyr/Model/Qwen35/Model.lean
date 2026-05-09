@@ -1429,6 +1429,118 @@ def generateGreedy {batch seq : UInt64}
     : IO (Sigma (fun outSeq => T #[batch, outSeq])) :=
   generate cfg m inputIds maxNewTokens .greedy eosTokenIds
 
+/-! ### Typed `Tensor m s` entry-point siblings
+
+Public-API typed wrappers. Activation tensors carry a free `TensorMeta`;
+token-id tensors are dtype-pinned to `.Int64`. Bodies cast typed inputs
+to legacy via `Tensor.toT`, call the legacy method, and wrap the output
+via `Tensor.unsafeOfT`. -/
+
+/-- Typed token embedding lookup. Ids are dtype-pinned to `.Int64`,
+    output inherits the embedding weight's metadata. -/
+def embedTokensT {tm : TensorMeta} {batch seq : UInt64}
+    (m : Qwen35ForCausalLM cfg)
+    (inputIds : Tensor { tm with dtype := .Int64 } #[batch, seq])
+    : Tensor tm #[batch, seq, cfg.hidden_size] :=
+  Tensor.unsafeOfT tm (m.embedTokens (Tensor.toT inputIds))
+
+/-- Typed forward from pre-computed input embeddings. -/
+def forwardEmbedsT {tm : TensorMeta} {batch seq : UInt64}
+    (cfg : Config)
+    (m : Qwen35ForCausalLM cfg)
+    (inputsEmbeds : Tensor tm #[batch, seq, cfg.hidden_size])
+    (attnMask : Option (Tensor tm #[batch, seq]) := none)
+    : Tensor tm #[batch, seq, cfg.vocab_size] :=
+  Tensor.unsafeOfT tm
+    (m.forwardEmbeds cfg (Tensor.toT inputsEmbeds) (attnMask.map Tensor.toT))
+
+/-- Typed forward from token IDs. Ids are dtype-pinned to `.Int64`. -/
+def forwardT {tm : TensorMeta} {batch seq : UInt64}
+    (cfg : Config)
+    (m : Qwen35ForCausalLM cfg)
+    (inputIds : Tensor { tm with dtype := .Int64 } #[batch, seq])
+    (attnMask : Option (Tensor { tm with dtype := .Int64 } #[batch, seq]) := none)
+    : Tensor tm #[batch, seq, cfg.vocab_size] :=
+  Tensor.unsafeOfT tm
+    (m.forward cfg (Tensor.toT inputIds) (attnMask.map Tensor.toT))
+
+/-- Typed generation from explicit input embeddings. -/
+def generateFromEmbedsT {tm : TensorMeta} {batch seq : UInt64}
+    (cfg : Config)
+    (m : Qwen35ForCausalLM cfg)
+    (inputIds : Tensor { tm with dtype := .Int64 } #[batch, seq])
+    (inputsEmbeds : Tensor tm #[batch, seq, cfg.hidden_size])
+    (maxNewTokens : UInt64 := 256)
+    (strategy : SamplingStrategy := .greedy)
+    (eosTokenIds : Array UInt64 := #[])
+    : IO (Sigma (fun outSeq => Tensor { tm with dtype := .Int64 } #[batch, outSeq])) := do
+  let ⟨outSeq, ids⟩ ← m.generateFromEmbeds cfg (Tensor.toT inputIds) (Tensor.toT inputsEmbeds)
+    maxNewTokens strategy eosTokenIds
+  pure ⟨outSeq, Tensor.unsafeOfT _ ids⟩
+
+/-- Typed streaming generation from explicit input embeddings. -/
+def generateFromEmbedsStreamT {tm : TensorMeta} {batch seq : UInt64}
+    (cfg : Config)
+    (m : Qwen35ForCausalLM cfg)
+    (inputIds : Tensor { tm with dtype := .Int64 } #[batch, seq])
+    (inputsEmbeds : Tensor tm #[batch, seq, cfg.hidden_size])
+    (onStep : StreamCallback batch)
+    (maxNewTokens : UInt64 := 256)
+    (strategy : SamplingStrategy := .greedy)
+    (eosTokenIds : Array UInt64 := #[])
+    : IO (Sigma (fun outSeq => Tensor { tm with dtype := .Int64 } #[batch, outSeq])) := do
+  let ⟨outSeq, ids⟩ ← m.generateFromEmbedsStream cfg (Tensor.toT inputIds) (Tensor.toT inputsEmbeds)
+    onStep maxNewTokens strategy eosTokenIds
+  pure ⟨outSeq, Tensor.unsafeOfT _ ids⟩
+
+/-- Typed generation from token IDs. -/
+def generateT {tm : TensorMeta} {batch seq : UInt64}
+    (cfg : Config)
+    (m : Qwen35ForCausalLM cfg)
+    (inputIds : Tensor { tm with dtype := .Int64 } #[batch, seq])
+    (maxNewTokens : UInt64 := 256)
+    (strategy : SamplingStrategy := .greedy)
+    (eosTokenIds : Array UInt64 := #[])
+    : IO (Sigma (fun outSeq => Tensor { tm with dtype := .Int64 } #[batch, outSeq])) := do
+  let ⟨outSeq, ids⟩ ← m.generate cfg (Tensor.toT inputIds) maxNewTokens strategy eosTokenIds
+  pure ⟨outSeq, Tensor.unsafeOfT _ ids⟩
+
+/-- Typed streaming generation from token IDs. -/
+def generateStreamT {tm : TensorMeta} {batch seq : UInt64}
+    (cfg : Config)
+    (m : Qwen35ForCausalLM cfg)
+    (inputIds : Tensor { tm with dtype := .Int64 } #[batch, seq])
+    (onStep : StreamCallback batch)
+    (maxNewTokens : UInt64 := 256)
+    (strategy : SamplingStrategy := .greedy)
+    (eosTokenIds : Array UInt64 := #[])
+    : IO (Sigma (fun outSeq => Tensor { tm with dtype := .Int64 } #[batch, outSeq])) := do
+  let ⟨outSeq, ids⟩ ← m.generateStream cfg (Tensor.toT inputIds) onStep maxNewTokens strategy eosTokenIds
+  pure ⟨outSeq, Tensor.unsafeOfT _ ids⟩
+
+/-- Typed reference (uncached) generation from token IDs. -/
+def generateUncachedT {tm : TensorMeta} {batch seq : UInt64}
+    (cfg : Config)
+    (m : Qwen35ForCausalLM cfg)
+    (inputIds : Tensor { tm with dtype := .Int64 } #[batch, seq])
+    (maxNewTokens : UInt64 := 256)
+    (strategy : SamplingStrategy := .greedy)
+    (eosTokenIds : Array UInt64 := #[])
+    : IO (Sigma (fun outSeq => Tensor { tm with dtype := .Int64 } #[batch, outSeq])) := do
+  let ⟨outSeq, ids⟩ ← m.generateUncached cfg (Tensor.toT inputIds) maxNewTokens strategy eosTokenIds
+  pure ⟨outSeq, Tensor.unsafeOfT _ ids⟩
+
+/-- Typed greedy-generation convenience wrapper. -/
+def generateGreedyT {tm : TensorMeta} {batch seq : UInt64}
+    (cfg : Config)
+    (m : Qwen35ForCausalLM cfg)
+    (inputIds : Tensor { tm with dtype := .Int64 } #[batch, seq])
+    (maxNewTokens : UInt64 := 256)
+    (eosTokenIds : Array UInt64 := #[])
+    : IO (Sigma (fun outSeq => Tensor { tm with dtype := .Int64 } #[batch, outSeq])) := do
+  let ⟨outSeq, ids⟩ ← m.generateGreedy cfg (Tensor.toT inputIds) maxNewTokens eosTokenIds
+  pure ⟨outSeq, Tensor.unsafeOfT _ ids⟩
+
 end Qwen35ForCausalLM
 
 end torch.qwen35

@@ -356,7 +356,7 @@ private def streamCallback
     (tok : tokenizer.qwen35.QwenTokenizer)
     {batch : UInt64}
     (chunkStart : Nat)
-    : Qwen35ForCausalLM.StreamCallback batch := fun _step nextTok => do
+    : torch.Model.StreamCallback batch := fun _step nextTok => do
   let flat : T #[batch] := reshape (data.toLong nextTok) #[batch]
   let vals ← data.tensorToUInt64Array flat
   if batch == 1 then

@@ -5,6 +5,7 @@
   Pre-norm architecture with RMSNorm.
 -/
 import Tyr.Torch
+import Tyr.Tensor
 import Tyr.TensorStruct
 import Tyr.Module.Core
 import Tyr.Module.Derive
@@ -64,6 +65,17 @@ def forward {batch seq hidden_size num_heads num_kv_heads head_dim intermediate_
   let x := layer.mlp.forward x
   residual + x
 
+/-- Typed `forward` — preserves TensorMeta of the activation through
+    the layer block. Body delegates to the legacy `forward`. -/
+@[inline] def forwardT {tm : TensorMeta} {batch seq hidden_size num_heads num_kv_heads head_dim intermediate_size : UInt64}
+    (layer : QwenLayer hidden_size num_heads num_kv_heads head_dim intermediate_size)
+    (x : Tensor tm #[batch, seq, hidden_size])
+    (cos : T #[seq, head_dim / 2])
+    (sin : T #[seq, head_dim / 2])
+    (is_causal : Bool := true)
+    : Tensor tm #[batch, seq, hidden_size] :=
+  Tensor.unsafeOfT tm (layer.forward (Tensor.toT x) cos sin is_causal)
+
 /-- Incremental one-token transformer layer step with attention KV cache.
     Input/output: `[batch, 1, hidden_size]`. -/
 def forwardStep {batch hidden_size num_heads num_kv_heads head_dim intermediate_size : UInt64}
@@ -85,6 +97,18 @@ def forwardStep {batch hidden_size num_heads num_kv_heads head_dim intermediate_
   let h3 := layer.mlp.forward h2
   (residual2 + h3, cache')
 
+/-- Typed `forwardStep` — preserves TensorMeta of the activation
+    through the cached single-token decode. Body delegates to legacy. -/
+@[inline] def forwardStepT {tm : TensorMeta} {batch hidden_size num_heads num_kv_heads head_dim intermediate_size : UInt64}
+    (layer : QwenLayer hidden_size num_heads num_kv_heads head_dim intermediate_size)
+    (x : Tensor tm #[batch, 1, hidden_size])
+    (cos : T #[1, head_dim / 2])
+    (sin : T #[1, head_dim / 2])
+    (cache : QwenAttention.KVCache batch num_kv_heads head_dim)
+    : Tensor tm #[batch, 1, hidden_size] × QwenAttention.KVCache batch num_kv_heads head_dim :=
+  let (out, cache') := layer.forwardStep (Tensor.toT x) cos sin cache
+  (Tensor.unsafeOfT tm out, cache')
+
 def forwardMasked {batch seq hidden_size num_heads num_kv_heads head_dim intermediate_size : UInt64}
     (layer : QwenLayer hidden_size num_heads num_kv_heads head_dim intermediate_size)
     (x : T #[batch, seq, hidden_size])
@@ -104,6 +128,17 @@ def forwardMasked {batch seq hidden_size num_heads num_kv_heads head_dim interme
   let x := layer.post_attention_layernorm.forward3d x
   let x := layer.mlp.forward x
   residual + x
+
+/-- Typed `forwardMasked` — preserves TensorMeta of the activation. -/
+@[inline] def forwardMaskedT {tm : TensorMeta} {batch seq hidden_size num_heads num_kv_heads head_dim intermediate_size : UInt64}
+    (layer : QwenLayer hidden_size num_heads num_kv_heads head_dim intermediate_size)
+    (x : Tensor tm #[batch, seq, hidden_size])
+    (cos : T #[seq, head_dim / 2])
+    (sin : T #[seq, head_dim / 2])
+    (attn_mask : T #[batch, seq])
+    (is_causal : Bool := true)
+    : Tensor tm #[batch, seq, hidden_size] :=
+  Tensor.unsafeOfT tm (layer.forwardMasked (Tensor.toT x) cos sin attn_mask is_causal)
 
 end QwenLayer
 

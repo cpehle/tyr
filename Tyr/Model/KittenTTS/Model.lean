@@ -8,6 +8,7 @@
   utterance inference, including harmonic source generation and inverse STFT.
  -/
 import Tyr.Torch
+import Tyr.Tensor
 import Tyr.TensorStruct
 import Tyr.Module.Core
 import Tyr.Module.Derive
@@ -1878,6 +1879,39 @@ def debugSynthesizeIds {seq : UInt64}
       predDurations := prepared.predDurations
       alignmentFrames := frames
     }
+
+/-- Typed sibling of `predictDurations`. Token IDs are dtype-pinned to
+    `.Int64`; the reference style is an activation with metadata `tm`.
+    Output is metadata-free (`Array Float` / `Array UInt64`). -/
+def predictDurationsT {tm : TensorMeta} {seq : UInt64}
+    (m : Model cfg)
+    (inputIds : Tensor { tm with dtype := .Int64 } #[1, seq])
+    (refStyle : Tensor tm #[1, KittenTTSConfig.fullStyleDim cfg])
+    (speed : Float := 1.0)
+    : IO KittenTTSDurationPrediction :=
+  predictDurations m (Tensor.toT inputIds) (Tensor.toT refStyle) speed
+
+/-- Typed sibling of `synthesizeIds`. Token IDs are dtype-pinned to
+    `.Int64`; the reference style is an activation with metadata `tm`.
+    The audio waveform inside `KittenTTSOutput` retains its erased
+    shape (legacy `T #[]`) since callers already use it that way. -/
+def synthesizeIdsT {tm : TensorMeta} {seq : UInt64}
+    (m : Model cfg)
+    (inputIds : Tensor { tm with dtype := .Int64 } #[1, seq])
+    (refStyle : Tensor tm #[1, KittenTTSConfig.fullStyleDim cfg])
+    (speed : Float := 1.0)
+    : IO KittenTTSOutput :=
+  synthesizeIds m (Tensor.toT inputIds) (Tensor.toT refStyle) speed
+
+/-- Typed sibling of `debugSynthesizeIds`. Same typing rules as
+    `synthesizeIdsT`; debug fields keep their erased-shape legacy form. -/
+def debugSynthesizeIdsT {tm : TensorMeta} {seq : UInt64}
+    (m : Model cfg)
+    (inputIds : Tensor { tm with dtype := .Int64 } #[1, seq])
+    (refStyle : Tensor tm #[1, KittenTTSConfig.fullStyleDim cfg])
+    (speed : Float := 1.0)
+    : IO KittenTTSDebugOutput :=
+  debugSynthesizeIds m (Tensor.toT inputIds) (Tensor.toT refStyle) speed
 
 end Model
 

@@ -14,6 +14,7 @@
   - Decoder-side 25Hz architecture (DiT + BigVGAN) is handled separately.
 -/
 import Tyr.Torch
+import Tyr.Tensor
 import Tyr.TensorStruct
 import Tyr.Module.Derive
 import Tyr.Model.Qwen3ASR.Frontend
