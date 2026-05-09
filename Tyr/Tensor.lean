@@ -317,6 +317,42 @@ Useful when porting code that calls `nn.layer_norm x w b eps` directly. -/
     (eps : Float := 1e-5) : Tensor m #[batch, seq, n] :=
   Tensor.unsafeOfT m (torch.nn.layer_norm (Tensor.toT x) (Tensor.toT weight) (Tensor.toT bias) eps)
 
+/-! ## SafeTensors / FFI ingress
+
+Loading from a SafeTensors file. Two patterns:
+
+  - **Caller-asserted metadata** (most common): `loadSafeTensor` takes
+    the expected `TensorMeta` and asserts it on the loaded tensor. If
+    the file has a different dtype/device than expected, the result
+    will silently misclaim its type — only the runtime tensor knows.
+    Use when you've already inspected the file header (or trust the
+    schema) and want the typed view.
+
+  - **Σ-typed auto-detect** (`loadSafeTensorAuto`): inspects the
+    runtime tensor and returns a `(m : TensorMeta) × Tensor m s`. Use
+    when the file's dtype is genuinely unknown at compile time. -/
+
+/-- Load a tensor from a SafeTensors file, asserting `m`. The
+    underlying tensor is moved to `m.device` after loading. Caller is
+    responsible for matching `m.dtype` to the file's actual dtype. -/
+def loadSafeTensor (path name : String) (s : Shape) (m : TensorMeta) : IO (Tensor m s) := do
+  let t ← torch.safetensors.loadTensor path name s
+  let t := T.to t m.device
+  return Tensor.unsafeOfT m t
+
+/-- Load a tensor from a SafeTensors file and recover its actual
+    metadata at runtime, returned alongside the typed tensor. The
+    caller can then destructure `let ⟨m, t⟩ ← ...` and proceed with a
+    pinned-type tensor. -/
+def loadSafeTensorAuto (path name : String) (s : Shape) (overrideDevice : Option Device := none)
+    : IO ((m : TensorMeta) × Tensor m s) := do
+  let t ← torch.safetensors.loadTensor path name s
+  let t := match overrideDevice with
+    | some d => T.to t d
+    | none => t
+  let m : TensorMeta := { device := t.device, dtype := t.dtype }
+  return ⟨m, Tensor.unsafeOfT m t⟩
+
 /-! ## Inspection
 
 Read-only queries that do not produce a new tensor — just plain values. -/
