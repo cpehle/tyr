@@ -91,4 +91,13 @@ instance {dim batch seq : UInt64} :
     Module (RMSNorm dim) (T #[batch, seq, dim]) (T #[batch, seq, dim]) where
   forward := RMSNorm.forward3d
 
+/-- Typed Module instance — `rn |> x` produces a `Tensor m s` when `x` is one. -/
+instance {tm : TensorMeta} {dim seq : UInt64} :
+    Module (RMSNorm dim) (Tensor tm #[seq, dim]) (Tensor tm #[seq, dim]) where
+  forward := RMSNorm.forward2dT
+
+instance {tm : TensorMeta} {dim batch seq : UInt64} :
+    Module (RMSNorm dim) (Tensor tm #[batch, seq, dim]) (Tensor tm #[batch, seq, dim]) where
+  forward := RMSNorm.forward3dT
+
 end torch

@@ -71,4 +71,13 @@ instance {in_dim out_dim batch seq : UInt64} :
     Module (Linear in_dim out_dim) (T #[batch, seq, in_dim]) (T #[batch, seq, out_dim]) where
   forward := Linear.forward3d
 
+/-- Typed Module instances. -/
+instance {tm : TensorMeta} {in_dim out_dim batch : UInt64} :
+    Module (Linear in_dim out_dim) (Tensor tm #[batch, in_dim]) (Tensor tm #[batch, out_dim]) where
+  forward := Linear.forward2dT
+
+instance {tm : TensorMeta} {in_dim out_dim batch seq : UInt64} :
+    Module (Linear in_dim out_dim) (Tensor tm #[batch, seq, in_dim]) (Tensor tm #[batch, seq, out_dim]) where
+  forward := Linear.forward3dT
+
 end torch
