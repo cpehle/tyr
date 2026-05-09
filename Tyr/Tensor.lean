@@ -161,6 +161,42 @@ cross device or dtype boundaries. -/
     : Tensor m #[batch, out_dim] :=
   Tensor.unsafeOfT m (torch.linear (Tensor.toT x) (Tensor.toT w))
 
+/-! ## Slicing
+
+Metadata-preserving, shape-changing. -/
+
+@[inline] def slice {m : TensorMeta} {s : Shape} (t : Tensor m s) (dim : UInt64) (start len : UInt64)
+    : Tensor m (torch.data.sliceShape s dim len) :=
+  Tensor.unsafeOfT m (torch.data.slice (Tensor.toT t) dim start len)
+
+/-! ## Attention helpers
+
+Reshape to / from canonical attention layout
+[batch, seq, n_head, head_dim] ↔ [batch, n_head, seq, head_dim].
+Metadata-preserving. -/
+
+@[inline] def transposeForAttention {m : TensorMeta} {batch seq n_head head_dim : UInt64}
+    (x : Tensor m #[batch, seq, n_head, head_dim])
+    : Tensor m #[batch, n_head, seq, head_dim] :=
+  Tensor.unsafeOfT m (torch.nn.transpose_for_attention (Tensor.toT x))
+
+@[inline] def transposeFromAttention {m : TensorMeta} {batch n_head seq head_dim : UInt64}
+    (x : Tensor m #[batch, n_head, seq, head_dim])
+    : Tensor m #[batch, seq, n_head, head_dim] :=
+  Tensor.unsafeOfT m (torch.nn.transpose_from_attention (Tensor.toT x))
+
+/-! ## Embedding
+
+Token-ID lookup: `ids` must be Int64; the result inherits the
+embedding weight's metadata. The Int64 constraint is enforced at the
+type level via a dtype-pinned input parameter. -/
+
+@[inline] def embedding {m : TensorMeta} {batch seq vocab embed : UInt64}
+    (weight : Tensor m #[vocab, embed])
+    (ids : Tensor { m with dtype := .Int64 } #[batch, seq])
+    : Tensor m #[batch, seq, embed] :=
+  Tensor.unsafeOfT m (torch.nn.embedding (Tensor.toT ids) (Tensor.toT weight))
+
 /-! ## Inspection
 
 Read-only queries that do not produce a new tensor — just plain values. -/
