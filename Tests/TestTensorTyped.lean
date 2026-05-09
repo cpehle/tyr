@@ -76,6 +76,29 @@ def testLinearTypedForward : IO Unit := do
   -- Shape projection confirms the type-level shape change took effect.
   assertEqual (Tensor.shape y) (#[1, 2, 3] : Shape) "Linear forward should produce out_dim=3"
 
+@[test]
+def testActivationsPreserveMeta : IO Unit := do
+  -- Activations are elementwise; metadata + shape unchanged.
+  let x : Tensor cpuF32 #[2, 3] := Tensor.zeros #[2, 3] cpuF32
+  let y₁ : Tensor cpuF32 #[2, 3] := Tensor.sigmoid x
+  let y₂ : Tensor cpuF32 #[2, 3] := Tensor.silu x
+  let y₃ : Tensor cpuF32 #[2, 3] := Tensor.softmax x
+  let y₄ : Tensor cpuF32 #[2, 3] := Tensor.rsqrt (Tensor.full #[2, 3] cpuF32 4.0)
+  -- sigmoid(0) = 0.5; sum over 6 elements = 3
+  let s := torch.nn.sumDim (Tensor.toT (Tensor.reshape y₁ #[6])) 0 false
+  let total : Float := nn.item s
+  assertTrue (total > 2.5 && total < 3.5) s!"sigmoid(0) sum should be ~3, got {total}"
+  -- Suppress unused warnings
+  let _ := (y₂, y₃, y₄)
+
+@[test]
+def testTransposeShapeIndex : IO Unit := do
+  -- transpose changes the shape index according to transposeShape.
+  let x : Tensor cpuF32 #[2, 3] := Tensor.zeros #[2, 3] cpuF32
+  let y := Tensor.transpose x 0 1
+  -- transposeShape #[2, 3] 0 1 = #[3, 2]
+  assertEqual (Tensor.shape y) (#[3, 2] : Shape) "transpose should swap dims at type level"
+
 end Tests.TensorTyped
 
 /-- The Lean type checker rejects adding tensors with different metadata —
