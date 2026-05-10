@@ -132,10 +132,19 @@ jobs:
         run: nvidia-smi --query-gpu=name,compute_cap --format=csv,noheader
 
       - name: Build GB10 E2E test runner
+        env:
+          # GB10 needs the Blackwell-family kernels emitted; the default
+          # codegen module is the Hopper MhaH100 set which won't link the
+          # `tkFlashAttnGb10*` / `tkFusedLayerNormResidual1024Blackwell*` /
+          # `tkFusedRMSNormResidual1024Blackwell*` symbols the GB10 e2e
+          # test invokes.
+          TYR_GPU_CODEGEN_MODULE: 'Tyr.GPU.Kernels.MhaGB10 Tyr.GPU.Kernels.FusedRMSNorm Tyr.GPU.Kernels.FusedLayerNorm Tyr.GPU.Kernels.MhaH100Decode'
         run: |
           lake -R build TestGPUGB10E2E
 
       - name: Run GB10 parity smoke
+        env:
+          TYR_GPU_CODEGEN_MODULE: 'Tyr.GPU.Kernels.MhaGB10 Tyr.GPU.Kernels.FusedRMSNorm Tyr.GPU.Kernels.FusedLayerNorm Tyr.GPU.Kernels.MhaH100Decode'
         run: |
           lake -R env ./.lake/build/bin/TestGPUGB10E2E --fail-fast
 
