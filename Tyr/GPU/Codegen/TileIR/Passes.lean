@@ -451,7 +451,7 @@ private partial def rewriteStmtInputs (subst : NameSubst) (stmt : Stmt) : Stmt :
           | none =>
               match rewriteStmtStructured? subst stmt with
               | some stmt => stmt
-              | none => panic! "unreachable"
+              | none => tileIRError "internal invariant: TileIR Passes structured rewriter returned none"
 
 private partial def rewriteBlockInputs (subst : NameSubst) (stmts : Array Stmt) : Array Stmt :=
   stmts.map (fun stmt => rewriteStmtInputs subst stmt)
