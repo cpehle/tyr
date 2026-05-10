@@ -140,6 +140,15 @@ jobs:
           # test invokes.
           TYR_GPU_CODEGEN_MODULE: 'Tyr.GPU.Kernels.MhaGB10 Tyr.GPU.Kernels.FusedRMSNorm Tyr.GPU.Kernels.FusedLayerNorm Tyr.GPU.Kernels.MhaH100Decode'
         run: |
+          # Build kernel module .oleans first — the codegen step
+          # (`GenerateGpuKernels`) reads .oleans for the modules listed in
+          # TYR_GPU_CODEGEN_MODULE, and on a fresh checkout those .oleans
+          # don't yet exist as transitive deps of the test exe target.
+          lake -R build \
+            Tyr.GPU.Kernels.MhaGB10 \
+            Tyr.GPU.Kernels.FusedRMSNorm \
+            Tyr.GPU.Kernels.FusedLayerNorm \
+            Tyr.GPU.Kernels.MhaH100Decode
           lake -R build TestGPUGB10E2E
 
       - name: Run GB10 parity smoke
