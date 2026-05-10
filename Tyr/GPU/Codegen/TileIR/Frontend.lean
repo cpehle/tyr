@@ -273,17 +273,17 @@ private def scalarTypeOf! : TileType → ScalarType
   | .tile _ (.ptr elem) => elem
   | .tensorView desc => desc.elem
   | .partitionView desc => desc.tensor.elem
-  | .token => panic! "TileIR tokens do not have a dtype"
+  | .token => tileIRError "TileIR tokens do not have a dtype"
 
 private def elemTypeOf! (ty : TileType) : ElemType :=
   match ty.elemType? with
   | some elem => elem
-  | none => panic! s!"TileIR value type {ty.render} does not have an element type"
+  | none => tileIRError s!"TileIR value type {ty.render} does not have an element type"
 
 private def staticShapeOf! (ty : TileType) : _root_.Array Nat :=
   match ty.staticShape? with
   | some shape => shape
-  | none => panic! s!"TileIR value type {ty.render} does not have a statically known shape"
+  | none => tileIRError s!"TileIR value type {ty.render} does not have a statically known shape"
 
 private def tileWithElem (elem : ElemType) (shape : _root_.Array Nat) : TileType :=
   .tile (staticShape shape) elem
@@ -1075,12 +1075,12 @@ private def unpackTermTuple (stx : TSyntax `tileirTermTuple) : Array (TSyntax `t
 private def unpackTupleArg (stx : TSyntax `tileirTupleArg) : Name × TSyntax `tileirTermTuple :=
   match stx with
   | `(tileirTupleArg| $name:ident := $value:tileirTermTuple) => (name.getId, value)
-  | _ => panic! "invalid tileirTupleArg syntax"
+  | _ => tileIRError "invalid tileirTupleArg syntax"
 
 private def unpackTermArg (stx : TSyntax `tileirTermArg) : Name × TSyntax `term :=
   match stx with
   | `(tileirTermArg| $name:ident := $value:term) => (name.getId, value)
-  | _ => panic! "invalid tileirTermArg syntax"
+  | _ => tileIRError "invalid tileirTermArg syntax"
 
 mutual
 

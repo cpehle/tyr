@@ -109,10 +109,10 @@ def mkFlashAttnFwdBody {dtype accDtype : GpuFloat} (cfg : FAVariantConfig)
     (lse_ptr : Option (GPtr accDtype))
     : KernelM Unit := do
   if cfg.useWarpSpec then
-    panic! "AttentionFactory.mkFlashAttnFwdBody: useWarpSpec := true is not yet \
+    KernelM.fail "AttentionFactory.mkFlashAttnFwdBody: useWarpSpec := true is not yet \
             supported. Use the hand-written FA3 kernels in Kernels/FlashAttn3.lean."
   if cfg.enableGqa then
-    panic! "AttentionFactory.mkFlashAttnFwdBody: enableGqa := true is not yet \
+    KernelM.fail "AttentionFactory.mkFlashAttnFwdBody: enableGqa := true is not yet \
             supported."
 
   let tileSize : Nat := cfg.tileSize
@@ -182,7 +182,7 @@ def mkFlashAttnFwdBody {dtype accDtype : GpuFloat} (cfg : FAVariantConfig)
         storeVec lshared lse
         storeVecGlobalRow lptr lshared coord
     | _, _ =>
-        panic! "AttentionFactory.mkFlashAttnFwdBody: emitLse := true but no \
+        KernelM.fail "AttentionFactory.mkFlashAttnFwdBody: emitLse := true but no \
                 lse_ptr was supplied"
 
 /-- Convenience entry without an LSE pointer. -/
@@ -211,7 +211,7 @@ def mkFlashAttnBwdPrep {dtype accDtype : GpuFloat} (cfg : FAVariantConfig)
     (d_ptr : GPtr accDtype)
     : KernelM Unit := do
   if cfg.useWarpSpec then
-    panic! "AttentionFactory.mkFlashAttnBwdPrep: useWarpSpec := true is not yet supported."
+    KernelM.fail "AttentionFactory.mkFlashAttnBwdPrep: useWarpSpec := true is not yet supported."
   let tileSize : Nat := cfg.tileSize
   let coord ← blockCoord2D
 
@@ -263,9 +263,9 @@ def mkFlashAttnBwdPartials {dtype accDtype : GpuFloat} (cfg : FAVariantConfig)
     (l_ptr d_ptr dQ_ptr dK_part_ptr dV_part_ptr : GPtr accDtype)
     : KernelM Unit := do
   if cfg.useWarpSpec then
-    panic! "AttentionFactory.mkFlashAttnBwdPartials: useWarpSpec := true is not yet supported."
+    KernelM.fail "AttentionFactory.mkFlashAttnBwdPartials: useWarpSpec := true is not yet supported."
   if cfg.enableGqa then
-    panic! "AttentionFactory.mkFlashAttnBwdPartials: enableGqa := true is not yet supported."
+    KernelM.fail "AttentionFactory.mkFlashAttnBwdPartials: enableGqa := true is not yet supported."
 
   let tileSize : Nat := cfg.tileSize
   let numKvBlocks : Nat := cfg.kvBlocks

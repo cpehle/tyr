@@ -11,6 +11,15 @@ The intent is to stay close to the published MLIR syntax so that rendering to
 
 namespace Tyr.GPU.Codegen.TileIR
 
+/-- Structured failure for TileIR pure helpers and boundary panics.
+
+    Several TileIR helpers (accessors, renderers, pure rewriters, builder
+    boundaries) live outside any error monad. Routing through this helper gives
+    every TileIR-side abort a uniform `[TileIR error]` prefix so callers can
+    grep for them and migrate them together to a real error channel later. -/
+@[inline] def tileIRError {α : Type} [Inhabited α] (msg : String) : α :=
+  panic! s!"[TileIR error] {msg}"
+
 structure Binding where
   name : String
   ty : TileType

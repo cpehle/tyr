@@ -56,7 +56,7 @@ private def renderLiteral (ty : TileType) (value : Literal) : String :=
   | some scalar =>
       s!"<{scalar.render}: {renderLiteralPayload value}>"
   | none =>
-      panic! s!"TileIR constant expects a scalar-backed tile type, got {ty.render}"
+      tileIRError s!"TileIR constant expects a scalar-backed tile type, got {ty.render}"
 
 private def renderShapeList (shape : Array ShapeDim) : String :=
   String.intercalate ", " <| shape.toList.map ShapeDim.render
@@ -202,7 +202,7 @@ private partial def renderStmt (depth : Nat) (stmt : Stmt) : String :=
   | _ =>
       match renderLeafStmt? depth stmt with
       | some text => text
-      | none => panic! "unreachable"
+      | none => tileIRError "internal invariant: TileIR Render leaf statement renderer returned none"
 
 private def renderGlobal (global : Global) : String :=
   s!"  cuda_tile.global {ensureSymbol global.name} {renderLiteral global.ty global.value} : {global.ty.render}"
