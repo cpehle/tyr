@@ -88,8 +88,14 @@ jobs:
 
       - name: Set up Lean toolchain
         run: |
-          elan toolchain install $(cat lean-toolchain)
-          elan default $(cat lean-toolchain)
+          toolchain="$(cat lean-toolchain)"
+          # `elan toolchain install` errors with exit 1 when the toolchain
+          # is already installed (which is normal on a long-lived
+          # self-hosted runner). Skip the install in that case.
+          if ! elan toolchain list | grep -q "^${toolchain}\b"; then
+            elan toolchain install "${toolchain}"
+          fi
+          elan default "${toolchain}"
 
       - name: Cache LibTorch (CUDA build)
         id: cache-libtorch
