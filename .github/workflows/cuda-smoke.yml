@@ -140,11 +140,13 @@ jobs:
           # test invokes.
           TYR_GPU_CODEGEN_MODULE: 'Tyr.GPU.Kernels.MhaGB10 Tyr.GPU.Kernels.FusedRMSNorm Tyr.GPU.Kernels.FusedLayerNorm Tyr.GPU.Kernels.MhaH100Decode'
         run: |
-          # Build kernel module .oleans first — the codegen step
-          # (`GenerateGpuKernels`) reads .oleans for the modules listed in
-          # TYR_GPU_CODEGEN_MODULE, and on a fresh checkout those .oleans
-          # don't yet exist as transitive deps of the test exe target.
-          lake -R build \
+          # Two-phase build to break the codegen circular dependency:
+          # (1) Build the Lean .oleans for the kernel modules with
+          #     codegen disabled — the codegen step needs .oleans for
+          #     these modules, which on a fresh checkout don't exist yet.
+          # (2) Re-run with codegen enabled — now the .oleans are present
+          #     and codegen + libTyrC.a + the test exe build cleanly.
+          TYR_SKIP_GPU_CODEGEN=1 lake -R build \
             Tyr.GPU.Kernels.MhaGB10 \
             Tyr.GPU.Kernels.FusedRMSNorm \
             Tyr.GPU.Kernels.FusedLayerNorm \
