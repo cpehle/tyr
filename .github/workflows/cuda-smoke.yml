@@ -97,25 +97,23 @@ jobs:
           fi
           elan default "${toolchain}"
 
-      - name: Cache LibTorch (CUDA build)
-        id: cache-libtorch
-        uses: actions/cache@v4
-        with:
-          path: external/libtorch
-          key: libtorch-cuda-${{ runner.os }}-${{ runner.arch }}-${{ env.LIBTORCH_VERSION }}
-
-      - name: Download LibTorch (CUDA)
-        if: steps.cache-libtorch.outputs.cache-hit != 'true'
+      - name: Set up LibTorch
         run: |
           mkdir -p external
-          # LibTorch CUDA build URL — adjust per host CUDA major version.
-          # For GB10 / aarch64, libtorch is typically obtained via pip install
-          # of the matching torch wheel and pointing at its `lib` dir; for
-          # x86_64 use the canonical libtorch CUDA zip.
-          if [ "$(uname -m)" = "aarch64" ]; then
-            # PEP 668 — system pythons reject installs. We own this runner;
-            # break-system-packages is intentional. Install into a workflow-
-            # local target dir to keep the system clean.
+          # Prefer a runner-host-provided libtorch if `TYR_LIBTORCH_DIR` is
+          # set in repo vars (recommended for self-hosted GPU runners — the
+          # full libtorch CUDA build with all headers is non-trivial to
+          # download per-run, especially on aarch64 where there's no
+          # canonical tarball).
+          if [ -n "${{ vars.TYR_LIBTORCH_DIR }}" ] && [ -d "${{ vars.TYR_LIBTORCH_DIR }}" ]; then
+            ln -sfn "${{ vars.TYR_LIBTORCH_DIR }}" external/libtorch
+            echo "Using runner-provided libtorch at ${{ vars.TYR_LIBTORCH_DIR }}"
+          elif [ "$(uname -m)" = "aarch64" ]; then
+            # Fallback for aarch64: pip-install pytorch wheel. Note the
+            # pip-installed wheel is missing some headers (e.g.
+            # `c10/cuda/impl/cuda_cmake_macros.h`) so this fallback may not
+            # be sufficient for full builds; prefer the
+            # `vars.TYR_LIBTORCH_DIR` path for a real CUDA libtorch.
             python3 -m pip install --break-system-packages --target external/_torch_pip "torch==${LIBTORCH_VERSION}" 2>/dev/null || \
               python3 -m pip install --break-system-packages --target external/_torch_pip torch
             ln -sfn "$(realpath external/_torch_pip/torch)" external/libtorch
@@ -125,6 +123,7 @@ jobs:
             unzip -q libtorch.zip -d external/
             rm libtorch.zip
           fi
+          ls -la external/libtorch | head -3
 
       - name: Verify NVCC
         run: nvcc --version
