@@ -81,6 +81,35 @@ extern "C" lean_object* lean_launch_Tyr_GPU_Kernels_tkMhaH100DecodeFwd256(
     uint64_t grid_x, uint64_t grid_y, uint64_t grid_z,
     uint64_t block_x, uint64_t block_y, uint64_t block_z,
     uint64_t shared_mem, uint64_t stream);
+
+// V2 D03 — GQA-packed decode forward kernels. Pack
+// `R = q_heads / kv_heads` query heads into one CTA, so K/V is loaded
+// once per group instead of R times. Grid: `batch * kv_heads`.
+// Eligible when R ∈ {2, 4, 8, 16} (so R | 64).
+extern "C" lean_object* lean_launch_Tyr_GPU_Kernels_tkMhaH100DecodeFwdGqa(
+    b_lean_obj_arg q_ptr, b_lean_obj_arg k_ptr, b_lean_obj_arg v_ptr,
+    b_lean_obj_arg o_ptr,
+    uint64_t batch, uint64_t q_heads, uint64_t kv_heads,
+    uint64_t kv_seq, uint64_t head_dim,
+    uint64_t grid_x, uint64_t grid_y, uint64_t grid_z,
+    uint64_t block_x, uint64_t block_y, uint64_t block_z,
+    uint64_t shared_mem, uint64_t stream);
+extern "C" lean_object* lean_launch_Tyr_GPU_Kernels_tkMhaH100DecodeFwdGqa64(
+    b_lean_obj_arg q_ptr, b_lean_obj_arg k_ptr, b_lean_obj_arg v_ptr,
+    b_lean_obj_arg o_ptr,
+    uint64_t batch, uint64_t q_heads, uint64_t kv_heads,
+    uint64_t kv_seq, uint64_t head_dim,
+    uint64_t grid_x, uint64_t grid_y, uint64_t grid_z,
+    uint64_t block_x, uint64_t block_y, uint64_t block_z,
+    uint64_t shared_mem, uint64_t stream);
+extern "C" lean_object* lean_launch_Tyr_GPU_Kernels_tkMhaH100DecodeFwdGqa256(
+    b_lean_obj_arg q_ptr, b_lean_obj_arg k_ptr, b_lean_obj_arg v_ptr,
+    b_lean_obj_arg o_ptr,
+    uint64_t batch, uint64_t q_heads, uint64_t kv_heads,
+    uint64_t kv_seq, uint64_t head_dim,
+    uint64_t grid_x, uint64_t grid_y, uint64_t grid_z,
+    uint64_t block_x, uint64_t block_y, uint64_t block_z,
+    uint64_t shared_mem, uint64_t stream);
 extern "C" lean_object* lean_launch_Tyr_GPU_Kernels_tkMhaH100BwdPrep2Block(
     b_lean_obj_arg dO_ptr, b_lean_obj_arg o_ptr, b_lean_obj_arg d_ptr,
     uint64_t seq_len, uint64_t head_dim,
@@ -440,14 +469,28 @@ static torch::Tensor generated_decode_forward(
   LeanTensorRef out_ref(out);
 
   LaunchConfig cfg;
-  // One CTA per (batch, q_head); single warpgroup of 128 threads. KV reads
-  // across a GQA group rely on L2 reuse in V1; a packed-Q variant is V2 work.
-  cfg.grid_x = static_cast<uint64_t>(q.size(0) * q.size(1));
   cfg.block_x = 128;
   cfg.shared_mem = generated_decode_tk_shared_mem(q.size(3));
   cfg.stream = current_stream_handle(q);
 
+  const int64_t q_heads = q.size(1);
+  const int64_t kv_heads = k.size(1);
   const int64_t head_dim = q.size(3);
+  // V2 D03: when R = q_heads / kv_heads ∈ {2, 4, 8, 16}, use the
+  // GQA-packed kernel (one CTA per kv_head, R query heads packed into
+  // one Q tile). Drops K/V bandwidth by Rx vs V1; falls back to V1
+  // for ratio=1 or other ratios.
+  const bool gqa_packed_eligible =
+      kv_heads > 0 &&
+      q_heads % kv_heads == 0 &&
+      ((q_heads / kv_heads) == 2 ||
+       (q_heads / kv_heads) == 4 ||
+       (q_heads / kv_heads) == 8 ||
+       (q_heads / kv_heads) == 16);
+
+  cfg.grid_x = static_cast<uint64_t>(
+      q.size(0) * (gqa_packed_eligible ? kv_heads : q_heads));
+
   auto launch = [&](auto fn, const char* name) {
     auto result = fn(
         q_ref.obj, k_ref.obj, v_ref.obj, out_ref.obj,
@@ -461,7 +504,18 @@ static torch::Tensor generated_decode_forward(
         cfg.shared_mem, cfg.stream);
     throw_on_launcher_error(result, name);
   };
-  if (head_dim == 64) {
+  if (gqa_packed_eligible) {
+    if (head_dim == 64) {
+      launch(lean_launch_Tyr_GPU_Kernels_tkMhaH100DecodeFwdGqa64,
+             "tkMhaH100DecodeFwdGqa64");
+    } else if (head_dim == 256) {
+      launch(lean_launch_Tyr_GPU_Kernels_tkMhaH100DecodeFwdGqa256,
+             "tkMhaH100DecodeFwdGqa256");
+    } else {
+      launch(lean_launch_Tyr_GPU_Kernels_tkMhaH100DecodeFwdGqa,
+             "tkMhaH100DecodeFwdGqa");
+    }
+  } else if (head_dim == 64) {
     launch(lean_launch_Tyr_GPU_Kernels_tkMhaH100DecodeFwd64,
            "tkMhaH100DecodeFwd64");
   } else if (head_dim == 256) {
