@@ -415,6 +415,9 @@ extern_lib libtyr pkg := do
     else
       pure true
   if shouldWriteConfig then
+    -- On a fresh checkout (e.g. CI runner) `pkg.buildDir` may not yet
+    -- exist; `writeFile` won't create it.
+    IO.FS.createDirAll pkg.buildDir
     IO.FS.writeFile gpuCodegenConfigPath gpuCodegenConfig
 
   -- Track Makefile plus C/CUDA sources/headers so Lake reruns `make` when FFI changes.
