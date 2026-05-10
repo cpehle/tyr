@@ -113,9 +113,11 @@ jobs:
           # of the matching torch wheel and pointing at its `lib` dir; for
           # x86_64 use the canonical libtorch CUDA zip.
           if [ "$(uname -m)" = "aarch64" ]; then
-            python3 -m pip install --upgrade pip
-            python3 -m pip install --target external/_torch_pip "torch==${LIBTORCH_VERSION}" 2>/dev/null || \
-              python3 -m pip install --target external/_torch_pip torch
+            # PEP 668 — system pythons reject installs. We own this runner;
+            # break-system-packages is intentional. Install into a workflow-
+            # local target dir to keep the system clean.
+            python3 -m pip install --break-system-packages --target external/_torch_pip "torch==${LIBTORCH_VERSION}" 2>/dev/null || \
+              python3 -m pip install --break-system-packages --target external/_torch_pip torch
             ln -sfn "$(realpath external/_torch_pip/torch)" external/libtorch
           else
             URL="https://download.pytorch.org/libtorch/cu124/libtorch-shared-with-deps-${LIBTORCH_VERSION}%2Bcu124.zip"
