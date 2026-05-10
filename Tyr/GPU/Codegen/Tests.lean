@@ -38,7 +38,7 @@ info: #include <kittens.cuh>
 using namespace kittens;
 
 #if defined(KITTENS_HOPPER)
-__global__ void simple_tile(/* TODO: params */) {
+__global__ void simple_tile(/* empty parameter list */) {
   rt<bf16, 64, 64, row_l> v0;
 }
 #endif
@@ -59,7 +59,7 @@ info: #include <kittens.cuh>
 using namespace kittens;
 
 #if defined(KITTENS_HOPPER)
-__global__ void multi_tile(/* TODO: params */) {
+__global__ void multi_tile(/* empty parameter list */) {
   rt<bf16, 64, 64, row_l> v0;
   __shared__ st<float, 32, 64> v1;
   rv<float, 64> v2;
@@ -85,7 +85,7 @@ info: #include <kittens.cuh>
 using namespace kittens;
 
 #if defined(KITTENS_HOPPER)
-__global__ void mma_ab(/* TODO: params */) {
+__global__ void mma_ab(/* empty parameter list */) {
   rt<bf16, 64, 64, row_l> v0;
   rt<bf16, 64, 64, col_l> v1;
   rt<float, 64, 64, row_l> v2;
@@ -110,7 +110,7 @@ info: #include <kittens.cuh>
 using namespace kittens;
 
 #if defined(KITTENS_HOPPER)
-__global__ void mma_abt(/* TODO: params */) {
+__global__ void mma_abt(/* empty parameter list */) {
   rt<bf16, 64, 64, row_l> v0;
   rt<bf16, 64, 64, row_l> v1;
   rt<float, 64, 64, row_l> v2;
@@ -135,7 +135,7 @@ info: #include <kittens.cuh>
 using namespace kittens;
 
 #if defined(KITTENS_HOPPER)
-__global__ void simple_loop(/* TODO: params */) {
+__global__ void simple_loop(/* empty parameter list */) {
   for (int v0 = 0; v0 < 4; v0++) {
     warp::sync(0);
   }
@@ -157,7 +157,7 @@ info: #include <kittens.cuh>
 using namespace kittens;
 
 #if defined(KITTENS_HOPPER)
-__global__ void nested_loop(/* TODO: params */) {
+__global__ void nested_loop(/* empty parameter list */) {
   for (int v0 = 0; v0 < 2; v0++) {
     for (int v1 = 0; v1 < 3; v1++) {
       warp::sync(1);
@@ -181,7 +181,7 @@ info: #include <kittens.cuh>
 using namespace kittens;
 
 #if defined(KITTENS_AMPERE)
-__global__ void sm80_kernel(/* TODO: params */) {
+__global__ void sm80_kernel(/* empty parameter list */) {
   rt<bf16, 64, 64, row_l> v0;
 }
 #endif
@@ -199,7 +199,7 @@ info: #include <kittens.cuh>
 using namespace kittens;
 
 #if defined(KITTENS_BLACKWELL)
-__global__ void sm100_kernel(/* TODO: params */) {
+__global__ void sm100_kernel(/* empty parameter list */) {
   rt<bf16, 64, 64, row_l> v0;
 }
 #endif
@@ -223,7 +223,7 @@ info: #include <kittens.cuh>
 using namespace kittens;
 
 #if defined(KITTENS_HOPPER)
-__global__ void row_reduction(/* TODO: params */) {
+__global__ void row_reduction(/* empty parameter list */) {
   rt<float, 64, 64, row_l> v0;
   rv<float, 64, ducks::rv_layout::ortho> v1;
   warp::row_sum(v1, v0);
@@ -249,7 +249,7 @@ info: #include <kittens.cuh>
 using namespace kittens;
 
 #if defined(KITTENS_HOPPER)
-__global__ void col_broadcast(/* TODO: params */) {
+__global__ void col_broadcast(/* empty parameter list */) {
   rt<float, 64, 64, row_l> v0;
   rv<float, 64, ducks::rv_layout::ortho> v1;
   warp::sub_row(v0, v0, v1);
@@ -276,7 +276,7 @@ info: #include <kittens.cuh>
 using namespace kittens;
 
 #if defined(KITTENS_HOPPER)
-__global__ void mask_ops(/* TODO: params */) {
+__global__ void mask_ops(/* empty parameter list */) {
   rt<float, 64, 64, row_l> v0;
   warp::make_causal(v0, v0, -10000000000.000000);
   warp::tril(v0, v0, 0);
@@ -314,7 +314,7 @@ __device__ inline void store_add(Dst &dst, const Src &src, const Offset &offset)
 }
 
 #if defined(KITTENS_HOPPER)
-__global__ void memory_ops(/* TODO: params */) {
+__global__ void memory_ops(/* empty parameter list */) {
   rt<bf16, 64, 64, row_l> v0;
   __shared__ st<bf16, 64, 64> v1;
   warp::load(v0, v1);
@@ -631,7 +631,7 @@ info: #include <kittens.cuh>
 using namespace kittens;
 
 #if defined(KITTENS_BLACKWELL)
-__global__ void tmem_alloc(/* TODO: params */) {
+__global__ void tmem_alloc(/* empty parameter list */) {
   tt<float, 128, 128> v0;
   tt<float, 64, 64> v1;
   warp::zero(v1);
@@ -651,7 +651,7 @@ info: #include <kittens.cuh>
 using namespace kittens;
 
 #if defined(KITTENS_BLACKWELL)
-__global__ void cluster_idx(/* TODO: params */) {
+__global__ void cluster_idx(/* empty parameter list */) {
   int v0 = clusterIdx().x;
 }
 #endif
@@ -675,7 +675,7 @@ info: #include <kittens.cuh>
 using namespace kittens;
 
 #if defined(KITTENS_BLACKWELL)
-__global__ void tcgen05_mma(/* TODO: params */) {
+__global__ void tcgen05_mma(/* empty parameter list */) {
   tt<float, 64, 64> v0;
   __shared__ st<bf16, 64, 64> v1;
   __shared__ st<bf16, 64, 64> v2;
@@ -728,7 +728,7 @@ info: #include <kittens.cuh>
 using namespace kittens;
 
 #if defined(KITTENS_BLACKWELL)
-__global__ void tmem_pool(/* TODO: params */) {
+__global__ void tmem_pool(/* empty parameter list */) {
   tensor_allocator<1, 2, false> tm_alloc;
   if(elect_one) v0.provision<2>(tmem_addr);
   if(elect_one) v0.deprovision();
@@ -750,7 +750,7 @@ info: #include <kittens.cuh>
 using namespace kittens;
 
 #if defined(KITTENS_HOPPER)
-__global__ void ring_buffer_3(/* TODO: params */) {
+__global__ void ring_buffer_3(/* empty parameter list */) {
   __shared__ st<bf16, 64, 64> v0;
   __shared__ semaphore v1;
   __shared__ st<bf16, 64, 64> v2;
@@ -778,7 +778,7 @@ info: #include <kittens.cuh>
 using namespace kittens;
 
 #if defined(KITTENS_HOPPER)
-__global__ void warp_spec_pipeline(/* TODO: params */) {
+__global__ void warp_spec_pipeline(/* empty parameter list */) {
   // Pipeline prologue: fill 2 stages
   if (kittens::warpgroup::groupid() == 0) {
     warp::sync(0);
@@ -855,7 +855,7 @@ info: #include <kittens.cuh>
 using namespace kittens;
 
 #if defined(KITTENS_HOPPER)
-__global__ void swizzle_coord(/* TODO: params */) {
+__global__ void swizzle_coord(/* empty parameter list */) {
   int v0 = 42;
   int v1 = 16;
   // L2 swizzle (group size = 8)
@@ -898,7 +898,7 @@ info: #include <kittens.cuh>
 using namespace kittens;
 
 #if defined(KITTENS_HOPPER)
-__global__ void two_phase(/* TODO: params */) {
+__global__ void two_phase(/* empty parameter list */) {
   // === Phase: phase1 ===
   rt<bf16, 64, 64, row_l> v0;
   warp::sync(0);
@@ -924,7 +924,7 @@ info: #include <kittens.cuh>
 using namespace kittens;
 
 #if defined(KITTENS_HOPPER)
-__global__ void fused_gemm(/* TODO: params */) {
+__global__ void fused_gemm(/* empty parameter list */) {
   __shared__ st<bf16, 64, 64> v0;
   __shared__ st<bf16, 64, 64> v1;
   // Fused GEMM: 64x64x64, 4 K-blocks
