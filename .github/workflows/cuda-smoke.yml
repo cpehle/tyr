@@ -1,0 +1,139 @@
+name: CUDA smoke
+
+# Self-hosted GPU runner CI for the Tyr GPU DSL. Catches regressions in the
+# generated kernels and the dispatch glue. Runs on PRs that touch GPU code,
+# plus manual `workflow_dispatch`.
+#
+# Setup notes (see dev/issues.md R1.3):
+#   - Register a self-hosted runner with labels `[self-hosted, gpu]` against
+#     the repo. Any GPU works for the CPU-side IR tests; for the parity tests
+#     a CUDA-capable device is required and the runner host needs the
+#     environment vars below set in `~/.bashrc` or a `.env` file:
+#       GPU=GB10            (or H100, B200, etc. — see cc/Makefile)
+#       TYR_GPU_FAMILY=BLACKWELL   (only needed on GB10 to override the default
+#                                   HOPPER family for true Blackwell kernels)
+#   - Pre-install: nvcc (CUDA 12.x or newer), python3 (for libtorch headers),
+#     elan, libsoxr-dev. LibTorch is downloaded by the workflow per-run and
+#     cached.
+#   - The workflow opts in via the `gpu-ci` label on a PR so it doesn't block
+#     CI when the runner is offline.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Tyr/GPU/**'
+      - 'cc/src/tyr*'
+      - 'cc/src/tk_*'
+      - 'cc/src/generated/**'
+      - 'cc/Makefile'
+      - 'lakefile.lean'
+      - 'lean-toolchain'
+      - '.github/workflows/cuda-smoke.yml'
+  pull_request:
+    types: [labeled, opened, synchronize, reopened]
+    paths:
+      - 'Tyr/GPU/**'
+      - 'cc/src/tyr*'
+      - 'cc/src/tk_*'
+      - 'cc/src/generated/**'
+      - 'cc/Makefile'
+      - 'lakefile.lean'
+      - 'lean-toolchain'
+      - '.github/workflows/cuda-smoke.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: cuda-smoke-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  gpu-smoke:
+    # Skip for unlabelled PRs so we don't block CI when the GPU runner is offline.
+    # Maintainers add the `gpu-ci` label to opt a PR in.
+    if: |
+      github.event_name != 'pull_request' ||
+      contains(github.event.pull_request.labels.*.name, 'gpu-ci')
+    runs-on: [self-hosted, gpu]
+    timeout-minutes: 60
+    env:
+      LIBTORCH_VERSION: 2.10.0
+      # GPU defaults expected on the runner; override here if a runner
+      # serves a different device.
+      GPU: ${{ vars.TYR_GPU || 'GB10' }}
+      TYR_GPU_FAMILY: ${{ vars.TYR_GPU_FAMILY || 'BLACKWELL' }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Initialize required submodules
+        run: |
+          git submodule update --init --depth 1 external/soxr
+          git submodule update --init --depth 1 thirdparty/ThunderKittens
+
+      - name: Cache elan toolchain
+        uses: actions/cache@v4
+        with:
+          path: ~/.elan
+          key: elan-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('lean-toolchain') }}
+
+      - name: Install elan if missing
+        run: |
+          if [ ! -x "$HOME/.elan/bin/elan" ]; then
+            curl https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -sSf | sh -s -- -y --default-toolchain none
+          fi
+          echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
+
+      - name: Set up Lean toolchain
+        run: |
+          elan toolchain install $(cat lean-toolchain)
+          elan default $(cat lean-toolchain)
+
+      - name: Cache LibTorch (CUDA build)
+        id: cache-libtorch
+        uses: actions/cache@v4
+        with:
+          path: external/libtorch
+          key: libtorch-cuda-${{ runner.os }}-${{ runner.arch }}-${{ env.LIBTORCH_VERSION }}
+
+      - name: Download LibTorch (CUDA)
+        if: steps.cache-libtorch.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p external
+          # LibTorch CUDA build URL — adjust per host CUDA major version.
+          # For GB10 / aarch64, libtorch is typically obtained via pip install
+          # of the matching torch wheel and pointing at its `lib` dir; for
+          # x86_64 use the canonical libtorch CUDA zip.
+          if [ "$(uname -m)" = "aarch64" ]; then
+            python3 -m pip install --upgrade pip
+            python3 -m pip install --target external/_torch_pip "torch==${LIBTORCH_VERSION}" 2>/dev/null || \
+              python3 -m pip install --target external/_torch_pip torch
+            ln -sfn "$(realpath external/_torch_pip/torch)" external/libtorch
+          else
+            URL="https://download.pytorch.org/libtorch/cu124/libtorch-shared-with-deps-${LIBTORCH_VERSION}%2Bcu124.zip"
+            curl --fail -L -o libtorch.zip "${URL}"
+            unzip -q libtorch.zip -d external/
+            rm libtorch.zip
+          fi
+
+      - name: Verify NVCC
+        run: nvcc --version
+
+      - name: Verify GPU
+        run: nvidia-smi --query-gpu=name,compute_cap --format=csv,noheader
+
+      - name: Build GB10 E2E test runner
+        run: |
+          lake -R build TestGPUGB10E2E
+
+      - name: Run GB10 parity smoke
+        run: |
+          lake -R env ./.lake/build/bin/TestGPUGB10E2E --fail-fast
+
+      - name: Optional — Hopper decode parity (only if Hopper hardware)
+        if: env.GPU == 'H100'
+        run: |
+          lake -R build RunMhaH100Decode
+          ./.lake/build/bin/RunMhaH100Decode --kv-seq 1024
