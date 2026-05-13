@@ -381,7 +381,19 @@ def generateCppLauncherCode (kernel : Kernel) : String :=
   let archGuard := kernel.family.toGuard
   let archMsg := toString kernel.arch
   let familyMsg := toString kernel.family
-  let defaultSharedMem := toString kernel.sharedMemBytes
+  -- ThunderKittens' `tma_swizzle_allocator` aligns each allocation to 1024
+  -- bytes (see `thirdparty/ThunderKittens/include/common/util.cuh`'s
+  -- `tma_allocator = shared_allocator<1024>`). The Lean-side
+  -- `sharedMemBytes` accounting (in `Tyr/GPU/Codegen/Primitives.lean`)
+  -- sums `rows*cols*dtype.bytes` without alignment padding. For kernels
+  -- with dynamic shared memory this underbudgets by up to 1024 bytes,
+  -- which causes the first TMA-aligned allocation to overrun the
+  -- caller-provided `effective_shared_mem` budget and trigger
+  -- `illegal memory access` at the first kernel launch on Hopper /
+  -- Blackwell.  Pad the default by 1024 bytes whenever the kernel uses
+  -- dynamic shared memory at all.
+  let smemPadding : Nat := if kernel.sharedMemBytes > 0 then 1024 else 0
+  let defaultSharedMem := toString (kernel.sharedMemBytes + smemPadding)
   let paramTmaTypes := inferGlobalParamTmaTypes kernel
 
   let externParams := kernel.params.toList.map paramToCppExternAttr
