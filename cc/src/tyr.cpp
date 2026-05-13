@@ -75,6 +75,18 @@
 #include <lean/lean.h>
 #include <torch/torch.h>
 #include <ATen/ATen.h>
+#include <ATen/Generator.h>
+#include <ATen/Context.h>
+#if defined(__has_include)
+#if __has_include(<ATen/cuda/CUDAGeneratorImpl.h>)
+#include <ATen/cuda/CUDAGeneratorImpl.h>
+#define TYR_HAS_CUDA_GENERATOR 1
+#else
+#define TYR_HAS_CUDA_GENERATOR 0
+#endif
+#else
+#define TYR_HAS_CUDA_GENERATOR 0
+#endif
 
 namespace tyr_ops {
 torch::Tensor flash_attn_dispatch(
@@ -104,6 +116,7 @@ torch::Tensor flash_attn_dispatch(
 #define TYR_HAS_CUDA_API 1
 #include <c10/cuda/CUDAStream.h>
 #include <c10/cuda/CUDAFunctions.h>
+#include <cuda_runtime_api.h>
 #else
 #define TYR_HAS_CUDA_API 0
 #endif
@@ -234,13 +247,46 @@ lean_object* lean_torch_get_live_tensors(lean_object* /* w */) {
     return lean_io_result_mk_ok(lean_box_uint64(static_cast<uint64_t>(g_live_lean_tensors.load())));
 }
 
+// Background on the workarounds below:
+//
+// The Lean toolchain statically embeds libc++abi + llvm-libunwind into
+// every executable. libtorch is built against libstdc++. The two C++
+// runtimes tag exceptions with different runtime classes
+// ("CLNGC++" vs "GNUCC++") that the personality functions in libtorch's
+// frames don't reconcile, so any `c10::Error` thrown by libtorch escapes
+// all `catch` blocks in this translation unit and trips
+// `std::terminate()` → SIGABRT.
+//
+// We can't fix the toolchain mismatch from within Tyr, but we can avoid
+// the throwing paths in the two FFI sites that hit it:
+//   - `torch::manual_seed` iterates every CUDA generator and calls
+//     `set_current_seed` → `assertNotCapturing` → `c10_cuda_check` →
+//     throw. Replaced with a CPU-only seed via the default CPU
+//     generator (caller cares about fixture determinism, which the CPU
+//     seed alone covers).
+//   - `c10::cuda::device_synchronize()` wraps `cudaDeviceSynchronize`
+//     and translates errors via `c10_cuda_check` → throw. Replaced
+//     with a direct `cudaDeviceSynchronize` call that returns
+//     `cudaError_t` and never throws.
+
 lean_object* lean_torch_manual_seed(uint64_t seed, lean_object* /*w*/) {
   try {
-    torch::manual_seed(static_cast<int64_t>(seed));
+    auto cpu_gen = at::detail::getDefaultCPUGenerator();
+    {
+      std::lock_guard<std::mutex> lock(cpu_gen.mutex());
+      cpu_gen.set_current_seed(seed);
+    }
+    // Deliberately skip CUDA generator seeding: the libtorch path
+    // throws across the libc++abi/libstdc++ ABI boundary on this
+    // toolchain. Fixture-regeneration callers (`Examples/GPU/Parity.lean`
+    // `seedFixtures`) only need the CPU seed.
     return lean_io_result_mk_ok(lean_box(0));
-  } catch (const c10::Error& e) {
+  } catch (const std::exception& e) {
     return lean_io_result_mk_error(lean_mk_io_user_error(
-      lean_mk_string(("Failed to set manual seed: " + std::string(e.what())).c_str())));
+      lean_mk_string((std::string("Failed to set manual seed: ") + e.what()).c_str())));
+  } catch (...) {
+    return lean_io_result_mk_error(lean_mk_io_user_error(
+      lean_mk_string("Failed to set manual seed: unknown exception")));
   }
 }
 
@@ -358,14 +404,24 @@ lean_object* lean_torch_get_stats(lean_obj_arg /*s*/, b_lean_obj_arg t) {
 lean_object* lean_torch_randn(lean_obj_arg s, int requires_grad, lean_obj_arg device) {
   auto device_ = getDevice(device);
   lean_dec(device);
-  auto t = torch::randn(getShape(s), torch::TensorOptions().requires_grad(requires_grad).device(device_));
+  // CPU-then-transfer to avoid the GB10 CUDA-RNG throw path; see comment
+  // on `lean_torch_rand`.
+  auto cpu_t = torch::randn(getShape(s), torch::TensorOptions().requires_grad(requires_grad));
+  auto t = device_.is_cpu() ? cpu_t : cpu_t.to(device_);
   lean_dec(s);
   return lean_io_result_mk_ok(fromTorchTensor(t));
 }
+// Generate on CPU then transfer to the target device. The libtorch CUDA
+// `Philox` generator hits `c10_cuda_check_implementation` on GB10/sm_120
+// which throws `c10::Error` across the libstdc++ → libc++abi boundary
+// (see `lean_torch_manual_seed` block comment). Generating on CPU and
+// `.to`-transferring avoids the throw entirely and is numerically
+// equivalent for fixture-regeneration use cases.
 lean_object* lean_torch_rand(lean_obj_arg s, int requires_grad, lean_obj_arg device) {
   auto device_ = getDevice(device);
   lean_dec(device);
-  auto t = torch::rand(getShape(s), torch::TensorOptions().requires_grad(requires_grad).device(device_));
+  auto cpu_t = torch::rand(getShape(s), torch::TensorOptions().requires_grad(requires_grad));
+  auto t = device_.is_cpu() ? cpu_t : cpu_t.to(device_);
   lean_dec(s);
   return lean_io_result_mk_ok(fromTorchTensor(t));
 }
@@ -373,8 +429,10 @@ lean_object* lean_torch_rand(lean_obj_arg s, int requires_grad, lean_obj_arg dev
 lean_object* lean_torch_randint(int64_t low, int64_t high, lean_obj_arg s, int /*requires_grad*/, lean_obj_arg device) {
   auto device_ = getDevice(device);
   lean_dec(device);
-  // randint always returns Long (int64) dtype - integral types don't support requires_grad
-  auto t = torch::randint(low, high, getShape(s), torch::TensorOptions().dtype(torch::kLong).device(device_));
+  // randint always returns Long (int64) dtype - integral types don't support requires_grad.
+  // CPU-then-transfer for the same reason as `lean_torch_rand`.
+  auto cpu_t = torch::randint(low, high, getShape(s), torch::TensorOptions().dtype(torch::kLong));
+  auto t = device_.is_cpu() ? cpu_t : cpu_t.to(device_);
   lean_dec(s);
   return lean_io_result_mk_ok(fromTorchTensor(t));
 }
@@ -4503,21 +4561,25 @@ lean_object* lean_torch_cuda_current_stream(lean_object* /*w*/) {
   }
 }
 
-// Synchronize CUDA device for deterministic validation around external launches.
+// Synchronize CUDA device for deterministic validation around external
+// launches. Calls cudart directly rather than `c10::cuda::device_synchronize`
+// because the latter throws `c10::Error` on failure, which cannot be
+// caught across the libc++abi/libstdc++ ABI boundary in Tyr binaries
+// (see the comment block above `lean_torch_manual_seed`). `cudaDeviceSynchronize`
+// returns a `cudaError_t` and never throws.
 lean_object* lean_torch_cuda_synchronize(lean_object* /*w*/) {
-  try {
-    if (!torch::cuda::is_available()) {
-      return lean_io_result_mk_ok(lean_box(0));
-    }
-#if TYR_HAS_CUDA_API
-    c10::cuda::device_synchronize();
-#endif
+  if (!torch::cuda::is_available()) {
     return lean_io_result_mk_ok(lean_box(0));
-  } catch (const c10::Error& e) {
-    return mkC10IoError("cuda_synchronize failed", e);
-  } catch (const std::exception& e) {
-    return mkStdIoError("cuda_synchronize failed", e);
   }
+#if TYR_HAS_CUDA_API
+  cudaError_t err = cudaDeviceSynchronize();
+  if (err != cudaSuccess) {
+    return lean_io_result_mk_error(lean_mk_io_user_error(
+      lean_mk_string((std::string("cuda_synchronize failed: ") +
+                      cudaGetErrorString(err)).c_str())));
+  }
+#endif
+  return lean_io_result_mk_ok(lean_box(0));
 }
 
 // Check if MPS is available
