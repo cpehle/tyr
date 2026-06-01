@@ -487,7 +487,7 @@ def testComputeLSE : IO Unit := do
 @[test]
 def testSignalBarrier : IO Unit := do
   let kernel := buildKernelM "test_signal_barrier" .SM90 #[] do
-    signalBarrier queryReadyBarrier
+    signalNamedBarrier queryReadyBarrier
     pure ()
 
   let code := generateKernel kernel
@@ -497,7 +497,7 @@ def testSignalBarrier : IO Unit := do
 @[test]
 def testWaitBarrier : IO Unit := do
   let kernel := buildKernelM "test_wait_barrier" .SM90 #[] do
-    waitBarrier queryReadyBarrier
+    waitNamedBarrier queryReadyBarrier
     pure ()
 
   let code := generateKernel kernel
@@ -604,11 +604,11 @@ def testWarpSpecializedPattern : IO Unit := do
 
     asProducer do
       comment "Producer: TMA loads"
-      signalBarrier queryReadyBarrier
+      signalNamedBarrier queryReadyBarrier
 
     asConsumer do
       comment "Consumer: MMA computation"
-      waitBarrier queryReadyBarrier
+      waitNamedBarrier queryReadyBarrier
 
       let q ← allocRT .BFloat16 64 64
       let k ← allocRT .BFloat16 64 64
