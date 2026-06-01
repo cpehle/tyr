@@ -233,9 +233,6 @@ SRCS := \
 	tyr_parquet.cpp\
 	tyr_execution.cpp\
 	float_buffer.cpp
-ifneq ($(GPU),H100)
-SRCS += tk_vendor_stubs.cpp
-endif
 MM_SRCS :=
 ifeq ($(UNAME_S),Darwin)
 MM_SRCS += apple_mps.mm
@@ -286,6 +283,9 @@ ifneq ($(strip $(CU_SRCS)),)
 $(warning NVCC not found; disabling CUDA kernel compilation and using CPU stubs)
 endif
 CU_SRCS :=
+endif
+ifeq ($(filter $(SRC_DIR)/tk_vendor_mha_h100.cu,$(CU_SRCS)),)
+SRCS += tk_vendor_stubs.cpp
 endif
 # Always include the kernel-launcher stubs in libTyrC.a. The stubs declare
 # every `lean_launch_Tyr_GPU_Kernels_...` symbol with `__attribute__((weak))`,
