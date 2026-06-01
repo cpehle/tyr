@@ -257,11 +257,14 @@ def testSetArchResetsFamilyToArchDefault : IO Unit := do
 
 @[test]
 def testCppLauncherUsesFamilyGuardAndFloorMessage : IO Unit := do
-  let cpp := generateCppLauncherCode
-    "gb10_floor_launcher"
-    .SM90
-    .Blackwell
-    #[{ name := "x", dtype := .BFloat16, isPointer := true }]
+  let kernel : Kernel := {
+    name := "gb10_floor_launcher"
+    arch := .SM90
+    family := .Blackwell
+    params := #[{ name := "x", dtype := .BFloat16, isPointer := true }]
+    body := #[]
+  }
+  let cpp := generateCppLauncherCode kernel
 
   assertContainsAll cpp #[
     ("#if defined(KITTENS_BLACKWELL)",
