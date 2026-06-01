@@ -11,12 +11,20 @@
 #include <torch/torch.h>
 #include <ATen/ATen.h>
 
+#ifndef TYR_OPS_HAS_CUDA_TOOLKIT
+#define TYR_OPS_HAS_CUDA_TOOLKIT 0
+#endif
+
+#if TYR_OPS_HAS_CUDA_TOOLKIT
 #if defined(__has_include)
 #if __has_include(<c10/cuda/CUDAStream.h>) && __has_include(<c10/cuda/CUDAFunctions.h>)
 #define TYR_OPS_HAS_CUDA_STREAM 1
 #include <c10/cuda/CUDAStream.h>
 #include <c10/cuda/CUDAFunctions.h>
 #include <ATen/cuda/CUDAContext.h>
+#else
+#define TYR_OPS_HAS_CUDA_STREAM 0
+#endif
 #else
 #define TYR_OPS_HAS_CUDA_STREAM 0
 #endif
