@@ -226,6 +226,8 @@ def packageLinkArgs : Array String :=
       "-L/opt/homebrew/lib", "-larrow", "-lparquet"
     ] ++ soxrLinkArgs ++ macOSSDKLinkArgs ++ macOSDeploymentLinkArgs ++ macOSFrameworkArgs ++ #[
       "-Wl,-rpath,@loader_path/../../external/libtorch/lib",
+      "-Wl,-rpath,@loader_path/../../../external/libtorch/lib",
+      "-Wl,-rpath,@executable_path/../../../external/libtorch/lib",
       "-Wl,-rpath,/opt/homebrew/opt/libomp/lib",
       "-Wl,-rpath,/opt/homebrew/lib",
       s!"-Wl,-rpath,{tyrLeanSharedLibRPath}"
