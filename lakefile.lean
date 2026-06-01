@@ -36,6 +36,27 @@ def linuxSystemLinkDirs : Array String :=
     "-L/usr/lib"
   ]
 
+/-- CUDA driver stub link flags. Hosted CI usually has CUDA-enabled LibTorch
+    but no CUDA driver stub, so only link `-lcuda` when the stub is present. -/
+def linuxCudaDriverStubLinkArgs : Array String := run_io do
+  if System.Platform.isOSX then return #[] else
+  let envCandidates ←
+    match (← IO.getEnv "CUDA_HOME") with
+    | some home => pure #[s!"{home}/lib64/stubs"]
+    | none => pure #[]
+  let fallbackCandidates := #[
+    "/usr/local/cuda/lib64/stubs",
+    "/usr/local/cuda-13.0/lib64/stubs",
+    "/usr/local/cuda-12.6/lib64/stubs",
+    "/grid/it/easybuild/easybuild5/software/CUDA/12.9.1/stubs/lib64"
+  ]
+  let candidates := envCandidates ++ fallbackCandidates
+  for stubsDir in candidates do
+    let libcuda : FilePath := ⟨stubsDir⟩ / "libcuda.so"
+    if ← libcuda.pathExists then
+      return #[s!"-L{stubsDir}", "-lcuda"]
+  return #[]
+
 /-- CUDA link flags for Linux: vendored `libtorch_cuda` / `libc10_cuda` and the
     system `libcudart` are needed because `cc/build/libTyrC.a` whole-archives
     CUDA-using objects (TK kernels). Returns `#[]` if the vendored libtorch
@@ -47,7 +68,7 @@ def linuxCudaLinkArgs : Array String := run_io do
   ]
   let hasTorchCuda ← torchCudaCandidates.anyM (·.pathExists)
   if hasTorchCuda then
-    pure #["-ltorch_cuda", "-lc10_cuda", "-lcudart", "-lcuda"]
+    pure (#["-ltorch_cuda", "-lc10_cuda", "-lcudart"] ++ linuxCudaDriverStubLinkArgs)
   else
     pure #[]
 
@@ -581,15 +602,11 @@ lean_exe test_runner where
     `libtyr.static` references CUDA driver API symbols
     (`cuTensorMapEncodeTiled`, `cuGetErrorString`) via `tk_vendor_mha_h100.o`,
     which the package-default flags don't pick up. CUDA toolchains ship a
-    link-time stub for `libcuda.so` at `$CUDA_HOME/lib64/stubs`. -/
-def codegenExeLinkArgs : Array String := run_io do
-  if System.Platform.isOSX then return #[] else
-  let stubsDir ←
-    match (← IO.getEnv "CUDA_HOME") with
-    | some home => pure s!"{home}/lib64/stubs"
-    | none =>
-      pure "/grid/it/easybuild/easybuild5/software/CUDA/12.9.1/stubs/lib64"
-  return #[s!"-L{stubsDir}", "-lcuda"] ++ linuxGlibc234CompatLinkArgs
+    link-time stub for `libcuda.so` at `$CUDA_HOME/lib64/stubs`. Return no
+    CUDA driver flags when the stub is absent, which is the normal hosted-CI
+    CPU-stub path. -/
+def codegenExeLinkArgs : Array String :=
+  linuxCudaDriverStubLinkArgs ++ linuxGlibc234CompatLinkArgs
 
 /-- Generate CUDA translation units from registered @[gpu_kernel] declarations.
 
@@ -597,8 +614,8 @@ def codegenExeLinkArgs : Array String := run_io do
     `TyrCodegen` (above) so the per-module `.so` cascade across `Tyr.*` is
     skipped. `moreLinkArgs := codegenExeLinkArgs` overrides the package
     default — drops the heavy libtorch/arrow/parquet flags (we don't need
-    them in a pure-Lean codegen tool) but keeps `-lcuda` so the auto-
-    attached libtyr.static can resolve its CUDA driver-API references. -/
+    them in a pure-Lean codegen tool) but keeps `-lcuda` when a CUDA driver
+    stub is available for auto-attached `libtyr.static` CUDA references. -/
 lean_exe GenerateGpuKernels where
   root := `Tyr.GPU.Codegen.GenerateMain
   supportInterpreter := true
