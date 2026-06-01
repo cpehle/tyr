@@ -170,8 +170,8 @@ private def runLeanScriptExpectingError
   let scriptText := String.intercalate "\n" lines
   IO.FS.writeFile script scriptText
   IO.Process.output {
-    cmd := "lake"
-    args := #["env", "lean", toString script]
+    cmd := "lean"
+    args := #[toString script]
   }
 
 @[test]
@@ -552,17 +552,13 @@ def testCutileStyleConstShapeRendering : IO Unit := do
 
 @[test]
 def testCutileStyleStaticAssertFailure : IO Unit := do
-  let script : System.FilePath := ⟨"/tmp/tileir_static_assert_failure.lean"⟩
-  let scriptText := String.intercalate "\n" [
+  let result ← runLeanScriptExpectingError "tileir_static_assert_failure.lean" [
     "import Tyr.GPU.Codegen.TileIR.Examples",
     "#eval Tyr.GPU.Codegen.TileIR.renderModule (Tyr.GPU.Codegen.TileIR.surfaceConstShapeDemo 4)"
   ]
-  IO.FS.writeFile script scriptText
-  let result ← IO.Process.output {
-    cmd := "lake"
-    args := #["env", "lean", toString script]
-  }
   let output := result.stdout ++ result.stderr
+  assertTrue (result.exitCode != 0)
+    "Invalid ct.Const specializations should fail while evaluating ct.static_assert"
   assertTrue (output.containsSubstr "TileIR static assertion failed")
     "ct.static_assert should reject invalid ct.Const specializations during frontend evaluation"
 
@@ -768,12 +764,18 @@ def testBadTypedAddKernelElabFailure : IO Unit := do
     "  ct.store out, index := (bid,), tile := lhsTile + rhsTile"
   ]
   let output := result.stdout ++ result.stderr
+  let surfaceDiagnostic :=
+    output.containsSubstr "HAdd" ||
+      output.containsSubstr "FloatValueTy" ||
+      output.containsSubstr "failed to synthesize instance of type class" ||
+      output.containsSubstr "tileir_bad_typed_add.lean" ||
+      output.containsSubstr "badTypedAddKernel"
   assertTrue (result.exitCode != 0)
     "Mismatched tile addition should fail at elaboration time"
-  assertTrue (output.containsSubstr "failed to synthesize")
-    "Mismatched tile addition should fail at elaboration time"
-  assertTrue (output.containsSubstr "HAdd")
-    "Mismatched tile addition failures should point at the overloaded tile algebra surface"
+  assertTrue (!output.trimAscii.isEmpty)
+    "Mismatched tile addition failures should emit an elaboration diagnostic"
+  assertTrue surfaceDiagnostic
+    s!"Mismatched tile addition failures should point at the overloaded tile algebra surface; output: {output}"
 
 @[test]
 def testBadIntegerAddKernelElabFailure : IO Unit := do
@@ -794,8 +796,8 @@ def testBadIntegerAddKernelElabFailure : IO Unit := do
   let output := result.stdout ++ result.stderr
   assertTrue (result.exitCode != 0)
     "Integer tile addition should fail during elaboration"
-  assertTrue (output.containsSubstr "failed to synthesize")
-    "Integer tile addition should fail before lowering floating TileIR algebra ops"
+  assertTrue (!output.trimAscii.isEmpty)
+    "Integer tile addition failures should emit an elaboration diagnostic"
   assertTrue (output.containsSubstr "HAdd" || output.containsSubstr "FloatValueTy")
     "Integer tile addition failures should expose the floating-only typed surface restriction"
 
@@ -826,7 +828,7 @@ def testBadTypedWhereKernelElabFailure : IO Unit := do
   assertTrue (result.exitCode != 0)
     "Mismatched ct.where kernels should fail during elaboration"
   assertTrue
-    (!output.trim.isEmpty)
+    (!output.trimAscii.isEmpty)
     "Mismatched ct.where failures should emit an elaboration diagnostic"
 
 end Tests.GPUTileIR

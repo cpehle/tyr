@@ -69,8 +69,11 @@ jobs:
 
       - name: Prepare doc-gen4 path dependency
         run: |
+          lean_version="$(sed -n 's|.*:v||p' lean-toolchain)"
+          test -n "$lean_version"
+          docgen_ref="v${lean_version}"
           rm -rf "$GITHUB_WORKSPACE/../doc-gen4"
-          git clone --depth 1 https://github.com/cpehle/doc-gen4.git "$GITHUB_WORKSPACE/../doc-gen4"
+          git clone --depth 1 --branch "$docgen_ref" https://github.com/leanprover/doc-gen4.git "$GITHUB_WORKSPACE/../doc-gen4"
 
       - name: Create docbuild package
         run: |
