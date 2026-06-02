@@ -7,6 +7,10 @@ open Tyr.ShapeSync
 private def cta256 : ThreadCtx :=
   { blockDimX := 256, blockDimY := 1, blockDimZ := 1, warpSize := 32, warpGroupSize := 128 }
 
+#guard ProofBackend.smtFacade.render == "smt_facade"
+#guard ProofStrategy.default.uses .omega
+#guard ProofStrategy.default.uses .smtFacade
+
 private theorem symbolicRangeAccessInBounds
     (base extent shape i : Int)
     (hbase : 0 <= base)
@@ -15,6 +19,24 @@ private theorem symbolicRangeAccessInBounds
     (hie : i < extent) :
     0 <= base + i ∧ base + i < shape := by
   shape_sync
+
+private theorem symbolicRangeAccessInBoundsNative
+    (base extent shape i : Int)
+    (hbase : 0 <= base)
+    (hupper : base + extent <= shape)
+    (hi0 : 0 <= i)
+    (hie : i < extent) :
+    0 <= base + i ∧ base + i < shape := by
+  shape_sync_native
+
+private theorem symbolicRangeAccessInBoundsSmtFacade
+    (base extent shape i : Int)
+    (hbase : 0 <= base)
+    (hupper : base + extent <= shape)
+    (hi0 : 0 <= i)
+    (hie : i < extent) :
+    0 <= base + i ∧ base + i < shape := by
+  shape_sync_smt
 
 private theorem dimRangeAccessInBounds
     (range : DimRange) (shape i : Int)
@@ -37,6 +59,10 @@ private theorem nonUnitShapeCompatibility :
 private theorem warpGroupNamedBarrierValid :
     (SyncObligation.namedSync 2 128 (.warpGroupEq 0)).Valid cta256 := by
   shape_sync
+
+private theorem warpGroupNamedBarrierValidFinite :
+    (SyncObligation.namedSync 2 128 (.warpGroupEq 0)).Valid cta256 := by
+  shape_sync_finite
 
 private theorem moduloLaneParticipantCount :
     ParticipantCount cta256 (.modEq 0 4 0) 64 := by
