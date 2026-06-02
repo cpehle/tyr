@@ -43,6 +43,20 @@ structure KernelState where
 /-- Kernel builder monad - just standard StateM! -/
 abbrev KernelM := StateM KernelState
 
+/-- Structured failure for kernel-builder code.
+
+    `KernelM` is a plain `StateM` so it has no native `throw`. We surface
+    builder/config errors through a single helper that:
+
+    - prefixes the message with `[KernelM error]` so callers can grep,
+    - aborts via `panic!` (the only abort mechanism available in `StateM`).
+
+    Sites that previously called `panic!` directly should call `KernelM.fail`
+    instead so that the error surface is centralized and easy to migrate to a
+    real `EStateM`-based error channel later. -/
+@[inline] def KernelM.fail {α : Type} [Inhabited α] (msg : String) : KernelM α :=
+  panic! s!"[KernelM error] {msg}"
+
 /-- Generate a fresh variable ID -/
 def freshVar : KernelM VarId := do
   let s ← get

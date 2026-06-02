@@ -36,6 +36,51 @@ def linuxSystemLinkDirs : Array String :=
     "-L/usr/lib"
   ]
 
+/-- CUDA driver stub link flags. Hosted CI usually has CUDA-enabled LibTorch
+    but no CUDA driver stub, so only link `-lcuda` when the stub is present. -/
+def linuxCudaDriverStubLinkArgs : Array String := run_io do
+  if System.Platform.isOSX then return #[] else
+  let envCandidates ←
+    match (← IO.getEnv "CUDA_HOME") with
+    | some home => pure #[s!"{home}/lib64/stubs"]
+    | none => pure #[]
+  let fallbackCandidates := #[
+    "/usr/local/cuda/lib64/stubs",
+    "/usr/local/cuda-13.0/lib64/stubs",
+    "/usr/local/cuda-12.6/lib64/stubs",
+    "/grid/it/easybuild/easybuild5/software/CUDA/12.9.1/stubs/lib64"
+  ]
+  let candidates := envCandidates ++ fallbackCandidates
+  for stubsDir in candidates do
+    let libcuda : FilePath := ⟨stubsDir⟩ / "libcuda.so"
+    if ← libcuda.pathExists then
+      return #[s!"-L{stubsDir}", "-lcuda"]
+  return #[]
+
+/-- CUDA link flags for Linux: vendored `libtorch_cuda` / `libc10_cuda` and the
+    system `libcudart` are needed because `cc/build/libTyrC.a` whole-archives
+    CUDA-using objects (TK kernels). Returns `#[]` if the vendored libtorch
+    doesn't ship CUDA support — this keeps a CPU-only checkout linking. -/
+def linuxCudaLinkArgs : Array String := run_io do
+  let torchCudaCandidates : Array System.FilePath := #[
+    ⟨(__dir__ / "external" / "libtorch" / "lib" / "libtorch_cuda.so").toString⟩,
+    ⟨(__dir__ / "external" / "libtorch" / "lib" / "libtorch_cuda.dylib").toString⟩
+  ]
+  let hasTorchCuda ← torchCudaCandidates.anyM (·.pathExists)
+  if hasTorchCuda then
+    pure (#["-ltorch_cuda", "-lc10_cuda", "-lcudart"] ++ linuxCudaDriverStubLinkArgs)
+  else
+    pure #[]
+
+/-- Lean v4.29's bundled `Scrt1.o` references `__libc_csu_init` / `__libc_csu_fini`,
+    which were removed from glibc 2.34 (Ubuntu 24.04 ships glibc 2.39). Define
+    both as zero so the link succeeds; glibc 2.34+ `__libc_start_main` ignores
+    the legacy init/fini function-pointer arguments, so the symbols are never
+    actually dereferenced. Scoped to Linux. -/
+def linuxGlibc234CompatLinkArgs : Array String :=
+  if System.Platform.isOSX then #[] else
+    #["-Wl,--defsym=__libc_csu_init=0", "-Wl,--defsym=__libc_csu_fini=0"]
+
 def linuxArrowLinkArgs : Array String := run_io do
   let candidates : Array System.FilePath := #[
     ⟨"/usr/lib/aarch64-linux-gnu/libarrow.so"⟩,
@@ -159,6 +204,19 @@ def soxrLinkArgs : Array String :=
 def linuxTorchLibDir : String :=
   (__dir__ / "external" / "libtorch" / "lib").toString
 
+/-- Common Linux link tail shared by `packageLinkArgs` and `commonLinkArgs`:
+    libtorch + CUDA (if vendored) + arrow/soxr + glibc-2.34 compat + rpath. -/
+def linuxLinkTail : Array String :=
+  #[
+    s!"-L{__dir__ / "external" / "libtorch" / "lib"}",
+    "-ltorch", "-ltorch_cpu", "-lc10"
+  ] ++ linuxCudaLinkArgs ++ linuxSystemLinkDirs ++ soxrLinkArgs ++ linuxArrowLinkArgs
+    ++ linuxGlibc234CompatLinkArgs ++ #[
+    "-l:libgomp.so.1", "-l:libstdc++.so.6",
+    s!"-Wl,-rpath,{linuxTorchLibDir}",
+    "-Wl,-rpath,$ORIGIN/../../../external/libtorch/lib"
+  ]
+
 def packageLinkArgs : Array String :=
   if System.Platform.isOSX then
     #[
@@ -168,20 +226,14 @@ def packageLinkArgs : Array String :=
       "-L/opt/homebrew/lib", "-larrow", "-lparquet"
     ] ++ soxrLinkArgs ++ macOSSDKLinkArgs ++ macOSDeploymentLinkArgs ++ macOSFrameworkArgs ++ #[
       "-Wl,-rpath,@loader_path/../../external/libtorch/lib",
+      "-Wl,-rpath,@loader_path/../../../external/libtorch/lib",
+      "-Wl,-rpath,@executable_path/../../../external/libtorch/lib",
       "-Wl,-rpath,/opt/homebrew/opt/libomp/lib",
       "-Wl,-rpath,/opt/homebrew/lib",
       s!"-Wl,-rpath,{tyrLeanSharedLibRPath}"
     ]
   else
-    #[
-      s!"-L{__dir__ / "external" / "libtorch" / "lib"}",
-      "-ltorch", "-ltorch_cpu", "-lc10"
-    ] ++ linuxSystemLinkDirs ++ soxrLinkArgs ++ linuxArrowLinkArgs ++ #[
-      "-l:libgomp.so.1", "-l:libstdc++.so.6",
-      "-larrow", "-lparquet",
-      s!"-Wl,-rpath,{linuxTorchLibDir}",
-      "-Wl,-rpath,$ORIGIN/../../../external/libtorch/lib"
-    ]
+    linuxLinkTail
 
 def commonLinkArgs : Array String :=
   if System.Platform.isOSX then
@@ -197,16 +249,7 @@ def commonLinkArgs : Array String :=
       "-Wl,-rpath,/opt/homebrew/lib"
     ]
   else
-    #[
-      s!"{__dir__ / "cc" / "build" / "libTyrC.a"}",
-      s!"-L{__dir__ / "external" / "libtorch" / "lib"}",
-      "-ltorch", "-ltorch_cpu", "-lc10"
-    ] ++ linuxSystemLinkDirs ++ soxrLinkArgs ++ linuxArrowLinkArgs ++ #[
-      "-l:libgomp.so.1", "-l:libstdc++.so.6",
-      "-larrow", "-lparquet",
-      s!"-Wl,-rpath,{linuxTorchLibDir}",
-      "-Wl,-rpath,$ORIGIN/../../../external/libtorch/lib"
-    ]
+    #[s!"{__dir__ / "cc" / "build" / "libTyrC.a"}"] ++ linuxLinkTail
 
 package tyr where
   srcDir := "."
@@ -395,6 +438,9 @@ extern_lib libtyr pkg := do
     else
       pure true
   if shouldWriteConfig then
+    -- On a fresh checkout (e.g. CI runner) `pkg.buildDir` may not yet
+    -- exist; `writeFile` won't create it.
+    IO.FS.createDirAll pkg.buildDir
     IO.FS.writeFile gpuCodegenConfigPath gpuCodegenConfig
 
   -- Track Makefile plus C/CUDA sources/headers so Lake reruns `make` when FFI changes.
@@ -558,15 +604,11 @@ lean_exe test_runner where
     `libtyr.static` references CUDA driver API symbols
     (`cuTensorMapEncodeTiled`, `cuGetErrorString`) via `tk_vendor_mha_h100.o`,
     which the package-default flags don't pick up. CUDA toolchains ship a
-    link-time stub for `libcuda.so` at `$CUDA_HOME/lib64/stubs`. -/
-def codegenExeLinkArgs : Array String := run_io do
-  if System.Platform.isOSX then return #[] else
-  let stubsDir ←
-    match (← IO.getEnv "CUDA_HOME") with
-    | some home => pure s!"{home}/lib64/stubs"
-    | none =>
-      pure "/grid/it/easybuild/easybuild5/software/CUDA/12.9.1/stubs/lib64"
-  return #[s!"-L{stubsDir}", "-lcuda"]
+    link-time stub for `libcuda.so` at `$CUDA_HOME/lib64/stubs`. Return no
+    CUDA driver flags when the stub is absent, which is the normal hosted-CI
+    CPU-stub path. -/
+def codegenExeLinkArgs : Array String :=
+  linuxCudaDriverStubLinkArgs ++ linuxGlibc234CompatLinkArgs
 
 /-- Generate CUDA translation units from registered @[gpu_kernel] declarations.
 
@@ -574,8 +616,8 @@ def codegenExeLinkArgs : Array String := run_io do
     `TyrCodegen` (above) so the per-module `.so` cascade across `Tyr.*` is
     skipped. `moreLinkArgs := codegenExeLinkArgs` overrides the package
     default — drops the heavy libtorch/arrow/parquet flags (we don't need
-    them in a pure-Lean codegen tool) but keeps `-lcuda` so the auto-
-    attached libtyr.static can resolve its CUDA driver-API references. -/
+    them in a pure-Lean codegen tool) but keeps `-lcuda` when a CUDA driver
+    stub is available for auto-attached `libtyr.static` CUDA references. -/
 lean_exe GenerateGpuKernels where
   root := `Tyr.GPU.Codegen.GenerateMain
   supportInterpreter := true

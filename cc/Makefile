@@ -82,6 +82,13 @@ CUDA_INC_FLAGS :=
 ifneq ($(wildcard $(CUDA_HOME)/include/cuda_runtime.h),)
 CUDA_INC_FLAGS += -I$(CUDA_HOME)/include
 endif
+HAS_CUDA_TOOLKIT := 0
+ifeq ($(HAS_NVCC),1)
+ifneq ($(wildcard $(CUDA_HOME)/include/cuda_runtime_api.h),)
+HAS_CUDA_TOOLKIT := 1
+endif
+endif
+CPP_CUDA_FLAGS := -DTYR_OPS_HAS_CUDA_TOOLKIT=$(HAS_CUDA_TOOLKIT)
 CUDA_LIB_FLAGS :=
 ifneq ($(wildcard $(CUDA_HOME)/lib64),)
 CUDA_LIB_FLAGS += -L$(CUDA_HOME)/lib64
@@ -247,7 +254,15 @@ APPLE_FRAMEWORK_FLAGS := \
 else
 APPLE_FRAMEWORK_FLAGS :=
 endif
+# tk_vendor_mha_h100.cu emits Hopper `wgmma` instructions; ptxas rejects it for
+# sm_10x/sm_12x (Blackwell) targets like B200/GB10. The launcher stubs are
+# weak so the runtime dispatcher's Hopper-arch gate routes those problems to
+# the portable SDPA fallback when the kernels are absent.
+ifeq ($(GPU),H100)
 STATIC_CU_SRCS := $(SRC_DIR)/tk_vendor_mha_h100.cu
+else
+STATIC_CU_SRCS :=
+endif
 GPU_CODEGEN_MODULES := $(strip $(TYR_GPU_CODEGEN_MODULE))
 ifeq ($(GPU_CODEGEN_MODULES),)
 CU_SRCS := $(STATIC_CU_SRCS) $(wildcard $(SRC_DIR)/generated/*.cu)
@@ -268,6 +283,9 @@ ifneq ($(strip $(CU_SRCS)),)
 $(warning NVCC not found; disabling CUDA kernel compilation and using CPU stubs)
 endif
 CU_SRCS :=
+endif
+ifeq ($(filter $(SRC_DIR)/tk_vendor_mha_h100.cu,$(CU_SRCS)),)
+SRCS += tk_vendor_stubs.cpp
 endif
 # Always include the kernel-launcher stubs in libTyrC.a. The stubs declare
 # every `lean_launch_Tyr_GPU_Kernels_...` symbol with `__attribute__((weak))`,
@@ -399,11 +417,11 @@ $(BENCH_FLASH_ATTN): $(TOOLS_DIR)/bench_flash_attn.cpp $(OUT_DIR)/$(DYLIB) | che
 
 $(OUT_DIR)/%.o : $(SRC_DIR)/%.cpp $(HDR_FILES) | check-submodules $(OUT_DIR)
 	@mkdir -p $(dir $@)
-	$(CXX) $(CXX_STD_FLAG) -o $@ -c $< -I$(HDR_DIR) -I$(LEAN_INCLUDE) $(TORCH_INC_FLAGS) $(CUDA_INC_FLAGS) $(NCCL_INC_FLAGS) $(XLA_INC_FLAGS) $(ARROW_INC_FLAGS) $(SOXR_INC_FLAGS) $(EXTRA_CXX_FLAGS) -fPIC
+	$(CXX) $(CXX_STD_FLAG) -o $@ -c $< -I$(HDR_DIR) -I$(LEAN_INCLUDE) $(TORCH_INC_FLAGS) $(CUDA_INC_FLAGS) $(NCCL_INC_FLAGS) $(XLA_INC_FLAGS) $(ARROW_INC_FLAGS) $(SOXR_INC_FLAGS) $(CPP_CUDA_FLAGS) $(EXTRA_CXX_FLAGS) -fPIC
 
 $(OUT_DIR)/%.o : $(SRC_DIR)/%.mm $(HDR_FILES) | check-submodules $(OUT_DIR)
 	@mkdir -p $(dir $@)
-	$(CXX) -x objective-c++ $(CXX_STD_FLAG) -o $@ -c $< -I$(HDR_DIR) -I$(LEAN_INCLUDE) $(TORCH_INC_FLAGS) $(CUDA_INC_FLAGS) $(NCCL_INC_FLAGS) $(XLA_INC_FLAGS) $(ARROW_INC_FLAGS) $(SOXR_INC_FLAGS) $(EXTRA_CXX_FLAGS) -fPIC -fobjc-arc
+	$(CXX) -x objective-c++ $(CXX_STD_FLAG) -o $@ -c $< -I$(HDR_DIR) -I$(LEAN_INCLUDE) $(TORCH_INC_FLAGS) $(CUDA_INC_FLAGS) $(NCCL_INC_FLAGS) $(XLA_INC_FLAGS) $(ARROW_INC_FLAGS) $(SOXR_INC_FLAGS) $(CPP_CUDA_FLAGS) $(EXTRA_CXX_FLAGS) -fPIC -fobjc-arc
 
 $(OUT_DIR)/%.o : $(SRC_DIR)/%.cu $(HDR_FILES) | check-submodules $(OUT_DIR)
 	@mkdir -p $(dir $@)

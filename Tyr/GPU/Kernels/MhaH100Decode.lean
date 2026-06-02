@@ -265,4 +265,161 @@ def tkMhaH100DecodeFwd256
   decodeFwdBodyImpl 256 0.090168440034 (by decide)
     q_ptr k_ptr v_ptr o_ptr q_heads kv_heads kv_seq
 
+/-! ## GQA-packed decode (V2 — D03)
+
+Decode-V2 step 1 from `dev/decode_kernel_v2_plan.md`. Pack `R = q_heads /
+kv_heads` query heads of a GQA group into the first R rows of the 64-row
+Q tile; grid drops from `batch * q_heads` to `batch * kv_heads`. Each CTA
+loads K/V once for the whole group instead of R times.
+
+Eligibility (enforced by the C++ dispatcher in `cc/src/tyr_ops.cpp`):
+- `q_heads % kv_heads == 0`
+- `R = q_heads / kv_heads ∈ {2, 4, 8, 16}` (so R | 64; rows beyond R are
+  TMA OOB-zero-fill on Q load and TMA OOB-drop on O store)
+- otherwise V1 (`tkMhaH100DecodeFwd*`) is selected and computes the
+  same answer with worse bandwidth.
+
+Body is a near-clone of `decodeFwdBodyImpl` differing only in:
+- grid axis: `kvHead = blockId % kv_heads; batchId = blockId / kv_heads`
+- Q coord: `(batch, kvHead * R, 0, 0)` — picks R contiguous heads
+- O coord: same as Q coord — TMA store drops rows ≥ R
+
+The WGMMA / softmax / convert / store machinery is unchanged: per-warp
+16-row tiles still operate the same way, rows beyond R compute on
+OOB-zero Q rows producing OOB outputs that get dropped on TMA store.
+-/
+private def decodeFwdBodyImplGqa (hdim : Nat) (scoreScaleLog2e : Float)
+    (hHdim : hdim % 16 = 0)
+    (q_ptr k_ptr v_ptr o_ptr : GPtr GpuFloat.BFloat16)
+    (q_heads kv_heads kv_seq : KVal UInt64) : KernelM Unit := do
+  let tileM : Nat := 64
+  let tileMWarp : Nat := 16
+  let tileN : Nat := 64
+  setLaunchBounds 128 1
+
+  let blockId32 ← getBlockIdx 0 "decode_block"
+  let blockId ← castUInt64 blockId32 "decode_block_u64"
+  -- D03 grid: batch * kv_heads (one CTA per GQA group).
+  let kvHead ← scalarMod blockId kv_heads "kv_head"
+  let batchId ← scalarDivVal blockId kv_heads "batch_id"
+  -- R = q_heads / kv_heads. firstQHead = kvHead * R is the leading head
+  -- index in this group; the next R-1 heads in q_heads layout follow it.
+  let gqaRatio ← scalarDivVal q_heads kv_heads "gqa_ratio"
+  let firstQHead ← scalarMulVal kvHead gqaRatio "first_q_head"
+
+  let zero ← constIntVal 0 "zero"
+  let qCoord := makeRTileCoord batchId.id firstQHead.id zero.id zero.id
+  let oCoord := qCoord
+
+  let o ← zeroRT .Float32 tileMWarp hdim
+  let softmaxState ← allocSoftmaxState .Float32 tileMWarp
+
+  let qShared ← allocST .BFloat16 tileM hdim
+  let kShared ← allocST .BFloat16 tileN hdim
+  let vShared ← allocST .BFloat16 tileN hdim .Col
+  let oShared ← allocST .BFloat16 tileM hdim
+  let qSem ← allocSemaphore
+  let kvSem ← allocSemaphore
+
+  asyncLoadDecodeTile qShared q_ptr qCoord qSem
+
+  let blockN64 ← constUInt64Val (tileN : Int) "block_n"
+  let blockNMinusOne ← constUInt64Val ((tileN - 1 : Nat) : Int) "block_n_minus_one"
+  let kvSeqPlusPad ← scalarAddVal kv_seq blockNMinusOne "kv_seq_plus_pad"
+  let numKvBlocks ← scalarDivVal kvSeqPlusPad blockN64 "num_kv_blocks"
+  let numKvBlocks32 : KVal UInt32 ← castScalar .UInt32 numKvBlocks "num_kv_blocks_u32"
+  let kvSeq32 : KVal UInt32 ← castScalar .UInt32 kv_seq "kv_seq_u32"
+  let blockN32 : KVal UInt32 ← constIntVal (tileN : Int) "block_n_u32"
+
+  let oneU32 ← constIntVal (1 : Int) "one_u32"
+  let numKvBlocksMinusOne ← scalarSub numKvBlocks32 oneU32 "n_kv_blocks_minus_one"
+
+  for kvIdx in kvrange 0 numKvBlocksMinusOne do
+    let s ← zeroRT .Float32 tileMWarp tileN
+    let p ← allocRT .BFloat16 tileMWarp tileN
+    let kvCoord := makeRTileCoord batchId.id kvHead.id kvIdx.id zero.id
+
+    asyncLoadDecodePair kShared k_ptr kvCoord vShared v_ptr kvCoord kvSem
+    warpgroupMmSharedT64x16 s qShared kShared (hK := hHdim)
+    mmaAsyncWait
+    onlineSoftmaxLog2 s o softmaxState scoreScaleLog2e
+    convert p s
+    warpgroupMma o p vShared (hN := hHdim)
+    mmaAsyncWait
+
+  let s ← zeroRT .Float32 tileMWarp tileN
+  let p ← allocRT .BFloat16 tileMWarp tileN
+  let kvCoord := makeRTileCoord batchId.id kvHead.id numKvBlocksMinusOne.id zero.id
+
+  asyncLoadDecodePair kShared k_ptr kvCoord vShared v_ptr kvCoord kvSem
+  warpgroupMmSharedT64x16 s qShared kShared (hK := hHdim)
+  mmaAsyncWait
+  let kvBase ← scalarMulVal numKvBlocksMinusOne blockN32 "kv_base_tail"
+  let cutoff ← scalarSub kvSeq32 kvBase "tail_cutoff"
+  let needsMask ← scalarLt cutoff blockN32 "needs_tail_mask"
+  emitIf needsMask.id do
+    rightFillVal s s cutoff (some (-3.4028234663852886e38))
+  onlineSoftmaxLog2 s o softmaxState scoreScaleLog2e
+  convert p s
+  warpgroupMma o p vShared (hN := hHdim)
+  mmaAsyncWait
+
+  finalizeSoftmax o softmaxState
+
+  let oBf16 ← allocRT .BFloat16 tileMWarp hdim
+  convert oBf16 o
+  warpgroupStore oShared oBf16
+  -- TMA store at coord (batch, firstQHead, 0, 0). Rows 0..R-1 land in the
+  -- valid `[batch, firstQHead..firstQHead+R-1, 0, :]` global slots; rows
+  -- R..63 are TMA OOB-dropped because the gl is configured with q_seq=1.
+  storeGlobalAsync o_ptr oShared oCoord
+  tmaStoreCommitGroup
+  tmaStoreAsyncWait
+
+/-- Decode attention forward, head_dim = 128, GQA-packed (V2 D03).
+    Launch: `gridX = batch * kv_heads`, `blockX = 128`. -/
+@[gpu_kernel .SM90]
+def tkMhaH100DecodeFwdGqa
+    (q_ptr : GPtr GpuFloat.BFloat16)
+    (k_ptr : GPtr GpuFloat.BFloat16)
+    (v_ptr : GPtr GpuFloat.BFloat16)
+    (o_ptr : GPtr GpuFloat.BFloat16)
+    (_batch : KVal UInt64)
+    (q_heads : KVal UInt64)
+    (kv_heads : KVal UInt64)
+    (kv_seq : KVal UInt64)
+    (_head_dim : KVal UInt64) : KernelM Unit :=
+  decodeFwdBodyImplGqa 128 0.12750032696 (by decide)
+    q_ptr k_ptr v_ptr o_ptr q_heads kv_heads kv_seq
+
+/-- Decode attention forward, head_dim = 64, GQA-packed (V2 D03). -/
+@[gpu_kernel .SM90]
+def tkMhaH100DecodeFwdGqa64
+    (q_ptr : GPtr GpuFloat.BFloat16)
+    (k_ptr : GPtr GpuFloat.BFloat16)
+    (v_ptr : GPtr GpuFloat.BFloat16)
+    (o_ptr : GPtr GpuFloat.BFloat16)
+    (_batch : KVal UInt64)
+    (q_heads : KVal UInt64)
+    (kv_heads : KVal UInt64)
+    (kv_seq : KVal UInt64)
+    (_head_dim : KVal UInt64) : KernelM Unit :=
+  decodeFwdBodyImplGqa 64 0.18033688011125 (by decide)
+    q_ptr k_ptr v_ptr o_ptr q_heads kv_heads kv_seq
+
+/-- Decode attention forward, head_dim = 256, GQA-packed (V2 D03). -/
+@[gpu_kernel .SM90]
+def tkMhaH100DecodeFwdGqa256
+    (q_ptr : GPtr GpuFloat.BFloat16)
+    (k_ptr : GPtr GpuFloat.BFloat16)
+    (v_ptr : GPtr GpuFloat.BFloat16)
+    (o_ptr : GPtr GpuFloat.BFloat16)
+    (_batch : KVal UInt64)
+    (q_heads : KVal UInt64)
+    (kv_heads : KVal UInt64)
+    (kv_seq : KVal UInt64)
+    (_head_dim : KVal UInt64) : KernelM Unit :=
+  decodeFwdBodyImplGqa 256 0.090168440034 (by decide)
+    q_ptr k_ptr v_ptr o_ptr q_heads kv_heads kv_seq
+
 end Tyr.GPU.Kernels

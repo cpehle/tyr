@@ -84,18 +84,24 @@ These helpers attach concrete ThunderKittens tile descriptors to generated
 body. They are useful for kernels that lower a small region through raw TK C++
 or through helper templates while still relying on generated launch wrappers. -/
 
+/-- Attach a TK tile descriptor to a global pointer parameter without forcing a
+    load/store in the body. The launch wrapper will use this descriptor when
+    constructing the `gl<...>` argument. -/
 def requireGlobalDescriptor {dtype : GpuFloat}
     (ptr : GPtr dtype) (descriptor : GlobalTileDescriptor) : KernelM Unit := do
   emit (KStmt.requireGlobalTma ptr.id descriptor)
 
+/-- Require an `st<dtype, rows, cols>` tile descriptor on the given global pointer. -/
 def requireGlobalST {dtype : GpuFloat}
     (ptr : GPtr dtype) (rows cols : Nat) : KernelM Unit :=
   requireGlobalDescriptor ptr (GlobalTileDescriptor.st dtype rows cols)
 
+/-- Require a `row_vec<st<dtype, rows, cols>>` tile descriptor on the global pointer. -/
 def requireGlobalRowVecST {dtype : GpuFloat}
     (ptr : GPtr dtype) (rows cols : Nat) : KernelM Unit :=
   requireGlobalDescriptor ptr (GlobalTileDescriptor.rowVecSt dtype rows cols)
 
+/-- Require a `col_vec<st<dtype, rows, cols>>` tile descriptor on the global pointer. -/
 def requireGlobalColVecST {dtype : GpuFloat}
     (ptr : GPtr dtype) (rows cols : Nat) : KernelM Unit :=
   requireGlobalDescriptor ptr (GlobalTileDescriptor.colVecSt dtype rows cols)
@@ -182,6 +188,7 @@ def tmemSubtile (src : TT dtype rows cols) (offset : Nat)
 
 /-- Semaphore type (barrier) for async operations -/
 structure Semaphore where
+  /-- Underlying SSA variable id of the shared semaphore allocation. -/
   id : VarId
   deriving Repr
 

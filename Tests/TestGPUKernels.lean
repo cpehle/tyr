@@ -4,6 +4,7 @@
   Tests for the native Lean4 GPU kernel DSL.
   Tests type safety, code generation, and architecture specialization.
 -/
+import Lean
 import Tyr.GPU.Types
 import Tyr.GPU.Codegen.Var
 import Tyr.GPU.Codegen.TileTypes
@@ -55,6 +56,37 @@ private partial def stmtHasRaw : KStmt → Bool
   | .ifStmt _ thenBody elseBody => thenBody.any stmtHasRaw || elseBody.any stmtHasRaw
   | .ifWarpGroup _ body => body.any stmtHasRaw
   | _ => false
+
+private def runCoreWithEnv (env : Lean.Environment) (x : Lean.CoreM α) : IO α := do
+  let ctx : Lean.Core.Context := {
+    fileName := "<gpu-kernel-test>"
+    fileMap := default
+  }
+  let st : Lean.Core.State := { env := env }
+  x.toIO' ctx st
+
+private unsafe def evalKernelConstExprForTest (constName : Lean.Name) : Lean.CoreM Kernel := do
+  withTheReader Lean.Core.Context (fun ctx => { ctx with maxHeartbeats := 0 }) do
+    Lean.Meta.MetaM.run' do
+      let info ← Lean.getConstInfo constName
+      let value ← match info with
+        | .defnInfo info => pure info.value
+        | .thmInfo info => pure info.value
+        | _ => throwError "Kernel companion '{constName}' is not reducible."
+      Lean.Meta.evalExpr
+        Kernel
+        (Lean.mkConst ``Tyr.GPU.Codegen.Kernel)
+        value
+
+private unsafe def evalKernelForTest (kernelConst : Lean.Name) : IO Kernel := do
+  Lean.initSearchPath (← Lean.findSysroot)
+  Lean.enableInitializersExecution
+  let env ← Lean.importModules
+    #[{ module := `LeanTest }, { module := `Tyr.GPU.Kernels.MhaH100Decode }]
+    {}
+    (loadExts := true)
+  runCoreWithEnv env <|
+    evalKernelConstExprForTest kernelConst
 
 /-! ## Basic Tile Allocation Tests -/
 
@@ -257,11 +289,14 @@ def testSetArchResetsFamilyToArchDefault : IO Unit := do
 
 @[test]
 def testCppLauncherUsesFamilyGuardAndFloorMessage : IO Unit := do
-  let cpp := generateCppLauncherCode
-    "gb10_floor_launcher"
-    .SM90
-    .Blackwell
-    #[{ name := "x", dtype := .BFloat16, isPointer := true }]
+  let kernel : Kernel := {
+    name := "gb10_floor_launcher"
+    arch := .SM90
+    family := .Blackwell
+    params := #[{ name := "x", dtype := .BFloat16, isPointer := true }]
+    body := #[]
+  }
+  let cpp := generateCppLauncherCode kernel
 
   assertContainsAll cpp #[
     ("#if defined(KITTENS_BLACKWELL)",
@@ -283,7 +318,7 @@ def testCodeGenDeclarations : IO Unit := do
 
   let code := generateKernel kernel
   assertTrue (code.containsSubstr "rt<bf16, 64, 64, row_l>") "Should have RT declaration"
-  assertTrue (code.containsSubstr "__shared__ st<float, 32, 64>") "Should have ST declaration"
+  assertTrue (code.containsSubstr "al.allocate<st<float, 32, 64>>") "Should have ST declaration"
   assertTrue (code.containsSubstr "rv<float, 64") "Should have RV declaration"
 
 @[test]
@@ -647,8 +682,8 @@ def testKernelParams : IO Unit := do
   ] (pure ())
 
   let code := generateKernel kernel
-  assertTrue (code.containsSubstr "gl<bf16, 1, 1, -1, -1> v0") "Should have bf16 global descriptor param"
-  assertTrue (code.containsSubstr "gl<float, 1, 1, -1, -1> v1") "Should have float global descriptor param"
+  assertTrue (code.containsSubstr "gl<bf16, -1, -1, -1, -1> v0") "Should have bf16 global descriptor param"
+  assertTrue (code.containsSubstr "gl<float, -1, -1, -1, -1> v1") "Should have float global descriptor param"
   assertTrue (code.containsSubstr "uint64_t v2") "Should have scalar param"
 
 /-- Test the shared SIMT helpers used by decode-style kernels. -/
@@ -667,7 +702,7 @@ def testDecodeSimtHelperCodegen : IO Unit := do
     "parallelThreadRange should stride by the CTA size"
   assertTrue (code.containsSubstr "::rsqrtf")
     "runtimeDefaultScoreScaleLog2e should lower through scalar rsqrt"
-  assertTrue (code.containsSubstr "1.44269504089")
+  assertTrue (code.containsSubstr "1.442695f")
     "runtimeDefaultScoreScaleLog2e should include log2(e)"
 
 /-- Decode attention should be authored through the DSL, not raw CUDA snippets.
@@ -675,16 +710,16 @@ def testDecodeSimtHelperCodegen : IO Unit := do
     The TK-style tile-based decode kernel (V1) lowers QK^T and PV through
     WGMMA, K/V loads through TMA, and uses online softmax in `log2` form. -/
 @[test]
-noncomputable def testDecodeKernelDslCodegen : IO Unit := do
-  let kernel := Tyr.GPU.Kernels.tkMhaH100DecodeFwd.kernel
+unsafe def testDecodeKernelDslCodegen : IO Unit := do
+  let kernel ← evalKernelForTest ``Tyr.GPU.Kernels.tkMhaH100DecodeFwd.kernel
   assertTrue (!kernel.body.any stmtHasRaw)
     "Decode kernel IR should not contain raw backend escape statements"
 
   let code := generateKernel kernel
   assertTrue (code.containsSubstr "extern __shared__ int __shm[]")
     "Dynamic shared-memory views should emit a shared-memory arena"
-  assertTrue (code.containsSubstr "mma_ABt(")
-    "QK^T should lower through warpgroup MMA (mma_ABt)"
+  assertTrue (code.containsSubstr "mm_ABt(")
+    "QK^T should lower through warpgroup MM overwrite (mm_ABt)"
   assertTrue (code.containsSubstr "mma_AB(")
     "PV should lower through warpgroup MMA (mma_AB)"
   assertTrue (code.containsSubstr "tma::load_async")
@@ -698,13 +733,13 @@ noncomputable def testDecodeKernelDslCodegen : IO Unit := do
 
 /-- The head_dim=64 decode variant emits the same TK-style structure. -/
 @[test]
-noncomputable def testDecodeKernelDslCodegen64 : IO Unit := do
-  let kernel := Tyr.GPU.Kernels.tkMhaH100DecodeFwd64.kernel
+unsafe def testDecodeKernelDslCodegen64 : IO Unit := do
+  let kernel ← evalKernelForTest ``Tyr.GPU.Kernels.tkMhaH100DecodeFwd64.kernel
   assertTrue (!kernel.body.any stmtHasRaw)
     "Decode-64 kernel IR should not contain raw backend escape statements"
   let code := generateKernel kernel
-  assertTrue (code.containsSubstr "mma_ABt(")
-    "QK^T should still lower through warpgroup MMA in the 64-dim variant"
+  assertTrue (code.containsSubstr "mm_ABt(")
+    "QK^T should still lower through warpgroup MM overwrite in the 64-dim variant"
   assertTrue (code.containsSubstr "mma_AB(")
     "PV should still lower through warpgroup MMA in the 64-dim variant"
   assertTrue (code.containsSubstr "tma::load_async")
@@ -797,7 +832,7 @@ def testFlashAttnStructure : IO Unit := do
 
   -- Check all expected components
   assertTrue (code.containsSubstr "flash_attn_test") "Should have kernel name"
-  assertTrue (code.containsSubstr "gl<bf16, 1, 1, -1, -1> v0") "Should have first global descriptor param"
+  assertTrue (code.containsSubstr "gl<bf16, -1, -1, -1, -1> v0") "Should have first global descriptor param"
   assertTrue (code.containsSubstr "mma_ABt(") "Should have mmaT"
   assertTrue (code.containsSubstr "make_causal(") "Should have causal mask"
   assertTrue (code.containsSubstr "row_max(") "Should have row_max"

@@ -97,9 +97,12 @@ def matmul {M K N : Nat} {inDtype : GpuFloat}
     (a : RT inDtype M K .Row)
     (b : RT inDtype K N .Col)
     (accDtype : GpuFloat := .Float32)
+    (hM : M % 16 = 0 := by decide)
+    (hK : K % 16 = 0 := by decide)
+    (hN : N % 16 = 0 := by decide)
     : KernelM (RT accDtype M N .Row) := do
   let c ← allocRT accDtype M N .Row
-  mm c a b
+  mm c a b hM hK hN
   pure c
 
 /-- Matrix multiply-accumulate returning result: D = A @ B + C -/
@@ -107,9 +110,12 @@ def matmulAccum {M K N : Nat} {inDtype accDtype : GpuFloat}
     (a : RT inDtype M K .Row)
     (b : RT inDtype K N .Col)
     (c : RT accDtype M N .Row)
+    (hM : M % 16 = 0 := by decide)
+    (hK : K % 16 = 0 := by decide)
+    (hN : N % 16 = 0 := by decide)
     : KernelM (RT accDtype M N .Row) := do
   let d ← allocRT accDtype M N .Row
-  mma d a b c
+  mma d a b c hM hK hN
   pure d
 
 /-- Matrix multiply with B transposed: C = A @ B^T -/
@@ -117,10 +123,13 @@ def matmulT {M K N : Nat} {inDtype : GpuFloat}
     (a : RT inDtype M K .Row)
     (b : RT inDtype N K .Row)
     (accDtype : GpuFloat := .Float32)
+    (hM : M % 16 = 0 := by decide)
+    (hK : K % 16 = 0 := by decide)
+    (hN : N % 16 = 0 := by decide)
     : KernelM (RT accDtype M N .Row) := do
   let c ← allocRT accDtype M N .Row
   let zero ← zeroRT accDtype M N .Row
-  mmaT c a b zero
+  mmaT c a b zero hM hK hN
   pure c
 
 /-- Matrix multiply-accumulate with B transposed: D = A @ B^T + C -/
@@ -128,9 +137,12 @@ def matmulTAccum {M K N : Nat} {inDtype accDtype : GpuFloat}
     (a : RT inDtype M K .Row)
     (b : RT inDtype N K .Row)
     (c : RT accDtype M N .Row)
+    (hM : M % 16 = 0 := by decide)
+    (hK : K % 16 = 0 := by decide)
+    (hN : N % 16 = 0 := by decide)
     : KernelM (RT accDtype M N .Row) := do
   let d ← allocRT accDtype M N .Row
-  mmaT d a b c
+  mmaT d a b c hM hK hN
   pure d
 
 /-- Matrix multiply with A transposed: C = A^T @ B -/
@@ -138,10 +150,13 @@ def matmulAt {M K N : Nat} {inDtype : GpuFloat}
     (a : RT inDtype K M .Col)
     (b : RT inDtype K N .Col)
     (accDtype : GpuFloat := .Float32)
+    (hM : M % 16 = 0 := by decide)
+    (hK : K % 16 = 0 := by decide)
+    (hN : N % 16 = 0 := by decide)
     : KernelM (RT accDtype M N .Row) := do
   let c ← allocRT accDtype M N .Row
   let zero ← zeroRT accDtype M N .Row
-  mmaAtB c a b zero
+  mmaAtB c a b zero hM hK hN
   pure c
 
 /-! ## Operator Notation
@@ -157,15 +172,21 @@ Use in do-notation: `let c ← a ⬝ b`
 def matmulF32 {M K N : Nat} {inDtype : GpuFloat}
     (a : RT inDtype M K .Row)
     (b : RT inDtype K N .Col)
+    (hM : M % 16 = 0 := by decide)
+    (hK : K % 16 = 0 := by decide)
+    (hN : N % 16 = 0 := by decide)
     : KernelM (RT GpuFloat.Float32 M N .Row) :=
-  matmul a b .Float32
+  matmul a b .Float32 hM hK hN
 
 /-- Matrix multiply transposed with default Float32 accumulator -/
 def matmulTF32 {M K N : Nat} {inDtype : GpuFloat}
     (a : RT inDtype M K .Row)
     (b : RT inDtype N K .Row)
+    (hM : M % 16 = 0 := by decide)
+    (hK : K % 16 = 0 := by decide)
+    (hN : N % 16 = 0 := by decide)
     : KernelM (RT GpuFloat.Float32 M N .Row) :=
-  matmulT a b .Float32
+  matmulT a b .Float32 hM hK hN
 
 -- Simple infix notation for matrix multiply
 scoped infixl:70 " ⬝ " => matmulF32

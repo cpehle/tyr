@@ -44,7 +44,7 @@ def dtype (value : Value) : ScalarType :=
   | .tile _ (.ptr elem) => elem
   | .tensorView desc => desc.elem
   | .partitionView desc => desc.tensor.elem
-  | .token => panic! "TileIR tokens do not have a dtype"
+  | .token => tileIRError "TileIR tokens do not have a dtype"
 
 def shape? (value : Value) : Option (Array Nat) :=
   value.ty.staticShape?
@@ -52,7 +52,7 @@ def shape? (value : Value) : Option (Array Nat) :=
 def shape (value : Value) : Array Nat :=
   match value.shape? with
   | some shape => shape
-  | none => panic! s!"TileIR value {value.name} does not have a statically known shape"
+  | none => tileIRError s!"TileIR value {value.name} does not have a statically known shape"
 
 def rank (value : Value) : Nat :=
   value.shape.size
@@ -1022,26 +1022,24 @@ def if_
       none
   let thenYieldValues := thenValues.map Value.name
   let elseYieldValues := elseValues.map Value.name
-  let thenYieldValues :=
+  let thenYieldValues ← do
     match hiddenTokenResult? with
-    | none => thenYieldValues
+    | none => pure thenYieldValues
     | some _ =>
-        let thenToken :=
-          match thenToken?, inputToken? with
-          | some token, _ => token.name
-          | none, some token => token.name
-          | none, none => panic! "TileIR builder token merge invariant violated in `if_`"
-        thenYieldValues.push thenToken
-  let elseYieldValues :=
+        match thenToken?, inputToken? with
+        | some token, _ => pure (thenYieldValues.push token.name)
+        | none, some token => pure (thenYieldValues.push token.name)
+        | none, none =>
+            throw "internal invariant: TileIR builder token merge violated in `if_` (then branch)"
+  let elseYieldValues ← do
     match hiddenTokenResult? with
-    | none => elseYieldValues
+    | none => pure elseYieldValues
     | some _ =>
-        let elseToken :=
-          match elseToken?, inputToken? with
-          | some token, _ => token.name
-          | none, some token => token.name
-          | none, none => panic! "TileIR builder token merge invariant violated in `if_`"
-        elseYieldValues.push elseToken
+        match elseToken?, inputToken? with
+        | some token, _ => pure (elseYieldValues.push token.name)
+        | none, some token => pure (elseYieldValues.push token.name)
+        | none, none =>
+            throw "internal invariant: TileIR builder token merge violated in `if_` (else branch)"
   emit <| .ifOp
     (results.map Value.binding)
     cond.name
@@ -1108,7 +1106,7 @@ def for_
     }
   if let some tokenBinder := hiddenTokenBinder? then
     let some tokenInit := outerToken?
-      | panic! "TileIR builder token loop invariant violated in `for_`"
+      | throw "internal invariant: TileIR builder token loop violated in `for_`"
     iterValues := iterValues.push {
       binder := tokenBinder
       init := tokenInit.name
@@ -1157,7 +1155,7 @@ def buildEntry? (name : String) (params : Array Value) (body : EntryM Unit) : Ex
 def buildEntry! (name : String) (params : Array Value) (body : EntryM Unit) : Entry :=
   match buildEntry? name params body with
   | .ok entry => entry
-  | .error err => panic! s!"Invalid TileIR entry '{name}': {err}"
+  | .error err => tileIRError s!"Invalid TileIR entry '{name}': {err}"
 
 def global (name : String) (ty : TileType) (value : Literal) : ModuleM Unit :=
   modify fun st => {
@@ -1187,6 +1185,6 @@ def buildModule? (name : String) (body : ModuleM Unit) : Except String Module :=
 def module_ (name : String) (body : ModuleM Unit) : Module :=
   match buildModule? name body with
   | .ok mod => mod
-  | .error err => panic! s!"Invalid TileIR module '{name}': {err}"
+  | .error err => tileIRError s!"Invalid TileIR module '{name}': {err}"
 
 end Tyr.GPU.Codegen.TileIR
