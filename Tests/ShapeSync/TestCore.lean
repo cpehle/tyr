@@ -34,6 +34,12 @@ private theorem nonUnitShapeCompatibility :
 #guard cta256.participantCount (.warpGroupEq 1) == 128
 #guard cta256.participantCount (.modEq 0 4 0) == 64
 
+#guard ArchitectureProfile.genericGpu.supportsProducerKind .simt == true
+#guard ArchitectureProfile.cudaSm80.supportsProducerKind .cpAsync == true
+#guard ArchitectureProfile.cudaSm80.supportsProducerKind .tma == false
+#guard ArchitectureProfile.cudaSm90.supportsProducerKind .tma == true
+#guard ArchitectureProfile.cudaSm90.supportsScope .cluster == true
+
 private theorem warpGroupNamedBarrierValid :
     (SyncObligation.namedSync 2 128 (.warpGroupEq 0)).Valid cta256 := by
   shape_sync
@@ -75,6 +81,12 @@ private def pcGraph : AccessGraph :=
 
 private def pcAnalysis : ProducerConsumerAnalysis :=
   ProducerConsumerAnalysis.build cta256 pcGraph
+
+#guard pcGraph.resources == [0]
+#guard pcGraph.writtenResources == [0]
+#guard pcGraph.readResources == [0]
+#guard pcGraph.hasProducerConsumerPair 0 == true
+#guard (pcGraph.windowsForResource 0).length == 1
 
 private def headForwardParticipants (analysis : ProducerConsumerAnalysis) : Option Nat :=
   match analysis.protocols.head? with

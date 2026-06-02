@@ -124,6 +124,12 @@ private def minNat? : List Nat → Option Nat
   | [] => none
   | x :: xs => some (xs.foldl Nat.min x)
 
+private def dedupResources : List ResourceId → List ResourceId
+  | [] => []
+  | x :: xs =>
+      let rest := dedupResources xs
+      if rest.any (fun y => y == x) then rest else x :: rest
+
 structure AccessGraph where
   nodes : List GraphNode
 deriving Repr, BEq, DecidableEq
@@ -164,6 +170,20 @@ def consumerCount (graph : AccessGraph) : Nat :=
 def hasAsyncProducer (graph : AccessGraph) : Bool :=
   graph.nodes.any GraphNode.isAsyncProducer
 
+def resources (graph : AccessGraph) : List ResourceId :=
+  dedupResources <| concatMap graph.nodes fun node =>
+    node.accesses.map (fun access => access.resource)
+
+def writtenResources (graph : AccessGraph) : List ResourceId :=
+  dedupResources <| concatMap graph.nodes fun node =>
+    node.accesses.filterMap fun access =>
+      if access.kind.writes then some access.resource else none
+
+def readResources (graph : AccessGraph) : List ResourceId :=
+  dedupResources <| concatMap graph.nodes fun node =>
+    node.accesses.filterMap fun access =>
+      if access.kind.reads then some access.resource else none
+
 def firstConsumerRead? (graph : AccessGraph) (resource : ResourceId) : Option (Nat × GraphNode) :=
   graph.consumerStream.find? fun (_, node) => node.readsResource resource
 
@@ -190,6 +210,23 @@ def dependencyWindows (graph : AccessGraph) : List DependencyWindow :=
             waitPos
             releasePos := lastAccess + 1
           }
+
+def windowsForResource (graph : AccessGraph) (resource : ResourceId) :
+    List DependencyWindow :=
+  graph.dependencyWindows.filter fun window => window.resource == resource
+
+def producerConsumerPairs (graph : AccessGraph) :
+    List (GraphNode × GraphNode × ResourceId) :=
+  concatMap graph.producerNodes fun producer =>
+    concatMap producer.writtenResources fun resource =>
+      graph.consumerStream.filterMap fun (_, consumer) =>
+        if consumer.readsResource resource then
+          some (producer, consumer, resource)
+        else
+          none
+
+def hasProducerConsumerPair (graph : AccessGraph) (resource : ResourceId) : Bool :=
+  graph.producerConsumerPairs.any fun (_, _, r) => r == resource
 
 def earliestAsyncRead (graph : AccessGraph) : Nat :=
   let resources :=
