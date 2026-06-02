@@ -320,17 +320,23 @@ def generateKernelCompanion (declName : Name) (arch : GpuArch)
 
 /-- Generate C++ extern parameter for a kernel param -/
 def paramToCppExternAttr (p : KParam) : String :=
-  if p.isPointer then s!"b_lean_obj_arg {p.name}"
+  if p.isPointer || p.scalarPointer then s!"b_lean_obj_arg {p.name}"
   else s!"{p.scalarTy.toCpp} {p.name}"
 
 /-- Generate C++ kernel argument (GL wrapper for pointers, pass-through for scalars). -/
 def paramToCppArgAttr (idx : Nat) (p : KParam) : String :=
-  if p.isPointer then s!"v{idx}_gl"
+  if p.scalarPointer then s!"v{idx}_ptr"
+  else if p.isPointer then s!"v{idx}_gl"
   else p.name
 
 /-- Generate pointer extraction code for a param -/
 def generatePtrExtractionAttr (idx : Nat) (p : KParam) : String :=
-  if p.isPointer then
+  if p.scalarPointer then
+    s!"    auto v{idx}_tensor = borrowTensor({p.name});\n" ++
+    s!"    if (!v{idx}_tensor.is_cuda()) return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string(\"{p.name} must be a CUDA tensor\")));\n" ++
+    s!"    if (!v{idx}_tensor.is_contiguous()) return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string(\"{p.name} must be contiguous\")));\n" ++
+    s!"    auto v{idx}_ptr = v{idx}_tensor.data_ptr<{p.scalarTy.toCpp}>();\n"
+  else if p.isPointer then
     s!"    auto v{idx}_tensor = borrowTensor({p.name});\n" ++
     s!"    if (!v{idx}_tensor.is_cuda()) return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string(\"{p.name} must be a CUDA tensor\")));\n" ++
     s!"    if (!v{idx}_tensor.is_contiguous()) return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string(\"{p.name} must be contiguous\")));\n" ++

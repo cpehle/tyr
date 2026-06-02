@@ -32,6 +32,12 @@ inductive PersistentMode where
 structure PersistentConfig where
   /-- Scheduling mode -/
   mode : PersistentMode := .fixedStride
+  /-- Mutable work counter used by `.atomicCounter`.
+
+      This must identify a scalar-pointer kernel parameter, distinct from the
+      total-work bound. The old raw emission reused the bound as the counter
+      address, which hid an invalid dataflow shape from the IR. -/
+  counter : Option VarId := none
   deriving Repr, Inhabited
 
 /-- A work item inside the persistent loop body -/
@@ -59,42 +65,53 @@ def persistentLoop (cfg : PersistentConfig) (totalWork : VarId)
     -- workId starts at blockIdx.x, strides by gridDim.x
     let blockIdxX ← freshVar
     emit (.getBlockIdx blockIdxX 0)
-    -- We use a forLoopVal with stride emulated via raw code
+    recordScalar blockIdxX (.blockIdx 0)
+    let gridDimX ← freshVar
+    emit (.getGridDim gridDimX 0)
+    recordScalar gridDimX (.gridDim 0)
     -- Emit: for (int workId = blockIdx.x; workId < totalWork; workId += gridDim.x)
     let workId ← freshVar
     let isValid ← freshVar
     emit (.constInt isValid 1)  -- always valid in fixed stride (loop condition checks)
+    recordScalar isValid (.const 1)
     let bodyStmts ← captureBody (body { workId, isValid })
-    -- Emit the strided for loop using raw code for the stride pattern
-    let wid := VarId.toIdent workId
-    let bid := VarId.toIdent blockIdxX
-    let tw := VarId.toIdent totalWork
-    emit (.raw s!"for (int {wid} = {bid}; {wid} < {tw}; {wid} += gridDim.x) \{")
-    for stmt in bodyStmts do
-      emit stmt
-    emit (.raw "}")
+    emit (.forLoopStride workId blockIdxX totalWork gridDimX bodyStmts)
 
   | .atomicCounter =>
     comment "Persistent loop (atomic counter)"
-    let workId ← freshVar
-    let isValid ← freshVar
-    -- Emit atomic work-claiming loop
-    let wid := VarId.toIdent workId
-    let vid := VarId.toIdent isValid
-    let tw := VarId.toIdent totalWork
-    emit (.raw s!"int {wid} = 0;")
-    emit (.raw s!"bool {vid} = true;")
-    let bodyStmts ← captureBody (body { workId, isValid })
-    -- While loop: atomicAdd to claim, check bounds, execute body
-    emit (.raw s!"while (true) \{")
-    emit (.raw s!"  if (threadIdx.x == 0) \{")
-    emit (.raw s!"    {wid} = atomicAdd(reinterpret_cast<int*>(&{tw}), 1);")
-    emit (.raw s!"  }")
-    emit (.raw s!"  {wid} = __shfl_sync(0xffffffff, {wid}, 0);")
-    emit (.raw s!"  if ({wid} >= {tw}) break;")
-    for stmt in bodyStmts do
-      emit stmt
-    emit (.raw "}")
+    match cfg.counter with
+    | none =>
+        panic! "PersistentMode.atomicCounter requires PersistentConfig.counter"
+    | some counter =>
+        let workId ← freshVar
+        emit (.constInt workId 0)
+        recordScalar workId (.const 0)
+        let isValid ← freshVar
+        emit (.constInt isValid 1)
+        recordScalar isValid (.const 1)
+        let tx ← freshVar
+        emit (.getThreadIdx tx 0)
+        recordScalar tx (.threadIdx 0)
+        let zero ← freshVar
+        emit (.constInt zero 0)
+        recordScalar zero (.const 0)
+        let one ← freshVar
+        emit (.constInt one 1)
+        recordScalar one (.const 1)
+        let leader ← freshVar
+        emit (.scalarCompare .Eq leader tx zero)
+        recordPredicate leader (.cmp .Eq (.threadIdx 0) (.const 0))
+        let done ← freshVar
+        recordPredicate done (.cmp .Ge (.var workId) (.var totalWork))
+        let claimStmt : KStmt := .atomicFetchAddUInt32 workId counter one
+        let loopPrefix : Array KStmt := #[
+          .ifStmt leader #[claimStmt] #[],
+          .warpBroadcast workId workId 0 0xffffffff,
+          .scalarCompare .Ge done workId totalWork,
+          .breakIf done
+        ]
+        let bodyStmts ← captureBody (body { workId, isValid })
+        emit (.whileLoop (loopPrefix ++ bodyStmts))
 
 /-! ## Work ID to Tile Coordinate Mapping -/
 

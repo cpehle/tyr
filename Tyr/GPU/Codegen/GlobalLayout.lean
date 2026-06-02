@@ -174,36 +174,42 @@ Functions to get thread block and thread indices at runtime.
 def getBlockIdxX : KernelM VarId := do
   let v ← freshVar
   emit (.getBlockIdx v 0)
+  recordScalar v (.blockIdx 0)
   pure v
 
 /-- Get blockIdx.y as a runtime value -/
 def getBlockIdxY : KernelM VarId := do
   let v ← freshVar
   emit (.getBlockIdx v 1)
+  recordScalar v (.blockIdx 1)
   pure v
 
 /-- Get blockIdx.z as a runtime value -/
 def getBlockIdxZ : KernelM VarId := do
   let v ← freshVar
   emit (.getBlockIdx v 2)
+  recordScalar v (.blockIdx 2)
   pure v
 
 /-- Get threadIdx.x as a runtime value -/
 def getThreadIdxX : KernelM VarId := do
   let v ← freshVar
   emit (.getThreadIdx v 0)
+  recordScalar v (.threadIdx 0)
   pure v
 
 /-- Get threadIdx.y as a runtime value -/
 def getThreadIdxY : KernelM VarId := do
   let v ← freshVar
   emit (.getThreadIdx v 1)
+  recordScalar v (.threadIdx 1)
   pure v
 
 /-- Get threadIdx.z as a runtime value -/
 def getThreadIdxZ : KernelM VarId := do
   let v ← freshVar
   emit (.getThreadIdx v 2)
+  recordScalar v (.threadIdx 2)
   pure v
 
 /-- Create a runtime coordinate with batch=0, depth=0, row=blockIdx.y, col=blockIdx.x
@@ -211,8 +217,10 @@ def getThreadIdxZ : KernelM VarId := do
 def blockCoord2D : KernelM RTileCoord := do
   let batchId ← freshVar
   emit (.constInt batchId 0)
+  recordScalar batchId (.const 0)
   let depthId ← freshVar
   emit (.constInt depthId 0)
+  recordScalar depthId (.const 0)
   let rowId ← getBlockIdxY
   let colId ← getBlockIdxX
   pure { b := batchId, d := depthId, r := rowId, c := colId }
@@ -225,12 +233,14 @@ def makeRTileCoord (b d r c : VarId) : RTileCoord :=
 def rowCoord (r : VarId) : KernelM RTileCoord := do
   let zero ← freshVar
   emit (.constInt zero 0)
+  recordScalar zero (.const 0)
   pure { b := zero, d := zero, r := r, c := zero }
 
 /-- Create a runtime coordinate with row from loop index -/
 def loopRowCoord (loopVar : VarId) : KernelM RTileCoord := do
   let zero ← freshVar
   emit (.constInt zero 0)
+  recordScalar zero (.const 0)
   pure { b := zero, d := zero, r := loopVar, c := zero }
 
 /-! ## Typeclass for Global Layout

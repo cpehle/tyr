@@ -35,7 +35,7 @@ def kernelNameToCFFI (name : String) : String :=
 
 /-- Generate Lean parameter type for a kernel param -/
 def paramToLeanType (p : KParam) : String :=
-  if p.isPointer then
+  if p.isPointer || p.scalarPointer then
     "(@ Tensor)"  -- Borrowed reference to Tensor
   else
     "UInt64"  -- Scalar values as UInt64
@@ -84,21 +84,23 @@ def gpuFloatToCudaPtr (dtype : GpuFloat) : String :=
 
 /-- Generate C++ extern parameter declaration -/
 def paramToCppExternParam (p : KParam) : String :=
-  if p.isPointer then
+  if p.isPointer || p.scalarPointer then
     s!"b_lean_obj_arg {p.name}"
   else
     s!"uint64_t {p.name}"
 
 /-- Generate C++ kernel argument (pointer extraction or scalar pass-through) -/
 def paramToCppKernelArg (p : KParam) : String :=
-  if p.isPointer then
+  if p.isPointer || p.scalarPointer then
     s!"{p.name}_ptr"
   else
     p.name
 
 /-- Generate C++ pointer extraction code -/
 def generatePointerExtraction (p : KParam) : String :=
-  if p.isPointer then
+  if p.scalarPointer then
+    s!"  auto {p.name}_ptr = borrowTensor({p.name}).data_ptr<{p.scalarTy.toCpp}>();\n"
+  else if p.isPointer then
     s!"  auto {p.name}_ptr = borrowTensor({p.name}).data_ptr<{p.dtype.toCpp}>();\n"
   else
     ""
