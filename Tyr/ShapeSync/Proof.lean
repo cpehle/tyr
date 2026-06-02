@@ -12,6 +12,36 @@ to definitional simplification of the closed finite participant-count checks.
 
 namespace Tyr.ShapeSync
 
+inductive ProofBackend where
+| omega
+| grind
+| finiteDecision
+| smtFacade
+deriving Repr, BEq, DecidableEq
+
+namespace ProofBackend
+
+def render : ProofBackend → String
+  | .omega => "omega"
+  | .grind => "grind"
+  | .finiteDecision => "finite_decision"
+  | .smtFacade => "smt_facade"
+
+end ProofBackend
+
+structure ProofStrategy where
+  backends : List ProofBackend := [.omega, .grind, .finiteDecision, .smtFacade]
+deriving Repr, BEq, DecidableEq
+
+namespace ProofStrategy
+
+def default : ProofStrategy := {}
+
+def uses (strategy : ProofStrategy) (backend : ProofBackend) : Bool :=
+  strategy.backends.any (fun b => b == backend)
+
+end ProofStrategy
+
 inductive Obligation where
 | shape (obl : ShapeObligation)
 | sync (obl : SyncObligation)
@@ -76,14 +106,16 @@ def ofProof (ctx : ThreadCtx) (obl : Obligation) (proof : obl.Valid ctx) :
 end Certificate
 
 syntax (name := shapeSyncTac) "shape_sync" : tactic
+syntax (name := shapeSyncNativeTac) "shape_sync_native" : tactic
+syntax (name := shapeSyncFiniteTac) "shape_sync_finite" : tactic
+syntax (name := shapeSyncSmtTac) "shape_sync_smt" : tactic
 
 macro_rules
-  | `(tactic| shape_sync) =>
+  | `(tactic| shape_sync_native) =>
       `(tactic|
         solve
         | omega
         | grind
-        | native_decide
         | simp [Obligation.Valid, ShapeObligation.Valid, SyncObligation.Valid,
             ProducerConsumerObligation.Valid, ProducerConsumerAnalysis.Valid,
             ProducerConsumerAnalysis.WellFormed, ProtocolsValid, BarrierProtocol.Valid,
@@ -91,5 +123,41 @@ macro_rules
             ThreadPred.eval, ThreadId.axis, ThreadId.linear, ThreadId.warpGroup,
             DimRange.WithinShape, DimRange.ContainsLocal, DimRange.globalIndex,
             NonUnitExtentsFit, nonUnitExtentsFit, DivisibleBy, MultipleOf] <;> omega)
+
+macro_rules
+  | `(tactic| shape_sync_finite) =>
+      `(tactic|
+        solve
+        | native_decide
+        | simp [Obligation.Valid, ShapeObligation.Valid, SyncObligation.Valid,
+            ProducerConsumerObligation.Valid, ProducerConsumerAnalysis.Valid,
+            ProducerConsumerAnalysis.WellFormed, ProtocolsValid, BarrierProtocol.Valid,
+            ParticipantCount, ThreadCtx.participantCount, ThreadCtx.threads,
+            ThreadPred.eval, ThreadId.axis, ThreadId.linear, ThreadId.warpGroup,
+            DimRange.WithinShape, DimRange.ContainsLocal, DimRange.globalIndex,
+            NonUnitExtentsFit, nonUnitExtentsFit, DivisibleBy, MultipleOf] <;> native_decide)
+
+macro_rules
+  | `(tactic| shape_sync_smt) =>
+      `(tactic|
+        solve
+        | grind
+        | omega
+        | simp [Obligation.Valid, ShapeObligation.Valid, SyncObligation.Valid,
+            ProducerConsumerObligation.Valid, ProducerConsumerAnalysis.Valid,
+            ProducerConsumerAnalysis.WellFormed, ProtocolsValid, BarrierProtocol.Valid,
+            ParticipantCount, ThreadCtx.participantCount, ThreadCtx.threads,
+            ThreadPred.eval, ThreadId.axis, ThreadId.linear, ThreadId.warpGroup,
+            DimRange.WithinShape, DimRange.ContainsLocal, DimRange.globalIndex,
+            NonUnitExtentsFit, nonUnitExtentsFit, DivisibleBy, MultipleOf] <;>
+            first | grind | omega | native_decide)
+
+macro_rules
+  | `(tactic| shape_sync) =>
+      `(tactic|
+        solve
+        | shape_sync_native
+        | shape_sync_smt
+        | shape_sync_finite)
 
 end Tyr.ShapeSync
