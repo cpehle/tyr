@@ -275,9 +275,15 @@ def fromKStmts (stmts : Array KStmt) : Except (Array String) LeanJaxpr := Id.run
         }
     | .declSemaphore v =>
         varMeta := registerDeclaredVarMeta varMeta v { participation := .static }
+    | .declTT v dtype rows cols =>
+        varMeta := registerDeclaredVarMeta varMeta v {
+          shape := some (rank2Shape rows cols)
+          dtype := some (toString dtype)
+          sharding := some "tensor.tmem"
+        }
+    | .declTMEMPool v _ _ _ =>
+        varMeta := registerDeclaredVarMeta varMeta v { participation := .static }
     | .comment _ =>
-        pure ()
-    | .raw _ =>
         pure ()
     | .unary op dst src =>
         let srcMeta := varMeta.getD src.idx {}

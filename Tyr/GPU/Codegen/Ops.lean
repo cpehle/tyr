@@ -27,15 +27,6 @@ namespace Tyr.GPU.Codegen
 
 open Tyr.GPU
 
-/-- Emit exact backend code when the typed DSL does not yet expose a primitive.
-
-This is intentionally narrow and should be used to isolate backend-specific
-constructs until they are promoted to first-class statements. Most Blackwell
-TMEM and cluster operations now have typed wrappers (`allocTT`, `tcgen05Mm`,
-`clusterIdx`, etc.). -/
-def emitRaw (code : String) : KernelM Unit := do
-  emit (.raw code)
-
 /-! ## Tile Allocation -/
 
 /-- Allocate a register tile -/
@@ -74,6 +65,13 @@ def allocSV (dtype : GpuFloat) (len : Nat) : KernelM (SV dtype len) := do
 def allocTT (dtype : GpuFloat) (rows cols : Nat) : KernelM (TT dtype rows cols) := do
   let v ← freshVar
   emit (.declTT v dtype rows cols)
+  pure ⟨v⟩
+
+/-- Allocate a Tensor Memory allocator/pool handle. -/
+def allocTMEMPool (slots : Nat := 1) (clusterSize : Nat := 1) (managed : Bool := false)
+    : KernelM TMEMPool := do
+  let v ← freshVar
+  emit (.declTMEMPool v slots clusterSize managed)
   pure ⟨v⟩
 
 /-- Allocate a zero-initialized tensor memory tile -/
@@ -169,6 +167,7 @@ def storeVec {dtype : GpuFloat} {len : Nat}
 def constIntVal (value : Int) (name : String := "const") : KernelM (KVal UInt32) := do
   let v ← freshVar
   emit (.constInt v value)
+  recordScalar v (.const value)
   pure ⟨v, name⟩
 
 /-- Materialize a Float32 constant as a runtime scalar. -/
@@ -182,7 +181,7 @@ def loadFloat32Scalar
     (src : GPtr GpuFloat.Float32)
     (offset : KVal UInt32)
     (name : String := "load_f32")
-    : KernelM (KVal Float32) := do
+  : KernelM (KVal Float32) := do
   let v ← freshVar
   emit (.loadScalarGlobal v src.id offset.id)
   pure ⟨v, name⟩
@@ -200,6 +199,8 @@ def scalarUnary {T : Type} (op : ScalarUnaryOp)
     (src : KVal T) (name : String := "scalar_unary") : KernelM (KVal T) := do
   let v ← freshVar
   emit (.scalarUnary op v src.id)
+  let proof ← get
+  recordScalar v (.unary op (proof.proof.scalarOrVar src.id))
   pure ⟨v, name⟩
 
 /-- Compare two runtime scalars and return a boolean scalar. -/
@@ -207,6 +208,8 @@ def scalarCompare {T : Type} (op : ScalarCompareOp)
     (a b : KVal T) (name : String := "scalar_cmp") : KernelM (KVal Bool) := do
   let v ← freshVar
   emit (.scalarCompare op v a.id b.id)
+  let proof ← get
+  recordPredicate v (.cmp op (proof.proof.scalarOrVar a.id) (proof.proof.scalarOrVar b.id))
   pure ⟨v, name⟩
 
 /-- Apply a scalar binary operation to two runtime scalars. -/
@@ -214,6 +217,8 @@ def scalarBinary {T : Type} (op : ScalarBinaryOp)
     (a b : KVal T) (name : String := "scalar_binary") : KernelM (KVal T) := do
   let v ← freshVar
   emit (.scalarBinary op v a.id b.id)
+  let proof ← get
+  recordScalar v (.binary op (proof.proof.scalarOrVar a.id) (proof.proof.scalarOrVar b.id))
   pure ⟨v, name⟩
 
 /-- Select between two runtime scalar values. -/
@@ -221,6 +226,11 @@ def scalarSelect {T : Type} (cond : KVal Bool)
     (ifTrue ifFalse : KVal T) (name : String := "scalar_select") : KernelM (KVal T) := do
   let v ← freshVar
   emit (.scalarSelect v cond.id ifTrue.id ifFalse.id)
+  let proof ← get
+  recordScalar v (.select
+    (proof.proof.predicateOrVar cond.id)
+    (proof.proof.scalarOrVar ifTrue.id)
+    (proof.proof.scalarOrVar ifFalse.id))
   pure ⟨v, name⟩
 
 /-- Negate a runtime scalar. -/
@@ -950,6 +960,7 @@ def layoutDim {dtype : GpuFloat}
     (name : String := "layout_dim") : KernelM (KVal UInt32) := do
   let v ← freshVar
   emit (.layoutDim v src.id axis)
+  recordScalar v (.layoutDim src.id axis)
   pure ⟨v, name⟩
 
 /-- Query the batch dimension from a global-layout kernel parameter. -/
@@ -1179,11 +1190,34 @@ def namedBarrierSync (barrierId : Nat) (numThreads : Nat) : KernelM Unit := do
 def namedBarrierArrive (barrierId : Nat) (numThreads : Nat) : KernelM Unit := do
   emit (.namedBarrierArrive barrierId numThreads)
 
+/-- Proof-aware named barrier synchronization.
+    Emits the same backend statement as `namedBarrierSync` and records the
+    ShapeSync participant obligation only after Lean has a proof of it. -/
+def namedBarrierSyncChecked (ctx : Tyr.ShapeSync.ThreadCtx)
+    (barrierId numThreads : Nat) (guard : Tyr.ShapeSync.ThreadPred)
+    (_proof : (Tyr.ShapeSync.SyncObligation.namedSync barrierId numThreads guard).Valid ctx) :
+    KernelM Unit := do
+  namedBarrierSync barrierId numThreads
+  addShapeSyncObligation
+    (.sync (Tyr.ShapeSync.SyncObligation.namedSync barrierId numThreads guard))
+
+/-- Proof-aware named barrier arrive.
+    Emits the same backend statement as `namedBarrierArrive` and records the
+    ShapeSync participant obligation only after Lean has a proof of it. -/
+def namedBarrierArriveChecked (ctx : Tyr.ShapeSync.ThreadCtx)
+    (barrierId numThreads : Nat) (guard : Tyr.ShapeSync.ThreadPred)
+    (_proof : (Tyr.ShapeSync.SyncObligation.namedArrive barrierId numThreads guard).Valid ctx) :
+    KernelM Unit := do
+  namedBarrierArrive barrierId numThreads
+  addShapeSyncObligation
+    (.sync (Tyr.ShapeSync.SyncObligation.namedArrive barrierId numThreads guard))
+
 /-- Get the warp group index (0, 1, 2, ...) within a CTA
     Used to determine producer vs consumer role in FA3 -/
 def getWarpGroupIdx : KernelM (KVal UInt32) := do
   let v ← freshVar
   emit (.warpGroupIdx v)
+  recordScalar v .warpGroupIdx
   pure ⟨v, "wg_idx"⟩
 
 /-- Elect one thread per warp to execute a region
@@ -1208,7 +1242,7 @@ def fenceProxyAsync : KernelM Unit := do
 def ifWarpGroup (wgIdx : Nat) (action : KernelM Unit) : KernelM Unit := do
   -- Capture the body statements
   let startLen := (← get).body.size
-  action
+  withProofGuard (.warpGroupEq wgIdx) action
   let endLen := (← get).body.size
   let bodyStmts := (← get).body.extract startLen endLen
   -- Replace with ifWarpGroup construct

@@ -716,10 +716,7 @@ __global__ void cluster_tma(gl<bf16, 1, 1, -1, -1> v0) {
 /-- TMEM pool operations (allocate, provision, subtile) -/
 def tmemPoolKernel : Kernel :=
   buildKernelM "tmem_pool" .SM100 #[] do
-    -- Pool is raw because TMEMPool needs a `tensor_allocator<>` decl,
-    -- which the emitter generates from a raw snippet for now.
-    emitRaw "tensor_allocator<1, 2, false> tm_alloc;"
-    let pool : TMEMPool := ⟨⟨0⟩⟩  -- placeholder VarId for the allocator
+    let pool ← allocTMEMPool 1 2 false
     tmemProvision pool 2
     tmemDeprovision pool
 
@@ -729,7 +726,7 @@ using namespace kittens;
 
 #if defined(KITTENS_BLACKWELL)
 __global__ void tmem_pool(/* TODO: params */) {
-  tensor_allocator<1, 2, false> tm_alloc;
+  tensor_allocator<1, 2, false> v0;
   if(elect_one) v0.provision<2>(tmem_addr);
   if(elect_one) v0.deprovision();
 }
@@ -831,15 +828,56 @@ using namespace kittens;
 __global__ void fixed_stride(uint32_t v0) {
   // Persistent loop (fixed stride)
   int v1 = blockIdx.x;
-  int v3 = 1;
-  for (int v2 = v1; v2 < v0; v2 += gridDim.x) {
-  // work item body
+  int v2 = gridDim.x;
+  int v4 = 1;
+  for (int v3 = v1; v3 < v0; v3 += v2) {
+    // work item body
   }
 }
 #endif
 -/
 #guard_msgs in
 #eval IO.println (generateKernel fixedStrideKernel)
+
+/-- Atomic-counter persistent loop requires a scalar pointer counter, not the
+    total-work scalar value. -/
+def atomicCounterKernel : Kernel :=
+  buildKernelM "atomic_counter" .SM90 #[
+    { name := "counter", dtype := .Float32, isPointer := false, scalarPointer := true, scalarTy := .UInt32 },
+    { name := "totalWork", dtype := .Float32, isPointer := false, scalarTy := .UInt32 }
+  ] do
+    let counter : VarId := ⟨0⟩
+    let totalWork : KVal UInt32 := ⟨⟨1⟩, "totalWork"⟩
+    persistentLoop { mode := .atomicCounter, counter := some counter } totalWork.id fun _wi => do
+      comment "work item body"
+
+/--
+info: #include <kittens.cuh>
+using namespace kittens;
+
+#if defined(KITTENS_HOPPER)
+__global__ void atomic_counter(uint32_t* v0, uint32_t v1) {
+  // Persistent loop (atomic counter)
+  int v2 = 0;
+  int v3 = 1;
+  int v4 = threadIdx.x;
+  int v5 = 0;
+  int v6 = 1;
+  auto v7 = (v4 == v5);
+  while (true) {
+    if (v7) {
+      v2 = atomicAdd(reinterpret_cast<unsigned int*>(v0), static_cast<unsigned int>(v6));
+    }
+    v2 = __shfl_sync(4294967295, v2, 0);
+    auto v8 = (v2 >= v1);
+    if (v8) break;
+    // work item body
+  }
+}
+#endif
+-/
+#guard_msgs in
+#eval IO.println (generateKernel atomicCounterKernel)
 
 /-- workIdToSwizzledCoord emits div/mod scalar ops -/
 def swizzleCoordKernel : Kernel :=

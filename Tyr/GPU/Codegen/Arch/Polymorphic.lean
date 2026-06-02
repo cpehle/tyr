@@ -97,7 +97,7 @@ end PolyKernel
 /-- Registered polymorphic kernel (stored in environment) -/
 structure RegisteredPolyKernel where
   /-- Original kernel name -/
-  name : Name
+  name : Lean.Name
   /-- Target architectures -/
   archs : Array ArchLevel
   /-- Compiled kernels (one per architecture) -/

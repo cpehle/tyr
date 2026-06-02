@@ -87,6 +87,8 @@ structure PipelineConfig where
   depth : Nat := 2
   /-- Use warp specialization (producer wg0, consumer wg1) -/
   warpSpecialized : Bool := false
+  /-- Use ShapeSync-derived semaphore handoff for depth-1 warp-specialized pipelines. -/
+  useShapeSyncBarriers : Bool := false
   deriving Repr, Inhabited
 
 /-! ## Pipelined Ring Loop
@@ -112,6 +114,53 @@ def pipelinedRingLoop (cfg : PipelineConfig)
     (producer : Nat → KernelM Unit)
     (consumer : Nat → KernelM Unit) : KernelM Unit := do
   let depth := Nat.min cfg.depth cfg.numIters
+  let mut shapeSyncProtocol? : Option Tyr.ShapeSync.BarrierProtocol := none
+  if cfg.warpSpecialized then
+    let proofCtx := (← get).proof.threadCtx
+    let representativeProducer ← captureBodySnapshot (producer depth)
+    let representativeConsumer ← captureBodySnapshot (consumer 0)
+    let previewStmts : Array KStmt := #[
+      .ifWarpGroup 0 representativeProducer,
+      .ifWarpGroup 1 representativeConsumer
+    ]
+    match KernelProof.shapeSyncAnalysisFromStmts proofCtx previewStmts with
+    | some analysis =>
+        addShapeSyncPipelineAnalysis analysis
+        shapeSyncProtocol? := analysis.protocols.head?
+    | none => pure ()
+  let useShapeSyncHandoff :=
+    cfg.warpSpecialized && cfg.useShapeSyncBarriers && depth == 1 &&
+      shapeSyncProtocol?.isSome
+  let forwardSem? ←
+    if useShapeSyncHandoff then
+      let sem ← allocSemaphore
+      initSemaphore sem 0
+      pure (some sem)
+    else
+      pure none
+  let backpressureSem? ←
+    if useShapeSyncHandoff then
+      let sem ← allocSemaphore
+      initSemaphore sem 1
+      pure (some sem)
+    else
+      pure none
+  let runProducer (action : KernelM Unit) : KernelM Unit := do
+    match shapeSyncProtocol?, forwardSem?, backpressureSem? with
+    | some protocol, some forwardSem, some backpressureSem =>
+        waitSemaphore backpressureSem
+        action
+        arriveSemaphore forwardSem protocol.forward.expectedParticipants
+    | _, _, _ =>
+        action
+  let runConsumer (action : KernelM Unit) : KernelM Unit := do
+    match shapeSyncProtocol?, forwardSem?, backpressureSem? with
+    | some protocol, some forwardSem, some backpressureSem =>
+        waitSemaphore forwardSem
+        action
+        arriveSemaphore backpressureSem protocol.backpressure.expectedParticipants
+    | _, _, _ =>
+        action
   let wrap := if cfg.warpSpecialized then
     fun (wg : Nat) (action : KernelM Unit) => ifWarpGroup wg action
   else
@@ -120,24 +169,27 @@ def pipelinedRingLoop (cfg : PipelineConfig)
   -- Prologue: fill pipeline stages
   comment s!"Pipeline prologue: fill {depth} stages"
   for i in List.range depth do
-    wrap 0 (producer i)
+    wrap 0 (if useShapeSyncHandoff then runProducer (producer i) else producer i)
 
-  sync
+  if !useShapeSyncHandoff then
+    sync
 
   -- Main loop: overlap producer and consumer
   if cfg.numIters > depth then
     comment s!"Pipeline main loop: {cfg.numIters - depth} iterations"
     forLoop 0 (cfg.numIters - depth) do
       -- Producer fills next stage (using representative stage index)
-      wrap 0 (producer depth)
+      wrap 0 (if useShapeSyncHandoff then runProducer (producer depth) else producer depth)
       -- Consumer processes current stage
-      wrap 1 (consumer 0)
-      sync
+      wrap 1 (if useShapeSyncHandoff then runConsumer (consumer 0) else consumer 0)
+      if !useShapeSyncHandoff then
+        sync
 
   -- Epilogue: drain pipeline
   comment s!"Pipeline epilogue: drain {depth} stages"
   for i in List.range depth do
-    wrap 1 (consumer i)
-    sync
+    wrap 1 (if useShapeSyncHandoff then runConsumer (consumer i) else consumer i)
+    if !useShapeSyncHandoff then
+      sync
 
 end Tyr.GPU.Codegen

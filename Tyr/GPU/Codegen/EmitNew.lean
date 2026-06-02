@@ -44,10 +44,6 @@ private def colVecLayout : TileLayout → RVLayout
   | .Row => .Ortho
   | .Col => .Align
 
-private def indentRaw (indent code : String) : String :=
-  let lines := code.splitOn "\n"
-  lines.map (fun line => if line.isEmpty then "" else indent ++ line) |> String.intercalate "\n"
-
 structure RVLayoutState where
   layouts : Std.HashMap VarId RVLayout := {}
   conflicts : Std.HashSet VarId := {}
@@ -78,8 +74,10 @@ private def collectRtLayoutsStmt (acc : Std.HashMap VarId TileLayout) : KStmt �
   | .declRT v _ _ _ layout => acc.insert v layout
   | .forLoop _ _ _ body => body.foldl collectRtLayoutsStmt acc
   | .forLoopVal _ _ _ body => body.foldl collectRtLayoutsStmt acc
+  | .forLoopStride _ _ _ _ body => body.foldl collectRtLayoutsStmt acc
   | .forLoopRev _ _ _ body => body.foldl collectRtLayoutsStmt acc
   | .forLoopValRev _ _ _ body => body.foldl collectRtLayoutsStmt acc
+  | .whileLoop body => body.foldl collectRtLayoutsStmt acc
   | .ifStmt _ thenBody elseBody =>
       let acc' := thenBody.foldl collectRtLayoutsStmt acc
       elseBody.foldl collectRtLayoutsStmt acc'
@@ -92,8 +90,10 @@ private def collectTileInfoStmt (acc : Std.HashMap VarId TileInfo) : KStmt → S
   | .declTT v dtype rows cols => acc.insert v { kind := .TT, rows := rows, cols := cols, dtype := dtype }
   | .forLoop _ _ _ body => body.foldl collectTileInfoStmt acc
   | .forLoopVal _ _ _ body => body.foldl collectTileInfoStmt acc
+  | .forLoopStride _ _ _ _ body => body.foldl collectTileInfoStmt acc
   | .forLoopRev _ _ _ body => body.foldl collectTileInfoStmt acc
   | .forLoopValRev _ _ _ body => body.foldl collectTileInfoStmt acc
+  | .whileLoop body => body.foldl collectTileInfoStmt acc
   | .ifStmt _ thenBody elseBody =>
       let acc' := thenBody.foldl collectTileInfoStmt acc
       elseBody.foldl collectTileInfoStmt acc'
@@ -104,8 +104,10 @@ private def collectRvDeclsStmt (acc : Std.HashSet VarId) : KStmt → Std.HashSet
   | .declRV v _ _ => acc.insert v
   | .forLoop _ _ _ body => body.foldl collectRvDeclsStmt acc
   | .forLoopVal _ _ _ body => body.foldl collectRvDeclsStmt acc
+  | .forLoopStride _ _ _ _ body => body.foldl collectRvDeclsStmt acc
   | .forLoopRev _ _ _ body => body.foldl collectRvDeclsStmt acc
   | .forLoopValRev _ _ _ body => body.foldl collectRvDeclsStmt acc
+  | .whileLoop body => body.foldl collectRvDeclsStmt acc
   | .ifStmt _ thenBody elseBody =>
       let acc' := thenBody.foldl collectRvDeclsStmt acc
       elseBody.foldl collectRvDeclsStmt acc'
@@ -182,8 +184,10 @@ private def collectRvLayoutsStmt
       unifyRvVars rvVars st dst src
   | .forLoop _ _ _ body => body.foldl (collectRvLayoutsStmt rtLayouts rvVars) st
   | .forLoopVal _ _ _ body => body.foldl (collectRvLayoutsStmt rtLayouts rvVars) st
+  | .forLoopStride _ _ _ _ body => body.foldl (collectRvLayoutsStmt rtLayouts rvVars) st
   | .forLoopRev _ _ _ body => body.foldl (collectRvLayoutsStmt rtLayouts rvVars) st
   | .forLoopValRev _ _ _ body => body.foldl (collectRvLayoutsStmt rtLayouts rvVars) st
+  | .whileLoop body => body.foldl (collectRvLayoutsStmt rtLayouts rvVars) st
   | .ifStmt _ thenBody elseBody =>
       let st' := thenBody.foldl (collectRvLayoutsStmt rtLayouts rvVars) st
       elseBody.foldl (collectRvLayoutsStmt rtLayouts rvVars) st'
@@ -343,6 +347,9 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout)
     s!"{indent}detail::tcgen05::commit<{clusterSize}>({sem.toIdent});\n"
 
   -- Tensor memory operations (Blackwell SM100)
+  | .declTMEMPool pool slots clusterSize managed =>
+    let managedStr := if managed then "true" else "false"
+    s!"{indent}tensor_allocator<{slots}, {clusterSize}, {managedStr}> {pool.toIdent};\n"
   | .tmemAllocate dst pool offset =>
     s!"{indent}auto {dst.toIdent} = {pool.toIdent}.allocate({offset});\n"
   | .tmemProvision pool clusterSize =>
@@ -371,6 +378,11 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout)
     s!"{indent}cluster::arrive({sem.toIdent});\n"
   | .clusterWait sem =>
     s!"{indent}cluster::wait({sem.toIdent});\n"
+
+  -- Grid/block geometry
+  | .getGridDim dst axis =>
+    let axisName := match axis with | 0 => "x" | 1 => "y" | _ => "z"
+    s!"{indent}int {dst.toIdent} = gridDim.{axisName};\n"
 
   -- Architecture-specific load variants
   | .cpAsyncLoad dst src coordB coordD coordR coordC _sem =>
@@ -753,12 +765,20 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout)
   | .forLoopVal v lo hi body =>
     let bodyStr := body.toList.map (generateStmt rvLayouts rvVars tileInfo (indent ++ "  ")) |>.foldl (· ++ ·) ""
     s!"{indent}for (int {v.toIdent} = {lo}; {v.toIdent} < {hi.toIdent}; {v.toIdent}++) \{\n{bodyStr}{indent}}\n"
+  | .forLoopStride v init hi step body =>
+    let bodyStr := body.toList.map (generateStmt rvLayouts rvVars tileInfo (indent ++ "  ")) |>.foldl (· ++ ·) ""
+    s!"{indent}for (int {v.toIdent} = {init.toIdent}; {v.toIdent} < {hi.toIdent}; {v.toIdent} += {step.toIdent}) \{\n{bodyStr}{indent}}\n"
   | .forLoopRev v lo hi body =>
     let bodyStr := body.toList.map (generateStmt rvLayouts rvVars tileInfo (indent ++ "  ")) |>.foldl (· ++ ·) ""
     s!"{indent}for (int {v.toIdent} = {hi}; {v.toIdent}-- > {lo}; ) \{\n{bodyStr}{indent}}\n"
   | .forLoopValRev v lo hi body =>
     let bodyStr := body.toList.map (generateStmt rvLayouts rvVars tileInfo (indent ++ "  ")) |>.foldl (· ++ ·) ""
     s!"{indent}for (int {v.toIdent} = {hi.toIdent}; {v.toIdent}-- > {lo}; ) \{\n{bodyStr}{indent}}\n"
+  | .whileLoop body =>
+    let bodyStr := body.toList.map (generateStmt rvLayouts rvVars tileInfo (indent ++ "  ")) |>.foldl (· ++ ·) ""
+    s!"{indent}while (true) \{\n{bodyStr}{indent}}\n"
+  | .breakIf cond =>
+    s!"{indent}if ({cond.toIdent}) break;\n"
   | .ifStmt cond thenBody elseBody =>
     let thenStr := thenBody.toList.map (generateStmt rvLayouts rvVars tileInfo (indent ++ "  ")) |>.foldl (· ++ ·) ""
     let elseStr := elseBody.toList.map (generateStmt rvLayouts rvVars tileInfo (indent ++ "  ")) |>.foldl (· ++ ·) ""
@@ -814,6 +834,10 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout)
     s!"{indent}auto {dst.toIdent} = ({a.toIdent} > {b.toIdent}) ? {a.toIdent} : {b.toIdent};\n"
   | .scalarSelect dst cond ifTrue ifFalse =>
     s!"{indent}auto {dst.toIdent} = {cond.toIdent} ? {ifTrue.toIdent} : {ifFalse.toIdent};\n"
+  | .atomicFetchAddUInt32 dst ptr increment =>
+    s!"{indent}{dst.toIdent} = atomicAdd(reinterpret_cast<unsigned int*>({ptr.toIdent}), static_cast<unsigned int>({increment.toIdent}));\n"
+  | .warpBroadcast dst src srcLane mask =>
+    s!"{indent}{dst.toIdent} = __shfl_sync({mask}, {src.toIdent}, {srcLane});\n"
   | .vecIota dst start step =>
     s!"{indent}warp::apply({dst.toIdent}, {dst.toIdent}, [] __device__ (int _i, auto _x) \{\n" ++
     s!"{indent}  return static_cast<decltype(_x)>({start}f + {step}f * static_cast<float>(_i));\n" ++
@@ -822,8 +846,6 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout)
     s!"{indent}warp::apply({dst.toIdent}, {dst.toIdent}, [&] __device__ (int _i, auto _x) \{\n" ++
     s!"{indent}  return static_cast<decltype(_x)>({scalar.toIdent});\n" ++
     s!"{indent}" ++ "});\n"
-  | .raw code =>
-    indentRaw indent code ++ "\n"
 
 /-- Generate kernel parameter list -/
 def generateParams (params : Array KParam) : String :=
@@ -831,7 +853,9 @@ def generateParams (params : Array KParam) : String :=
     let mut out : List String := []
     for h : idx in [:params.size] do
       let p := params[idx]
-      if p.isPointer then
+      if p.scalarPointer then
+        out := out.concat s!"{p.scalarTy.toCpp}* v{idx}"
+      else if p.isPointer then
         -- Kernel-side global pointers are ThunderKittens gl descriptors.
         -- Start with a minimal 2D dynamic shape (b=1, d=1, rows/cols runtime).
         out := out.concat s!"gl<{p.dtype.toCpp}, 1, 1, -1, -1> v{idx}"
@@ -846,8 +870,10 @@ private partial def stmtUses (p : KStmt → Bool) : KStmt → Bool
       match stmt with
       | .forLoop _ _ _ body => body.any (stmtUses p)
       | .forLoopVal _ _ _ body => body.any (stmtUses p)
+      | .forLoopStride _ _ _ _ body => body.any (stmtUses p)
       | .forLoopRev _ _ _ body => body.any (stmtUses p)
       | .forLoopValRev _ _ _ body => body.any (stmtUses p)
+      | .whileLoop body => body.any (stmtUses p)
       | .ifStmt _ thenBody elseBody =>
         thenBody.any (stmtUses p) || elseBody.any (stmtUses p)
       | .ifWarpGroup _ body => body.any (stmtUses p)

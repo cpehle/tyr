@@ -131,8 +131,9 @@ def archForLoop {minArch : ArchLevel}
 def archIfStmt {minArch : ArchLevel}
     (cond : VarId) (thenBody elseBody : ArchKernelM minArch Unit)
     : ArchKernelM minArch Unit := ⟨do
-  let thenStmts ← captureBody thenBody.run
-  let elseStmts ← captureBody elseBody.run
+  let pred := (← get).proof.predicateOrVar cond
+  let thenStmts ← captureBody (withProofGuard pred thenBody.run)
+  let elseStmts ← captureBody (withProofGuard (.not pred) elseBody.run)
   emit (.ifStmt cond thenStmts elseStmts)⟩
 
 /-- Synchronization operations -/
