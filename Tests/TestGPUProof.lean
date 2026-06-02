@@ -415,6 +415,58 @@ def testShapeSyncPipelinePreviewAnalysisRecorded : IO Unit := do
       fail "expected a representative ShapeSync pipeline analysis"
 
 @[test]
+def testShapeSyncPipelineDepthTwoPreviewAnalysesRecorded : IO Unit := do
+  let kernel := buildKernelM "proof_shapesync_pipeline_depth_two_preview" .SM90 #[] do
+    let shared0 ← freshVar
+    emit (.declST shared0 .Float32 16 16 .Row)
+    let shared1 ← freshVar
+    emit (.declST shared1 .Float32 16 16 .Row)
+    let reg ← freshVar
+    emit (.declRT reg .Float32 16 16 .Row)
+    let global ← freshVar
+    emit (.declGPtr global .Float32 "global")
+    let coord ← freshVar
+    emit (.constInt coord 0)
+    let sem ← freshVar
+    emit (.declSemaphore sem)
+    let sharedAtStage (stage : Nat) := if stage % 2 == 0 then shared0 else shared1
+    pipelinedRingLoop { numIters := 4, depth := 2, warpSpecialized := true }
+      (fun stage => emit (.tmaLoadAsync (sharedAtStage stage) global coord coord coord coord sem))
+      (fun stage => emit (.load reg (sharedAtStage stage)))
+
+  assertTrue (kernel.proof.shapeSyncPipelineAnalyses.size == 2)
+    "depth-2 warp-specialized pipeline should record one ShapeSync analysis per stage"
+  for analysis in kernel.proof.shapeSyncPipelineAnalyses do
+    assertTrue (analysis.protocols.length == 1)
+      "each depth-2 representative stage should have one producer/consumer protocol"
+
+@[test]
+def testShapeSyncPipelineDepthTwoHandoffFallsBackToConservativeSync : IO Unit := do
+  let kernel := buildKernelM "proof_shapesync_pipeline_depth_two_handoff_fallback" .SM90 #[] do
+    let shared0 ← freshVar
+    emit (.declST shared0 .Float32 16 16 .Row)
+    let shared1 ← freshVar
+    emit (.declST shared1 .Float32 16 16 .Row)
+    let reg ← freshVar
+    emit (.declRT reg .Float32 16 16 .Row)
+    let global ← freshVar
+    emit (.declGPtr global .Float32 "global")
+    let coord ← freshVar
+    emit (.constInt coord 0)
+    let sem ← freshVar
+    emit (.declSemaphore sem)
+    let sharedAtStage (stage : Nat) := if stage % 2 == 0 then shared0 else shared1
+    pipelinedRingLoop
+      { numIters := 4, depth := 2, warpSpecialized := true, useShapeSyncBarriers := true }
+      (fun stage => emit (.tmaLoadAsync (sharedAtStage stage) global coord coord coord coord sem))
+      (fun stage => emit (.load reg (sharedAtStage stage)))
+
+  assertTrue (kernel.proof.shapeSyncPipelineAnalyses.size == 2)
+    "depth-2 opt-in should still record per-stage ShapeSync analysis"
+  assertTrue (collectSemaphoreOps kernel.body).isEmpty
+    "depth-2 handoff remains conservative and should not emit ShapeSync semaphore ops yet"
+
+@[test]
 def testShapeSyncPipelineSemaphoreHandoffEmitsSynchronization : IO Unit := do
   let kernel := buildKernelM "proof_shapesync_pipeline_handoff" .SM90 #[] do
     let shared ← freshVar
@@ -466,6 +518,8 @@ def run : IO Unit := do
   testShapeSyncAnalysisDerivedFromSimtStore
   testShapeSyncCheckedNamedBarrierRecordsObligation
   testShapeSyncPipelinePreviewAnalysisRecorded
+  testShapeSyncPipelineDepthTwoPreviewAnalysesRecorded
+  testShapeSyncPipelineDepthTwoHandoffFallsBackToConservativeSync
   testShapeSyncPipelineSemaphoreHandoffEmitsSynchronization
 
 def main : IO Unit := do

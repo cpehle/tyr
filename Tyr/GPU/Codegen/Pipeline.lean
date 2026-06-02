@@ -115,19 +115,22 @@ def pipelinedRingLoop (cfg : PipelineConfig)
     (consumer : Nat → KernelM Unit) : KernelM Unit := do
   let depth := Nat.min cfg.depth cfg.numIters
   let mut shapeSyncProtocol? : Option Tyr.ShapeSync.BarrierProtocol := none
-  if cfg.warpSpecialized then
+  if cfg.warpSpecialized && depth > 0 then
     let proofCtx := (← get).proof.threadCtx
-    let representativeProducer ← captureBodySnapshot (producer depth)
-    let representativeConsumer ← captureBodySnapshot (consumer 0)
-    let previewStmts : Array KStmt := #[
-      .ifWarpGroup 0 representativeProducer,
-      .ifWarpGroup 1 representativeConsumer
-    ]
-    match KernelProof.shapeSyncAnalysisFromStmts proofCtx previewStmts with
-    | some analysis =>
-        addShapeSyncPipelineAnalysis analysis
-        shapeSyncProtocol? := analysis.protocols.head?
-    | none => pure ()
+    for stage in List.range depth do
+      let representativeProducer ← captureBodySnapshot (producer stage)
+      let representativeConsumer ← captureBodySnapshot (consumer stage)
+      let previewStmts : Array KStmt := #[
+        .ifWarpGroup 0 representativeProducer,
+        .ifWarpGroup 1 representativeConsumer
+      ]
+      match KernelProof.shapeSyncAnalysisFromStmts proofCtx previewStmts with
+      | some analysis =>
+          addShapeSyncPipelineAnalysis analysis
+          match shapeSyncProtocol?, analysis.protocols.head? with
+          | none, some protocol => shapeSyncProtocol? := some protocol
+          | _, _ => pure ()
+      | none => pure ()
   let useShapeSyncHandoff :=
     cfg.warpSpecialized && cfg.useShapeSyncBarriers && depth == 1 &&
       shapeSyncProtocol?.isSome
