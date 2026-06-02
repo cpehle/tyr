@@ -1280,6 +1280,16 @@ partial def completeFromStmt (proof : KernelProof) : KStmt → KernelProof
       proof.addShapeSyncConsumerReads [src]
   | .loadAsync dst _src =>
       proof.addShapeSyncProducerWrite .cpAsync dst
+  | .store dst _src =>
+      proof.addShapeSyncProducerWrite .simt dst
+  | .storeAsync dst _src =>
+      proof.addShapeSyncProducerWrite .simt dst
+  | .storeAdd dst _src =>
+      proof.addShapeSyncProducerWrite .simt dst
+  | .storeAddAsync dst _src =>
+      proof.addShapeSyncProducerWrite .simt dst
+  | .storeMinAsync dst _src =>
+      proof.addShapeSyncProducerWrite .simt dst
   | .tmaLoad dst _src _coord =>
       proof.addShapeSyncProducerWrite .tma dst
   | .loadGlobalAsync dst _src _coordB _coordD _coordR _coordC _sem =>

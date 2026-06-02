@@ -1,6 +1,7 @@
 import Tyr.ShapeSync.Shape
 import Tyr.ShapeSync.Thread
 import Tyr.ShapeSync.Graph
+import Tyr.ShapeSync.Arch
 import Tyr.ShapeSync.ProducerConsumer
 import Tyr.ShapeSync.Proof
 

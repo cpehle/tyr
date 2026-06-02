@@ -325,6 +325,41 @@ def testShapeSyncAnalysisDerivedFromKStmtTree : IO Unit := do
       fail "expected ShapeSync producer/consumer analysis to be attached to KernelProof"
 
 @[test]
+def testShapeSyncAnalysisDerivedFromSimtStore : IO Unit := do
+  let kernel := buildKernelM "proof_shapesync_simt_store" .SM90 #[] do
+    let shared ← freshVar
+    emit (.declST shared .Float32 16 16 .Row)
+    let producerReg ← freshVar
+    emit (.declRT producerReg .Float32 16 16 .Row)
+    let consumerReg ← freshVar
+    emit (.declRT consumerReg .Float32 16 16 .Row)
+    emit (.ifWarpGroup 0 #[
+      .store shared producerReg
+    ])
+    emit (.ifWarpGroup 1 #[
+      .load consumerReg shared
+    ])
+
+  assertTrue (kernel.proof.shapeSyncNodes.size == 2)
+    "expected ShapeSync to collect one SIMT producer node and one consumer node"
+  match kernel.proof.shapeSyncProducerConsumer? with
+  | some analysis =>
+      assertTrue (analysis.graph.producerConsumerPairs.length == 1)
+        "expected a producer/consumer pair for the stored shared tile"
+      assertTrue (analysis.protocols.length == 1)
+        "expected one SIMT producer/consumer protocol for the shared resource"
+      match analysis.protocols.head? with
+      | some protocol =>
+          assertTrue (protocol.forward.expectedParticipants == 128)
+            "SIMT producer warp-group should contribute 128 participants"
+          assertTrue (protocol.backpressure.expectedParticipants == 128)
+            "consumer warp-group should contribute 128 participants"
+      | none =>
+          fail "expected a SIMT store protocol"
+  | none =>
+      fail "expected ShapeSync producer/consumer analysis for SIMT store"
+
+@[test]
 def testShapeSyncCheckedNamedBarrierRecordsObligation : IO Unit := do
   let shapeCtx := ShapeSyncBridge.threadCtx ({ blockDimX := 256 } : ThreadCtx)
   let kernel := buildKernelM "proof_shapesync_checked_barrier" .SM90 #[] do
@@ -428,6 +463,7 @@ def run : IO Unit := do
   testShapeSyncBridgeConvertsClosedModuloGuard
   testShapeSyncBridgeRejectsRuntimeBoolGuard
   testShapeSyncAnalysisDerivedFromKStmtTree
+  testShapeSyncAnalysisDerivedFromSimtStore
   testShapeSyncCheckedNamedBarrierRecordsObligation
   testShapeSyncPipelinePreviewAnalysisRecorded
   testShapeSyncPipelineSemaphoreHandoffEmitsSynchronization
