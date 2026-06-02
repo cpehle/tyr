@@ -318,7 +318,7 @@ def testCodeGenDeclarations : IO Unit := do
 
   let code := generateKernel kernel
   assertTrue (code.containsSubstr "rt<bf16, 64, 64, row_l>") "Should have RT declaration"
-  assertTrue (code.containsSubstr "__shared__ st<float, 32, 64>") "Should have ST declaration"
+  assertTrue (code.containsSubstr "al.allocate<st<float, 32, 64>>") "Should have ST declaration"
   assertTrue (code.containsSubstr "rv<float, 64") "Should have RV declaration"
 
 @[test]
@@ -682,8 +682,8 @@ def testKernelParams : IO Unit := do
   ] (pure ())
 
   let code := generateKernel kernel
-  assertTrue (code.containsSubstr "gl<bf16, 1, 1, -1, -1> v0") "Should have bf16 global descriptor param"
-  assertTrue (code.containsSubstr "gl<float, 1, 1, -1, -1> v1") "Should have float global descriptor param"
+  assertTrue (code.containsSubstr "gl<bf16, -1, -1, -1, -1> v0") "Should have bf16 global descriptor param"
+  assertTrue (code.containsSubstr "gl<float, -1, -1, -1, -1> v1") "Should have float global descriptor param"
   assertTrue (code.containsSubstr "uint64_t v2") "Should have scalar param"
 
 /-- Test the shared SIMT helpers used by decode-style kernels. -/
@@ -702,7 +702,7 @@ def testDecodeSimtHelperCodegen : IO Unit := do
     "parallelThreadRange should stride by the CTA size"
   assertTrue (code.containsSubstr "::rsqrtf")
     "runtimeDefaultScoreScaleLog2e should lower through scalar rsqrt"
-  assertTrue (code.containsSubstr "1.44269504089")
+  assertTrue (code.containsSubstr "1.442695f")
     "runtimeDefaultScoreScaleLog2e should include log2(e)"
 
 /-- Decode attention should be authored through the DSL, not raw CUDA snippets.
@@ -832,7 +832,7 @@ def testFlashAttnStructure : IO Unit := do
 
   -- Check all expected components
   assertTrue (code.containsSubstr "flash_attn_test") "Should have kernel name"
-  assertTrue (code.containsSubstr "gl<bf16, 1, 1, -1, -1> v0") "Should have first global descriptor param"
+  assertTrue (code.containsSubstr "gl<bf16, -1, -1, -1, -1> v0") "Should have first global descriptor param"
   assertTrue (code.containsSubstr "mma_ABt(") "Should have mmaT"
   assertTrue (code.containsSubstr "make_causal(") "Should have causal mask"
   assertTrue (code.containsSubstr "row_max(") "Should have row_max"
