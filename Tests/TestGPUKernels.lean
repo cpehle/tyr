@@ -4,6 +4,7 @@
   Tests for the native Lean4 GPU kernel DSL.
   Tests type safety, code generation, and architecture specialization.
 -/
+import Lean
 import Tyr.GPU.Types
 import Tyr.GPU.Codegen.Var
 import Tyr.GPU.Codegen.TileTypes
@@ -55,6 +56,37 @@ private partial def stmtHasRaw : KStmt → Bool
   | .ifStmt _ thenBody elseBody => thenBody.any stmtHasRaw || elseBody.any stmtHasRaw
   | .ifWarpGroup _ body => body.any stmtHasRaw
   | _ => false
+
+private def runCoreWithEnv (env : Lean.Environment) (x : Lean.CoreM α) : IO α := do
+  let ctx : Lean.Core.Context := {
+    fileName := "<gpu-kernel-test>"
+    fileMap := default
+  }
+  let st : Lean.Core.State := { env := env }
+  x.toIO' ctx st
+
+private unsafe def evalKernelConstExprForTest (constName : Lean.Name) : Lean.CoreM Kernel := do
+  withTheReader Lean.Core.Context (fun ctx => { ctx with maxHeartbeats := 0 }) do
+    Lean.Meta.MetaM.run' do
+      let info ← Lean.getConstInfo constName
+      let value ← match info with
+        | .defnInfo info => pure info.value
+        | .thmInfo info => pure info.value
+        | _ => throwError "Kernel companion '{constName}' is not reducible."
+      Lean.Meta.evalExpr
+        Kernel
+        (Lean.mkConst ``Tyr.GPU.Codegen.Kernel)
+        value
+
+private unsafe def evalKernelForTest (kernelConst : Lean.Name) : IO Kernel := do
+  Lean.initSearchPath (← Lean.findSysroot)
+  Lean.enableInitializersExecution
+  let env ← Lean.importModules
+    #[{ module := `LeanTest }, { module := `Tyr.GPU.Kernels.MhaH100Decode }]
+    {}
+    (loadExts := true)
+  runCoreWithEnv env <|
+    evalKernelConstExprForTest kernelConst
 
 /-! ## Basic Tile Allocation Tests -/
 
@@ -678,16 +710,16 @@ def testDecodeSimtHelperCodegen : IO Unit := do
     The TK-style tile-based decode kernel (V1) lowers QK^T and PV through
     WGMMA, K/V loads through TMA, and uses online softmax in `log2` form. -/
 @[test]
-noncomputable def testDecodeKernelDslCodegen : IO Unit := do
-  let kernel := Tyr.GPU.Kernels.tkMhaH100DecodeFwd.kernel
+unsafe def testDecodeKernelDslCodegen : IO Unit := do
+  let kernel ← evalKernelForTest ``Tyr.GPU.Kernels.tkMhaH100DecodeFwd.kernel
   assertTrue (!kernel.body.any stmtHasRaw)
     "Decode kernel IR should not contain raw backend escape statements"
 
   let code := generateKernel kernel
   assertTrue (code.containsSubstr "extern __shared__ int __shm[]")
     "Dynamic shared-memory views should emit a shared-memory arena"
-  assertTrue (code.containsSubstr "mma_ABt(")
-    "QK^T should lower through warpgroup MMA (mma_ABt)"
+  assertTrue (code.containsSubstr "mm_ABt(")
+    "QK^T should lower through warpgroup MM overwrite (mm_ABt)"
   assertTrue (code.containsSubstr "mma_AB(")
     "PV should lower through warpgroup MMA (mma_AB)"
   assertTrue (code.containsSubstr "tma::load_async")
@@ -701,13 +733,13 @@ noncomputable def testDecodeKernelDslCodegen : IO Unit := do
 
 /-- The head_dim=64 decode variant emits the same TK-style structure. -/
 @[test]
-noncomputable def testDecodeKernelDslCodegen64 : IO Unit := do
-  let kernel := Tyr.GPU.Kernels.tkMhaH100DecodeFwd64.kernel
+unsafe def testDecodeKernelDslCodegen64 : IO Unit := do
+  let kernel ← evalKernelForTest ``Tyr.GPU.Kernels.tkMhaH100DecodeFwd64.kernel
   assertTrue (!kernel.body.any stmtHasRaw)
     "Decode-64 kernel IR should not contain raw backend escape statements"
   let code := generateKernel kernel
-  assertTrue (code.containsSubstr "mma_ABt(")
-    "QK^T should still lower through warpgroup MMA in the 64-dim variant"
+  assertTrue (code.containsSubstr "mm_ABt(")
+    "QK^T should still lower through warpgroup MM overwrite in the 64-dim variant"
   assertTrue (code.containsSubstr "mma_AB(")
     "PV should still lower through warpgroup MMA in the 64-dim variant"
   assertTrue (code.containsSubstr "tma::load_async")
