@@ -71,6 +71,8 @@ jobs:
         run: |
           rm -rf "$GITHUB_WORKSPACE/../doc-gen4"
           git clone --depth 1 https://github.com/cpehle/doc-gen4.git "$GITHUB_WORKSPACE/../doc-gen4"
+          cd "$GITHUB_WORKSPACE/../doc-gen4"
+          lake update BibtexQuery
 
       - name: Create docbuild package
         run: |
