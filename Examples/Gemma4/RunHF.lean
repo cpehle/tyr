@@ -5,11 +5,22 @@
   local path or HuggingFace repo id.
 -/
 import Tyr.Hub
-import Tyr.Model.Gemma4
+import Tyr.Model.Gemma4.Config
+import Tyr.Model.Gemma4.ConfigIO
+import Tyr.Model.Gemma4.Model
+import Tyr.Model.Gemma4.Weights
+import Tyr.Model.Gemma4.VLConfig
+import Tyr.Model.Gemma4.VLConfigIO
+import Tyr.Model.Gemma4.Media
+import Tyr.Model.Gemma4.Multimodal
+import Tyr.Model.Gemma4.VLWeights
 import Tyr.Tokenizer.Gemma4
+import Examples.ModelRunner
 
 open torch
+open torch.Model
 open torch.gemma4
+open Examples.ModelRunner
 
 namespace Examples.Gemma4
 
@@ -30,10 +41,27 @@ structure Args where
   showHelp : Bool := false
   deriving Inhabited
 
-private def parseNatArg (name : String) (v : String) : IO UInt64 := do
-  match v.toNat? with
-  | some n => pure n.toUInt64
-  | none => throw <| IO.userError s!"Invalid {name}: {v}"
+private partial def parseArgsLoop (xs : List String) (acc : Args) : IO Args := do
+  match xs with
+  | [] => pure acc
+  | "--source" :: v :: rest => parseArgsLoop rest { acc with source := v }
+  | "--revision" :: v :: rest => parseArgsLoop rest { acc with revision := v }
+  | "--cache-dir" :: v :: rest => parseArgsLoop rest { acc with cacheDir := v }
+  | "--device" :: v :: rest => parseArgsLoop rest { acc with device := v }
+  | "--prompt" :: v :: rest => parseArgsLoop rest { acc with prompt := v }
+  | "--prompt-file" :: v :: rest => parseArgsLoop rest { acc with promptFile := some v }
+  | "--image" :: v :: rest => parseArgsLoop rest { acc with imagePaths := acc.imagePaths.push v }
+  | "--batch-size" :: v :: rest => parseArgsLoop rest { acc with batchSize := (← parseNatArg "--batch-size" v) }
+  | "--max-new-tokens" :: v :: rest => parseArgsLoop rest { acc with maxNewTokens := (← parseNatArg "--max-new-tokens" v) }
+  | "--stream" :: rest => parseArgsLoop rest { acc with stream := true }
+  | "--multimodal" :: rest => parseArgsLoop rest { acc with multimodal := true }
+  | "--enable-thinking" :: rest => parseArgsLoop rest { acc with enableThinking := true }
+  | "--debug-ids" :: rest => parseArgsLoop rest { acc with debugIds := true }
+  | "--help" :: _ => parseArgsLoop [] { acc with showHelp := true }
+  | x :: _ => throw <| IO.userError s!"Unknown argument: {x}"
+
+private def parseArgs (xs : List String) : IO Args :=
+  parseArgsLoop xs {}
 
 private def printHelp : IO Unit := do
   IO.println "Usage: lake exe Gemma4RunHF [options]"
@@ -51,102 +79,14 @@ private def printHelp : IO Unit := do
   IO.println "  --enable-thinking            Use the Gemma 4 thinking-enabled chat template"
   IO.println "  --debug-ids                  Print generated token ids alongside decoded text"
 
-private partial def parseArgsLoop (xs : List String) (acc : Args) : IO Args := do
-  match xs with
-  | [] => pure acc
-  | "--source" :: v :: rest =>
-      parseArgsLoop rest { acc with source := v }
-  | "--revision" :: v :: rest =>
-      parseArgsLoop rest { acc with revision := v }
-  | "--cache-dir" :: v :: rest =>
-      parseArgsLoop rest { acc with cacheDir := v }
-  | "--device" :: v :: rest =>
-      parseArgsLoop rest { acc with device := v }
-  | "--prompt" :: v :: rest =>
-      parseArgsLoop rest { acc with prompt := v }
-  | "--prompt-file" :: v :: rest =>
-      parseArgsLoop rest { acc with promptFile := some v }
-  | "--image" :: v :: rest =>
-      parseArgsLoop rest { acc with imagePaths := acc.imagePaths.push v }
-  | "--batch-size" :: v :: rest =>
-      parseArgsLoop rest { acc with batchSize := (← parseNatArg "--batch-size" v) }
-  | "--max-new-tokens" :: v :: rest =>
-      parseArgsLoop rest { acc with maxNewTokens := (← parseNatArg "--max-new-tokens" v) }
-  | "--stream" :: rest =>
-      parseArgsLoop rest { acc with stream := true }
-  | "--multimodal" :: rest =>
-      parseArgsLoop rest { acc with multimodal := true }
-  | "--enable-thinking" :: rest =>
-      parseArgsLoop rest { acc with enableThinking := true }
-  | "--debug-ids" :: rest =>
-      parseArgsLoop rest { acc with debugIds := true }
-  | "--help" :: _ =>
-      parseArgsLoop [] { acc with showHelp := true }
-  | x :: _ =>
-      throw <| IO.userError s!"Unknown argument: {x}"
-
-private def parseArgs (xs : List String) : IO Args :=
-  parseArgsLoop xs {}
-
-private def loadPrompts (args : Args) : IO (Array String) := do
-  match args.promptFile with
-  | some path =>
-    let contents ← IO.FS.readFile path
-    let lines := contents.splitOn "\n"
-    let prompts := lines.foldl
-      (init := #[])
-      (fun acc line =>
-        let s := line.trimAscii.toString
-        if s.isEmpty then acc else acc.push s)
-    if prompts.isEmpty then
-      throw <| IO.userError s!"No prompts found in {path}"
-    pure prompts
-  | none =>
-    pure #[args.prompt]
-
-private def deviceToString : Device → String
-  | Device.MPS => "MPS"
-  | Device.CPU => "CPU"
-  | Device.CUDA n => s!"CUDA:{n}"
-
-private def resolveDevice (arg : String) : IO Device := do
-  let requested := arg.trimAscii.toString.toLower
-  match requested with
-  | "auto" => getBestDevice
-  | "cpu" => pure Device.CPU
-  | "mps" => pure Device.MPS
-  | "cuda" =>
-      if ← cuda_is_available then pure (Device.CUDA 0) else pure Device.CPU
-  | _ =>
-      if requested.startsWith "cuda:" then
-        match (requested.drop 5).toNat? with
-        | some idx =>
-            if ← cuda_is_available then pure (Device.CUDA idx.toUInt64) else pure Device.CPU
-        | none => pure Device.CPU
-      else
-        pure Device.CPU
-
-private def moveModelToDevice [TensorStruct α] (device : Device) (x : α) : IO α :=
-  TensorStruct.mapM (fun t => pure (t.to device)) x
-
-private def movePatchGridTo {cfg : VLConfig}
-    (device : Device)
-    (x : ImagePatchGrid cfg)
-    : ImagePatchGrid cfg :=
-  match x with
-  | ⟨patchRows, ⟨patchCols, grid⟩⟩ =>
-    ⟨patchRows, ⟨patchCols, grid.to device⟩⟩
-
 private def encodePromptToIds
     (tok : tokenizer.gemma4.GemmaTokenizer)
     (enableThinking : Bool)
     (prompt : String)
     : Array UInt64 :=
   let text :=
-    if enableThinking then
-      tokenizer.gemma4.chatTemplateThinking prompt
-    else
-      tokenizer.gemma4.chatTemplate prompt
+    if enableThinking then tokenizer.gemma4.chatTemplateThinking prompt
+    else tokenizer.gemma4.chatTemplate prompt
   (tokenizer.gemma4.encodeText tok text).map (fun t => t.toUInt64)
 
 private def buildImageExpansion (softTokenCount : UInt64) : String :=
@@ -161,26 +101,19 @@ private def prefixImageExpansions (softTokenCounts : Array UInt64) : String :=
   Id.run do
     let mut out := ""
     for i in [:softTokenCounts.size] do
-      if i > 0 then
-        out := out ++ " "
+      if i > 0 then out := out ++ " "
       out := out ++ buildImageExpansion softTokenCounts[i]!
     pure out
 
-private def injectImageExpansions
-    (prompt : String)
-    (softTokenCounts : Array UInt64)
-    : IO String := do
+private def injectImageExpansions (prompt : String) (softTokenCounts : Array UInt64) : IO String := do
   let placeholder := "<|image|>"
   let parts := (prompt.splitOn placeholder).toArray
-  if parts.size <= 1 then do
+  if parts.size <= 1 then
     let prefixText := prefixImageExpansions softTokenCounts
-    if prefixText.isEmpty then
-      pure prompt
-    else if prompt.trimAscii.isEmpty then
-      pure prefixText
-    else
-      pure s!"{prefixText}\n{prompt}"
-  else do
+    if prefixText.isEmpty then pure prompt
+    else if prompt.trimAscii.isEmpty then pure prefixText
+    else pure s!"{prefixText}\n{prompt}"
+  else
     let occurrences := parts.size - 1
     if occurrences != softTokenCounts.size then
       throw <| IO.userError
@@ -199,35 +132,6 @@ private def encodePromptToIdsMultimodal
   let prompt' ← injectImageExpansions prompt softTokenCounts
   pure (encodePromptToIds tok enableThinking prompt')
 
-private def buildBatchInputWithEncoder
-    (tok : tokenizer.gemma4.GemmaTokenizer)
-    (prompts : Array String)
-    (encode : String → IO (Array UInt64))
-    : IO (Sigma (fun batch => Sigma (fun seq => T #[batch, seq] × Array Nat))) := do
-  let mut encoded : Array (Array UInt64) := #[]
-  for prompt in prompts do
-    encoded := encoded.push (← encode prompt)
-  let batch := encoded.size.toUInt64
-  if batch == 0 then
-    throw <| IO.userError "buildBatchInputWithEncoder requires at least one prompt"
-
-  let maxLenNat := encoded.foldl (fun m ids => Nat.max m ids.size) 0
-  if maxLenNat == 0 then
-    throw <| IO.userError "Prompt tokenization produced empty input."
-  let seq := maxLenNat.toUInt64
-
-  let mut flat : Array Int64 := #[]
-  let mut promptLens : Array Nat := #[]
-  for ids in encoded do
-    promptLens := promptLens.push ids.size
-    let mut row : Array Int64 := ids.map (fun x => x.toInt64)
-    while row.size < maxLenNat do
-      row := row.push tok.padToken.toUInt64.toInt64
-    flat := flat ++ row
-
-  let inputIds : T #[batch, seq] := reshape (data.fromInt64Array flat) #[batch, seq]
-  pure ⟨batch, ⟨seq, (inputIds, promptLens)⟩⟩
-
 private def pushUnique (xs : Array UInt64) (x : UInt64) : Array UInt64 :=
   if xs.contains x then xs else xs.push x
 
@@ -242,80 +146,9 @@ private def eosStopTokenIds (tok : tokenizer.gemma4.GemmaTokenizer) (cfg : Confi
       | none => pure ()
     out
 
-private def generatedIdsFromBatch
-    (promptLens : Array Nat)
-    {batch outSeq : UInt64}
-    (ids : T #[batch, outSeq])
-    : IO (Array (Array UInt64)) := do
-  let mut out : Array (Array UInt64) := #[]
-  for i in [:batch.toNat] do
-    let row2 : T #[1, outSeq] := data.slice ids 0 i.toUInt64 1
-    let row1 : T #[outSeq] := reshape (data.toLong row2) #[outSeq]
-    let vals ← data.tensorToUInt64Array row1
-    let promptLen := promptLens.getD i 0
-    let gen :=
-      if vals.size <= promptLen then
-        #[]
-      else
-        vals.extract promptLen vals.size
-    out := out.push gen
-  pure out
-
-private def decodeGeneratedBatch
-    (tok : tokenizer.gemma4.GemmaTokenizer)
-    (promptLens : Array Nat)
-    {batch outSeq : UInt64}
-    (ids : T #[batch, outSeq])
-    : IO (Array String) := do
-  let generatedIds ← generatedIdsFromBatch promptLens ids
-  pure <| generatedIds.map (fun xs => tokenizer.gemma4.decodeText tok (xs.map (fun x => x.toUInt32)))
-
-private def printDecodedBatch
-    (chunkStart : Nat)
-    (decoded : Array String)
-    (singleOnly : Bool := false)
-    : IO Unit := do
-  if singleOnly && decoded.size == 1 && chunkStart == 0 then
-    IO.println "GEN_BEGIN"
-    IO.println decoded[0]!
-    IO.println "GEN_END"
-  else
-    for i in [:decoded.size] do
-      let idx := chunkStart + i
-      IO.println s!"GEN[{idx}]_BEGIN"
-      IO.println decoded[i]!
-      IO.println s!"GEN[{idx}]_END"
-
-private def printGeneratedIds
-    (chunkStart : Nat)
-    (generatedIds : Array (Array UInt64))
-    (singleOnly : Bool := false)
-    : IO Unit := do
-  if singleOnly && generatedIds.size == 1 && chunkStart == 0 then
-    IO.println s!"GEN_IDS={generatedIds[0]!}"
-  else
-    for i in [:generatedIds.size] do
-      let idx := chunkStart + i
-      IO.println s!"GEN_IDS[{idx}]={generatedIds[i]!}"
-
-private def streamCallback
-    (tok : tokenizer.gemma4.GemmaTokenizer)
-    {batch : UInt64}
-    (chunkStart : Nat)
-    : Gemma4ForCausalLM.StreamCallback batch := fun _step nextTok => do
-  let flat : T #[batch] := reshape (data.toLong nextTok) #[batch]
-  let vals ← data.tensorToUInt64Array flat
-  if batch == 1 then
-    match vals[0]? with
-    | some v =>
-      let piece := tokenizer.gemma4.decodeOne tok v.toUInt32
-      IO.print piece
-    | none => pure ()
-  else
-    for i in [:vals.size] do
-      let idx := chunkStart + i
-      let piece := tokenizer.gemma4.decodeOne tok vals[i]!.toUInt32
-      IO.println s!"STREAM[{idx}] {piece}"
+private def movePatchGridTo {cfg : VLConfig} (device : Device) (x : ImagePatchGrid cfg) : ImagePatchGrid cfg :=
+  match x with
+  | ⟨patchRows, ⟨patchCols, grid⟩⟩ => ⟨patchRows, ⟨patchCols, grid.to device⟩⟩
 
 private def runTextBatches
     (tok : tokenizer.gemma4.GemmaTokenizer)
@@ -325,39 +158,20 @@ private def runTextBatches
     (args : Args)
     (prompts : Array String)
     : IO Unit := do
-  let chunkSize := Nat.max 1 args.batchSize.toNat
   let generationStopIds := eosStopTokenIds tok cfg
-
-  let mut start : Nat := 0
-  while start < prompts.size do
-    let stop := Nat.min prompts.size (start + chunkSize)
-    let chunk := prompts.extract start stop
-    let ⟨_batch, ⟨_seq, (inputIds, promptLens)⟩⟩ ←
-      buildBatchInputWithEncoder tok chunk (fun p => pure (encodePromptToIds tok args.enableThinking p))
-    let inputIds := inputIds.to device
-
-    let ⟨_outSeq, outIds⟩ ←
-      if args.stream then
-        model.generateStream
-          cfg
-          inputIds
-          (streamCallback tok start)
-          args.maxNewTokens
-          .greedy
-          generationStopIds
-      else
-        model.generate cfg inputIds args.maxNewTokens .greedy generationStopIds
-
-    if args.stream && chunk.size == 1 then
-      IO.println ""
-
-    if !args.stream then
-      let decoded ← decodeGeneratedBatch tok promptLens outIds
-      if args.debugIds then
-        let generatedIds ← generatedIdsFromBatch promptLens outIds
-        printGeneratedIds start generatedIds (singleOnly := prompts.size == 1)
-      printDecodedBatch start decoded (singleOnly := prompts.size == 1)
-    start := stop
+  let buildBatch chunk := do
+    let ⟨batch, ⟨seq, (inputIds, promptLens)⟩⟩ ←
+      buildBatchInputWithEncoder tok.padToken.toUInt64 chunk (fun p => pure (encodePromptToIds tok args.enableThinking p))
+    pure ⟨batch, ⟨seq, (inputIds.to device, promptLens)⟩⟩
+  let decodeBatch (promptLens : Array Nat) {b os : UInt64} (ids : T #[b, os]) : IO (Array String) :=
+    decodeGeneratedBatch promptLens ids (fun xs => tokenizer.gemma4.decodeText tok xs)
+  let runGen (b : UInt64) {s : UInt64} (ids : T #[b, s]) :=
+    model.generate cfg ids args.maxNewTokens .greedy generationStopIds
+  let runGenStream (b : UInt64) {s : UInt64} (ids : T #[b, s]) (cb : StreamCallback b) :=
+    model.generateStream cfg ids cb args.maxNewTokens .greedy generationStopIds
+  runGenerationBatches prompts args.batchSize args.maxNewTokens args.stream args.debugIds
+    (prompts.size == 1) buildBatch runGen runGenStream decodeBatch
+    (makeStreamCallback (fun x => tokenizer.gemma4.decodeOne tok x))
 
 private def runMultimodalBatches
     (tok : tokenizer.gemma4.GemmaTokenizer)
@@ -369,53 +183,29 @@ private def runMultimodalBatches
     (imageSoftTokenCounts : Array UInt64)
     (imageFeatures : Option (ImageFeatures cfg))
     : IO Unit := do
-  let chunkSize := Nat.max 1 args.batchSize.toNat
   let generationStopIds := eosStopTokenIds tok cfg.text_config
-
-  let mut start : Nat := 0
-  while start < prompts.size do
-    let stop := Nat.min prompts.size (start + chunkSize)
-    let chunk := prompts.extract start stop
-    let enc := encodePromptToIdsMultimodal tok args.enableThinking imageSoftTokenCounts
-    let ⟨batch, ⟨_seq, (inputIds, promptLens)⟩⟩ ←
-      buildBatchInputWithEncoder tok chunk enc
-    let inputIds := inputIds.to device
+  let buildBatch chunk := do
+    let ⟨batch, ⟨seq, (inputIds, promptLens)⟩⟩ ←
+      buildBatchInputWithEncoder tok.padToken.toUInt64 chunk
+        (encodePromptToIdsMultimodal tok args.enableThinking imageSoftTokenCounts)
+    pure ⟨batch, ⟨seq, (inputIds.to device, promptLens)⟩⟩
+  let decodeBatch (promptLens : Array Nat) {b os : UInt64} (ids : T #[b, os]) : IO (Array String) :=
+    decodeGeneratedBatch promptLens ids (fun xs => tokenizer.gemma4.decodeText tok xs)
+  let runGen (b : UInt64) {s : UInt64} (ids : T #[b, s]) :=
     let imageFeaturesChunk :=
       match imageFeatures with
-      | some ⟨_nTok, feats⟩ =>
-        some <| Gemma4ForConditionalGeneration.repeatFeaturesForBatch (batch := batch) cfg feats
-      | none =>
-        none
-
-    let ⟨_outSeq, outIds⟩ ←
-      if args.stream then
-        model.generateStream
-          cfg
-          inputIds
-          (streamCallback tok start)
-          args.maxNewTokens
-          .greedy
-          generationStopIds
-          imageFeaturesChunk
-      else
-        model.generate
-          cfg
-          inputIds
-          args.maxNewTokens
-          .greedy
-          generationStopIds
-          imageFeaturesChunk
-
-    if args.stream && chunk.size == 1 then
-      IO.println ""
-
-    if !args.stream then
-      let decoded ← decodeGeneratedBatch tok promptLens outIds
-      if args.debugIds then
-        let generatedIds ← generatedIdsFromBatch promptLens outIds
-        printGeneratedIds start generatedIds (singleOnly := prompts.size == 1)
-      printDecodedBatch start decoded (singleOnly := prompts.size == 1)
-    start := stop
+      | some ⟨_nTok, feats⟩ => some <| Gemma4ForConditionalGeneration.repeatFeaturesForBatch (batch := b) cfg feats
+      | none => none
+    model.generate cfg ids args.maxNewTokens .greedy generationStopIds imageFeaturesChunk
+  let runGenStream (b : UInt64) {s : UInt64} (ids : T #[b, s]) (cb : StreamCallback b) :=
+    let imageFeaturesChunk :=
+      match imageFeatures with
+      | some ⟨_nTok, feats⟩ => some <| Gemma4ForConditionalGeneration.repeatFeaturesForBatch (batch := b) cfg feats
+      | none => none
+    model.generateStream cfg ids cb args.maxNewTokens .greedy generationStopIds imageFeaturesChunk
+  runGenerationBatches prompts args.batchSize args.maxNewTokens args.stream args.debugIds
+    (prompts.size == 1) buildBatch runGen runGenStream decodeBatch
+    (makeStreamCallback (fun x => tokenizer.gemma4.decodeOne tok x))
 
 def runMain (argv : List String) : IO UInt32 := do
   let args ← parseArgs argv
@@ -423,31 +213,32 @@ def runMain (argv : List String) : IO UInt32 := do
     printHelp
     return 0
 
-  let device ← resolveDevice args.device
+  let (device, deviceWarning?) ← resolveDevice args.device
   let hasImages := !args.imagePaths.isEmpty
   let useMultimodal := args.multimodal || hasImages
   if hasImages && !args.multimodal then
     IO.println "Info: enabling multimodal mode because --image was provided."
 
-  let modelDir ← hub.resolvePretrainedDir args.source {
+  let modelDir ← Hub.resolvePretrainedDir args.source {
     revision := args.revision
     cacheDir := args.cacheDir
     includeTokenizer := true
   }
   IO.println s!"Model directory: {modelDir}"
+  match deviceWarning? with
+  | some msg => IO.println msg
+  | none => pure ()
   IO.println s!"Using device: {deviceToString device}"
 
   let tok ← tokenizer.gemma4.loadTokenizer modelDir
-  let prompts ← loadPrompts args
+  let prompts ← loadPrompts args.promptFile args.prompt
 
   if useMultimodal && hasImages then
     let cfg ← VLConfig.loadFromPretrainedDir modelDir {}
-    let isSharded ← hub.detectWeightLayout modelDir
+    let isSharded ← Hub.detectWeightLayout modelDir
     let modelCpu ←
-      if isSharded then
-        Gemma4ForConditionalGeneration.loadSharded modelDir cfg
-      else
-        Gemma4ForConditionalGeneration.load s!"{modelDir}/model.safetensors" cfg
+      if isSharded then Gemma4ForConditionalGeneration.loadSharded modelDir cfg
+      else Gemma4ForConditionalGeneration.load s!"{modelDir}/model.safetensors" cfg
     let model ← moveModelToDevice device modelCpu
 
     let mut imageGrids : Array (ImagePatchGrid cfg) := #[]
@@ -457,9 +248,8 @@ def runMain (argv : List String) : IO UInt32 := do
       let grid := movePatchGridTo device (← media.loadImagePatchGrid cfg p)
       match grid with
       | ⟨patchRows, ⟨patchCols, _⟩⟩ =>
-        imageSoftTokenCounts :=
-          imageSoftTokenCounts.push
-            ((patchRows / cfg.vision_config.pooling_kernel_size) * (patchCols / cfg.vision_config.pooling_kernel_size))
+        imageSoftTokenCounts := imageSoftTokenCounts.push
+          ((patchRows / cfg.vision_config.pooling_kernel_size) * (patchCols / cfg.vision_config.pooling_kernel_size))
       imageGrids := imageGrids.push grid
 
     let imageFeatures ← model.getImageFeaturesMany cfg imageGrids
@@ -468,12 +258,10 @@ def runMain (argv : List String) : IO UInt32 := do
     if useMultimodal && !hasImages then
       IO.println "Warning: --multimodal requested without --image; running text-only path."
     let cfg ← Config.loadFromPretrainedDir modelDir Config.gemma4_E4B
-    let isSharded ← hub.detectWeightLayout modelDir
+    let isSharded ← Hub.detectWeightLayout modelDir
     let modelCpu ←
-      if isSharded then
-        Gemma4ForCausalLM.loadSharded modelDir cfg
-      else
-        Gemma4ForCausalLM.load s!"{modelDir}/model.safetensors" cfg
+      if isSharded then Gemma4ForCausalLM.loadSharded modelDir cfg
+      else Gemma4ForCausalLM.load s!"{modelDir}/model.safetensors" cfg
     let model ← moveModelToDevice device modelCpu
     runTextBatches tok cfg model device args prompts
 
