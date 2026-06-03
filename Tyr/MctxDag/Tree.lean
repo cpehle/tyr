@@ -10,7 +10,7 @@ structure DagTree (S K E : Type) [BEq K] [Hashable K] where
   nodeValues : Array Float
   childrenIndex : Array (Array Int)
   childrenPriorLogits : Array (Array Float)
-  childrenVisits : Array (Array Nat)
+  childrenVisits : Array (Array UInt64)
   childrenRewards : Array (Array Float)
   childrenDiscounts : Array (Array Float)
   childrenValues : Array (Array Float)
@@ -60,18 +60,18 @@ def DagTree.qvalues [BEq K] [Hashable K] (tree : DagTree S K E) (nodeIndex : Nat
   (List.range rewards.size).toArray.map fun a =>
     rewards.getD a 0.0 + discounts.getD a 0.0 * values.getD a 0.0
 
-private def visitProbsFromCounts (counts : Array Nat) (numActions : Nat) : Array Float :=
-  let total : Nat := counts.foldl (init := 0) (· + ·)
+private def visitProbsFromCounts (counts : Array UInt64) (numActions : UInt64) : Array Float :=
+  let total : UInt64 := counts.foldl (init := 0) (· + ·)
   if total = 0 then
-    if numActions = 0 then #[] else Array.replicate numActions (1.0 / Float.ofNat numActions)
+    if numActions = 0 then #[] else Array.replicate numActions.toNat (1.0 / numActions.toFloat)
   else
-    counts.map (fun c => Float.ofNat c / Float.ofNat total)
+    counts.map (fun c => c.toFloat / total.toFloat)
 
 def DagTree.summary [BEq K] [Hashable K] (tree : DagTree S K E) : SearchSummary :=
   let value := tree.nodeValues.getD ROOT_INDEX 0.0
   let visitCounts := tree.childrenVisits.getD ROOT_INDEX #[]
   let qvalues := tree.qvalues ROOT_INDEX
-  let visitProbs := visitProbsFromCounts visitCounts tree.numActions
+  let visitProbs := visitProbsFromCounts visitCounts tree.numActions.toUInt64
   {
     visitCounts := visitCounts
     visitProbs := visitProbs
@@ -101,7 +101,7 @@ def resetSearchTree [Inhabited S] [Inhabited K] [BEq K] [Hashable K]
   let numNodes := tree.capacity
   let numActions := tree.numActions
   let intRow : Array Int := Array.replicate numActions UNVISITED
-  let natRow : Array Nat := Array.replicate numActions 0
+  let visitRow : Array UInt64 := Array.replicate numActions 0
   let floatRow : Array Float := Array.replicate numActions 0.0
   { tree with
     nodeVisits := Array.replicate numNodes 0
@@ -109,7 +109,7 @@ def resetSearchTree [Inhabited S] [Inhabited K] [BEq K] [Hashable K]
     nodeValues := Array.replicate numNodes 0.0
     childrenIndex := Array.replicate numNodes intRow
     childrenPriorLogits := Array.replicate numNodes floatRow
-    childrenVisits := Array.replicate numNodes natRow
+    childrenVisits := Array.replicate numNodes visitRow
     childrenRewards := Array.replicate numNodes floatRow
     childrenDiscounts := Array.replicate numNodes floatRow
     childrenValues := Array.replicate numNodes floatRow
@@ -158,7 +158,7 @@ def getSubtree [Inhabited S] [Inhabited K] [BEq K] [Hashable K]
     oldToNew := oldToNew.set! oldIdx (Int.ofNat newIdx)
 
   let intRow : Array Int := Array.replicate numActions UNVISITED
-  let natRow : Array Nat := Array.replicate numActions 0
+  let visitRow : Array UInt64 := Array.replicate numActions 0
   let floatRow : Array Float := Array.replicate numActions 0.0
   let mut out : DagTree S K E := {
     nodeVisits := Array.replicate numNodes 0
@@ -166,7 +166,7 @@ def getSubtree [Inhabited S] [Inhabited K] [BEq K] [Hashable K]
     nodeValues := Array.replicate numNodes 0.0
     childrenIndex := Array.replicate numNodes intRow
     childrenPriorLogits := Array.replicate numNodes floatRow
-    childrenVisits := Array.replicate numNodes natRow
+    childrenVisits := Array.replicate numNodes visitRow
     childrenRewards := Array.replicate numNodes floatRow
     childrenDiscounts := Array.replicate numNodes floatRow
     childrenValues := Array.replicate numNodes floatRow

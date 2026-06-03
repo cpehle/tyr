@@ -156,7 +156,7 @@ private def buildTreeFactorFromCotangentRows [TensorStruct Params] {s : Shape} {
   exact {
     rows := pulled
     rows_size := by
-      simpa [pulled, rows_size]
+      simp [pulled, rows_size]
   }
 
 private def finalizePreparedStepWithTreeFactor
