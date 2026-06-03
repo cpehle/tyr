@@ -2,7 +2,7 @@ import Tyr.MctxDag.Tree
 
 namespace torch.mctxdag
 
-private def completeQvalues (qvalues : Array Float) (visitCounts : Array Nat) (value : Float) : Array Float :=
+private def completeQvalues (qvalues : Array Float) (visitCounts : Array UInt64) (value : Float) : Array Float :=
   (List.range qvalues.size).toArray.map fun i =>
     if visitCounts.getD i 0 > 0 then qvalues.getD i 0.0 else value
 
@@ -19,10 +19,10 @@ private def rescaleQvalues (qvalues : Array Float) (epsilon : Float := 1e-8) : A
 def computeMixedValue
     (rawValue : Float)
     (qvalues : Array Float)
-    (visitCounts : Array Nat)
+    (visitCounts : Array UInt64)
     (priorProbs : Array Float)
     : Float :=
-  let sumVisitCounts : Float := Float.ofNat (visitCounts.foldl (init := 0) (· + ·))
+  let sumVisitCounts : Float := (visitCounts.foldl (init := 0) (· + ·)).toFloat
   let tiny : Float := 1e-30
   let priorSafe := priorProbs.map (fun p => if p < tiny then tiny else p)
   let sumProbs := (List.range priorSafe.size).foldl (init := 0.0) fun acc i =>
@@ -99,7 +99,7 @@ def qtransformCompletedByMixValue
       rawValue
   let completed := completeQvalues qvalues visitCounts value
   let completed := if rescaleValues then rescaleQvalues completed epsilon else completed
-  let maxVisit := Float.ofNat (visitCounts.foldl (init := 0) fun acc c => if c > acc then c else acc)
+  let maxVisit := (visitCounts.foldl (init := 0) fun acc c => if c > acc then c else acc).toFloat
   let visitScale := maxvisitInit + maxVisit
   completed.map (fun q => visitScale * valueScale * q)
 
