@@ -129,6 +129,8 @@ private def indentBlock (n : Nat) (source : String) : String :=
 
 private def renderTensorDecls (sourceIsDirectory : Bool) (tensor : TensorSchema) (declName : String) : Array String :=
   let shapeLit := renderShapeLit tensor.shape
+  let dtypeExpr := renderDTypeExpr tensor.dtype
+  let typedReturnType := s!"(_root_.torch.DTensor {declName}Shape {dtypeExpr})"
   let shapeDecl :=
     s!"/-- Static shape for tensor `{tensor.name}`. -/\n" ++
     s!"abbrev {declName}Shape : _root_.torch.Shape := {shapeLit}\n"
@@ -137,10 +139,14 @@ private def renderTensorDecls (sourceIsDirectory : Bool) (tensor : TensorSchema)
     s!"def {declName}Spec : _root_.torch.safetensors.TensorSchema :=\n" ++
     "  {\n" ++
     s!"    name := {leanStringLit tensor.name},\n" ++
-    s!"    dtype := {renderDTypeExpr tensor.dtype},\n" ++
+    s!"    dtype := {dtypeExpr},\n" ++
     s!"    shape := {declName}Shape,\n" ++
     s!"    sourceFile := {leanStringLit tensor.sourceFile}\n" ++
     "  }\n"
+  let tensorSpecDecl :=
+    s!"/-- Shared tensor spec for `{tensor.name}`. -/\n" ++
+    s!"def {declName}TensorSpec : _root_.torch.TensorSpec :=\n" ++
+    s!"  {declName}Spec.toSpec\n"
   let loadFromHandleDecl :=
     s!"/-- Load `{tensor.name}` from an open SafeTensors handle with a type-safe shape. -/\n" ++
     s!"def load_{declName}FromHandle (handle : _root_.torch.safetensors.SafeTensorsHandle) : IO (_root_.torch.T {declName}Shape) :=\n" ++
@@ -157,10 +163,35 @@ private def renderTensorDecls (sourceIsDirectory : Bool) (tensor : TensorSchema)
       s!"def load_{declName} (source : String := defaultSource) : IO (_root_.torch.T {declName}Shape) := do\n" ++
       "  let handle ← _root_.torch.safetensors.openHandle source\n" ++
       s!"  load_{declName}FromHandle handle\n"
+  let typedLoadFromHandleOnDeviceDecl :=
+    s!"/-- Load `{tensor.name}` from an open handle, checking shape, dtype, and target device. -/\n" ++
+    s!"def load_{declName}TypedFromHandleOnDevice (handle : _root_.torch.safetensors.SafeTensorsHandle) (device : _root_.torch.Device := _root_.torch.Device.CPU) : IO {typedReturnType} :=\n" ++
+    s!"  _root_.torch.safetensors.loadFromHandleWithSpec handle {declName}Spec.name {declName}TensorSpec device\n"
+  let typedLoadFromHandleDecl :=
+    s!"/-- Load `{tensor.name}` from an open handle, checking shape and dtype on CPU. -/\n" ++
+    s!"def load_{declName}TypedFromHandle (handle : _root_.torch.safetensors.SafeTensorsHandle) : IO {typedReturnType} :=\n" ++
+    s!"  load_{declName}TypedFromHandleOnDevice handle\n"
+  let typedLoadOnDeviceDecl :=
+    if sourceIsDirectory then
+      s!"/-- Load `{tensor.name}`, checking shape, dtype, and target device. -/\n" ++
+      s!"def load_{declName}TypedOnDevice (source : String := defaultSource) (device : _root_.torch.Device := _root_.torch.Device.CPU) : IO {typedReturnType} := do\n" ++
+      "  let filePath : String :=\n" ++
+      "    if " ++ declName ++ "Spec.sourceFile.isEmpty then source else source ++ \"/\" ++ " ++ declName ++ "Spec.sourceFile\n" ++
+      s!"  _root_.torch.safetensors.loadTensorWithSpec filePath {declName}Spec.name {declName}TensorSpec device\n"
+    else
+      s!"/-- Load `{tensor.name}`, checking shape, dtype, and target device. -/\n" ++
+      s!"def load_{declName}TypedOnDevice (source : String := defaultSource) (device : _root_.torch.Device := _root_.torch.Device.CPU) : IO {typedReturnType} := do\n" ++
+      "  let handle ← _root_.torch.safetensors.openHandle source\n" ++
+      s!"  load_{declName}TypedFromHandleOnDevice handle device\n"
+  let typedLoadDecl :=
+    s!"/-- Load `{tensor.name}`, checking shape and dtype on CPU. -/\n" ++
+    s!"def load_{declName}Typed (source : String := defaultSource) : IO {typedReturnType} :=\n" ++
+    s!"  load_{declName}TypedOnDevice source\n"
   if sourceIsDirectory then
-    #[shapeDecl, specDecl, loadDecl]
+    #[shapeDecl, specDecl, tensorSpecDecl, loadDecl, typedLoadOnDeviceDecl, typedLoadDecl]
   else
-    #[shapeDecl, specDecl, loadFromHandleDecl, loadDecl]
+    #[shapeDecl, specDecl, tensorSpecDecl, loadFromHandleDecl, loadDecl,
+      typedLoadFromHandleOnDeviceDecl, typedLoadFromHandleDecl, typedLoadOnDeviceDecl, typedLoadDecl]
 
 private structure LeafInfo where
   declName : String
