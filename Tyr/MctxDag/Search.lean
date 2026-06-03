@@ -51,7 +51,7 @@ def instantiateDagTreeFromRootWithCapacity
     : DagTree S K E :=
   let numActions := root.priorLogits.size
   let intRow : Array Int := Array.replicate numActions UNVISITED
-  let natRow : Array Nat := Array.replicate numActions 0
+  let visitRow : Array UInt64 := Array.replicate numActions 0
   let floatRow : Array Float := Array.replicate numActions 0.0
   let tree : DagTree S K E := {
     nodeVisits := Array.replicate numNodes 0
@@ -59,7 +59,7 @@ def instantiateDagTreeFromRootWithCapacity
     nodeValues := Array.replicate numNodes 0.0
     childrenIndex := Array.replicate numNodes intRow
     childrenPriorLogits := Array.replicate numNodes floatRow
-    childrenVisits := Array.replicate numNodes natRow
+    childrenVisits := Array.replicate numNodes visitRow
     childrenRewards := Array.replicate numNodes floatRow
     childrenDiscounts := Array.replicate numNodes floatRow
     childrenValues := Array.replicate numNodes floatRow

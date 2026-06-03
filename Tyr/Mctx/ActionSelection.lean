@@ -40,7 +40,7 @@ def muzeroActionSelection
   let priorProbs := softmax (tree.childrenPriorLogits.getD nodeIndex #[])
   let policyScore := (List.range priorProbs.size).toArray.map fun i =>
     Float.sqrt nodeVisit * pbC * priorProbs.getD i 0.0 /
-      (Float.ofNat (visitCounts.getD i 0) + 1.0)
+      ((visitCounts.getD i 0).toFloat + 1.0)
   let valueScore := qtransform tree nodeIndex
   let toArgmax := addArrays valueScore policyScore
   let invalid := if depth = 0 then some tree.rootInvalidActions else none
@@ -51,10 +51,10 @@ structure GumbelMuZeroExtraData where
   rootGumbel : Array Float
   deriving Repr, Inhabited
 
-private def prepareArgmaxInput (probs : Array Float) (visitCounts : Array Nat) : Array Float :=
-  let total := Float.ofNat (visitCounts.foldl (init := 0) (· + ·))
+private def prepareArgmaxInput (probs : Array Float) (visitCounts : Array UInt64) : Array Float :=
+  let total := (visitCounts.foldl (init := 0) (· + ·)).toFloat
   (List.range probs.size).toArray.map fun i =>
-    probs.getD i 0.0 - (Float.ofNat (visitCounts.getD i 0)) / (1.0 + total)
+    probs.getD i 0.0 - (visitCounts.getD i 0).toFloat / (1.0 + total)
 
 /-- Root action selection for Gumbel MuZero using sequential halving. -/
 def gumbelMuZeroRootActionSelection
@@ -71,9 +71,9 @@ def gumbelMuZeroRootActionSelection
   let numValidActions := tree.rootInvalidActions.foldl (init := 0) fun acc invalid =>
     if invalid then acc else acc + 1
   let numConsidered := Nat.min maxNumConsideredActions numValidActions
-  let simulationIndex := visitCounts.foldl (init := 0) (· + ·)
+  let simulationIndex := (visitCounts.foldl (init := 0) (· + ·)).toNat
   let consideredVisit := (table.getD numConsidered #[]).getD simulationIndex 0
-  let toArgmax := scoreConsidered consideredVisit tree.extraData.rootGumbel priorLogits completedQvalues visitCounts
+  let toArgmax := scoreConsidered (UInt64.ofNat consideredVisit) tree.extraData.rootGumbel priorLogits completedQvalues visitCounts
   maskedArgmax toArgmax (some tree.rootInvalidActions)
 
 /-- Deterministic interior action selection for Gumbel MuZero. -/
