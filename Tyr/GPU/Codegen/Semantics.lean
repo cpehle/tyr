@@ -119,8 +119,17 @@ partial def ScalarExpr.render : ScalarExpr -> String
   | .layoutDim src .Depth => s!"{src.toIdent}.depth"
   | .layoutDim src .Rows => s!"{src.toIdent}.rows"
   | .layoutDim src .Cols => s!"{src.toIdent}.cols"
-  | .unary .Neg src => s!"(-{src.render})"
-  | .unary .Exp src => s!"exp({src.render})"
+  | .unary op src =>
+      let fn := match op with
+        | .Neg => "-"
+        | .Exp => "exp"
+        | .Exp2 => "exp2"
+        | .Log => "log"
+        | .Log2 => "log2"
+        | .Rsqrt => "rsqrt"
+      match op with
+      | .Neg => s!"(-{src.render})"
+      | _ => s!"{fn}({src.render})"
   | .binary op lhs rhs =>
       let opStr := match op with
         | .Add => "+"
@@ -163,7 +172,10 @@ def ScalarExpr.eval? (ctx : ThreadCtx) (tx ty tz : Nat) : ScalarExpr -> Option I
       | 1 => ty
       | _ => tz)
   | .warpGroupIdx => some (Int.ofNat <| ctx.warpGroupOf tx ty tz)
-  | .unary .Neg src => src.eval? ctx tx ty tz |>.map (fun x => -x)
+  | .unary op src =>
+      match op with
+      | .Neg => src.eval? ctx tx ty tz |>.map (fun x => -x)
+      | _ => none
   | .binary op lhs rhs => do
       let a <- lhs.eval? ctx tx ty tz
       let b <- rhs.eval? ctx tx ty tz

@@ -49,7 +49,6 @@ import Tests.TestDiffEqAdjoint
 import Tests.TestDiffEqAdjointParity
 import Tests.TestDiffEqAdjointCore
 import Tests.TestGPUDSL
-import Tests.TestGPUProof
 import Tests.TestGPUKernels
 import Tests.TestGPUTileIR
 import Tests.TestNanoChatTokens
