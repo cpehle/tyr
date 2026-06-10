@@ -293,39 +293,6 @@ def expand {σ : StaticSpec} (t : Tensor σ) (target : Shape) :
     Tensor (σ.withShape target) :=
   .assumeSpec (nn.expand t.raw target)
 
-/-! Broadcasting `+`/`-`/`*`/`/` instances.
-
-These canNOT carry the broadcastability proof: instance resolution never
-runs auto-param tactics, so a guarded instance is simply unsynthesizable.
-They are therefore *unguarded* — an incompatible pair still compiles (with
-the junk result shape `#[]`) and fails at runtime with libtorch's error.
-Use `addB`/`subB`/`mulB`/`divB` for the compile-time broadcast guarantee.
-Low priority keeps the same-shape instances preferred. -/
-
-instance (priority := 100) {σ₁ σ₂ : StaticSpec} :
-    HAdd (Tensor σ₁) (Tensor σ₂) (Tensor (σ₁.pointwise σ₂)) :=
-  ⟨fun a b => .assumeSpec
-    (torch.reshape (torch.add (torch.reshape a.raw #[]) (torch.reshape b.raw #[]))
-      (TensorSpec.broadcastShape σ₁.shape σ₂.shape))⟩
-
-instance (priority := 100) {σ₁ σ₂ : StaticSpec} :
-    HSub (Tensor σ₁) (Tensor σ₂) (Tensor (σ₁.pointwise σ₂)) :=
-  ⟨fun a b => .assumeSpec
-    (torch.reshape (torch.sub (torch.reshape a.raw #[]) (torch.reshape b.raw #[]))
-      (TensorSpec.broadcastShape σ₁.shape σ₂.shape))⟩
-
-instance (priority := 100) {σ₁ σ₂ : StaticSpec} :
-    HMul (Tensor σ₁) (Tensor σ₂) (Tensor (σ₁.pointwise σ₂)) :=
-  ⟨fun a b => .assumeSpec
-    (torch.reshape (torch.mul (torch.reshape a.raw #[]) (torch.reshape b.raw #[]))
-      (TensorSpec.broadcastShape σ₁.shape σ₂.shape))⟩
-
-instance (priority := 100) {σ₁ σ₂ : StaticSpec} :
-    HDiv (Tensor σ₁) (Tensor σ₂) (Tensor (σ₁.division σ₂)) :=
-  ⟨fun a b => .assumeSpec
-    (torch.reshape (nn.div (torch.reshape a.raw #[]) (torch.reshape b.raw #[]))
-      (TensorSpec.broadcastShape σ₁.shape σ₂.shape))⟩
-
 /-! ## Reductions -/
 
 def sumAll {σ : StaticSpec} (t : Tensor σ) : Tensor σ.sumSpec :=
@@ -396,5 +363,19 @@ def rmsNormWeighted {σ : StaticSpec} {w : Shape}
   .assumeSpec (nn.rmsNormWeighted x.raw weight.raw eps)
 
 end Tensor
+
+/-! ## Checked broadcasting operators
+
+`+`/`-`/`*`/`/` stay same-shape (resolved by unification). Broadcasting
+gets its own operators, which expand to `addB`/`subB`/`mulB`/`divB` —
+unlike typeclass instances, notation produces a plain application, so the
+broadcastability auto-param IS discharged and incompatible shapes fail to
+compile. (A broadcasting `HAdd` instance cannot be guarded: instance
+resolution never runs auto-param tactics.) -/
+
+@[inherit_doc Tensor.addB] scoped infixl:65 " +ᵇ " => Tensor.addB
+@[inherit_doc Tensor.subB] scoped infixl:65 " -ᵇ " => Tensor.subB
+@[inherit_doc Tensor.mulB] scoped infixl:70 " *ᵇ " => Tensor.mulB
+@[inherit_doc Tensor.divB] scoped infixl:70 " /ᵇ " => Tensor.divB
 
 end torch

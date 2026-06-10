@@ -166,12 +166,17 @@ def testBroadcastOpsParity : IO Unit := do
   -- asymmetric broadcastTo is a view onto the target shape
   assertValid (bias.broadcastTo #[2, 3]) "broadcastTo bias"
   assertValid ((Tensor.ones #[2, 1]).broadcastTo #[2, 3]) "broadcastTo dim-1 expansion"
-  -- `+` broadcasts via the (unguarded) operator instances
-  let opSum := x + bias
-  assertValid opSum "operator + broadcasts"
+  -- the checked broadcast operators expand to addB/mulB, so the
+  -- broadcastability proof is discharged at the call site
+  let opSum := x +ᵇ bias
+  assertValid opSum "operator +ᵇ broadcasts"
   let opVals ← data.tensorToFloatArray' opSum.raw
   for v in opVals do
     LeanTest.assertTrue (v == 3.0) s!"operator broadcast value, got {v}"
+  assertValid (x *ᵇ bias) "operator *ᵇ broadcasts"
+  -- a shape-only (dynamic dtype) claim validates against any runtime dtype
+  let dyn : Tensor { shape := #[2, 3] } := Tensor.assumeSpec (torch.ones #[2, 3])
+  assertValid dyn "shape-only claim is dtype-agnostic"
 
 /-- Fully typed model layers: shape and dtype agree end to end, runtime
     metadata matches the phantom claims, and values are sane. -/

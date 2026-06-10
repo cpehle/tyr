@@ -35,28 +35,28 @@ deriving Repr, BEq
 namespace StaticSpec
 
 /-- Forget the device policy (runtime-metadata view). -/
-def toTensorSpec (σ : StaticSpec) : TensorSpec :=
+@[reducible] def toTensorSpec (σ : StaticSpec) : TensorSpec :=
   { shape := σ.shape, dtype := σ.dtype }
 
-def withShape (σ : StaticSpec) (shape : Shape) : StaticSpec :=
+@[reducible] def withShape (σ : StaticSpec) (shape : Shape) : StaticSpec :=
   { σ with shape }
 
-def withDType (σ : StaticSpec) (dtype : DType) : StaticSpec :=
+@[reducible] def withDType (σ : StaticSpec) (dtype : DType) : StaticSpec :=
   { σ with dtype }
 
 /-- Result spec of a broadcasting pointwise op. The device policy of the
     left operand propagates. -/
-def pointwise (l r : StaticSpec) : StaticSpec :=
+@[reducible] def pointwise (l r : StaticSpec) : StaticSpec :=
   { shape := TensorSpec.broadcastShape l.shape r.shape
     dtype := DType.promote l.dtype r.dtype
     device := l.device }
 
 /-- Result spec of true division: pointwise, then floated. -/
-def division (l r : StaticSpec) : StaticSpec :=
+@[reducible] def division (l r : StaticSpec) : StaticSpec :=
   { l.pointwise r with dtype := (DType.promote l.dtype r.dtype).atLeastFloat }
 
 /-- Result spec of a full reduction with sum accumulation rules. -/
-def sumSpec (σ : StaticSpec) : StaticSpec :=
+@[reducible] def sumSpec (σ : StaticSpec) : StaticSpec :=
   { σ with shape := #[], dtype := σ.dtype.sumResult }
 
 end StaticSpec
@@ -111,10 +111,15 @@ def actualSpec {σ : StaticSpec} (t : Tensor σ) : TensorSpec :=
   { shape := t.raw.runtimeShape, dtype := t.raw.dtype }
 
 /-- Validate every phantom claim — shape, dtype, and device policy —
-    against the runtime handle. Used by tests and debug assertions at
-    trust boundaries. -/
+    against the runtime handle. Graded components make no claim at their
+    dynamic level: an `Unknown` dtype matches any runtime dtype, and the
+    `.any` device policy accepts any placement. Used by tests and debug
+    assertions at trust boundaries. -/
 def validate {σ : StaticSpec} (t : Tensor σ) : Except String Unit := do
-  TensorSpec.checkCompatible σ.toTensorSpec t.actualSpec
+  TensorSpec.checkShape σ.shape t.raw.runtimeShape
+  match σ.dtype with
+  | .Unknown _ => pure ()
+  | d => TensorSpec.checkDType d t.raw.dtype
   σ.device.check t.raw.device
 
 def ofTensor? {shape : Shape} (dtype : DType) (raw : T shape) : Option (DTensor shape dtype) :=
