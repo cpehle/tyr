@@ -635,6 +635,14 @@ lean_exe test_runner_experimental where
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
+/-- Manual FFI failure-mode probe (intentionally crashes; not in the suite).
+    Run it to check that an uncaught libtorch exception terminates with an
+    intelligible message instead of a bare SIGABRT/SIGSEGV. -/
+lean_exe ffi_crash_probe where
+  root := `Tests.FfiCrashProbe
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
 /-- Focused LeanTest runner for the Riemannian nanoGPT tests. -/
 lean_exe RunRiemannianNanoGPTTests where
   root := `Tests.RunRiemannianNanoGPTTests

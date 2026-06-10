@@ -58,7 +58,9 @@
 #include <filesystem>
 #include <algorithm>
 #include <atomic>
+#include <cstdio>
 #include <cstdlib>
+#include <exception>
 #include <cmath>
 #include <limits>
 #include <memory>
@@ -240,6 +242,65 @@ static lean_object* mkC10IoError(const char* context, const c10::Error& e) {
 static lean_object* mkStdIoError(const char* context, const std::exception& e) {
   return mkIoUserError(std::string(context) + ": " + std::string(e.what()));
 }
+
+// ----------------------------------------------------------------------------
+// Fail intelligibly on uncaught C++ exceptions.
+//
+// Most tensor ops are pure on the Lean side (`T s → T s`), so there is no IO
+// channel to report a libtorch error through, and we deliberately do not
+// guard each entry point: shape errors are prevented by Lean's type system
+// before crossing the FFI, and what remains (device/dtype misuse) is a
+// programming error that should terminate. The only job of this handler is
+// to make that termination readable: print the pending exception's message
+// — for `c10::Error` just the user-facing text, not the multi-page dispatch
+// table and C++ backtrace the default handler dumps — and then abort.
+// Set TYR_VERBOSE_ERRORS=1 to get the full libtorch report instead.
+//
+// Caveat: on toolchains where libtorch's exception cannot unwind into our
+// runtime (see the libc++abi/libstdc++ note in `lean_torch_manual_seed`
+// below), the foreign runtime may invoke its own terminate handler instead
+// of this one.
+namespace {
+
+std::terminate_handler g_prev_terminate_handler = nullptr;
+
+[[noreturn]] void tyrTerminateHandler() {
+  if (std::exception_ptr eptr = std::current_exception()) {
+    try {
+      std::rethrow_exception(eptr);
+    } catch (const c10::Error& e) {
+      const bool verbose = std::getenv("TYR_VERBOSE_ERRORS") != nullptr;
+      std::fprintf(stderr,
+                   "\n[tyr] fatal: uncaught libtorch error at the Lean FFI boundary:\n  %s\n",
+                   verbose ? e.what() : e.what_without_backtrace());
+      if (!verbose) {
+        std::fprintf(stderr,
+                     "[tyr] set TYR_VERBOSE_ERRORS=1 for the full libtorch report.\n");
+      }
+    } catch (const std::exception& e) {
+      std::fprintf(stderr,
+                   "\n[tyr] fatal: uncaught C++ exception at the Lean FFI boundary:\n  %s\n",
+                   e.what());
+    } catch (...) {
+      std::fprintf(stderr,
+                   "\n[tyr] fatal: uncaught non-standard C++ exception at the Lean FFI boundary\n");
+    }
+    std::fflush(stderr);
+    std::abort();
+  }
+  // terminate() without an active exception: defer to the previous handler.
+  if (g_prev_terminate_handler != nullptr) {
+    g_prev_terminate_handler();
+  }
+  std::abort();
+}
+
+const bool g_tyr_terminate_handler_installed = [] {
+  g_prev_terminate_handler = std::set_terminate(&tyrTerminateHandler);
+  return true;
+}();
+
+}  // namespace
 
 extern "C" {
 
@@ -1451,7 +1512,8 @@ lean_object* lean_torch_embedding_1d(
 }
 
 // Matrix multiplication functions (critical for transformers)
-lean_object* lean_torch_matmul(lean_obj_arg /*s*/, b_lean_obj_arg input, b_lean_obj_arg other) {
+// Lean passes both Shape implicits of `matmul_impl {s1 s2 : Shape}`.
+lean_object* lean_torch_matmul(lean_obj_arg /*s1*/, lean_obj_arg /*s2*/, b_lean_obj_arg input, b_lean_obj_arg other) {
   auto input_ = borrowTensor(input);
   auto other_ = borrowTensor(other);
   auto result_ = torch::matmul(input_, other_);
