@@ -24,4 +24,40 @@ def initWeight (shape : Shape) (fanIn : UInt64) : IO (T shape) := do
 def initBias (shape : Shape) : T shape :=
   autograd.set_requires_grad (torch.zeros shape) true
 
+/-- Mark a loaded pretrained tensor as frozen (requires_grad=false). -/
+def reqGradFalse {s : Shape} (t : T s) : T s :=
+  autograd.set_requires_grad t false
+
+/-- Dequantize FP8 weights with blockwise inverse scales (128x128 blocks).
+    weight: [out, in], scale_inv: [out/128, in/128]. Returns float32 weights. -/
+def dequantizeFP8 {outDim inDim : UInt64}
+    (weight : T #[outDim, inDim])
+    (scaleInv : T #[outDim / 128, inDim / 128])
+    : T #[outDim, inDim] :=
+  let outBlocks := outDim / 128
+  let inBlocks := inDim / 128
+  let w := toFloat' weight
+  let s := toFloat' scaleInv
+  let w := reshape w #[outBlocks, 128, inBlocks, 128]
+  let s := reshape s #[outBlocks, 1, inBlocks, 1]
+  let s := nn.expand s #[outBlocks, 128, inBlocks, 128]
+  let w := w * s
+  reshape w #[outDim, inDim]
+
+/-- Dequantize FP8 expert weights with blockwise inverse scales per expert.
+    weight: [experts, out, in], scale_inv: [experts, out/128, in/128]. -/
+def dequantizeFP8Experts {experts outDim inDim : UInt64}
+    (weight : T #[experts, outDim, inDim])
+    (scaleInv : T #[experts, outDim / 128, inDim / 128])
+    : T #[experts, outDim, inDim] :=
+  let outBlocks := outDim / 128
+  let inBlocks := inDim / 128
+  let w := toFloat' weight
+  let s := toFloat' scaleInv
+  let w := reshape w #[experts, outBlocks, 128, inBlocks, 128]
+  let s := reshape s #[experts, outBlocks, 1, inBlocks, 1]
+  let s := nn.expand s #[experts, outBlocks, 128, inBlocks, 128]
+  let w := w * s
+  reshape w #[experts, outDim, inDim]
+
 end torch.Model

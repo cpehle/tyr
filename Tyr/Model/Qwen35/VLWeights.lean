@@ -5,15 +5,17 @@
 -/
 import Tyr.Torch
 import Tyr.Log
+import Tyr.SafeTensors.Load
+import Tyr.Model.Utils
 import Tyr.Model.Qwen35.Weights
 import Tyr.Model.Qwen35.Multimodal
 
 namespace torch.qwen35
 
 open torch.Log
-
-private def reqGradFalse {s : Shape} (t : T s) : T s :=
-  autograd.set_requires_grad t false
+open torch.Model (reqGradFalse)
+open torch.safetensors (tryLoadTensor tryLoadTensorSharded
+  loadTensorCandidates loadTensorShardedCandidates)
 
 private def visionNameCandidates (name : String) : Array String :=
   let out : Array String := #[name]
@@ -25,52 +27,6 @@ private def visionNameCandidates (name : String) : Array String :=
     else
       out
   out
-
-private def tryLoadTensorSharded
-    (modelDir : String)
-    (name : String)
-    (s : Shape)
-    (device : Device := Device.CPU)
-    : IO (Option (T s)) := do
-  try
-    let t ← safetensors.loadTensorShardedOnDevice modelDir name s device
-    pure (some t)
-  catch _ =>
-    pure none
-
-private def tryLoadTensor
-    (path : String)
-    (name : String)
-    (s : Shape)
-    (device : Device := Device.CPU)
-    : IO (Option (T s)) := do
-  try
-    let t ← safetensors.loadTensorOnDevice path name s device
-    pure (some t)
-  catch _ =>
-    pure none
-
-private def loadTensorShardedCandidates
-    (modelDir : String)
-    (names : Array String)
-    (s : Shape)
-    (device : Device := Device.CPU)
-    : IO (T s) := do
-  for n in names do
-    if let some t ← tryLoadTensorSharded modelDir n s device then
-      return t
-  throw <| IO.userError s!"Failed to load tensor (sharded): {names}"
-
-private def loadTensorCandidates
-    (path : String)
-    (names : Array String)
-    (s : Shape)
-    (device : Device := Device.CPU)
-    : IO (T s) := do
-  for n in names do
-    if let some t ← tryLoadTensor path n s device then
-      return t
-  throw <| IO.userError s!"Failed to load tensor: {names}"
 
 private def loadVisionLayerNormSharded (modelDir : String) (base : String) (dim : UInt64)
     (device : Device := Device.CPU)

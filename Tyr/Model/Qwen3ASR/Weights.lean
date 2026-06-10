@@ -6,23 +6,16 @@
 import Tyr.Torch
 import Tyr.TensorStruct
 import Tyr.Log
+import Tyr.SafeTensors.Load
 import Tyr.Module.RMSNorm
+import Tyr.Model.Utils
 import Tyr.Model.Qwen3ASR.Model
 
 namespace torch.qwen3asr
 
 open torch.Log
-
-private def reqGradFalse {s : Shape} (t : T s) : T s :=
-  autograd.set_requires_grad t false
-
-private def tryLoadTensorSharded (modelDir : String) (name : String) (s : Shape)
-    : IO (Option (T s)) := do
-  try
-    let t ← safetensors.loadTensorSharded modelDir name s
-    pure (some t)
-  catch _ =>
-    pure none
+open torch.Model (reqGradFalse)
+open torch.safetensors (tryLoadTensorSharded)
 
 private def loadLayerNormSharded (modelDir : String) (name : String) (dim : UInt64)
     : IO (LayerNorm dim) := do

@@ -7,6 +7,8 @@
 -/
 import Tyr.Torch
 import Tyr.Log
+import Tyr.SafeTensors.Load
+import Tyr.Model.Utils
 import Tyr.Model.Qwen.Config
 import Tyr.Model.Qwen.Model
 import Tyr.Model.Qwen.Embedder
@@ -14,33 +16,8 @@ import Tyr.Model.Qwen.Embedder
 namespace torch.qwen
 
 open torch.Log
-
-/-- Helper to try loading a tensor, returning none on failure.
-    Used for optional weights like Q/K norms. -/
-private def tryLoadTensorSharded (modelDir : String) (name : String) (s : Shape)
-    : IO (Option (T s)) := do
-  try
-    let t ← safetensors.loadTensorSharded modelDir name s
-    pure (some t)
-  catch _ =>
-    pure none
-
-/-- Dequantize FP8 weights using blockwise inverse scales (128x128 blocks).
-    weight: [out, in], scale_inv: [out/128, in/128]
-    Returns: float32 weights -/
-private def dequantizeFP8 {outDim inDim : UInt64}
-    (weight : T #[outDim, inDim])
-    (scaleInv : T #[outDim / 128, inDim / 128])
-    : T #[outDim, inDim] :=
-  let outBlocks := outDim / 128
-  let inBlocks := inDim / 128
-  let w := _root_.torch.toFloat' weight
-  let s := _root_.torch.toFloat' scaleInv
-  let w := reshape w #[outBlocks, 128, inBlocks, 128]
-  let s := reshape s #[outBlocks, 1, inBlocks, 1]
-  let s := nn.expand s #[outBlocks, 128, inBlocks, 128]
-  let w := w * s
-  reshape w #[outDim, inDim]
+open torch.Model (dequantizeFP8)
+open torch.safetensors (tryLoadTensor tryLoadTensorSharded)
 
 /-- Load a (potentially FP8-quantized) linear weight from sharded SafeTensors.
     If a matching weight_scale_inv exists, dequantize to float32. -/
@@ -57,12 +34,7 @@ private def loadLinearWeightSharded (modelDir : String) (name : String) (outDim 
 private def loadLinearWeight (path : String) (name : String) (outDim inDim : UInt64)
     : IO (T #[outDim, inDim]) := do
   let w ← safetensors.loadTensor path s!"{name}.weight" #[outDim, inDim]
-  let scaleInv ←
-    try
-      let s ← safetensors.loadTensor path s!"{name}.weight_scale_inv" #[outDim / 128, inDim / 128]
-      pure (some s)
-    catch _ =>
-      pure none
+  let scaleInv ← tryLoadTensor path s!"{name}.weight_scale_inv" #[outDim / 128, inDim / 128]
   pure <| match scaleInv with
     | some s => dequantizeFP8 w s
     | none => w

@@ -6,21 +6,15 @@
 import Tyr.Torch
 import Tyr.TensorStruct
 import Tyr.Log
+import Tyr.SafeTensors.Load
+import Tyr.Model.Utils
 import Tyr.Model.Whisper.Model
 
 namespace torch.whisper
 
 open torch.Log
-
-private def reqGradFalse {s : Shape} (t : T s) : T s :=
-  autograd.set_requires_grad t false
-
-private def tryLoadTensorSharded (modelDir : String) (name : String) (s : Shape)
-    : IO (Option (T s)) := do
-  try
-    pure (some (← safetensors.loadTensorSharded modelDir name s))
-  catch _ =>
-    pure none
+open torch.Model (reqGradFalse)
+open torch.safetensors (tryLoadTensorSharded)
 
 private def loadLayerNormSharded (modelDir : String) (namePrefix : String) (dim : UInt64) (eps : Float)
     : IO (LayerNorm dim) := do

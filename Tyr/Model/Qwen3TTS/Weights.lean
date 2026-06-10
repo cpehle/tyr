@@ -8,28 +8,22 @@
 import Tyr.Torch
 import Tyr.TensorStruct
 import Tyr.Log
+import Tyr.SafeTensors.Load
 import Tyr.Module.RMSNorm
+import Tyr.Model.Utils
 import Tyr.Model.Qwen3TTS.Model
 
 namespace torch.qwen3tts
 
 open torch.Log
 
-private def reqGradFalse {s : Shape} (t : T s) : T s :=
-  autograd.set_requires_grad t false
+open torch.Model (reqGradFalse)
+open torch.safetensors (tryLoadTensorSharded)
 
 /-- Local alias for sharded tensor loading.
     Device placement is performed once in `loadSharded`. -/
 private def loadTensorShardedTarget (modelDir : String) (name : String) (s : Shape) : IO (T s) := do
   safetensors.loadTensorSharded modelDir name s
-
-private def tryLoadTensorSharded (modelDir : String) (name : String) (s : Shape)
-    : IO (Option (T s)) := do
-  try
-    let t ← loadTensorShardedTarget modelDir name s
-    pure (some t)
-  catch _ =>
-    pure none
 
 private def loadRMSNormSharded (modelDir : String) (name : String) (dim : UInt64) (eps : Float)
     : IO (RMSNorm dim) := do
