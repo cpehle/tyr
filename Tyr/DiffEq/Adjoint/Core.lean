@@ -431,6 +431,142 @@ private def explicitRKAdjointOverAcceptedAttempts
     else
       return some { adjY0 := adjY, adjArgs := adjArgs }
 
+/-- Fixed-point iteration with an RMS-based stopping rule (same contraction
+    style as the forward implicit stage solves). -/
+private def dirkFixedPoint {Y : Type} [DiffEqSpace Y] [DiffEqSeminorm Y]
+    (iterate : Y → Y) (init : Y) (maxIters : Nat) (rtol atol : Float) : Y := Id.run do
+  let mut x := init
+  for _ in [:maxIters] do
+    let next := iterate x
+    let delta := DiffEqSeminorm.rms (DiffEqSpace.sub next x)
+    let scale := atol + rtol * DiffEqSeminorm.rms next
+    x := next
+    if delta <= scale then
+      break
+  return x
+
+/-- Discrete adjoint of one diagonally-implicit RK step.
+
+Forward stages satisfy `zᵢ = y₀ + Σ_{j≤i} aᵢⱼ kⱼ` with `kᵢ = h·f(tᵢ, zᵢ)`;
+the reverse sweep solves the transposed stage equations
+`μᵢ = bᵢ·λ + Σ_{j>i} aⱼᵢ·vⱼ + aᵢᵢ·vᵢ` where `vᵢ = h·Jᵢᵀ·μᵢ`, each by the
+same fixed-point contraction as the forward solve, using only the term's
+VJP (no explicit Jacobians or linear solves). With a strictly
+lower-triangular tableau this degenerates exactly to the explicit RK
+adjoint. -/
+private def dirkStepAdjoint
+    {Y Args : Type}
+    [DiffEqSpace Y] [DiffEqSpace Args] [DiffEqSeminorm Y]
+    [AdjointBackend Y Args]
+    [Inhabited Y] [Inhabited Args]
+    (spec : DIRKAdjointSpec)
+    (term : ODETerm Y Args)
+    (t0 t1 : Time)
+    (y0 : Y)
+    (args : Args)
+    (adjY1 : Y) :
+    Option (AdjointResult Y Args) :=
+  let tableau := spec.tableau
+  let s := tableau.b.size
+  if tableau.a.size != s || tableau.c.size != s then
+    none
+  else
+    let dt := t1 - t0
+    let zeroY := zeroLike y0
+    let zeroArgs := zeroLike args
+    -- replay the primal stage states, solving diagonal stages by fixed point
+    let stageYs : Array Y := Id.run do
+      let mut ys : Array Y := #[]
+      let mut ks : Array Y := #[]
+      for i in [:s] do
+        let row := tableau.a.getD i #[]
+        let mut base := y0
+        for j in [:i] do
+          base := DiffEqSpace.add base
+            (DiffEqSpace.scale (row.getD j 0.0) (ks.getD j zeroY))
+        let ti := t0 + tableau.c.getD i 0.0 * dt
+        let aii := row.getD i 0.0
+        let yi :=
+          if aii == 0.0 then
+            base
+          else
+            dirkFixedPoint
+              (fun y => DiffEqSpace.add base
+                (DiffEqSpace.scale (aii * dt) (term.vectorField ti y args)))
+              base spec.maxIters spec.rtol spec.atol
+        let ki := DiffEqSpace.scale dt (term.vectorField ti yi args)
+        ys := ys.push yi
+        ks := ks.push ki
+      return ys
+    Id.run do
+      let mut adjY0 := adjY1
+      let mut adjArgs := zeroArgs
+      let mut adjKs : Array Y := Array.replicate s zeroY
+      for i in [:s] do
+        adjKs := adjKs.set! i (DiffEqSpace.scale (tableau.b.getD i 0.0) adjY1)
+      for offset in [:s] do
+        let i := s - 1 - offset
+        let ti := t0 + tableau.c[i]! * dt
+        let yi := stageYs[i]!
+        let row := tableau.a[i]!
+        let aii := row.getD i 0.0
+        let vjpAt := fun (mu : Y) =>
+          (AdjointBackend.vjp (Y := Y) (Args := Args))
+            term.vectorField ti yi args (DiffEqSpace.scale dt mu)
+        -- solve μ = c + aᵢᵢ·(h Jᵀ μ) for the converged stage cotangent
+        let ci := adjKs[i]!
+        let mui :=
+          if aii == 0.0 then
+            ci
+          else
+            dirkFixedPoint
+              (fun mu =>
+                let (_, vY, _) := vjpAt mu
+                DiffEqSpace.add ci (DiffEqSpace.scale aii vY))
+              ci spec.maxIters spec.rtol spec.atol
+        let (_, vY, vArgs) := vjpAt mui
+        adjY0 := DiffEqSpace.add adjY0 vY
+        adjArgs := DiffEqSpace.add adjArgs vArgs
+        for j in [:i] do
+          let aij := row.getD j 0.0
+          adjKs := adjKs.set! j (DiffEqSpace.add adjKs[j]! (DiffEqSpace.scale aij vY))
+      return some { adjY0 := adjY0, adjArgs := adjArgs }
+
+private def dirkAdjointOverAcceptedAttempts
+    {Y Args ControllerState : Type}
+    [DiffEqSpace Y] [DiffEqSpace Args] [DiffEqSeminorm Y]
+    [AdjointBackend Y Args]
+    [Inhabited Y] [Inhabited Args]
+    (spec : DIRKAdjointSpec)
+    (term : ODETerm Y Args)
+    (attempts : Array (SolveLoopAttempt Y ControllerState))
+    (args : Args)
+    (adjY1 : Y) :
+    Option (AdjointResult Y Args) :=
+  let zeroArgs := zeroLike args
+  Id.run do
+    let mut adjY := adjY1
+    let mut adjArgs := zeroArgs
+    let mut failure := false
+    for offset in [:attempts.size] do
+      if !failure then
+        let i := attempts.size - 1 - offset
+        match attempts[i]? with
+        | none =>
+            failure := true
+        | some attempt =>
+            if attempt.accepted then
+              match dirkStepAdjoint spec term attempt.tStart attempt.tAfter attempt.yStart args adjY with
+              | some stepAdj =>
+                  adjY := stepAdj.adjY0
+                  adjArgs := DiffEqSpace.add adjArgs stepAdj.adjArgs
+              | none =>
+                  failure := true
+    if failure then
+      return none
+    else
+      return some { adjY0 := adjY, adjArgs := adjArgs }
+
 private def runPrimalLoopTrace
     {Y Args Controller : Type}
     [DiffEqSpace Y]
@@ -499,6 +635,15 @@ private def directLikeDiscreteLoopAdjointWithController
               none
             else
               explicitRKAdjointOverAcceptedAttempts tableau term loopResult.attempts args adjY1
+        | none => none
+    | some (.dirk spec) =>
+        match runPrimalLoopTrace (Controller := Controller) term solver t0 t1 dt0 y0 args maxSteps controller with
+        | some loopResult =>
+            let hasRejected := loopResult.attempts.any (fun attempt => !attempt.accepted)
+            if loopResult.result != Result.successful || hasRejected then
+              none
+            else
+              dirkAdjointOverAcceptedAttempts spec term loopResult.attempts args adjY1
         | none => none
     | none => none
 

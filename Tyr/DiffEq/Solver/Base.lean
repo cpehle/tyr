@@ -164,8 +164,19 @@ structure ExplicitRKAdjointTableau where
   c : Array Time
   deriving Inhabited
 
+/-- Discrete-adjoint data for diagonally-implicit RK steps. The tableau rows
+    include the diagonal entries; the fixed-point parameters mirror the
+    forward stage solves. -/
+structure DIRKAdjointSpec where
+  tableau : ExplicitRKAdjointTableau
+  maxIters : Nat := 50
+  rtol : Float := 1.0e-9
+  atol : Float := 1.0e-12
+  deriving Inhabited
+
 inductive ODEStepAdjoint where
   | explicitRK (tableau : ExplicitRKAdjointTableau)
+  | dirk (spec : DIRKAdjointSpec)
   deriving Inhabited
 
 structure AbstractSolver (Term Y VF Control Args : Type) where
