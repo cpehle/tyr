@@ -7,6 +7,7 @@
   - Macros.lean: Pattern macros for common kernel patterns
 -/
 import Tyr.GPU.Types
+import Tyr.GPU.Kernels.RKCombine
 import Tyr.GPU.Codegen.Var
 import Tyr.GPU.Codegen.TileTypes
 import Tyr.GPU.Codegen.IR
@@ -621,5 +622,38 @@ def testWarpSpecializedPattern : IO Unit := do
   assertTrue (code.containsSubstr "warpgroup::groupid() == 0") "Should have producer check"
   assertTrue (code.containsSubstr "warpgroup::groupid() == 1") "Should have consumer check"
   assertTrue (code.containsSubstr "kittens::arrive") "Should have barrier ops"
+
+
+/-! ## Fused RK stage-combination kernel -/
+
+/-- The tableau-driven combine body emits one fused kernel: per-stage
+    scalar-mul + accumulate for the solution and embedded-error weights,
+    skipping zero-weight stages at codegen time. -/
+@[test]
+def testRKCombineCodegen : IO Unit := do
+  let params : Array KParam :=
+    (Array.range 10).map fun i =>
+      { name := s!"p{i}", dtype := .Float32, isPointer := true }
+  let kPtrs : Array (GPtr GpuFloat.Float32) :=
+    (Array.range 7).map fun i => { id := ⟨i + 1⟩, name := s!"k{i + 1}" }
+  let kernel := buildKernelM "rk_combine_test" .SM90 params do
+    Tyr.GPU.Kernels.rkCombineBody
+      #[35.0 / 384.0, 0.0, 500.0 / 1113.0, 125.0 / 192.0,
+        -2187.0 / 6784.0, 11.0 / 84.0, 0.0]
+      #[1951.0 / 21600.0, 0.0, 22642.0 / 50085.0, 451.0 / 720.0,
+        -12231.0 / 42400.0, 649.0 / 6300.0, 1.0 / 60.0]
+      ({ id := ⟨0⟩, name := "y0" } : GPtr GpuFloat.Float32) kPtrs
+      { id := ⟨8⟩, name := "y1" } { id := ⟨9⟩, name := "err" }
+  let code := generateKernel kernel
+  assertTrue (code.containsSubstr "mul(") "Should emit scalar multiplies"
+  assertTrue (code.containsSubstr "add(") "Should emit accumulation adds"
+  assertTrue (code.containsSubstr "zero(") "Should zero the error accumulator"
+  assertTrue (code.containsSubstr "0.091146") "Should bake b₁ = 35/384 into the kernel"
+  -- stage 2 has b = bHat = 0 and must be skipped at codegen time
+  assertTrue (!(code.containsSubstr "v14, v2,")) "Zero-weight stage k2 must not be loaded"
+  -- y0 + 6 live stages in, y1 + err out: 9 global accesses in one launch
+  let globalAccesses := (code.splitOn "kittens::coord").length - 1
+  assertTrue (globalAccesses == 9)
+    s!"Expected 9 global tile accesses (7 in, 2 out), got {globalAccesses}"
 
 end Tests.GPUDSL

@@ -81,4 +81,39 @@ private abbrev YSpec : StaticSpec := { shape := #[2], dtype := .Float32 }
         LeanTest.assertTrue (approx v (Float.exp (-1.0)) 1.0e-4)
           s!"adaptive y(1) expected ≈ {Float.exp (-1.0)}, got {v}"
 
+
+@[test] def testSolverGlueTimingProbe : IO Unit := do
+  -- Informational: per-step cost of Dopri5 on tensor vs Float states at
+  -- fixed step count quantifies the FFI/launch glue a fused kernel removes.
+  let steps := 500
+  let dt := 1.0 / steps.toFloat
+  -- tensor state, n = 64
+  let tTerm : ODETerm (T #[64]) Unit :=
+    { vectorField := fun _t y _ => mul_scalar y (-1.0) }
+  let tSolver :=
+    Dopri5.solver (Term := ODETerm (T #[64]) Unit)
+      (Y := T #[64]) (VF := T #[64]) (Args := Unit)
+  let t0 ← IO.monoMsNow
+  let tSol :=
+    diffeqsolve (Term := ODETerm (T #[64]) Unit)
+      (Y := T #[64]) (VF := T #[64]) (Control := Time) (Args := Unit)
+      (Controller := ConstantStepSize)
+      tTerm tSolver 0.0 1.0 (some dt) (torch.ones #[64]) () (saveat := { t1 := true })
+  let tFinal := nn.item (nn.sumAll ((tSol.ys.getD #[]).getD 0 (torch.ones #[64])))
+  let tensorMs := (← IO.monoMsNow) - t0
+  -- Float state (pure Lean, no FFI)
+  let fTerm : ODETerm Float Unit := { vectorField := fun _t y _ => -y }
+  let fSolver :=
+    Dopri5.solver (Term := ODETerm Float Unit)
+      (Y := Float) (VF := Float) (Args := Unit)
+  let t1 ← IO.monoMsNow
+  let fSol :=
+    diffeqsolve (Term := ODETerm Float Unit)
+      (Y := Float) (VF := Float) (Control := Time) (Args := Unit)
+      (Controller := ConstantStepSize)
+      fTerm fSolver 0.0 1.0 (some dt) (1.0 : Float) () (saveat := { t1 := true })
+  let fFinal := (fSol.ys.getD #[]).getD 0 0.0
+  let floatMs := (← IO.monoMsNow) - t1
+  IO.eprintln s!"  [glue-timing] dopri5 {steps} steps: tensor[64] {tensorMs}ms ({(tensorMs.toFloat * 1000.0 / steps.toFloat)}us/step), Float {floatMs}ms (finals {tFinal}, {fFinal})"
+
 end Tests.DiffEqTyped
