@@ -9,17 +9,17 @@
 -/
 import Tyr.Torch
 import Tyr.Log
+import Tyr.SafeTensors.Load
+import Tyr.Model.Utils
 import Tyr.Model.Gemma4.Model
 
 namespace torch.gemma4
 
 open torch.Log
-
-private def reqGradFalse {s : Shape} (t : T s) : T s :=
-  autograd.set_requires_grad t false
-
-private def pushUnique (xs : Array String) (x : String) : Array String :=
-  if xs.contains x then xs else xs.push x
+open torch.Model (reqGradFalse)
+open torch.safetensors (pushUnique tryLoadTensor tryLoadTensorSharded
+  loadTensorCandidates loadTensorShardedCandidates
+  tryLoadTensorCandidates tryLoadTensorShardedCandidates)
 
 private def tensorNameCandidates (name : String) : Array String :=
   Id.run do
@@ -57,59 +57,17 @@ private def parameterNameCandidates (name : String) : Array String :=
         out := pushUnique out cand
     out
 
-private def tryLoadTensorSharded (modelDir : String) (name : String) (s : Shape)
-    : IO (Option (T s)) := do
-  try
-    let t ← safetensors.loadTensorSharded modelDir name s
-    pure (some t)
-  catch _ =>
-    pure none
-
-private def tryLoadTensor (path : String) (name : String) (s : Shape)
-    : IO (Option (T s)) := do
-  try
-    let t ← safetensors.loadTensor path name s
-    pure (some t)
-  catch _ =>
-    pure none
-
-private def loadTensorByCandidates
-    (tryLoad : String → IO (Option (T s)))
-    (names : Array String)
-    : IO (T s) := do
-  for n in names do
-    if let some t ← tryLoad n then
-      return t
-  throw <| IO.userError s!"Failed to load tensor: {names}"
-
-private def tryLoadTensorByCandidates
-    (tryLoad : String → IO (Option (T s)))
-    (names : Array String)
-    : IO (Option (T s)) := do
-  for n in names do
-    if let some t ← tryLoad n then
-      return some t
-  pure none
-
 private def loadParameterSharded (modelDir : String) (name : String) (s : Shape) : IO (T s) :=
-  loadTensorByCandidates
-    (fun n => tryLoadTensorSharded modelDir n s)
-    (parameterNameCandidates name)
+  loadTensorShardedCandidates modelDir (parameterNameCandidates name) s
 
 private def tryLoadParameterSharded (modelDir : String) (name : String) (s : Shape) : IO (Option (T s)) :=
-  tryLoadTensorByCandidates
-    (fun n => tryLoadTensorSharded modelDir n s)
-    (parameterNameCandidates name)
+  tryLoadTensorShardedCandidates modelDir (parameterNameCandidates name) s
 
 private def loadParameter (path : String) (name : String) (s : Shape) : IO (T s) :=
-  loadTensorByCandidates
-    (fun n => tryLoadTensor path n s)
-    (parameterNameCandidates name)
+  loadTensorCandidates path (parameterNameCandidates name) s
 
 private def tryLoadParameter (path : String) (name : String) (s : Shape) : IO (Option (T s)) :=
-  tryLoadTensorByCandidates
-    (fun n => tryLoadTensor path n s)
-    (parameterNameCandidates name)
+  tryLoadTensorCandidates path (parameterNameCandidates name) s
 
 private def zeros1dOn {n : UInt64} (device : Device) : T #[n] :=
   torch.zeros #[n] false device

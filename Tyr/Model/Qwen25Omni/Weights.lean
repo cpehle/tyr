@@ -6,6 +6,8 @@
 -/
 import Tyr.Torch
 import Tyr.Log
+import Tyr.SafeTensors.Load
+import Tyr.Model.Utils
 import Tyr.Model.Qwen25Omni.Config
 import Tyr.Model.Qwen3.Model
 import Tyr.Model.Qwen.Model
@@ -13,12 +15,10 @@ import Tyr.Model.Qwen.Model
 namespace torch.qwen25omni
 
 open torch.Log
-
-private def reqGradFalse {s : Shape} (t : T s) : T s :=
-  autograd.set_requires_grad t false
-
-private def pushUnique (xs : Array String) (x : String) : Array String :=
-  if xs.contains x then xs else xs.push x
+open torch.Model (reqGradFalse dequantizeFP8)
+open torch.safetensors (pushUnique tryLoadTensor tryLoadTensorSharded
+  loadTensorCandidates loadTensorShardedCandidates
+  tryLoadTensorCandidates tryLoadTensorShardedCandidates)
 
 private def baseNameCandidates (base : String) : Array String :=
   let out : Array String := #[]
@@ -49,65 +49,6 @@ private def tensorNameCandidates (name : String) : Array String :=
     pushUnique out s!"model.language_model.{suffix}"
   else
     out
-
-private def tryLoadTensorSharded (modelDir : String) (name : String) (s : Shape)
-    : IO (Option (T s)) := do
-  try
-    let t ← safetensors.loadTensorSharded modelDir name s
-    pure (some t)
-  catch _ =>
-    pure none
-
-private def tryLoadTensor (path : String) (name : String) (s : Shape)
-    : IO (Option (T s)) := do
-  try
-    let t ← safetensors.loadTensor path name s
-    pure (some t)
-  catch _ =>
-    pure none
-
-private def loadTensorShardedCandidates (modelDir : String) (names : Array String) (s : Shape)
-    : IO (T s) := do
-  for n in names do
-    if let some t ← tryLoadTensorSharded modelDir n s then
-      return t
-  throw <| IO.userError s!"Failed to load tensor (sharded): {names}"
-
-private def loadTensorCandidates (path : String) (names : Array String) (s : Shape)
-    : IO (T s) := do
-  for n in names do
-    if let some t ← tryLoadTensor path n s then
-      return t
-  throw <| IO.userError s!"Failed to load tensor: {names}"
-
-private def tryLoadTensorShardedCandidates (modelDir : String) (names : Array String) (s : Shape)
-    : IO (Option (T s)) := do
-  for n in names do
-    if let some t ← tryLoadTensorSharded modelDir n s then
-      return some t
-  pure none
-
-private def tryLoadTensorCandidates (path : String) (names : Array String) (s : Shape)
-    : IO (Option (T s)) := do
-  for n in names do
-    if let some t ← tryLoadTensor path n s then
-      return some t
-  pure none
-
-/-- Dequantize FP8 weights with blockwise inverse scales (128x128 blocks). -/
-private def dequantizeFP8 {outDim inDim : UInt64}
-    (weight : T #[outDim, inDim])
-    (scaleInv : T #[outDim / 128, inDim / 128])
-    : T #[outDim, inDim] :=
-  let outBlocks := outDim / 128
-  let inBlocks := inDim / 128
-  let w := toFloat' weight
-  let s := toFloat' scaleInv
-  let w := reshape w #[outBlocks, 128, inBlocks, 128]
-  let s := reshape s #[outBlocks, 1, inBlocks, 1]
-  let s := nn.expand s #[outBlocks, 128, inBlocks, 128]
-  let w := w * s
-  reshape w #[outDim, inDim]
 
 private def loadLinearWeightSharded (modelDir : String) (baseName : String) (outDim inDim : UInt64)
     : IO (T #[outDim, inDim]) := do
