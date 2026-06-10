@@ -95,9 +95,7 @@ def absResult : DType → DType
   | dtype => dtype
 
 def sumResult : DType → DType
-  | .Bool => .Int32
-  | .UInt8 => .Int32
-  | .Int8 | .Int16 => .Int32
+  | .Bool | .UInt8 | .Int8 | .Int16 | .Int32 => .Int64
   | .Float8E4M3FN | .Float8E5M2 => .Float32
   | dtype => dtype
 

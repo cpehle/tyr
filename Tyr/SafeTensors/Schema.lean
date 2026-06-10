@@ -67,7 +67,7 @@ private def checkLoadedWithContractCore
     : IO (DTensor shape contract.spec.dtype) := do
   let actual : TensorSpec := { shape := raw.runtimeShape, dtype := raw.dtype }
   match contract.check actual raw.device with
-  | .ok () => pure (DTensor.assumeDType raw)
+  | .ok () => pure (Tensor.assumeDType raw)
   | .error err => throw <| IO.userError s!"{context}: {err}"
 
 /--

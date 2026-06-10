@@ -53,4 +53,172 @@ def testDevicePolicyChecks : IO Unit := do
   | .ok () => LeanTest.fail "device mismatch should fail"
   | .error err => LeanTest.assertTrue (err.containsSubstr "Expected device")
 
+/-- Assert that a typed tensor's runtime metadata matches its phantom spec
+    (shape, dtype, and device policy). -/
+private def assertValid {σ : StaticSpec}
+    (t : Tensor σ) (label : String) : IO Unit := do
+  match t.validate with
+  | .ok () => pure ()
+  | .error err => LeanTest.fail s!"{label}: {err}"
+
+/-- The typed wrappers re-index the phantom dtype according to the promotion
+    algebra in `Tyr.Typed.DType`. These tests run the real ops and assert the
+    runtime dtype agrees with the type-level claim, so the algebra cannot
+    silently diverge from libtorch's behavior. -/
+@[test]
+def testTypedOpsDtypeParity : IO Unit := do
+  -- same-dtype elementwise: preserve
+  let f32 := Tensor.ones #[2, 2]
+  let bf16 := f32.toBFloat16
+  assertValid (f32 + f32) "f32 + f32"
+  assertValid (bf16 * bf16) "bf16 * bf16"
+  -- mixed-dtype elementwise: promote (f32 absorbs bf16)
+  assertValid (f32 + bf16) "f32 + bf16 promotes"
+  LeanTest.assertEqual (f32 + bf16).raw.dtype DType.Float32
+    "runtime add(f32, bf16) should produce f32"
+  -- true division floats integers
+  let i64 := Tensor.fullInt #[4] 3
+  assertValid (i64 / Tensor.fullInt #[4] 2) "i64 / i64 floats"
+  LeanTest.assertEqual (i64 / Tensor.fullInt #[4] 2).raw.dtype DType.Float32
+    "runtime div(i64, i64) should produce f32"
+  -- float scalars promote integer tensors
+  assertValid (i64 * (2.0 : Float)) "i64 * float scalar floats"
+  assertValid (bf16 * (2.0 : Float)) "bf16 * float scalar preserves"
+  -- integral sums accumulate as i64
+  assertValid i64.sumAll "sum(i64) stays i64"
+  LeanTest.assertEqual i64.sumAll.raw.dtype DType.Int64
+    "runtime sum(i64) should produce i64"
+  -- float mean preserves
+  assertValid bf16.meanAll "mean(bf16) preserves"
+
+@[test]
+def testTypedOpsShapeAndUnaryParity : IO Unit := do
+  let x := Tensor.ones #[2, 3]
+  -- float-only unary preserves dtype
+  assertValid x.exp "exp(f32)"
+  assertValid x.toBFloat16.silu "silu(bf16)"
+  assertValid (x.softmax) "softmax(f32)"
+  -- relu/abs work on any dtype and preserve it
+  assertValid (Tensor.fullInt #[3] (-1)).relu "relu(i64)"
+  assertValid (Tensor.fullInt #[3] (-1)).abs "abs(i64)"
+  -- matmul family requires and preserves one dtype
+  let w := Tensor.ones #[4, 3]
+  assertValid (x.matmul w.transpose2d) "matmul(f32)"
+  assertValid (x.mm w.transpose2d) "mm(f32)"
+  assertValid (x.linear w) "linear(f32)"
+  -- shape ops preserve dtype
+  assertValid (x.reshape #[3, 2]) "reshape"
+  assertValid (x.transpose 0 1) "transpose"
+  assertValid (x.unsqueeze 0) "unsqueeze"
+  assertValid (Tensor.cat x x 0) "cat"
+  -- casts land where they claim
+  assertValid x.toBFloat16 "toBFloat16"
+  assertValid x.toBFloat16.toFloat32 "toFloat32"
+  assertValid x.toInt64 "toInt64"
+
+/-- Pure broadcast-shape algebra (NumPy/PyTorch rules: right-align, pad with
+    leading 1s, dims must match or be 1). -/
+@[test]
+def testBroadcastShapeAlgebra : IO Unit := do
+  LeanTest.assertEqual (TensorSpec.broadcastShapes? #[2, 3] #[3]) (some #[2, 3])
+    "trailing-dim bias pattern"
+  LeanTest.assertEqual (TensorSpec.broadcastShapes? #[3, 2, 1] #[2, 7]) (some #[3, 2, 7])
+    "rank extension plus dim-1 expansion"
+  LeanTest.assertEqual (TensorSpec.broadcastShapes? #[1, 3] #[2, 1]) (some #[2, 3])
+    "mutual expansion produces a shape neither input has"
+  LeanTest.assertEqual (TensorSpec.broadcastShapes? #[] #[2, 3]) (some #[2, 3])
+    "scalar broadcasts to anything"
+  LeanTest.assertEqual (TensorSpec.broadcastShapes? #[2, 3] #[4, 3]) none
+    "mismatched non-1 dims must fail"
+  LeanTest.assertEqual (TensorSpec.broadcastList? [#[1, 2, 3], #[2, 3], #[]]) (some #[1, 2, 3])
+    "n-ary broadcast folds the binary rule"
+  LeanTest.assertEqual (TensorSpec.broadcastList? []) none
+    "empty list has no broadcast shape"
+  LeanTest.assertTrue (TensorSpec.broadcastShapes? #[3] #[2, 3] == some #[2, 3])
+    "fixed-side check: #[3] broadcastsTo #[2, 3]"
+  LeanTest.assertTrue (TensorSpec.broadcastShapes? #[2, 3] #[3] != some #[3])
+    "fixed-side check: #[2, 3] does not broadcastTo #[3]"
+
+/-- Broadcasting typed ops: output shape is inferred at compile time via the
+    `rfl` auto-param; these assert the runtime (native libtorch broadcasting
+    under type erasure) lands on the same shape and dtype. -/
+@[test]
+def testBroadcastOpsParity : IO Unit := do
+  -- bias-add pattern: [2, 3] + [3]
+  let x := Tensor.ones #[2, 3]
+  let bias := Tensor.full #[3] 2.0
+  let y := x.addB bias
+  assertValid y "addB bias pattern"
+  let vals ← data.tensorToFloatArray' y.raw
+  LeanTest.assertEqual vals.size 6 "bias add yields 2x3 elements"
+  for v in vals do
+    LeanTest.assertTrue (v == 3.0) s!"1 + 2 broadcast value, got {v}"
+  -- mask pattern: mutual expansion [1, 3] * [2, 1] -> [2, 3]
+  let m := Tensor.ones #[1, 3]
+  let n := Tensor.full #[2, 1] 5.0
+  assertValid (m.mulB n) "mulB mutual expansion"
+  -- mixed dtype with broadcast: f32 [2, 3] + bf16 [3] -> f32 [2, 3]
+  assertValid (x.addB bias.toBFloat16) "addB promotes across broadcast"
+  -- integer division broadcasts and floats
+  assertValid ((Tensor.fullInt #[2, 2] 7).divB (Tensor.fullInt #[2] 2)) "divB floats ints"
+  -- subB scalar-shape operand
+  assertValid (x.subB (Tensor.full #[] 1.0)) "subB against scalar tensor"
+  -- asymmetric broadcastTo is a view onto the target shape
+  assertValid (bias.broadcastTo #[2, 3]) "broadcastTo bias"
+  assertValid ((Tensor.ones #[2, 1]).broadcastTo #[2, 3]) "broadcastTo dim-1 expansion"
+  -- `+` broadcasts via the (unguarded) operator instances
+  let opSum := x + bias
+  assertValid opSum "operator + broadcasts"
+  let opVals ← data.tensorToFloatArray' opSum.raw
+  for v in opVals do
+    LeanTest.assertTrue (v == 3.0) s!"operator broadcast value, got {v}"
+
+/-- Fully typed model layers: shape and dtype agree end to end, runtime
+    metadata matches the phantom claims, and values are sane. -/
+@[test]
+def testTypedLayers : IO Unit := do
+  -- Linear with bias: [2, 3] -> [2, 4] and [2, 5, 3] -> [2, 5, 4]
+  let lin ← Typed.Linear.init 3 4
+  let x2 := Tensor.ones #[2, 3]
+  assertValid (lin.forward2d x2) "typed Linear forward2d"
+  let x3 := Tensor.ones #[2, 5, 3]
+  assertValid (lin.forward3d x3) "typed Linear forward3d (affine)"
+  -- without bias the 3d path goes through linear3d
+  let linNb ← Typed.Linear.init 3 4 (withBias := false)
+  assertValid (linNb.forward3d x3) "typed Linear forward3d (no bias)"
+  -- RMSNorm: normalizing all-ones with unit weights gives ~1.0 everywhere
+  let rn := Typed.RMSNorm.init 3
+  let y := rn.forward3d x3
+  assertValid y "typed RMSNorm forward3d"
+  let vals ← data.tensorToFloatArray' y.raw
+  LeanTest.assertEqual vals.size 30 "rmsnorm preserves numel"
+  for v in vals do
+    LeanTest.assertTrue ((v - 1.0).abs < 1e-3) s!"rmsnorm(ones) ≈ 1, got {v}"
+  -- bf16 layer: the f32 stability upcast is visible in the result type
+  -- (promote Float32 BFloat16 = Float32), and the runtime agrees
+  let rnBf : Typed.RMSNorm 3 .BFloat16 := { weight := (Tensor.ones #[3]).toBFloat16 }
+  let yBf := rnBf.forward2d x2.toBFloat16
+  assertValid yBf "typed RMSNorm bf16 upcasts to f32"
+  LeanTest.assertEqual yBf.raw.dtype DType.Float32
+    "rmsnorm computes in f32 regardless of layer dtype"
+  assertValid yBf.toBFloat16 "explicit cast back restores bf16"
+
+/-- Device policy in the spec: `.exact` pins a tensor's placement, `validate`
+    checks it against the runtime device, and spec-preserving ops keep the
+    pin. (Cross-policy application errors are compile-time and covered by
+    the prototype probes in `dev/static_spec_tensor_proto.lean`.) -/
+@[test]
+def testDevicePinnedSpec : IO Unit := do
+  let pinned : Tensor { shape := #[2, 2], dtype := .Float32, device := .exact .CPU } :=
+    Tensor.assumeSpec (torch.ones #[2, 2])
+  assertValid pinned "CPU-pinned tensor on CPU"
+  assertValid pinned.relu "spec-preserving op keeps the pin"
+  assertValid (Add.add pinned pinned) "homogeneous add keeps the pin"
+  -- a wrong pin is a *runtime* validate failure (the claim is checked, not trusted)
+  let misPinned : Tensor { shape := #[2, 2], dtype := .Float32, device := .exact (.CUDA 0) } :=
+    Tensor.assumeSpec (torch.ones #[2, 2])
+  match misPinned.validate with
+  | .ok () => LeanTest.fail "CUDA pin on a CPU tensor should fail validation"
+  | .error err => LeanTest.assertTrue (err.containsSubstr "device") s!"got: {err}"
+
 end Tests.TestTyped
