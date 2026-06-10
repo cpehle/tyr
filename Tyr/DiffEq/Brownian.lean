@@ -1096,14 +1096,72 @@ instance instVirtualBrownianTreeOpsOption {BM : Type}
         let inc := VirtualBrownianTreeOps.incrementSpaceTimeTime (BM := BM) childPath t0 t1
         { dt := inc.dt, W := some inc.W, H := some inc.H, K := some inc.K }
 
+/-! ### Tensor-valued virtual Brownian tree
+
+Each tensor element follows its own scalar Brownian bridge, keyed by the
+same element-index derivation as the `Array Float` instance — so a tensor
+path with seed `k` matches the `Array Float` path with seed `k`
+element-for-element (modulo the Float32 storage of tensors). The `shape`
+field tensor supplies the runtime shape; sampling runs the scalar core per
+element on the CPU and packs the result, which is adequate for typical
+noise dimensions (batched device-side sampling is a possible follow-up). -/
+
+private def tensorFloatChild {s : Shape} (path : VirtualBrownianTree (T s)) (i : Nat) :
+    VirtualBrownianTree Float :=
+  -- Same tag as `splitArrayIdx` so tensors and float arrays agree per element.
+  let root := PRNGKey.foldIn (baseKey path.seed) 0x56544152
+  let childSeed := (PRNGKey.foldIn root (UInt32.ofNat i)).state
+  mkChildPath path childSeed 0.0
+
+private def tensorNumel {s : Shape} (ref : T s) : Nat :=
+  ref.runtimeShape.foldl (fun acc d => acc * d.toNat) 1
+
+/-- Pack per-element values into a tensor with `ref`'s runtime shape. -/
+private def tensorPackLike {s : Shape} (ref : T s) (vals : Array Float) : T s :=
+  reshape (reshape (data.fromFloatArray vals) ref.runtimeShape) s
+
+instance {s : Shape} : VirtualBrownianTreeOps (T s) where
+  increment path t0 t1 := Id.run do
+    let n := tensorNumel path.shape
+    let mut ws : Array Float := Array.mkEmpty n
+    for i in [:n] do
+      let inc := incrementFloatCore (tensorFloatChild path i) t0 t1
+      ws := ws.push inc.W
+    return { dt := t1 - t0, W := tensorPackLike path.shape ws }
+  incrementSpaceTime path t0 t1 := Id.run do
+    let n := tensorNumel path.shape
+    let mut ws : Array Float := Array.mkEmpty n
+    let mut hs : Array Float := Array.mkEmpty n
+    for i in [:n] do
+      let inc := incrementSpaceTimeFloatCore (tensorFloatChild path i) t0 t1
+      ws := ws.push inc.W
+      hs := hs.push inc.H
+    return { dt := t1 - t0
+             W := tensorPackLike path.shape ws
+             H := tensorPackLike path.shape hs }
+  incrementSpaceTimeTime path t0 t1 := Id.run do
+    let n := tensorNumel path.shape
+    let mut ws : Array Float := Array.mkEmpty n
+    let mut hs : Array Float := Array.mkEmpty n
+    let mut ks : Array Float := Array.mkEmpty n
+    for i in [:n] do
+      let inc := incrementSpaceTimeTimeFloatCore (tensorFloatChild path i) t0 t1
+      ws := ws.push inc.W
+      hs := hs.push inc.H
+      ks := ks.push inc.K
+    return { dt := t1 - t0
+             W := tensorPackLike path.shape ws
+             H := tensorPackLike path.shape hs
+             K := tensorPackLike path.shape ks }
+
 @[inline] private def ensureValidRange (path : VirtualBrownianTree BM) (t0 t1 : Time) : Unit :=
   Id.run do
     if !(path.t0 < path.t1) then
-      panic! "VirtualBrownianTree requires t0 < t1"
+      panic! s!"VirtualBrownianTree requires t0 < t1 (got tree range [{path.t0}, {path.t1}])"
     let lo := min t0 t1
     let hi := max t0 t1
     if lo < path.t0 || hi > path.t1 then
-      panic! "VirtualBrownianTree increment query outside range"
+      panic! s!"VirtualBrownianTree increment query [{t0}, {t1}] outside tree range [{path.t0}, {path.t1}]"
     pure ()
 
 def increment [VirtualBrownianTreeOps BM] (path : VirtualBrownianTree BM) (t0 t1 : Time) :
