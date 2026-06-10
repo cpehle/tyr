@@ -174,9 +174,20 @@ structure DIRKAdjointSpec where
   atol : Float := 1.0e-12
   deriving Inhabited
 
+/-- Discrete-adjoint data for IMEX additive RK steps (paired explicit and
+    diagonally-implicit tableaux sharing stage times, as in KenCarp). -/
+structure IMEXAdjointSpec where
+  explicit : ExplicitRKAdjointTableau
+  implicit : ExplicitRKAdjointTableau
+  maxIters : Nat := 50
+  rtol : Float := 1.0e-9
+  atol : Float := 1.0e-12
+  deriving Inhabited
+
 inductive ODEStepAdjoint where
   | explicitRK (tableau : ExplicitRKAdjointTableau)
   | dirk (spec : DIRKAdjointSpec)
+  | imexDirk (spec : IMEXAdjointSpec)
   deriving Inhabited
 
 structure AbstractSolver (Term Y VF Control Args : Type) where
