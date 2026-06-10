@@ -83,4 +83,11 @@ def dopri5Combine64
     (y0 k1 k2 k3 k4 k5 k6 k7 y1 err : GPtr GpuFloat.Float32) : KernelM Unit :=
   rkCombineBody dopri5B dopri5BHat y0 #[k1, k2, k3, k4, k5, k6, k7] y1 err
 
+/-- Blackwell-family variant of the fused Dopri5 combination. -/
+@[gpu_kernel .SM90]
+def dopri5Combine64Blackwell
+    (y0 k1 k2 k3 k4 k5 k6 k7 y1 err : GPtr GpuFloat.Float32) : KernelM Unit := do
+  setFamily .Blackwell
+  rkCombineBody dopri5B dopri5BHat y0 #[k1, k2, k3, k4, k5, k6, k7] y1 err
+
 end Tyr.GPU.Kernels
