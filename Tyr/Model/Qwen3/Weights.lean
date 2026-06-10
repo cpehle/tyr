@@ -5,43 +5,16 @@
 -/
 import Tyr.Torch
 import Tyr.Log
+import Tyr.SafeTensors.Load
+import Tyr.Model.Utils
 import Tyr.Model.Qwen.Weights
 import Tyr.Model.Qwen3.Model
 
 namespace torch.qwen3
 
 open torch.Log
-
-private def reqGradFalse {s : Shape} (t : T s) : T s :=
-  autograd.set_requires_grad t false
-
-private def isMissingTensorError (msg : String) (name : String) : Bool :=
-  (msg.contains name) &&
-  ((msg.contains "not found") || (msg.contains "missing") || (msg.contains "No tensor"))
-
-private def tryLoadOptionalTensorSharded (modelDir : String) (name : String) (s : Shape)
-    : IO (Option (T s)) := do
-  try
-    let t ← safetensors.loadTensorSharded modelDir name s
-    pure (some t)
-  catch e =>
-    let msg := toString e
-    if isMissingTensorError msg name then
-      pure none
-    else
-      throw e
-
-private def tryLoadOptionalTensor (path : String) (name : String) (s : Shape)
-    : IO (Option (T s)) := do
-  try
-    let t ← safetensors.loadTensor path name s
-    pure (some t)
-  catch e =>
-    let msg := toString e
-    if isMissingTensorError msg name then
-      pure none
-    else
-      throw e
+open torch.Model (reqGradFalse)
+open torch.safetensors (tryLoadOptionalTensor tryLoadOptionalTensorSharded)
 
 namespace Qwen3ForCausalLM
 

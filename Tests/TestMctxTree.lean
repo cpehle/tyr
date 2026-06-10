@@ -91,7 +91,7 @@ private def runFixture (path : System.FilePath) : IO Unit := do
     let summary := out.searchTree.summary
     LeanTest.assertEqual summary.visitCounts.size numActions
       s!"MuZero fixture {path}: visit count width should match action count"
-    LeanTest.assertEqual (summary.visitCounts.foldl (init := 0) (· + ·)) numSimulations
+    LeanTest.assertEqual (summary.visitCounts.foldl (init := 0) (· + ·)) (UInt64.ofNat numSimulations)
       s!"MuZero fixture {path}: root visits should match simulation budget"
   else if algorithm = "gumbel_muzero" then
     let out := gumbelMuZeroPolicy
@@ -102,7 +102,7 @@ private def runFixture (path : System.FilePath) : IO Unit := do
     let summary := out.searchTree.summary
     LeanTest.assertEqual summary.visitCounts.size numActions
       s!"Gumbel MuZero fixture {path}: visit count width should match action count"
-    LeanTest.assertEqual (summary.visitCounts.foldl (init := 0) (· + ·)) numSimulations
+    LeanTest.assertEqual (summary.visitCounts.foldl (init := 0) (· + ·)) (UInt64.ofNat numSimulations)
       s!"Gumbel MuZero fixture {path}: root visits should match simulation budget"
   else
     LeanTest.fail s!"Unknown algorithm '{algorithm}' in fixture {path}"

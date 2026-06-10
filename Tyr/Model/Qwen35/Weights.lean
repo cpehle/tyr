@@ -7,23 +7,23 @@
 -/
 import Tyr.Torch
 import Tyr.Log
+import Tyr.SafeTensors.Load
+import Tyr.Model.Utils
 import Tyr.Model.Qwen35.Model
 
 namespace torch.qwen35
 
 open torch.Log
-
-private def reqGradFalse {s : Shape} (t : T s) : T s :=
-  autograd.set_requires_grad t false
+open torch.Model (reqGradFalse dequantizeFP8 dequantizeFP8Experts)
+open torch.safetensors (pushUnique tryLoadTensor tryLoadTensorSharded
+  loadTensorCandidates loadTensorShardedCandidates
+  tryLoadTensorCandidates tryLoadTensorShardedCandidates)
 
 private def finalizeDequantizedForDevice {s : Shape} (device : Device) (t : T s) : T s :=
   match device with
   | .CPU => t
   | .MPS => toBFloat16' t
   | .CUDA _ => toBFloat16' t
-
-private def pushUnique (xs : Array String) (x : String) : Array String :=
-  if xs.contains x then xs else xs.push x
 
 private def nameCandidates (name : String) : Array String :=
   let out : Array String := #[]
@@ -38,105 +38,6 @@ private def nameCandidates (name : String) : Array String :=
     else
       out
   out
-
-private def tryLoadTensorSharded
-    (modelDir : String)
-    (name : String)
-    (s : Shape)
-    (device : Device := Device.CPU)
-    : IO (Option (T s)) := do
-  try
-    let t ← safetensors.loadTensorShardedOnDevice modelDir name s device
-    pure (some t)
-  catch _ =>
-    pure none
-
-private def tryLoadTensor
-    (path : String)
-    (name : String)
-    (s : Shape)
-    (device : Device := Device.CPU)
-    : IO (Option (T s)) := do
-  try
-    let t ← safetensors.loadTensorOnDevice path name s device
-    pure (some t)
-  catch _ =>
-    pure none
-
-private def loadTensorShardedCandidates
-    (modelDir : String)
-    (names : Array String)
-    (s : Shape)
-    (device : Device := Device.CPU)
-    : IO (T s) := do
-  for n in names do
-    if let some t ← tryLoadTensorSharded modelDir n s device then
-      return t
-  throw <| IO.userError s!"Failed to load tensor (sharded): {names}"
-
-private def loadTensorCandidates
-    (path : String)
-    (names : Array String)
-    (s : Shape)
-    (device : Device := Device.CPU)
-    : IO (T s) := do
-  for n in names do
-    if let some t ← tryLoadTensor path n s device then
-      return t
-  throw <| IO.userError s!"Failed to load tensor: {names}"
-
-private def tryLoadTensorShardedCandidates
-    (modelDir : String)
-    (names : Array String)
-    (s : Shape)
-    (device : Device := Device.CPU)
-    : IO (Option (T s)) := do
-  for n in names do
-    if let some t ← tryLoadTensorSharded modelDir n s device then
-      return some t
-  pure none
-
-private def tryLoadTensorCandidates
-    (path : String)
-    (names : Array String)
-    (s : Shape)
-    (device : Device := Device.CPU)
-    : IO (Option (T s)) := do
-  for n in names do
-    if let some t ← tryLoadTensor path n s device then
-      return some t
-  pure none
-
-/-- Dequantize FP8 weights with blockwise inverse scales (128x128 blocks). -/
-private def dequantizeFP8 {outDim inDim : UInt64}
-    (weight : T #[outDim, inDim])
-    (scaleInv : T #[outDim / 128, inDim / 128])
-    : T #[outDim, inDim] :=
-  let outBlocks := outDim / 128
-  let inBlocks := inDim / 128
-  let w := toFloat' weight
-  let s := toFloat' scaleInv
-  let w := reshape w #[outBlocks, 128, inBlocks, 128]
-  let s := reshape s #[outBlocks, 1, inBlocks, 1]
-  let s := nn.expand s #[outBlocks, 128, inBlocks, 128]
-  let w := w * s
-  reshape w #[outDim, inDim]
-
-/-- Dequantize FP8 expert weights with blockwise inverse scales per expert.
-    weight: [experts, out, in], scale_inv: [experts, out/128, in/128]. -/
-private def dequantizeFP8Experts {experts outDim inDim : UInt64}
-    (weight : T #[experts, outDim, inDim])
-    (scaleInv : T #[experts, outDim / 128, inDim / 128])
-    : T #[experts, outDim, inDim] :=
-  let outBlocks := outDim / 128
-  let inBlocks := inDim / 128
-  let w := toFloat' weight
-  let s := toFloat' scaleInv
-  let w := reshape w #[experts, outBlocks, 128, inBlocks, 128]
-  let s := reshape s #[experts, outBlocks, 1, inBlocks, 1]
-  let s := nn.expand s #[experts, outBlocks, 128, inBlocks, 128]
-  let w := w * s
-  reshape w #[experts, outDim, inDim]
 
 private def loadLinearWeightSharded
     (modelDir : String)

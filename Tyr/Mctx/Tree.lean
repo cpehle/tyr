@@ -12,7 +12,7 @@ structure Tree (S E : Type) where
   actionFromParent : Array Int
   childrenIndex : Array (Array Int)
   childrenPriorLogits : Array (Array Float)
-  childrenVisits : Array (Array Nat)
+  childrenVisits : Array (Array UInt64)
   childrenRewards : Array (Array Float)
   childrenDiscounts : Array (Array Float)
   childrenValues : Array (Array Float)
@@ -64,19 +64,19 @@ def Tree.qvalues (tree : Tree S E) (nodeIndex : Nat) : Array Float :=
   (List.range rewards.size).toArray.map fun a =>
     rewards.getD a 0.0 + discounts.getD a 0.0 * values.getD a 0.0
 
-private def visitProbsFromCounts (counts : Array Nat) (numActions : Nat) : Array Float :=
-  let total : Nat := counts.foldl (init := 0) (· + ·)
+private def visitProbsFromCounts (counts : Array UInt64) (numActions : UInt64) : Array Float :=
+  let total : UInt64 := counts.foldl (init := 0) (· + ·)
   if total = 0 then
-    if numActions = 0 then #[] else Array.replicate numActions (1.0 / Float.ofNat numActions)
+    if numActions = 0 then #[] else Array.replicate numActions.toNat (1.0 / numActions.toFloat)
   else
-    counts.map (fun c => Float.ofNat c / Float.ofNat total)
+    counts.map (fun c => c.toFloat / total.toFloat)
 
 /-- Root summary statistics used by policies. -/
 def Tree.summary (tree : Tree S E) : SearchSummary :=
   let value := tree.nodeValues.getD ROOT_INDEX 0.0
   let visitCounts := tree.childrenVisits.getD ROOT_INDEX #[]
   let qvalues := tree.qvalues ROOT_INDEX
-  let visitProbs := visitProbsFromCounts visitCounts tree.numActions
+  let visitProbs := visitProbsFromCounts visitCounts tree.numActions.toUInt64
   { visitCounts := visitCounts
   , visitProbs := visitProbs
   , value := value
@@ -111,7 +111,7 @@ def resetSearchTree [Inhabited S] (tree : Tree S E) : Tree S E :=
   let numNodes := tree.nodeVisits.size
   let numActions := tree.numActions
   let intRow : Array Int := Array.replicate numActions UNVISITED
-  let natRow : Array Nat := Array.replicate numActions 0
+  let natRow : Array UInt64 := Array.replicate numActions 0
   let floatRow : Array Float := Array.replicate numActions 0.0
   { tree with
     nodeVisits := Array.replicate numNodes 0
@@ -163,7 +163,7 @@ def getSubtree [Inhabited S] (tree : Tree S E) (childAction : Nat) : Tree S E :=
     oldToNew := oldToNew.set! oldIdx (Int.ofNat newIdx)
 
   let intRow : Array Int := Array.replicate numActions UNVISITED
-  let natRow : Array Nat := Array.replicate numActions 0
+  let natRow : Array UInt64 := Array.replicate numActions 0
   let floatRow : Array Float := Array.replicate numActions 0.0
   let mut out : Tree S E := {
     nodeVisits := Array.replicate numNodes 0

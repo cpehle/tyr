@@ -5,18 +5,18 @@
 -/
 import Tyr.Torch
 import Tyr.Log
+import Tyr.SafeTensors.Load
+import Tyr.Model.Utils
 import Tyr.Model.Gemma4.Weights
 import Tyr.Model.Gemma4.Multimodal
 
 namespace torch.gemma4
 
 open torch.Log
-
-private def reqGradFalse {s : Shape} (t : T s) : T s :=
-  autograd.set_requires_grad t false
-
-private def pushUnique (xs : Array String) (x : String) : Array String :=
-  if xs.contains x then xs else xs.push x
+open torch.Model (reqGradFalse)
+open torch.safetensors (pushUnique
+  loadTensorCandidates loadTensorShardedCandidates
+  tryLoadTensorCandidates tryLoadTensorShardedCandidates)
 
 private def visionTensorNameCandidates (name : String) : Array String :=
   Id.run do
@@ -37,62 +37,20 @@ private def visionParameterNameCandidates (name : String) : Array String :=
           out := pushUnique out cand
     out
 
-private def tryLoadTensorSharded {s : Shape} (modelDir : String) (name : String)
-    : IO (Option (T s)) := do
-  try
-    let t ← safetensors.loadTensorSharded modelDir name s
-    pure (some t)
-  catch _ =>
-    pure none
-
-private def tryLoadTensor {s : Shape} (path : String) (name : String)
-    : IO (Option (T s)) := do
-  try
-    let t ← safetensors.loadTensor path name s
-    pure (some t)
-  catch _ =>
-    pure none
-
-private def loadTensorByCandidates {s : Shape}
-    (tryLoad : String → IO (Option (T s)))
-    (names : Array String)
-    : IO (T s) := do
-  for n in names do
-    if let some t ← tryLoad n then
-      return t
-  throw <| IO.userError s!"Failed to load tensor: {names}"
-
-private def tryLoadTensorByCandidates {s : Shape}
-    (tryLoad : String → IO (Option (T s)))
-    (names : Array String)
-    : IO (Option (T s)) := do
-  for n in names do
-    if let some t ← tryLoad n then
-      return some t
-  pure none
-
 private def loadVisionParameterSharded {s : Shape}
     (modelDir : String)
     (name : String)
     : IO (T s) :=
-  loadTensorByCandidates
-    (fun n => tryLoadTensorSharded modelDir n)
-    (visionParameterNameCandidates name)
+  loadTensorShardedCandidates modelDir (visionParameterNameCandidates name) s
 
 private def loadVisionParameter {s : Shape}
     (path : String)
     (name : String)
     : IO (T s) :=
-  loadTensorByCandidates
-    (fun n => tryLoadTensor path n)
-    (visionParameterNameCandidates name)
+  loadTensorCandidates path (visionParameterNameCandidates name) s
 
 private def tryLoadVisionScalarSharded (modelDir : String) (name : String) : IO (Option Float) := do
-  let t? ←
-    tryLoadTensorByCandidates
-      (s := #[])
-      (fun n => tryLoadTensorSharded (s := #[]) modelDir n)
-      (visionTensorNameCandidates name)
+  let t? ← tryLoadTensorShardedCandidates modelDir (visionTensorNameCandidates name) #[]
   match t? with
   | some t =>
     let vals ← data.tensorToFloatArray' t
@@ -101,11 +59,7 @@ private def tryLoadVisionScalarSharded (modelDir : String) (name : String) : IO 
     pure none
 
 private def tryLoadVisionScalar (path : String) (name : String) : IO (Option Float) := do
-  let t? ←
-    tryLoadTensorByCandidates
-      (s := #[])
-      (fun n => tryLoadTensor (s := #[]) path n)
-      (visionTensorNameCandidates name)
+  let t? ← tryLoadTensorCandidates path (visionTensorNameCandidates name) #[]
   match t? with
   | some t =>
     let vals ← data.tensorToFloatArray' t
@@ -117,17 +71,13 @@ private def tryLoadVisionParameterSharded {s : Shape}
     (modelDir : String)
     (name : String)
     : IO (Option (T s)) :=
-  tryLoadTensorByCandidates
-    (fun n => tryLoadTensorSharded modelDir n)
-    (visionParameterNameCandidates name)
+  tryLoadTensorShardedCandidates modelDir (visionParameterNameCandidates name) s
 
 private def tryLoadVisionParameter {s : Shape}
     (path : String)
     (name : String)
     : IO (Option (T s)) :=
-  tryLoadTensorByCandidates
-    (fun n => tryLoadTensor path n)
-    (visionParameterNameCandidates name)
+  tryLoadTensorCandidates path (visionParameterNameCandidates name) s
 
 private def loadVisionLinearSharded (modelDir : String) (name : String) (outDim inDim : UInt64)
     : IO (Gemma4VisionLinear outDim inDim) := do
@@ -244,10 +194,9 @@ private def loadVisionPatchEmbedderSharded (modelDir : String) (cfg : VLConfig)
       cfg.vision_config.hidden_size
       (VisionConfig.patchDim cfg.vision_config)
   let posEmbed ←
-    loadTensorByCandidates
-      (s := #[2, cfg.vision_config.position_embedding_size, cfg.vision_config.hidden_size])
-      (fun n => tryLoadTensorSharded modelDir n)
+    loadTensorShardedCandidates modelDir
       (visionTensorNameCandidates "model.vision_tower.patch_embedder.position_embedding_table")
+      #[2, cfg.vision_config.position_embedding_size, cfg.vision_config.hidden_size]
   pure {
     input_proj := inputProj
     position_embedding_table := reqGradFalse posEmbed
@@ -262,10 +211,9 @@ private def loadVisionPatchEmbedder (path : String) (cfg : VLConfig)
       cfg.vision_config.hidden_size
       (VisionConfig.patchDim cfg.vision_config)
   let posEmbed ←
-    loadTensorByCandidates
-      (s := #[2, cfg.vision_config.position_embedding_size, cfg.vision_config.hidden_size])
-      (fun n => tryLoadTensor path n)
+    loadTensorCandidates path
       (visionTensorNameCandidates "model.vision_tower.patch_embedder.position_embedding_table")
+      #[2, cfg.vision_config.position_embedding_size, cfg.vision_config.hidden_size]
   pure {
     input_proj := inputProj
     position_embedding_table := reqGradFalse posEmbed

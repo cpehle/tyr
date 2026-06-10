@@ -49,9 +49,9 @@ def getTableOfConsideredVisits (maxNumConsideredActions numSimulations : Nat) : 
 
 /-- Score used by Gumbel MuZero root action selection. -/
 def scoreConsidered
-    (consideredVisit : Nat)
+    (consideredVisit : UInt64)
     (gumbel logits normalizedQvalues : Array Float)
-    (visitCounts : Array Nat)
+    (visitCounts : Array UInt64)
     : Array Float :=
   let lowLogit : Float := -1e9
   let logits' :=

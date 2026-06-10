@@ -172,7 +172,7 @@ def testMctxGumbelMuZeroPolicyWithoutInvalidActions : IO Unit := do
 
   let summary := out.searchTree.summary
   let totalVisits := summary.visitCounts.foldl (init := 0) (· + ·)
-  LeanTest.assertEqual totalVisits numSimulations
+  LeanTest.assertEqual totalVisits (UInt64.ofNat numSimulations)
     s!"Root child visits should sum to num_simulations={numSimulations}"
 
 @[test]
