@@ -18,12 +18,8 @@ private def b1Emb : Float := 2756255671327.0 / 12835298489170.0
 private def b2Emb : Float := -10771552573575.0 / 22201958757719.0
 private def b3Emb : Float := 9247589265047.0 / 10645013368117.0
 private def b4Emb : Float := 2193209047091.0 / 5459859503100.0
-private def b1Err : Float := b1 - b1Emb
-private def b2Err : Float := b2 - b2Emb
-private def b3Err : Float := b3 - b3Emb
-private def b4Err : Float := gamma - b4Emb
 
-private def kencarp3Explicit : ButcherTableau 4 := {
+def kencarp3Explicit : ButcherTableau 4 := {
   a := vec4
     #[]
     #[2.0 * gamma]
@@ -32,11 +28,13 @@ private def kencarp3Explicit : ButcherTableau 4 := {
       10755448449292.0 / 10357097424841.0]
   b := vec4 b1 b2 b3 gamma
   c := vec4 0.0 (2.0 * gamma) (3.0 / 5.0) 1.0
-  bErr := some (vec4 b1Err b2Err b3Err b4Err)
+  -- Steppers compute the error estimate as (b − bErr)·k, so bErr stores
+  -- the *embedded* (lower-order) solution weights, not a difference vector.
+  bErr := some (vec4 b1Emb b2Emb b3Emb b4Emb)
   order := 3
 }
 
-private def kencarp3Implicit : ButcherTableau 4 := {
+def kencarp3Implicit : ButcherTableau 4 := {
   a := vec4
     #[]
     #[gamma, gamma]
@@ -44,7 +42,9 @@ private def kencarp3Implicit : ButcherTableau 4 := {
     #[b1, b2, b3, gamma]
   b := vec4 b1 b2 b3 gamma
   c := vec4 0.0 (2.0 * gamma) (3.0 / 5.0) 1.0
-  bErr := some (vec4 b1Err b2Err b3Err b4Err)
+  -- Steppers compute the error estimate as (b − bErr)·k, so bErr stores
+  -- the *embedded* (lower-order) solution weights, not a difference vector.
+  bErr := some (vec4 b1Emb b2Emb b3Emb b4Emb)
   order := 3
 }
 

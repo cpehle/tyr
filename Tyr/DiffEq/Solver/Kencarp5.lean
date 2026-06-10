@@ -25,16 +25,8 @@ private def b5Emb : Float := -548382580838.0 / 3424219808633.0
 private def b6Emb : Float := -33438840321285.0 / 15594753105479.0
 private def b7Emb : Float := 3629800801594.0 / 4656183773603.0
 private def b8Emb : Float := 4035322873751.0 / 18575991585200.0
-private def b1Err : Float := b1 - b1Emb
-private def b2Err : Float := b2 - b2Emb
-private def b3Err : Float := b3 - b3Emb
-private def b4Err : Float := b4 - b4Emb
-private def b5Err : Float := b5 - b5Emb
-private def b6Err : Float := b6 - b6Emb
-private def b7Err : Float := b7 - b7Emb
-private def b8Err : Float := gamma - b8Emb
 
-private def kencarp5Explicit : ButcherTableau 8 := {
+def kencarp5Explicit : ButcherTableau 8 := {
   a := vec8
     #[]
     #[41.0 / 100.0]
@@ -55,11 +47,13 @@ private def kencarp5Explicit : ButcherTableau 8 := {
   b := vec8 b1 b2 b3 b4 b5 b6 b7 gamma
   c := vec8 0.0 (41.0 / 100.0) (2935347310677.0 / 11292855782101.0)
     (1426016391358.0 / 7196633302097.0) (92.0 / 100.0) (24.0 / 100.0) (3.0 / 5.0) 1.0
-  bErr := some (vec8 b1Err b2Err b3Err b4Err b5Err b6Err b7Err b8Err)
+  -- Steppers compute the error estimate as (b − bErr)·k, so bErr stores
+  -- the *embedded* (lower-order) solution weights, not a difference vector.
+  bErr := some (vec8 b1Emb b2Emb b3Emb b4Emb b5Emb b6Emb b7Emb b8Emb)
   order := 5
 }
 
-private def kencarp5Implicit : ButcherTableau 8 := {
+def kencarp5Implicit : ButcherTableau 8 := {
   a := vec8
     #[]
     #[gamma, gamma]
@@ -76,7 +70,9 @@ private def kencarp5Implicit : ButcherTableau 8 := {
   b := vec8 b1 b2 b3 b4 b5 b6 b7 gamma
   c := vec8 0.0 (41.0 / 100.0) (2935347310677.0 / 11292855782101.0)
     (1426016391358.0 / 7196633302097.0) (92.0 / 100.0) (24.0 / 100.0) (3.0 / 5.0) 1.0
-  bErr := some (vec8 b1Err b2Err b3Err b4Err b5Err b6Err b7Err b8Err)
+  -- Steppers compute the error estimate as (b − bErr)·k, so bErr stores
+  -- the *embedded* (lower-order) solution weights, not a difference vector.
+  bErr := some (vec8 b1Emb b2Emb b3Emb b4Emb b5Emb b6Emb b7Emb b8Emb)
   order := 5
 }
 

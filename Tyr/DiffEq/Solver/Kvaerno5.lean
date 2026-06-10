@@ -43,7 +43,9 @@ def kvaerno5Tableau : ButcherTableau 7 := {
     #[a71, a72, a73, a74, a75, a76, gamma]
   b := vec7 a71 a72 a73 a74 a75 a76 gamma
   c := vec7 0.0 0.52 1.230333209967908 0.8957659843500759 0.43639360985864756 1.0 1.0
-  bErr := some (vec7 (a71 - a61) (a72 - a62) (a73 - a63) (a74 - a64) (a75 - a65) (a76 - gamma) gamma)
+  -- Steppers compute the error estimate as (b − bErr)·k, so bErr stores
+  -- the *embedded* (lower-order) solution weights, not a difference vector.
+  bErr := some (vec7 a61 a62 a63 a64 a65 gamma 0.0)
   order := 5
 }
 
