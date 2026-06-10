@@ -934,7 +934,7 @@ private def evaluateDenseFloat {S C : Type}
       (Args := Unit)
       (Controller := ConstantStepSize)
       term solver 0.0 1.0 (some 0.1) (1.0 : Float) () (saveat := badSaveAt)
-  LeanTest.assertTrue (sol.result == Result.internalError) "SaveAt(ts) out-of-range should error"
+  LeanTest.assertTrue (sol.result == Result.invalidInput) "SaveAt(ts) out-of-range should error"
 
 @[test] def testSaveAtTs : IO Unit := do
   let term : ODETerm Float Unit := { vectorField := fun _t y _ => -0.5 * y }
@@ -1440,7 +1440,7 @@ private def evaluateDenseFloat {S C : Type}
       (Args := Unit)
       (Controller := ConstantStepSize)
       term solver 0.0 1.0 (some 0.1) (1.0 : Float) () (saveat := badSaveAt)
-  LeanTest.assertTrue (sol.result == Result.internalError)
+  LeanTest.assertTrue (sol.result == Result.invalidInput)
     "Forward solve with non-monotone SaveAt.ts should fail"
 
 @[test] def testSaveAtTsDirectionReverse : IO Unit := do
@@ -1457,7 +1457,7 @@ private def evaluateDenseFloat {S C : Type}
       (Args := Unit)
       (Controller := ConstantStepSize)
       term solver 1.0 0.0 (some 0.1) (1.0 : Float) () (saveat := badSaveAt)
-  LeanTest.assertTrue (sol.result == Result.internalError)
+  LeanTest.assertTrue (sol.result == Result.invalidInput)
     "Reverse solve with non-monotone SaveAt.ts should fail"
 
 @[test] def testNestedSubSaveAtPayloadFlags : IO Unit := do
@@ -2843,8 +2843,8 @@ private def assertUnderdampedArgsContract
       term solver 0.0 1.0 (some 0.1) (1.0 : Float) ()
       (saveat := { steps := (1 : Nat) })
       (maxStepsOpt := none)
-  LeanTest.assertTrue (sol.result == Result.internalError)
-    "Expected internalError when maxStepsOpt=none with saveat.steps"
+  LeanTest.assertTrue (sol.result == Result.invalidInput)
+    "Expected invalidInput when maxStepsOpt=none with saveat.steps"
   LeanTest.assertTrue sol.ts.isNone
     "Expected no ts output for incompatible maxStepsOpt=none + saveat.steps config"
   LeanTest.assertTrue sol.ys.isNone
@@ -2865,8 +2865,8 @@ private def assertUnderdampedArgsContract
       term solver 0.0 1.0 (some 0.1) (1.0 : Float) ()
       (saveat := { dense := true })
       (maxStepsOpt := none)
-  LeanTest.assertTrue (sol.result == Result.internalError)
-    "Expected internalError when maxStepsOpt=none with saveat.dense"
+  LeanTest.assertTrue (sol.result == Result.invalidInput)
+    "Expected invalidInput when maxStepsOpt=none with saveat.dense"
   LeanTest.assertTrue sol.interpolation.isNone
     "Expected no dense interpolation for incompatible maxStepsOpt=none + saveat.dense config"
 
