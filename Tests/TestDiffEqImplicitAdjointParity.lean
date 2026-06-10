@@ -107,4 +107,61 @@ private def checkAgainstFiniteDifferences
         s!"kvaerno5 d/da {nn.item i.adjArgs} vs dopri5 {nn.item e.adjArgs}"
   | _, _ => LeanTest.fail "expected adjoint results from both solvers"
 
+/-! ## IMEX (KenCarp) adjoints -/
+
+private def imexExplicitTerm : ODETerm (T #[]) (T #[]) :=
+  { vectorField := fun _t y a => mul a y }
+
+private def imexImplicitTerm : ODETerm (T #[]) (T #[]) :=
+  { vectorField := fun _t y _ => mul_scalar (mul (mul y y) y) (-1.0) }
+
+private def imexTerms : MultiTerm (ODETerm (T #[]) (T #[])) (ODETerm (T #[]) (T #[])) :=
+  { term1 := imexExplicitTerm, term2 := imexImplicitTerm }
+
+private def imexSolveFinal
+    (solver : AbstractSolver (MultiTerm (ODETerm (T #[]) (T #[])) (ODETerm (T #[]) (T #[])))
+      (T #[]) (T #[] × T #[]) (Time × Time) (T #[]))
+    (y0 a : T #[]) (dt0 : Float) : Float :=
+  let sol :=
+    diffeqsolve
+      (Term := MultiTerm (ODETerm (T #[]) (T #[])) (ODETerm (T #[]) (T #[])))
+      (Y := T #[]) (VF := (T #[] × T #[])) (Control := (Time × Time)) (Args := T #[])
+      (Controller := ConstantStepSize)
+      imexTerms solver 0.0 1.0 (some dt0) y0 a (saveat := { t1 := true })
+  match sol.ys with
+  | some ys => nn.item (ys.getD (ys.size - 1) y0)
+  | none => 0.0
+
+/-- The IMEX split fᴱ = a·y, fᴵ = −y³ totals the same vector field as the
+    DIRK test; gradients must match central finite differences. -/
+@[test] def testKencarp4ImexAdjointFiniteDiff : IO Unit := do
+  let solver :=
+    Kencarp4.solver
+      (ExplicitTerm := ODETerm (T #[]) (T #[]))
+      (ImplicitTerm := ODETerm (T #[]) (T #[]))
+      (Y := T #[]) (VFe := T #[]) (VFi := T #[]) (Args := T #[])
+  let y0 := full #[] 0.8
+  let a := full #[] 0.5
+  let adjY1 := ones #[]
+  let dt0 := 0.05
+  let (_, adjOpt) :=
+    diffeqsolveDirectAdjointIMEX imexTerms solver 0.0 1.0 (some dt0) y0 a adjY1
+      (saveat := { t1 := true })
+  match adjOpt with
+  | none => LeanTest.fail "kencarp4 IMEX: expected direct adjoint result"
+  | some adj => do
+      let eps := 1.0e-4
+      let fdY0 :=
+        (imexSolveFinal solver (add_scalar y0 eps) a dt0 -
+         imexSolveFinal solver (add_scalar y0 (-eps)) a dt0) / (2.0 * eps)
+      let fdA :=
+        (imexSolveFinal solver y0 (add_scalar a eps) dt0 -
+         imexSolveFinal solver y0 (add_scalar a (-eps)) dt0) / (2.0 * eps)
+      let adjY0 := nn.item adj.adjY0
+      let adjA := nn.item adj.adjArgs
+      LeanTest.assertTrue (approx adjY0 fdY0 1.0e-2)
+        s!"kencarp4 IMEX: d/dy0 expected {fdY0}, got {adjY0}"
+      LeanTest.assertTrue (approx adjA fdA 1.0e-2)
+        s!"kencarp4 IMEX: d/da expected {fdA}, got {adjA}"
+
 end Tests.DiffEqImplicitAdjointParity
