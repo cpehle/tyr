@@ -100,12 +100,12 @@ instance [DiffEqSpace α] : DiffEqSpace (List α) where
     if x.length == y.length then
       List.zipWith DiffEqSpace.add x y
     else
-      panic! "DiffEqSpace.add: List length mismatch"
+      panic! s!"DiffEqSpace.add: List length mismatch ({x.length} vs {y.length}) — state and vector-field containers must have identical structure"
   sub x y :=
     if x.length == y.length then
       List.zipWith DiffEqSpace.sub x y
     else
-      panic! "DiffEqSpace.sub: List length mismatch"
+      panic! s!"DiffEqSpace.sub: List length mismatch ({x.length} vs {y.length}) — state and vector-field containers must have identical structure"
   scale s x := x.map (DiffEqSpace.scale s)
 
 instance [DiffEqSpace α] : DiffEqSpace (Array α) where
@@ -113,12 +113,12 @@ instance [DiffEqSpace α] : DiffEqSpace (Array α) where
     if x.size == y.size then
       Array.zipWith DiffEqSpace.add x y
     else
-      panic! "DiffEqSpace.add: Array size mismatch"
+      panic! s!"DiffEqSpace.add: Array size mismatch ({x.size} vs {y.size}) — state and vector-field containers must have identical structure"
   sub x y :=
     if x.size == y.size then
       Array.zipWith DiffEqSpace.sub x y
     else
-      panic! "DiffEqSpace.sub: Array size mismatch"
+      panic! s!"DiffEqSpace.sub: Array size mismatch ({x.size} vs {y.size}) — state and vector-field containers must have identical structure"
   scale s x := x.map (DiffEqSpace.scale s)
 
 instance [DiffEqSpace α] : DiffEqSpace (Option α) where
@@ -126,12 +126,12 @@ instance [DiffEqSpace α] : DiffEqSpace (Option α) where
     match x, y with
     | some x, some y => some (DiffEqSpace.add x y)
     | none, none => none
-    | _, _ => panic! "DiffEqSpace.add: Option shape mismatch"
+    | _, _ => panic! "DiffEqSpace.add: Option mismatch (some vs none) — state and vector-field containers must have identical structure"
   sub x y :=
     match x, y with
     | some x, some y => some (DiffEqSpace.sub x y)
     | none, none => none
-    | _, _ => panic! "DiffEqSpace.sub: Option shape mismatch"
+    | _, _ => panic! "DiffEqSpace.sub: Option mismatch (some vs none) — state and vector-field containers must have identical structure"
   scale s x := x.map (DiffEqSpace.scale s)
 
 instance : DiffEqSeminorm Float where
@@ -198,13 +198,13 @@ instance [DiffEqElem α] : DiffEqElem (List α) where
     if x.length == y.length then
       List.zipWith DiffEqElem.max x y
     else
-      panic! "DiffEqElem.max: List length mismatch"
+      panic! s!"DiffEqElem.max: List length mismatch ({x.length} vs {y.length})"
   addScalar s x := x.map (DiffEqElem.addScalar s)
   div x y :=
     if x.length == y.length then
       List.zipWith DiffEqElem.div x y
     else
-      panic! "DiffEqElem.div: List length mismatch"
+      panic! s!"DiffEqElem.div: List length mismatch ({x.length} vs {y.length})"
 
 instance [DiffEqElem α] : DiffEqElem (Array α) where
   abs x := x.map DiffEqElem.abs
@@ -212,13 +212,13 @@ instance [DiffEqElem α] : DiffEqElem (Array α) where
     if x.size == y.size then
       Array.zipWith DiffEqElem.max x y
     else
-      panic! "DiffEqElem.max: Array size mismatch"
+      panic! s!"DiffEqElem.max: Array size mismatch ({x.size} vs {y.size})"
   addScalar s x := x.map (DiffEqElem.addScalar s)
   div x y :=
     if x.size == y.size then
       Array.zipWith DiffEqElem.div x y
     else
-      panic! "DiffEqElem.div: Array size mismatch"
+      panic! s!"DiffEqElem.div: Array size mismatch ({x.size} vs {y.size})"
 
 instance [DiffEqElem α] : DiffEqElem (Option α) where
   abs x := x.map DiffEqElem.abs
@@ -226,13 +226,13 @@ instance [DiffEqElem α] : DiffEqElem (Option α) where
     match x, y with
     | some x, some y => some (DiffEqElem.max x y)
     | none, none => none
-    | _, _ => panic! "DiffEqElem.max: Option shape mismatch"
+    | _, _ => panic! "DiffEqElem.max: Option mismatch (some vs none)"
   addScalar s x := x.map (DiffEqElem.addScalar s)
   div x y :=
     match x, y with
     | some x, some y => some (DiffEqElem.div x y)
     | none, none => none
-    | _, _ => panic! "DiffEqElem.div: Option shape mismatch"
+    | _, _ => panic! "DiffEqElem.div: Option mismatch (some vs none)"
 
 private def tensorMaximum {s : Shape} (a b : T s) : T s :=
   where_ (gt a b) a b
