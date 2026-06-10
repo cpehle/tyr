@@ -42,6 +42,7 @@ import Tests.TestDiffEq
 import Tests.TestDiffEqEventTreeParity
 import Tests.TestDiffEqMilsteinAutodiffParity
 import Tests.TestDiffEqSDEOrderParity
+import Tests.TestDiffEqTableauConditions
 import Tests.TestDiffEqUnderdampedOrderParity
 import Tests.TestDiffEqWeakStats
 import Tests.TestDiffEqWeakStatsParity2
