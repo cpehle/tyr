@@ -4,18 +4,71 @@ import Tyr.Typed.Device
 /-!
 # Typed tensor facade
 
-`DTensor shape dtype` is a lightweight typed view over Tyr's existing `T shape`.
-It does not replace the runtime tensor representation.  Checked constructors
-validate runtime dtype metadata when crossing from raw tensors into the typed
-facade; `assumeDType` is available for code that already established the
-invariant externally.
+`Tensor (σ : StaticSpec)` is a lightweight typed view over Tyr's existing
+`T shape`, graded by ONE struct index carrying shape, dtype, and device
+policy. The index is phantom: a `Tensor σ` contains exactly a `T σ.shape`
+handle, so wrappers cost nothing at runtime and the FFI surface is
+untouched.
+
+Grading: `dtype` and `device` have "dynamic" defaults, so
+`Tensor {shape := s}` claims only the shape, while
+`Tensor {shape := s, dtype := .Float32, device := .exact (.CUDA 0)}` pins
+everything. `DTensor shape dtype` abbreviates the shape+dtype instantiation.
+
+Checked constructors validate runtime metadata when crossing from raw
+tensors into the typed facade; `assumeSpec`/`assumeDType` are available for
+code that already established the invariant externally (each such use
+encodes an assumption about libtorch behavior — keep them covered by the
+parity tests in `Tests/TestTyped.lean`).
 -/
 
 namespace torch
 
-structure DTensor (shape : Shape) (dtype : DType) where
+/-- Static specification carried by a typed tensor: shape always; dtype and
+    device policy graded, with defaults meaning "dynamic" / "anywhere". -/
+structure StaticSpec where
+  shape : Shape
+  dtype : DType := .Unknown "dynamic"
+  device : DevicePolicy := .any
+deriving Repr, BEq
+
+namespace StaticSpec
+
+/-- Forget the device policy (runtime-metadata view). -/
+def toTensorSpec (σ : StaticSpec) : TensorSpec :=
+  { shape := σ.shape, dtype := σ.dtype }
+
+def withShape (σ : StaticSpec) (shape : Shape) : StaticSpec :=
+  { σ with shape }
+
+def withDType (σ : StaticSpec) (dtype : DType) : StaticSpec :=
+  { σ with dtype }
+
+/-- Result spec of a broadcasting pointwise op. The device policy of the
+    left operand propagates. -/
+def pointwise (l r : StaticSpec) : StaticSpec :=
+  { shape := TensorSpec.broadcastShape l.shape r.shape
+    dtype := DType.promote l.dtype r.dtype
+    device := l.device }
+
+/-- Result spec of true division: pointwise, then floated. -/
+def division (l r : StaticSpec) : StaticSpec :=
+  { l.pointwise r with dtype := (DType.promote l.dtype r.dtype).atLeastFloat }
+
+/-- Result spec of a full reduction with sum accumulation rules. -/
+def sumSpec (σ : StaticSpec) : StaticSpec :=
+  { σ with shape := #[], dtype := σ.dtype.sumResult }
+
+end StaticSpec
+
+/-- Typed tensor: phantom `StaticSpec` index over the runtime `T` handle. -/
+structure Tensor (σ : StaticSpec) where
   private mk ::
-  raw : T shape
+  raw : T σ.shape
+
+/-- Shape+dtype instantiation of the graded tensor (device unconstrained). -/
+abbrev DTensor (shape : Shape) (dtype : DType) : Type :=
+  Tensor { shape, dtype }
 
 abbrev TT (shape : Shape) (dtype : DType) : Type :=
   DTensor shape dtype
@@ -23,28 +76,46 @@ abbrev TT (shape : Shape) (dtype : DType) : Type :=
 abbrev SomeDTensor :=
   Sigma fun spec : TensorSpec => DTensor spec.shape spec.dtype
 
-namespace DTensor
+namespace Tensor
 
-def assumeDType {shape : Shape} {dtype : DType} (raw : T shape) : DTensor shape dtype :=
+/-- Wrap a raw tensor, assuming the full static spec holds. -/
+def assumeSpec {σ : StaticSpec} (raw : T σ.shape) : Tensor σ :=
   .mk raw
 
-def toTensor {shape : Shape} {dtype : DType} (tensor : DTensor shape dtype) : T shape :=
-  tensor.raw
+/-- Compat alias for `assumeSpec` (the shape+dtype reading). -/
+abbrev assumeDType {σ : StaticSpec} (raw : T σ.shape) : Tensor σ :=
+  assumeSpec raw
 
-instance {shape : Shape} {dtype : DType} : CoeOut (DTensor shape dtype) (T shape) where
+def toTensor {σ : StaticSpec} (t : Tensor σ) : T σ.shape :=
+  t.raw
+
+instance {σ : StaticSpec} : CoeOut (Tensor σ) (T σ.shape) where
   coe := toTensor
 
-def spec {shape : Shape} {dtype : DType} (_tensor : DTensor shape dtype) : TensorSpec :=
-  { shape, dtype }
+/-- The static spec, as runtime metadata (shape + dtype). -/
+def spec {σ : StaticSpec} (_t : Tensor σ) : TensorSpec :=
+  σ.toTensorSpec
 
-def dtype {shape : Shape} {dtype : DType} (_tensor : DTensor shape dtype) : DType :=
-  dtype
+/-- The full static spec, including the device policy. -/
+def staticSpec {σ : StaticSpec} (_t : Tensor σ) : StaticSpec :=
+  σ
 
-def shape {shape : Shape} {dtype : DType} (_tensor : DTensor shape dtype) : Shape :=
-  shape
+def dtype {σ : StaticSpec} (_t : Tensor σ) : DType :=
+  σ.dtype
 
-def actualSpec {shape : Shape} {dtype : DType} (tensor : DTensor shape dtype) : TensorSpec :=
-  { shape := tensor.raw.runtimeShape, dtype := tensor.raw.dtype }
+def shape {σ : StaticSpec} (_t : Tensor σ) : Shape :=
+  σ.shape
+
+/-- Runtime metadata actually carried by the handle. -/
+def actualSpec {σ : StaticSpec} (t : Tensor σ) : TensorSpec :=
+  { shape := t.raw.runtimeShape, dtype := t.raw.dtype }
+
+/-- Validate every phantom claim — shape, dtype, and device policy —
+    against the runtime handle. Used by tests and debug assertions at
+    trust boundaries. -/
+def validate {σ : StaticSpec} (t : Tensor σ) : Except String Unit := do
+  TensorSpec.checkCompatible σ.toTensorSpec t.actualSpec
+  σ.device.check t.raw.device
 
 def ofTensor? {shape : Shape} (dtype : DType) (raw : T shape) : Option (DTensor shape dtype) :=
   if raw.dtype == dtype then
@@ -66,31 +137,8 @@ def ofTensorWithContract {shape : Shape} (contract : TensorContract) (raw : T sh
     .error s!"Expected static shape {reprStr contract.spec.shape}, got {reprStr shape}"
 
 def toSome {shape : Shape} {dtype : DType} (tensor : DTensor shape dtype) : SomeDTensor :=
-  ⟨tensor.spec, tensor⟩
+  ⟨{ shape, dtype }, tensor⟩
 
-def add {shape : Shape} {lhsDType rhsDType : DType}
-    (lhs : DTensor shape lhsDType) (rhs : DTensor shape rhsDType) :
-    DTensor shape (DType.promote lhsDType rhsDType) :=
-  .mk (torch.add lhs.raw rhs.raw)
-
-def sub {shape : Shape} {lhsDType rhsDType : DType}
-    (lhs : DTensor shape lhsDType) (rhs : DTensor shape rhsDType) :
-    DTensor shape (DType.promote lhsDType rhsDType) :=
-  .mk (torch.sub lhs.raw rhs.raw)
-
-def mul {shape : Shape} {lhsDType rhsDType : DType}
-    (lhs : DTensor shape lhsDType) (rhs : DTensor shape rhsDType) :
-    DTensor shape (DType.promote lhsDType rhsDType) :=
-  .mk (torch.mul lhs.raw rhs.raw)
-
-def toFloat32 {shape : Shape} {dtype : DType} (tensor : DTensor shape dtype) :
-    DTensor shape .Float32 :=
-  .mk (torch.toFloat' tensor.raw)
-
-def toBFloat16 {shape : Shape} {dtype : DType} (tensor : DTensor shape dtype) :
-    DTensor shape .BFloat16 :=
-  .mk (torch.toBFloat16' tensor.raw)
-
-end DTensor
+end Tensor
 
 end torch

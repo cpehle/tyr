@@ -146,16 +146,16 @@ def testSafeTensorsTypeProviderSingle : IO Unit := do
     (SingleSafe.linear_weightTensorSpec == { shape := #[2, 3], dtype := DType.Float32 })
     "generated TensorSpec should expose shape and dtype through the shared spec layer"
   let typed ← SingleSafe.load_linear_weightTyped
-  LeanTest.assertTrue (DTensor.actualSpec typed == SingleSafe.linear_weightTensorSpec)
+  LeanTest.assertTrue (Tensor.actualSpec typed == SingleSafe.linear_weightTensorSpec)
     "checked typed loader should validate runtime metadata before returning DTensor"
-  LeanTest.assertEqual (DTensor.dtype typed) DType.Float32
+  LeanTest.assertEqual (Tensor.dtype typed) DType.Float32
     "checked typed loader should carry dtype in the return type"
   let handle ← safetensors.openHandle "Tests/fixtures/safetensors/single.safetensors"
   let tFromHandle ← SingleSafe.load_linear_weightFromHandle handle
   LeanTest.assertTrue (tFromHandle.runtimeShape == #[2, 3])
     "single-file provider should expose a per-tensor from-handle loader"
   let typedFromHandle ← SingleSafe.load_linear_weightTypedFromHandle handle
-  LeanTest.assertTrue (DTensor.actualSpec typedFromHandle == SingleSafe.linear_weightTensorSpec)
+  LeanTest.assertTrue (Tensor.actualSpec typedFromHandle == SingleSafe.linear_weightTensorSpec)
     "single-file provider should expose a checked per-tensor from-handle loader"
 
   let wrongDTypeSpec : TensorSpec := { SingleSafe.linear_weightTensorSpec with dtype := DType.BFloat16 }
@@ -201,7 +201,7 @@ def testSafeTensorsTypeProviderSharded : IO Unit := do
   let e ← ShardedSafe.load_embed_weight
   LeanTest.assertTrue (e.runtimeShape == #[2, 2]) "embed loader should return generated typed shape"
   let eTyped ← ShardedSafe.load_embed_weightTyped
-  LeanTest.assertTrue (DTensor.actualSpec eTyped == ShardedSafe.embed_weightTensorSpec)
+  LeanTest.assertTrue (Tensor.actualSpec eTyped == ShardedSafe.embed_weightTensorSpec)
     "sharded provider should expose checked typed loaders"
 
   let b ← ShardedSafe.load_proj_bias

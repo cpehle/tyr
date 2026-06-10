@@ -60,6 +60,18 @@ def broadcastShapes? (lhs rhs : Shape) : Option Shape :=
 def broadcastsTo (src dst : Shape) : Prop :=
   broadcastShapes? src dst = some dst
 
+/-- n-ary mutual broadcast: fold the binary broadcast over all shapes.
+    `none` for the empty list or any incompatible pair. -/
+def broadcastList? : List Shape → Option Shape
+  | [] => none
+  | shape :: rest => rest.foldlM broadcastShapes? shape
+
+/-- Total broadcast-shape function for use in type indices (`#[]` junk on
+    incompatible shapes — callers rule that out with a
+    `(broadcastShapes? s1 s2).isSome` proof). -/
+def broadcastShape (lhs rhs : Shape) : Shape :=
+  (broadcastShapes? lhs rhs).getD #[]
+
 def pointwise? (lhs rhs : TensorSpec) : Option TensorSpec := do
   let shape ← broadcastShapes? lhs.shape rhs.shape
   pure { shape, dtype := DType.promote lhs.dtype rhs.dtype }
