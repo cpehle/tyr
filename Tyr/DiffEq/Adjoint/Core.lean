@@ -936,6 +936,100 @@ def diffeqsolveDirectAdjoint
           (Controller := ConstantStepSize)
           term solver t0 t1 dt0 y0 args adjY1 maxSteps controller)
 
+/-! ## SDE backsolve adjoint (Stratonovich)
+
+For `dy = f(t,y,θ) dt + g(t,y,θ) ∘ dW` and a loss on the terminal state,
+the continuous adjoint satisfies (backward in time, with the SAME Brownian
+path)
+
+    da = −(∂f/∂y)ᵀ a dt − (∂g/∂y)ᵀ a ∘ dW
+    dγ = −(∂f/∂θ)ᵀ a dt − (∂g/∂θ)ᵀ a ∘ dW
+
+Stratonovich calculus is time-reversal symmetric, which is what makes the
+backward solve meaningful (this is why backsolve SDE adjoints are
+Stratonovich-only). The augmented (y, a, γ) system is integrated backward
+with a Heun (Stratonovich) scheme; Brownian increments are re-queried from
+the diffusion term's control, which must be backed by a replayable path
+(e.g. a `VirtualBrownianTree`). Per step, the diffusion map with the
+increment frozen, `y ↦ prod (g t y θ) c`, is an ordinary `Y → Y` map, so
+both adjoint contractions come from the same `AdjointBackend.vjp` used by
+the ODE adjoints. -/
+
+/-- One backward Stratonovich-Heun step of the augmented adjoint system,
+    from `tHi` down to `tLo` (so `h = tLo − tHi < 0`); `c` is the control
+    increment queried over `(tHi, tLo)`, already orientation-correct. -/
+private def sdeAdjointHeunStep
+    {Y Args Control : Type}
+    [DiffEqSpace Y] [DiffEqSpace Args]
+    [AdjointBackend Y Args]
+    (drift : ODETerm Y Args)
+    (diffusion : ControlTerm Y Y Control Args)
+    (tHi tLo : Time)
+    (c : Control)
+    (y a : Y) (γ : Args) (args : Args) :
+    (Y × Y × Args) :=
+  let h := tLo - tHi
+  let diffMap := fun (t : Time) (y' : Y) (θ : Args) =>
+    diffusion.prod (diffusion.vectorField t y' θ) c
+  -- augmented vector field at (t, y, a): returns (dy-drift, da, dγ) pieces
+  let eval := fun (t : Time) (y' a' : Y) =>
+    let f := drift.vectorField t y' args
+    let (_, jfA, gfA) :=
+      (AdjointBackend.vjp (Y := Y) (Args := Args)) drift.vectorField t y' args a'
+    let gInc := diffMap t y' args
+    let (_, jgA, ggA) :=
+      (AdjointBackend.vjp (Y := Y) (Args := Args)) diffMap t y' args a'
+    -- (Δy, Δa, Δγ) over this step for drift·h and diffusion·c respectively
+    ( DiffEqSpace.add (DiffEqSpace.scale h f) gInc
+    , DiffEqSpace.scale (-1.0) (DiffEqSpace.add (DiffEqSpace.scale h jfA) jgA)
+    , DiffEqSpace.scale (-1.0) (DiffEqSpace.add (DiffEqSpace.scale h gfA) ggA) )
+  let (dy1, da1, dγ1) := eval tHi y a
+  -- predictor
+  let yP := DiffEqSpace.add y dy1
+  let aP := DiffEqSpace.add a da1
+  let (dy2, da2, dγ2) := eval tLo yP aP
+  -- trapezoidal corrector
+  ( DiffEqSpace.add y (DiffEqSpace.scale 0.5 (DiffEqSpace.add dy1 dy2))
+  , DiffEqSpace.add a (DiffEqSpace.scale 0.5 (DiffEqSpace.add da1 da2))
+  , DiffEqSpace.add γ (DiffEqSpace.scale 0.5 (DiffEqSpace.add dγ1 dγ2)) )
+
+/-- Backsolve (continuous, optimise-then-discretise) adjoint for a
+    single-noise Stratonovich SDE given as drift `ODETerm` plus diffusion
+    `ControlTerm` (the standard `MultiTerm` SDE splitting, with `VF = Y`).
+
+    Integrates the augmented `(y, a, γ)` system backward from `(yT, adjY1,
+    0)` over `steps` uniform steps, re-querying the diffusion control over
+    each backward subinterval — the control must be replayable. Gradients
+    are with respect to the initial state and `args` (which may feed the
+    drift, the diffusion, or both). -/
+def sdeBacksolveAdjointStratonovich
+    {Y Args Control : Type}
+    [DiffEqSpace Y] [DiffEqSpace Args]
+    [AdjointBackend Y Args]
+    [Inhabited Y] [Inhabited Args]
+    (drift : ODETerm Y Args)
+    (diffusion : ControlTerm Y Y Control Args)
+    (t0 t1 : Time)
+    (yT : Y)
+    (args : Args)
+    (adjY1 : Y)
+    (steps : Nat := 256) :
+    AdjointResult Y Args := Id.run do
+  let n := Nat.max steps 1
+  let dt := (t1 - t0) / Float.ofNat n
+  let mut y := yT
+  let mut a := adjY1
+  let mut γ := zeroLike args
+  for k in [:n] do
+    let tHi := t1 - Float.ofNat k * dt
+    let tLo := if k + 1 == n then t0 else t1 - Float.ofNat (k + 1) * dt
+    let c := diffusion.control tHi tLo
+    let (y', a', γ') := sdeAdjointHeunStep drift diffusion tHi tLo c y a γ args
+    y := y'
+    a := a'
+    γ := γ'
+  return { adjY0 := a, adjArgs := γ }
+
 /-- IMEX twin of `runPrimalLoopTrace` for `MultiTerm` drift splittings. -/
 private def runPrimalLoopTraceIMEX
     {Y Args Controller : Type}
