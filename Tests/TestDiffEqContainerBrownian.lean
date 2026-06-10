@@ -114,6 +114,25 @@ private def approx (a b tol : Float) : Bool :=
     LeanTest.assertTrue (approx arrInc.K[i]! k1[i]! 1e-6)
       s!"tensor K[{i}] should match array path"
 
+
+@[test] def testBrownianTensorTimingProbe : IO Unit := do
+  -- Informational timing (no assertion): the per-element scalar path costs
+  -- ~4.5µs per element-increment at tol=1e-4. A keying-preserving batched
+  -- CPU rewrite was measured 5x SLOWER (allocation-bound), so the scalable
+  -- path for large noise dims is device-side counter-based sampling.
+  for n in ([64, 1024] : List Nat) do
+    let tree : VirtualBrownianTree (T #[n.toUInt64]) := {
+      t0 := 0.0, t1 := 1.0, tol := 1.0e-4, seed := 11
+      shape := torch.zeros #[n.toUInt64]
+    }
+    let start ← IO.monoMsNow
+    let mut acc := 0.0
+    for k in [:16] do
+      let inc := VirtualBrownianTree.increment tree 0.0 (0.03 + 0.06 * k.toFloat)
+      acc := acc + nn.item (nn.sumAll inc.W)
+    let elapsed := (← IO.monoMsNow) - start
+    IO.eprintln s!"  [vbt-timing] n={n}: 16 increments in {elapsed}ms (acc={acc})"
+
 def run : IO Unit := do
   testBrownianArrayIncrementsAdditive
   testBrownianListIncrementsAdditive
