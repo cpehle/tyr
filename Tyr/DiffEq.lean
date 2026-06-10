@@ -1,4 +1,5 @@
 import Tyr.DiffEq.Types
+import Tyr.DiffEq.Typed
 import Tyr.DiffEq.Term
 import Tyr.DiffEq.Path
 import Tyr.DiffEq.Brownian
