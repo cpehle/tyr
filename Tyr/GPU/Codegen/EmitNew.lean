@@ -1160,6 +1160,8 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout)
   -- Constants
   | .constInt dst value =>
     s!"{indent}int {dst.toIdent} = {value};\n"
+  | .constUInt64 dst value =>
+    s!"{indent}uint64_t {dst.toIdent} = {value}ULL;\n"
   | .constFloat dst value =>
     s!"{indent}float {dst.toIdent} = {value}f;\n"
   | .scalarUnary .Neg dst src =>
@@ -1343,7 +1345,7 @@ private partial def stmtUses (p : KStmt → Bool) : KStmt → Bool
       | .semaphoreArrayWaitVal .. | .semaphoreArrayArrive ..
       | .comment ..
       | .getBlockIdx .. | .getThreadIdx .. | .getGridDim .. | .getBlockDim ..
-      | .constInt .. | .constFloat ..
+      | .constInt .. | .constUInt64 .. | .constFloat ..
       | .scalarUnary .. | .scalarCompare .. | .scalarBinary .. | .scalarSelect ..
       | .scalarAssign .. | .scalarCast .. | .blockReduce ..
       | .vecIota .. | .vecFillScalar ..

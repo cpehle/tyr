@@ -428,6 +428,7 @@ inductive KStmt where
   -- Constants
   /-- Materialize a compile-time integer constant into a runtime scalar. -/
   | constInt (dst : VarId) (value : Int)
+  | constUInt64 (dst : VarId) (value : Nat)
   /-- Materialize a compile-time Float constant into a runtime scalar. -/
   | constFloat (dst : VarId) (value : Float)
   /-- Apply a unary op to a runtime scalar (neg/exp/log/rsqrt/...). -/
