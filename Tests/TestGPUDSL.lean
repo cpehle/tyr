@@ -8,6 +8,7 @@
 -/
 import Tyr.GPU.Types
 import Tyr.GPU.Kernels.RKCombine
+import Tyr.GPU.Kernels.BrownianSample
 import Tyr.GPU.Codegen.Var
 import Tyr.GPU.Codegen.TileTypes
 import Tyr.GPU.Codegen.IR
@@ -144,8 +145,8 @@ def testScalarMul : IO Unit := do
   let code := generateKernel kernel
   -- Should have two mul operations with scalar
   assertTrue (code.containsSubstr "mul(") "Should have scalar mul"
-  assertTrue (code.containsSubstr "0.500000f") "Should have 0.5 scalar"
-  assertTrue (code.containsSubstr "2.000000f") "Should have 2.0 scalar"
+  assertTrue (code.containsSubstr "0x1.0000000000000p-1f") "Should have 0.5 scalar"
+  assertTrue (code.containsSubstr "0x1.0000000000000p1f") "Should have 2.0 scalar"
 
 /-- Test scalar addition -/
 @[test]
@@ -157,7 +158,7 @@ def testScalarAdd : IO Unit := do
 
   let code := generateKernel kernel
   assertTrue (code.containsSubstr "add(") "Should have scalar add"
-  assertTrue (code.containsSubstr "1.000000f") "Should have 1.0 scalar"
+  assertTrue (code.containsSubstr "0x1.0000000000000p0f") "Should have 1.0 scalar"
 
 /-! ## Notation Tests: Vector Operators -/
 
@@ -648,12 +649,60 @@ def testRKCombineCodegen : IO Unit := do
   assertTrue (code.containsSubstr "mul(") "Should emit scalar multiplies"
   assertTrue (code.containsSubstr "add(") "Should emit accumulation adds"
   assertTrue (code.containsSubstr "zero(") "Should zero the error accumulator"
-  assertTrue (code.containsSubstr "0.091146") "Should bake b₁ = 35/384 into the kernel"
+  assertTrue (code.containsSubstr "0x1.7555555555555p-4") "Should bake b₁ = 35/384 exactly into the kernel"
   -- stage 2 has b = bHat = 0 and must be skipped at codegen time
   assertTrue (!(code.containsSubstr "v14, v2,")) "Zero-weight stage k2 must not be loaded"
   -- y0 + 6 live stages in, y1 + err out: 9 global accesses in one launch
   let globalAccesses := (code.splitOn "kittens::coord").length - 1
   assertTrue (globalAccesses == 9)
     s!"Expected 9 global tile accesses (7 in, 2 out), got {globalAccesses}"
+
+
+/-- The stage-sum generator skips zero coefficients (Dopri5 row 7 has a
+    zero at k2) and emits one fused accumulation per live stage. -/
+@[test]
+def testRKStageSumCodegen : IO Unit := do
+  let params : Array KParam :=
+    (Array.range 8).map fun i =>
+      { name := s!"p{i}", dtype := .Float32, isPointer := true }
+  let kPtrs : Array (GPtr GpuFloat.Float32) :=
+    (Array.range 6).map fun i => { id := ⟨i + 1⟩, name := s!"k{i + 1}" }
+  let kernel := buildKernelM "rk_stage7_test" .SM90 params do
+    Tyr.GPU.Kernels.rkStageSumBody
+      #[35.0 / 384.0, 0.0, 500.0 / 1113.0, 125.0 / 192.0,
+        -2187.0 / 6784.0, 11.0 / 84.0]
+      ({ id := ⟨0⟩, name := "y0" } : GPtr GpuFloat.Float32) kPtrs
+      { id := ⟨7⟩, name := "out" }
+  let code := generateKernel kernel
+  assertTrue (code.containsSubstr "mul(") "Should emit scalar multiplies"
+  assertTrue (!(code.containsSubstr "v14, v2,")) "Zero-coefficient stage k2 must not be loaded"
+  -- y0 + 5 live stages in, 1 out: 7 global tile accesses
+  let globalAccesses := (code.splitOn "kittens::coord").length - 1
+  assertTrue (globalAccesses == 7)
+    s!"Expected 7 global tile accesses (6 in, 1 out), got {globalAccesses}"
+
+
+/-- The keyed-normal sampler replicates the CPU PRNG chain: exact 64-bit
+    LCG constants, Box-Muller via the new scalar Sqrt/Cos ops, one global
+    store per element. -/
+@[test]
+def testKeyedNormalCodegen : IO Unit := do
+  let params : Array KParam := #[
+    { name := "out", dtype := .Float32, isPointer := true },
+    { name := "root", dtype := .Float32, isPointer := false },
+    { name := "n", dtype := .Float32, isPointer := false }
+  ]
+  let kernel := buildKernelM "keyed_normal_test" .SM90 params do
+    Tyr.GPU.Kernels.keyedNormalBody
+      ({ id := ⟨0⟩, name := "out" } : GPtr GpuFloat.Float32)
+      ({ id := ⟨1⟩, name := "root" } : KVal UInt64)
+      ({ id := ⟨2⟩, name := "n" } : KVal UInt64)
+  let code := generateKernel kernel
+  assertTrue (code.containsSubstr "6364136223846793005ULL") "Exact 64-bit LCG multiplier"
+  assertTrue (code.containsSubstr "11400714819323198485ULL") "Exact 64-bit golden-ratio constant"
+  assertTrue (code.containsSubstr "::cosf(") "Box-Muller cosine via the new scalar Cos"
+  assertTrue (code.containsSubstr "::sqrtf(") "Box-Muller radius via the new scalar Sqrt"
+  assertTrue (code.containsSubstr "::logf(") "Box-Muller log"
+  assertTrue (code.containsSubstr "threadIdx.x") "Per-thread parallel iteration"
 
 end Tests.GPUDSL

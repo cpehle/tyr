@@ -5,6 +5,8 @@ import Examples.GPU.RunLayerNorm
 import Examples.GPU.RunRMSNorm
 import Examples.GPU.RunMhaGB10
 import Examples.GPU.RunRKCombine
+import Examples.GPU.RunRKFusedSolve
+import Examples.GPU.RunBrownianSample
 
 namespace Tests.GPUGB10E2E
 
@@ -72,5 +74,21 @@ def testRKCombineGB10TorchParity : IO Unit :=
     Examples.GPU.isBlackwellFamily
     "requires TYR_GPU_FAMILY=BLACKWELL"
     Examples.GPU.RunRKCombine.runOnce
+
+@[test]
+def testRKFusedSolveGB10Parity : IO Unit :=
+  runGpuBoolTestIf
+    "rk_fused_solve_gb10_vs_generic"
+    Examples.GPU.isBlackwellFamily
+    "requires TYR_GPU_FAMILY=BLACKWELL"
+    Examples.GPU.RunRKFusedSolve.runOnce
+
+@[test]
+def testKeyedNormalGB10CpuParity : IO Unit :=
+  runGpuBoolTestIf
+    "keyed_normal_gb10_vs_cpu"
+    Examples.GPU.isBlackwellFamily
+    "requires TYR_GPU_FAMILY=BLACKWELL"
+    Examples.GPU.RunBrownianSample.runOnce
 
 end Tests.GPUGB10E2E

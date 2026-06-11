@@ -702,7 +702,7 @@ def testDecodeSimtHelperCodegen : IO Unit := do
     "parallelThreadRange should stride by the CTA size"
   assertTrue (code.containsSubstr "::rsqrtf")
     "runtimeDefaultScoreScaleLog2e should lower through scalar rsqrt"
-  assertTrue (code.containsSubstr "1.442695f")
+  assertTrue (code.containsSubstr "0x1.71547652b953ap0f")
     "runtimeDefaultScoreScaleLog2e should include log2(e)"
 
 /-- Decode attention should be authored through the DSL, not raw CUDA snippets.

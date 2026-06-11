@@ -127,6 +127,8 @@ partial def ScalarExpr.render : ScalarExpr -> String
         | .Log => "log"
         | .Log2 => "log2"
         | .Rsqrt => "rsqrt"
+        | .Sqrt => "sqrt"
+        | .Cos => "cos"
       match op with
       | .Neg => s!"(-{src.render})"
       | _ => s!"{fn}({src.render})"

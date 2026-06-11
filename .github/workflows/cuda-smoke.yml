@@ -153,7 +153,7 @@ jobs:
           # `tkFlashAttnGb10*` / `tkFusedLayerNormResidual1024Blackwell*` /
           # `tkFusedRMSNormResidual1024Blackwell*` symbols the GB10 e2e
           # test invokes.
-          TYR_GPU_CODEGEN_MODULE: 'Tyr.GPU.Kernels.MhaGB10 Tyr.GPU.Kernels.FusedRMSNorm Tyr.GPU.Kernels.FusedLayerNorm Tyr.GPU.Kernels.MhaH100Decode Tyr.GPU.Kernels.RKCombine'
+          TYR_GPU_CODEGEN_MODULE: 'Tyr.GPU.Kernels.MhaGB10 Tyr.GPU.Kernels.FusedRMSNorm Tyr.GPU.Kernels.FusedLayerNorm Tyr.GPU.Kernels.MhaH100Decode Tyr.GPU.Kernels.RKCombine Tyr.GPU.Kernels.BrownianSample'
         run: |
           # Two-phase build to break the codegen circular dependency:
           # (1) Build the Lean .oleans for the kernel modules with
@@ -166,12 +166,13 @@ jobs:
             Tyr.GPU.Kernels.FusedRMSNorm \
             Tyr.GPU.Kernels.FusedLayerNorm \
             Tyr.GPU.Kernels.MhaH100Decode \
-            Tyr.GPU.Kernels.RKCombine
+            Tyr.GPU.Kernels.RKCombine \
+            Tyr.GPU.Kernels.BrownianSample
           lake -R build TestGPUGB10E2E
 
       - name: Run GB10 parity smoke
         env:
-          TYR_GPU_CODEGEN_MODULE: 'Tyr.GPU.Kernels.MhaGB10 Tyr.GPU.Kernels.FusedRMSNorm Tyr.GPU.Kernels.FusedLayerNorm Tyr.GPU.Kernels.MhaH100Decode Tyr.GPU.Kernels.RKCombine'
+          TYR_GPU_CODEGEN_MODULE: 'Tyr.GPU.Kernels.MhaGB10 Tyr.GPU.Kernels.FusedRMSNorm Tyr.GPU.Kernels.FusedLayerNorm Tyr.GPU.Kernels.MhaH100Decode Tyr.GPU.Kernels.RKCombine Tyr.GPU.Kernels.BrownianSample'
         run: |
           lake -R env ./.lake/build/bin/TestGPUGB10E2E --fail-fast
 
