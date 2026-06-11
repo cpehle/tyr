@@ -7,6 +7,7 @@ import Examples.GPU.RunMhaGB10
 import Examples.GPU.RunRKCombine
 import Examples.GPU.RunRKFusedSolve
 import Examples.GPU.RunBrownianSample
+import Examples.GPU.RunBrownianDescent
 
 namespace Tests.GPUGB10E2E
 
@@ -90,5 +91,13 @@ def testKeyedNormalGB10CpuParity : IO Unit :=
     Examples.GPU.isBlackwellFamily
     "requires TYR_GPU_FAMILY=BLACKWELL"
     Examples.GPU.RunBrownianSample.runOnce
+
+@[test]
+def testBrownianDescentGB10CpuParity : IO Unit :=
+  runGpuBoolTestIf
+    "brownian_descent_gb10_vs_cpu"
+    Examples.GPU.isBlackwellFamily
+    "requires TYR_GPU_FAMILY=BLACKWELL"
+    Examples.GPU.RunBrownianDescent.runOnce
 
 end Tests.GPUGB10E2E

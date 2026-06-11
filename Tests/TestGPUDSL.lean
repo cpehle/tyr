@@ -705,4 +705,34 @@ def testKeyedNormalCodegen : IO Unit := do
   assertTrue (code.containsSubstr "::logf(") "Box-Muller log"
   assertTrue (code.containsSubstr "threadIdx.x") "Per-thread parallel iteration"
 
+
+/-- The VBT descent kernel walks both query schedules per element:
+    keyed chains for interval/midpoint/point draws, branchless updates. -/
+@[test]
+def testVbtDescentCodegen : IO Unit := do
+  let params : Array KParam := #[
+    { name := "out", dtype := .Float32, isPointer := true },
+    { name := "schedA", dtype := .Float32, isPointer := true },
+    { name := "schedB", dtype := .Float32, isPointer := true },
+    { name := "root", dtype := .Float32, isPointer := false },
+    { name := "n", dtype := .Float32, isPointer := false },
+    { name := "lenA", dtype := .Float32, isPointer := false },
+    { name := "lenB", dtype := .Float32, isPointer := false }
+  ]
+  let kernel := buildKernelM "vbt_descent_test" .SM90 params do
+    Tyr.GPU.Kernels.vbtIncrementBody
+      ({ id := ⟨0⟩, name := "out" } : GPtr GpuFloat.Float32)
+      ({ id := ⟨1⟩, name := "schedA" } : GPtr GpuFloat.Float32)
+      ({ id := ⟨2⟩, name := "schedB" } : GPtr GpuFloat.Float32)
+      ({ id := ⟨3⟩, name := "root" } : KVal UInt64)
+      ({ id := ⟨4⟩, name := "n" } : KVal UInt64)
+      ({ id := ⟨5⟩, name := "lenA" } : KVal UInt64)
+      ({ id := ⟨6⟩, name := "lenB" } : KVal UInt64)
+  let code := generateKernel kernel
+  assertTrue (code.containsSubstr "2654435769ULL") "interval op tag baked"
+  assertTrue (code.containsSubstr "608135816ULL") "midpoint op tag baked"
+  assertTrue (code.containsSubstr "320440878ULL") "point op tag baked"
+  assertTrue (code.containsSubstr "::cosf(") "Box-Muller per node"
+  assertTrue (code.containsSubstr "? ") "branchless selects emitted"
+
 end Tests.GPUDSL
