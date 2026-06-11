@@ -58,13 +58,15 @@ def rkCombineBody (b bHat : Array Float)
       if ei != 0.0 then
         scalarMul scratch work ei
         add errAcc errAcc scratch
+  -- Two outputs need two shared tiles: reusing one races the first
+  -- output's (async) global store against the second output's smem write
+  -- (observed on GB10 as a corrupted y1 with a clean err).
+  let smemErr ← allocST .Float32 64 64
   store smem acc
+  store smemErr errAcc
   sync
   storeGlobal y1Ptr smem coord
-  sync
-  store smem errAcc
-  sync
-  storeGlobal errPtr smem coord
+  storeGlobal errPtr smemErr coord
   sync
 
 private def dopri5B : Array Float :=
