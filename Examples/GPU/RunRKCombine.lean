@@ -47,8 +47,12 @@ def runOnce : IO Bool := do
   let mut ks : Array (T #[1, 1, 64, 64]) := #[]
   for _ in [:7] do
     ks := ks.push (← torch.rand #[1, 1, 64, 64] false device)
+  -- NB: output buffers must come from syntactically DISTINCT pure calls:
+  -- `zeros_like y0` twice gets common-subexpression-eliminated into one
+  -- shared tensor, and the kernel then writes both outputs into the same
+  -- buffer (observed on GB10 as y1 containing the error estimate).
   let y1 := torch.zeros_like y0
-  let err := torch.zeros_like y0
+  let err := torch.zeros_like (ks.getD 0 y0)
   let stream ← torch.cuda_current_stream
 
   let blackwell ← isBlackwellFamily
