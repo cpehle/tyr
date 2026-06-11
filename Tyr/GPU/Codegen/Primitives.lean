@@ -278,10 +278,11 @@ def constIntVal (value : Int) (name : String := "const") : KernelM (KVal UInt32)
   emit (.constInt v value)
   pure ⟨v, name⟩
 
-/-- Materialize an integer constant as a UInt64 runtime scalar. -/
+/-- Materialize an integer constant as a UInt64 runtime scalar (emitted as a
+    proper `uint64_t` C literal, so full 64-bit constants are exact). -/
 def constUInt64Val (value : Int) (name : String := "const_u64") : KernelM (KVal UInt64) := do
   let v ← freshVar
-  emit (.constInt v value)
+  emit (.constUInt64 v value.toNat)
   pure ⟨v, name⟩
 
 /-- Materialize a Float32 constant as a runtime scalar. -/
