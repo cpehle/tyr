@@ -344,7 +344,11 @@ private def applySuppressEos {batch vocab : UInt64}
   let idx : T #[vocab] := if idx0.device == logits.device then idx0 else idx0.to logits.device
   let eosMask1d : T #[vocab] := torch.eq_scalar idx (Int64.ofNat eosTokenId.toNat)
   let eosMask2d : T #[batch, vocab] := nn.expand (reshape eosMask1d #[1, vocab]) #[batch, vocab]
-  nn.masked_fill logits eosMask2d (-1e9)
+  -- Strictly below the tail-suppression fill (-1e9): when `suppressTail`
+  -- covers the whole vocab (tiny test configs), every non-EOS logit is
+  -- already -1e9 and an equal EOS fill would make the distribution
+  -- uniform — EOS must stay unsampleable relative to allowed tokens.
+  nn.masked_fill logits eosMask2d (-1e30)
 
 private def applyRepetitionPenalty {batch vocab histLen : UInt64}
     (logits : T #[batch, vocab])
@@ -687,7 +691,7 @@ def streamCodes {batch seq : UInt64} (cfg : TalkerConfig)
       for i in [:batch.toNat] do
         let isDone := done.getD i false
         let tok := firstCodes.getD i cfg.codecEosTokenId
-        if !isDone && tok == cfg.codecEosTokenId then
+        if !isDone && allowEos && tok == cfg.codecEosTokenId then
           done := done.set! i true
           lengths := lengths.set! i step.toUInt64
 
