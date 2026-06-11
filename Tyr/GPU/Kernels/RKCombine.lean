@@ -69,6 +69,101 @@ def rkCombineBody (b bHat : Array Float)
   storeGlobal errPtr smemErr coord
   sync
 
+/-- Emit a fused stage-value sum for one 64×64 tile:
+    `out = y0 + Σᵢ aᵢ·kᵢ` (the per-stage `zᵢ` computation of an explicit RK
+    step). Zero-coefficient stages are skipped at codegen time. -/
+def rkStageSumBody (a : Array Float)
+    (y0Ptr : GPtr GpuFloat.Float32)
+    (kPtrs : Array (GPtr GpuFloat.Float32))
+    (outPtr : GPtr GpuFloat.Float32) : KernelM Unit := do
+  comment "fused explicit-RK stage sum: out = y0 + Σ aᵢkᵢ"
+  let coord ← blockCoord2D
+  let smem ← allocST .Float32 64 64
+  let work ← allocRT .Float32 64 64
+  let scratch ← allocRT .Float32 64 64
+  let acc ← allocRT .Float32 64 64
+  loadGlobal smem y0Ptr coord
+  load acc smem
+  sync
+  let mut i := 0
+  for kPtr in kPtrs do
+    let ai := a.getD i 0.0
+    i := i + 1
+    if ai != 0.0 then
+      loadGlobal smem kPtr coord
+      load work smem
+      sync
+      scalarMul scratch work ai
+      add acc acc scratch
+  store smem acc
+  sync
+  storeGlobal outPtr smem coord
+  sync
+
+private def dopri5A2 : Array Float := #[1.0 / 5.0]
+private def dopri5A3 : Array Float := #[3.0 / 40.0, 9.0 / 40.0]
+private def dopri5A4 : Array Float := #[44.0 / 45.0, -56.0 / 15.0, 32.0 / 9.0]
+private def dopri5A5 : Array Float :=
+  #[19372.0 / 6561.0, -25360.0 / 2187.0, 64448.0 / 6561.0, -212.0 / 729.0]
+private def dopri5A6 : Array Float :=
+  #[9017.0 / 3168.0, -355.0 / 33.0, 46732.0 / 5247.0, 49.0 / 176.0, -5103.0 / 18656.0]
+private def dopri5A7 : Array Float :=
+  #[35.0 / 384.0, 0.0, 500.0 / 1113.0, 125.0 / 192.0, -2187.0 / 6784.0, 11.0 / 84.0]
+
+@[gpu_kernel .SM90]
+def dopri5Stage2 (y0 k1 out : GPtr GpuFloat.Float32) : KernelM Unit :=
+  rkStageSumBody dopri5A2 y0 #[k1] out
+
+@[gpu_kernel .SM90]
+def dopri5Stage3 (y0 k1 k2 out : GPtr GpuFloat.Float32) : KernelM Unit :=
+  rkStageSumBody dopri5A3 y0 #[k1, k2] out
+
+@[gpu_kernel .SM90]
+def dopri5Stage4 (y0 k1 k2 k3 out : GPtr GpuFloat.Float32) : KernelM Unit :=
+  rkStageSumBody dopri5A4 y0 #[k1, k2, k3] out
+
+@[gpu_kernel .SM90]
+def dopri5Stage5 (y0 k1 k2 k3 k4 out : GPtr GpuFloat.Float32) : KernelM Unit :=
+  rkStageSumBody dopri5A5 y0 #[k1, k2, k3, k4] out
+
+@[gpu_kernel .SM90]
+def dopri5Stage6 (y0 k1 k2 k3 k4 k5 out : GPtr GpuFloat.Float32) : KernelM Unit :=
+  rkStageSumBody dopri5A6 y0 #[k1, k2, k3, k4, k5] out
+
+@[gpu_kernel .SM90]
+def dopri5Stage7 (y0 k1 k2 k3 k4 k5 k6 out : GPtr GpuFloat.Float32) : KernelM Unit :=
+  rkStageSumBody dopri5A7 y0 #[k1, k2, k3, k4, k5, k6] out
+
+@[gpu_kernel .SM90]
+def dopri5Stage2Blackwell (y0 k1 out : GPtr GpuFloat.Float32) : KernelM Unit := do
+  setFamily .Blackwell
+  rkStageSumBody dopri5A2 y0 #[k1] out
+
+@[gpu_kernel .SM90]
+def dopri5Stage3Blackwell (y0 k1 k2 out : GPtr GpuFloat.Float32) : KernelM Unit := do
+  setFamily .Blackwell
+  rkStageSumBody dopri5A3 y0 #[k1, k2] out
+
+@[gpu_kernel .SM90]
+def dopri5Stage4Blackwell (y0 k1 k2 k3 out : GPtr GpuFloat.Float32) : KernelM Unit := do
+  setFamily .Blackwell
+  rkStageSumBody dopri5A4 y0 #[k1, k2, k3] out
+
+@[gpu_kernel .SM90]
+def dopri5Stage5Blackwell (y0 k1 k2 k3 k4 out : GPtr GpuFloat.Float32) : KernelM Unit := do
+  setFamily .Blackwell
+  rkStageSumBody dopri5A5 y0 #[k1, k2, k3, k4] out
+
+@[gpu_kernel .SM90]
+def dopri5Stage6Blackwell (y0 k1 k2 k3 k4 k5 out : GPtr GpuFloat.Float32) : KernelM Unit := do
+  setFamily .Blackwell
+  rkStageSumBody dopri5A6 y0 #[k1, k2, k3, k4, k5] out
+
+@[gpu_kernel .SM90]
+def dopri5Stage7Blackwell (y0 k1 k2 k3 k4 k5 k6 out : GPtr GpuFloat.Float32) : KernelM Unit := do
+  setFamily .Blackwell
+  rkStageSumBody dopri5A7 y0 #[k1, k2, k3, k4, k5, k6] out
+
 private def dopri5B : Array Float :=
   #[35.0 / 384.0, 0.0, 500.0 / 1113.0, 125.0 / 192.0,
     -2187.0 / 6784.0, 11.0 / 84.0, 0.0]

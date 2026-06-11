@@ -656,4 +656,28 @@ def testRKCombineCodegen : IO Unit := do
   assertTrue (globalAccesses == 9)
     s!"Expected 9 global tile accesses (7 in, 2 out), got {globalAccesses}"
 
+
+/-- The stage-sum generator skips zero coefficients (Dopri5 row 7 has a
+    zero at k2) and emits one fused accumulation per live stage. -/
+@[test]
+def testRKStageSumCodegen : IO Unit := do
+  let params : Array KParam :=
+    (Array.range 8).map fun i =>
+      { name := s!"p{i}", dtype := .Float32, isPointer := true }
+  let kPtrs : Array (GPtr GpuFloat.Float32) :=
+    (Array.range 6).map fun i => { id := ⟨i + 1⟩, name := s!"k{i + 1}" }
+  let kernel := buildKernelM "rk_stage7_test" .SM90 params do
+    Tyr.GPU.Kernels.rkStageSumBody
+      #[35.0 / 384.0, 0.0, 500.0 / 1113.0, 125.0 / 192.0,
+        -2187.0 / 6784.0, 11.0 / 84.0]
+      ({ id := ⟨0⟩, name := "y0" } : GPtr GpuFloat.Float32) kPtrs
+      { id := ⟨7⟩, name := "out" }
+  let code := generateKernel kernel
+  assertTrue (code.containsSubstr "mul(") "Should emit scalar multiplies"
+  assertTrue (!(code.containsSubstr "v14, v2,")) "Zero-coefficient stage k2 must not be loaded"
+  -- y0 + 5 live stages in, 1 out: 7 global tile accesses
+  let globalAccesses := (code.splitOn "kittens::coord").length - 1
+  assertTrue (globalAccesses == 7)
+    s!"Expected 7 global tile accesses (6 in, 1 out), got {globalAccesses}"
+
 end Tests.GPUDSL
