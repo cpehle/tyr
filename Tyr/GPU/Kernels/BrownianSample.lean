@@ -243,4 +243,52 @@ def vbtIncrementBlackwell
   setFamily .Blackwell
   vbtIncrementBody out schedA schedB root n lenA lenB
 
+/-! ## Fused Euler–Maruyama step
+
+One diagonal-noise Euler–Maruyama step with the Brownian increment drawn
+on device — the VBT descent runs inline, so the noise never touches an
+intermediate buffer:
+
+    out[i] = y0[i] + fh[i] + g[i] · (w_i(tB) − w_i(tA))
+
+`fh` carries the step size (`h · f(t, y0)`, folded on the host like the
+fused RK stages) and `g` is the diffusion evaluation `g(t, y0)`.
+-/
+
+/-- Per-element fused EM update over two precomputed value-query
+    schedules. -/
+def emStepVbtBody
+    (out y0 fh g : GPtr GpuFloat.Float32)
+    (schedA schedB : GPtr GpuFloat.Float32)
+    (root : KVal UInt64)
+    (n lenA lenB : KVal UInt64) : KernelM Unit := do
+  comment "fused Euler-Maruyama: out[i] = y0[i] + fh[i] + g[i]*(wB - wA)"
+  for i in (← parallelThreadRange n) do
+    let childState ← foldState root i
+    let wA ← walkSchedule childState schedA lenA
+    let wB ← walkSchedule childState schedB lenB
+    let dW ← scalarBinary .Sub wB wA "dW"
+    let off ← castScalar .UInt32 i "em_off"
+    let y ← loadFloat32Scalar y0 off "y_val"
+    let f ← loadFloat32Scalar fh off "fh_val"
+    let gv ← loadFloat32Scalar g off "g_val"
+    let noise ← scalarMulVal gv dW "g_dW"
+    let drifted ← scalarAddVal y f "y_drift"
+    let y1 ← scalarAddVal drifted noise "y_next"
+    storeFloat32Scalar out off y1
+
+@[gpu_kernel .SM90]
+def emStepVbt
+    (out y0 fh g schedA schedB : GPtr GpuFloat.Float32)
+    (root : KVal UInt64) (n lenA lenB : KVal UInt64) : KernelM Unit :=
+  emStepVbtBody out y0 fh g schedA schedB root n lenA lenB
+
+/-- Blackwell-family variant. -/
+@[gpu_kernel .SM90]
+def emStepVbtBlackwell
+    (out y0 fh g schedA schedB : GPtr GpuFloat.Float32)
+    (root : KVal UInt64) (n lenA lenB : KVal UInt64) : KernelM Unit := do
+  setFamily .Blackwell
+  emStepVbtBody out y0 fh g schedA schedB root n lenA lenB
+
 end Tyr.GPU.Kernels

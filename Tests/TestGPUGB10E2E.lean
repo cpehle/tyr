@@ -8,6 +8,7 @@ import Examples.GPU.RunRKCombine
 import Examples.GPU.RunRKFusedSolve
 import Examples.GPU.RunBrownianSample
 import Examples.GPU.RunBrownianDescent
+import Examples.GPU.RunEulerMaruyamaFused
 
 namespace Tests.GPUGB10E2E
 
@@ -99,5 +100,13 @@ def testBrownianDescentGB10CpuParity : IO Unit :=
     Examples.GPU.isBlackwellFamily
     "requires TYR_GPU_FAMILY=BLACKWELL"
     Examples.GPU.RunBrownianDescent.runOnce
+
+@[test]
+def testEulerMaruyamaFusedGB10CpuParity : IO Unit :=
+  runGpuBoolTestIf
+    "euler_maruyama_fused_gb10_vs_cpu"
+    Examples.GPU.isBlackwellFamily
+    "requires TYR_GPU_FAMILY=BLACKWELL"
+    Examples.GPU.RunEulerMaruyamaFused.runOnce
 
 end Tests.GPUGB10E2E
