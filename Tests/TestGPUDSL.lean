@@ -735,4 +735,42 @@ def testVbtDescentCodegen : IO Unit := do
   assertTrue (code.containsSubstr "::cosf(") "Box-Muller per node"
   assertTrue (code.containsSubstr "? ") "branchless selects emitted"
 
+
+/-- The fused Euler–Maruyama step draws the VBT increment inline and
+    applies `y + fh + g·dW` with one load per operand and one store. -/
+@[test]
+def testEmStepVbtCodegen : IO Unit := do
+  let params : Array KParam := #[
+    { name := "out", dtype := .Float32, isPointer := true },
+    { name := "y0", dtype := .Float32, isPointer := true },
+    { name := "fh", dtype := .Float32, isPointer := true },
+    { name := "g", dtype := .Float32, isPointer := true },
+    { name := "schedA", dtype := .Float32, isPointer := true },
+    { name := "schedB", dtype := .Float32, isPointer := true },
+    { name := "root", dtype := .Float32, isPointer := false },
+    { name := "n", dtype := .Float32, isPointer := false },
+    { name := "lenA", dtype := .Float32, isPointer := false },
+    { name := "lenB", dtype := .Float32, isPointer := false }
+  ]
+  let kernel := buildKernelM "em_step_vbt_test" .SM90 params do
+    Tyr.GPU.Kernels.emStepVbtBody
+      ({ id := ⟨0⟩, name := "out" } : GPtr GpuFloat.Float32)
+      ({ id := ⟨1⟩, name := "y0" } : GPtr GpuFloat.Float32)
+      ({ id := ⟨2⟩, name := "fh" } : GPtr GpuFloat.Float32)
+      ({ id := ⟨3⟩, name := "g" } : GPtr GpuFloat.Float32)
+      ({ id := ⟨4⟩, name := "schedA" } : GPtr GpuFloat.Float32)
+      ({ id := ⟨5⟩, name := "schedB" } : GPtr GpuFloat.Float32)
+      ({ id := ⟨6⟩, name := "root" } : KVal UInt64)
+      ({ id := ⟨7⟩, name := "n" } : KVal UInt64)
+      ({ id := ⟨8⟩, name := "lenA" } : KVal UInt64)
+      ({ id := ⟨9⟩, name := "lenB" } : KVal UInt64)
+  let code := generateKernel kernel
+  assertTrue (code.containsSubstr "2654435769ULL") "interval op tag baked"
+  assertTrue (code.containsSubstr "608135816ULL") "midpoint op tag baked"
+  assertTrue (code.containsSubstr "320440878ULL") "point op tag baked"
+  assertTrue (code.containsSubstr "v1[") "state load emitted"
+  assertTrue (code.containsSubstr "v2[") "scaled-drift load emitted"
+  assertTrue (code.containsSubstr "v3[") "diffusion load emitted"
+  assertTrue (code.containsSubstr "v0[") "fused-update store emitted"
+
 end Tests.GPUDSL
