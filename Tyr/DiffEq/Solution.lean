@@ -13,6 +13,7 @@ inductive Result where
   | eventOccurred
   | maxStepsRejected
   | internalError
+  | invalidInput
   deriving Repr, BEq, Inhabited
 
 namespace Result
@@ -37,6 +38,7 @@ def message (r : Result) : String :=
   | eventOccurred => "Terminating differential equation solve because an event occurred."
   | maxStepsRejected => "Maximum number of rejected steps was reached."
   | internalError => "An internal error occurred in the solver."
+  | invalidInput => "Invalid solve configuration: SaveAt times out of range or non-monotone, empty SubSaveAt leaf, or incompatible options."
 
 end Result
 

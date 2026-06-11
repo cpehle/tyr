@@ -905,7 +905,7 @@ def diffeqsolve {Term Y VF Control Args Controller : Type}
       ys := none
       interpolation := none
       stats := stepStats0
-      result := Result.internalError
+      result := Result.invalidInput
       solverState := none
       controllerState := none
       madeJump := none

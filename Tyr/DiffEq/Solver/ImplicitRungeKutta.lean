@@ -133,6 +133,16 @@ def solver {s : Nat} {Term Y VF Args : Type}
   termStructure := TermStructure.single
   order := fun _ => rk.tableau.order
   strongOrder := fun _ => 0.0
+  odeStepAdjoint? := some (.dirk {
+    tableau := {
+      a := rk.tableau.a.toArray
+      b := rk.tableau.b.toArray
+      c := rk.tableau.c.toArray
+    }
+    maxIters := rk.rootMaxIters.getD 50
+    rtol := rk.rootRtol.getD 1.0e-9
+    atol := rk.rootAtol.getD 1.0e-12
+  })
   init := fun _ _ _ _ _ => ()
   step := fun term t0 t1 y0 args state _madeJump =>
     let inst := (inferInstance : TermLike Term Y VF Time Args)
@@ -210,6 +220,21 @@ def solver {s : Nat} {ExplicitTerm ImplicitTerm Y VFe VFi Args : Type}
   termStructure := TermStructure.pair
   order := fun _ => rk.explicit.order
   strongOrder := fun _ => 0.0
+  odeStepAdjoint? := some (.imexDirk {
+    explicit := {
+      a := rk.explicit.a.toArray
+      b := rk.explicit.b.toArray
+      c := rk.explicit.c.toArray
+    }
+    implicit := {
+      a := rk.implicit.a.toArray
+      b := rk.implicit.b.toArray
+      c := rk.implicit.c.toArray
+    }
+    maxIters := rk.rootMaxIters.getD 50
+    rtol := rk.rootRtol.getD 1.0e-9
+    atol := rk.rootAtol.getD 1.0e-12
+  })
   init := fun _ _ _ _ _ => ()
   step := fun terms t0 t1 y0 args state _madeJump =>
     let explicit := terms.term1

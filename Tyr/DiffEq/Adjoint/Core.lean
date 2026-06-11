@@ -431,6 +431,280 @@ private def explicitRKAdjointOverAcceptedAttempts
     else
       return some { adjY0 := adjY, adjArgs := adjArgs }
 
+/-- Fixed-point iteration with an RMS-based stopping rule (same contraction
+    style as the forward implicit stage solves). -/
+private def dirkFixedPoint {Y : Type} [DiffEqSpace Y] [DiffEqSeminorm Y]
+    (iterate : Y → Y) (init : Y) (maxIters : Nat) (rtol atol : Float) : Y := Id.run do
+  let mut x := init
+  for _ in [:maxIters] do
+    let next := iterate x
+    let delta := DiffEqSeminorm.rms (DiffEqSpace.sub next x)
+    let scale := atol + rtol * DiffEqSeminorm.rms next
+    x := next
+    if delta <= scale then
+      break
+  return x
+
+/-- Discrete adjoint of one diagonally-implicit RK step.
+
+Forward stages satisfy `zᵢ = y₀ + Σ_{j≤i} aᵢⱼ kⱼ` with `kᵢ = h·f(tᵢ, zᵢ)`;
+the reverse sweep solves the transposed stage equations
+`μᵢ = bᵢ·λ + Σ_{j>i} aⱼᵢ·vⱼ + aᵢᵢ·vᵢ` where `vᵢ = h·Jᵢᵀ·μᵢ`, each by the
+same fixed-point contraction as the forward solve, using only the term's
+VJP (no explicit Jacobians or linear solves). With a strictly
+lower-triangular tableau this degenerates exactly to the explicit RK
+adjoint. -/
+private def dirkStepAdjoint
+    {Y Args : Type}
+    [DiffEqSpace Y] [DiffEqSpace Args] [DiffEqSeminorm Y]
+    [AdjointBackend Y Args]
+    [Inhabited Y] [Inhabited Args]
+    (spec : DIRKAdjointSpec)
+    (term : ODETerm Y Args)
+    (t0 t1 : Time)
+    (y0 : Y)
+    (args : Args)
+    (adjY1 : Y) :
+    Option (AdjointResult Y Args) :=
+  let tableau := spec.tableau
+  let s := tableau.b.size
+  if tableau.a.size != s || tableau.c.size != s then
+    none
+  else
+    let dt := t1 - t0
+    let zeroY := zeroLike y0
+    let zeroArgs := zeroLike args
+    -- replay the primal stage states, solving diagonal stages by fixed point
+    let stageYs : Array Y := Id.run do
+      let mut ys : Array Y := #[]
+      let mut ks : Array Y := #[]
+      for i in [:s] do
+        let row := tableau.a.getD i #[]
+        let mut base := y0
+        for j in [:i] do
+          base := DiffEqSpace.add base
+            (DiffEqSpace.scale (row.getD j 0.0) (ks.getD j zeroY))
+        let ti := t0 + tableau.c.getD i 0.0 * dt
+        let aii := row.getD i 0.0
+        let yi :=
+          if aii == 0.0 then
+            base
+          else
+            dirkFixedPoint
+              (fun y => DiffEqSpace.add base
+                (DiffEqSpace.scale (aii * dt) (term.vectorField ti y args)))
+              base spec.maxIters spec.rtol spec.atol
+        let ki := DiffEqSpace.scale dt (term.vectorField ti yi args)
+        ys := ys.push yi
+        ks := ks.push ki
+      return ys
+    Id.run do
+      let mut adjY0 := adjY1
+      let mut adjArgs := zeroArgs
+      let mut adjKs : Array Y := Array.replicate s zeroY
+      for i in [:s] do
+        adjKs := adjKs.set! i (DiffEqSpace.scale (tableau.b.getD i 0.0) adjY1)
+      for offset in [:s] do
+        let i := s - 1 - offset
+        let ti := t0 + tableau.c[i]! * dt
+        let yi := stageYs[i]!
+        let row := tableau.a[i]!
+        let aii := row.getD i 0.0
+        let vjpAt := fun (mu : Y) =>
+          (AdjointBackend.vjp (Y := Y) (Args := Args))
+            term.vectorField ti yi args (DiffEqSpace.scale dt mu)
+        -- solve μ = c + aᵢᵢ·(h Jᵀ μ) for the converged stage cotangent
+        let ci := adjKs[i]!
+        let mui :=
+          if aii == 0.0 then
+            ci
+          else
+            dirkFixedPoint
+              (fun mu =>
+                let (_, vY, _) := vjpAt mu
+                DiffEqSpace.add ci (DiffEqSpace.scale aii vY))
+              ci spec.maxIters spec.rtol spec.atol
+        let (_, vY, vArgs) := vjpAt mui
+        adjY0 := DiffEqSpace.add adjY0 vY
+        adjArgs := DiffEqSpace.add adjArgs vArgs
+        for j in [:i] do
+          let aij := row.getD j 0.0
+          adjKs := adjKs.set! j (DiffEqSpace.add adjKs[j]! (DiffEqSpace.scale aij vY))
+      return some { adjY0 := adjY0, adjArgs := adjArgs }
+
+private def dirkAdjointOverAcceptedAttempts
+    {Y Args ControllerState : Type}
+    [DiffEqSpace Y] [DiffEqSpace Args] [DiffEqSeminorm Y]
+    [AdjointBackend Y Args]
+    [Inhabited Y] [Inhabited Args]
+    (spec : DIRKAdjointSpec)
+    (term : ODETerm Y Args)
+    (attempts : Array (SolveLoopAttempt Y ControllerState))
+    (args : Args)
+    (adjY1 : Y) :
+    Option (AdjointResult Y Args) :=
+  let zeroArgs := zeroLike args
+  Id.run do
+    let mut adjY := adjY1
+    let mut adjArgs := zeroArgs
+    let mut failure := false
+    for offset in [:attempts.size] do
+      if !failure then
+        let i := attempts.size - 1 - offset
+        match attempts[i]? with
+        | none =>
+            failure := true
+        | some attempt =>
+            if attempt.accepted then
+              match dirkStepAdjoint spec term attempt.tStart attempt.tAfter attempt.yStart args adjY with
+              | some stepAdj =>
+                  adjY := stepAdj.adjY0
+                  adjArgs := DiffEqSpace.add adjArgs stepAdj.adjArgs
+              | none =>
+                  failure := true
+    if failure then
+      return none
+    else
+      return some { adjY0 := adjY, adjArgs := adjArgs }
+
+/-- Discrete adjoint of one IMEX additive-RK step (paired explicit and
+diagonally-implicit tableaux sharing stage times).
+
+Forward stages satisfy `zᵢ = y₀ + Σ_{j<i} aᴱᵢⱼ kᴱⱼ + Σ_{j≤i} aᴵᵢⱼ kᴵⱼ` with
+`kᴱᵢ = h·fᴱ(tᵢ, zᵢ)` and `kᴵᵢ = h·fᴵ(tᵢ, zᵢ)`. The reverse sweep keeps
+separate stage cotangents `μᴱᵢ = bᴱᵢλ + Σ_{j>i} aᴱⱼᵢ vⱼ` and
+`μᴵᵢ = bᴵᵢλ + Σ_{j>i} aᴵⱼᵢ vⱼ + aᴵᵢᵢ vᵢ`, and solves
+`vᵢ = h·Jᴱᵢᵀ μᴱᵢ + h·Jᴵᵢᵀ μᴵᵢ` by fixed-point iteration in `vᵢ` (only the
+implicit cotangent depends on it). With `fᴱ = 0` this is the DIRK adjoint. -/
+private def imexStepAdjoint
+    {Y Args : Type}
+    [DiffEqSpace Y] [DiffEqSpace Args] [DiffEqSeminorm Y]
+    [AdjointBackend Y Args]
+    [Inhabited Y] [Inhabited Args]
+    (spec : IMEXAdjointSpec)
+    (explicitTerm implicitTerm : ODETerm Y Args)
+    (t0 t1 : Time)
+    (y0 : Y)
+    (args : Args)
+    (adjY1 : Y) :
+    Option (AdjointResult Y Args) :=
+  let tE := spec.explicit
+  let tI := spec.implicit
+  let s := tE.b.size
+  if tE.a.size != s || tE.c.size != s || tI.a.size != s || tI.b.size != s then
+    none
+  else
+    let dt := t1 - t0
+    let zeroY := zeroLike y0
+    let zeroArgs := zeroLike args
+    -- replay the primal stage states (diagonal stages by fixed point)
+    let stageYs : Array Y := Id.run do
+      let mut ys : Array Y := #[]
+      let mut ksE : Array Y := #[]
+      let mut ksI : Array Y := #[]
+      for i in [:s] do
+        let rowE := tE.a.getD i #[]
+        let rowI := tI.a.getD i #[]
+        let mut base := y0
+        for j in [:i] do
+          base := DiffEqSpace.add base
+            (DiffEqSpace.scale (rowE.getD j 0.0) (ksE.getD j zeroY))
+          base := DiffEqSpace.add base
+            (DiffEqSpace.scale (rowI.getD j 0.0) (ksI.getD j zeroY))
+        let ti := t0 + tI.c.getD i 0.0 * dt
+        let aii := rowI.getD i 0.0
+        let yi :=
+          if aii == 0.0 then
+            base
+          else
+            dirkFixedPoint
+              (fun y => DiffEqSpace.add base
+                (DiffEqSpace.scale (aii * dt) (implicitTerm.vectorField ti y args)))
+              base spec.maxIters spec.rtol spec.atol
+        ys := ys.push yi
+        ksE := ksE.push (DiffEqSpace.scale dt (explicitTerm.vectorField ti yi args))
+        ksI := ksI.push (DiffEqSpace.scale dt (implicitTerm.vectorField ti yi args))
+      return ys
+    Id.run do
+      let mut adjY0 := adjY1
+      let mut adjArgs := zeroArgs
+      let mut cE : Array Y := Array.replicate s zeroY
+      let mut cI : Array Y := Array.replicate s zeroY
+      for i in [:s] do
+        cE := cE.set! i (DiffEqSpace.scale (tE.b.getD i 0.0) adjY1)
+        cI := cI.set! i (DiffEqSpace.scale (tI.b.getD i 0.0) adjY1)
+      for offset in [:s] do
+        let i := s - 1 - offset
+        let ti := t0 + tI.c[i]! * dt
+        let yi := stageYs[i]!
+        let rowE := tE.a[i]!
+        let rowI := tI.a[i]!
+        let aii := rowI.getD i 0.0
+        let vjpE := fun (mu : Y) =>
+          (AdjointBackend.vjp (Y := Y) (Args := Args))
+            explicitTerm.vectorField ti yi args (DiffEqSpace.scale dt mu)
+        let vjpI := fun (mu : Y) =>
+          (AdjointBackend.vjp (Y := Y) (Args := Args))
+            implicitTerm.vectorField ti yi args (DiffEqSpace.scale dt mu)
+        -- explicit contribution is constant in vᵢ; compute it once
+        let (_, wE, gE) := vjpE cE[i]!
+        let ciI := cI[i]!
+        let vi :=
+          if aii == 0.0 then
+            let (_, wI, _) := vjpI ciI
+            DiffEqSpace.add wE wI
+          else
+            dirkFixedPoint
+              (fun v =>
+                let (_, wI, _) := vjpI (DiffEqSpace.add ciI (DiffEqSpace.scale aii v))
+                DiffEqSpace.add wE wI)
+              (DiffEqSpace.add wE (let (_, wI, _) := vjpI ciI; wI))
+              spec.maxIters spec.rtol spec.atol
+        let muI := DiffEqSpace.add ciI (DiffEqSpace.scale aii vi)
+        let (_, _, gI) := vjpI muI
+        adjY0 := DiffEqSpace.add adjY0 vi
+        adjArgs := DiffEqSpace.add adjArgs (DiffEqSpace.add gE gI)
+        for j in [:i] do
+          cE := cE.set! j (DiffEqSpace.add cE[j]! (DiffEqSpace.scale (rowE.getD j 0.0) vi))
+          cI := cI.set! j (DiffEqSpace.add cI[j]! (DiffEqSpace.scale (rowI.getD j 0.0) vi))
+      return some { adjY0 := adjY0, adjArgs := adjArgs }
+
+private def imexAdjointOverAcceptedAttempts
+    {Y Args ControllerState : Type}
+    [DiffEqSpace Y] [DiffEqSpace Args] [DiffEqSeminorm Y]
+    [AdjointBackend Y Args]
+    [Inhabited Y] [Inhabited Args]
+    (spec : IMEXAdjointSpec)
+    (explicitTerm implicitTerm : ODETerm Y Args)
+    (attempts : Array (SolveLoopAttempt Y ControllerState))
+    (args : Args)
+    (adjY1 : Y) :
+    Option (AdjointResult Y Args) :=
+  let zeroArgs := zeroLike args
+  Id.run do
+    let mut adjY := adjY1
+    let mut adjArgs := zeroArgs
+    let mut failure := false
+    for offset in [:attempts.size] do
+      if !failure then
+        let i := attempts.size - 1 - offset
+        match attempts[i]? with
+        | none =>
+            failure := true
+        | some attempt =>
+            if attempt.accepted then
+              match imexStepAdjoint spec explicitTerm implicitTerm
+                  attempt.tStart attempt.tAfter attempt.yStart args adjY with
+              | some stepAdj =>
+                  adjY := stepAdj.adjY0
+                  adjArgs := DiffEqSpace.add adjArgs stepAdj.adjArgs
+              | none =>
+                  failure := true
+    if failure then
+      return none
+    else
+      return some { adjY0 := adjY, adjArgs := adjArgs }
+
 private def runPrimalLoopTrace
     {Y Args Controller : Type}
     [DiffEqSpace Y]
@@ -500,6 +774,17 @@ private def directLikeDiscreteLoopAdjointWithController
             else
               explicitRKAdjointOverAcceptedAttempts tableau term loopResult.attempts args adjY1
         | none => none
+    | some (.dirk spec) =>
+        match runPrimalLoopTrace (Controller := Controller) term solver t0 t1 dt0 y0 args maxSteps controller with
+        | some loopResult =>
+            let hasRejected := loopResult.attempts.any (fun attempt => !attempt.accepted)
+            if loopResult.result != Result.successful || hasRejected then
+              none
+            else
+              dirkAdjointOverAcceptedAttempts spec term loopResult.attempts args adjY1
+        | none => none
+    -- IMEX specs only apply to MultiTerm solvers (`diffeqsolveDirectAdjointIMEX`)
+    | some (.imexDirk _) => none
     | none => none
 
 def diffeqsolveAdjoint
@@ -650,6 +935,190 @@ def diffeqsolveDirectAdjoint
         directLikeDiscreteLoopAdjointWithController
           (Controller := ConstantStepSize)
           term solver t0 t1 dt0 y0 args adjY1 maxSteps controller)
+
+/-! ## SDE backsolve adjoint (Stratonovich)
+
+For `dy = f(t,y,θ) dt + g(t,y,θ) ∘ dW` and a loss on the terminal state,
+the continuous adjoint satisfies (backward in time, with the SAME Brownian
+path)
+
+    da = −(∂f/∂y)ᵀ a dt − (∂g/∂y)ᵀ a ∘ dW
+    dγ = −(∂f/∂θ)ᵀ a dt − (∂g/∂θ)ᵀ a ∘ dW
+
+Stratonovich calculus is time-reversal symmetric, which is what makes the
+backward solve meaningful (this is why backsolve SDE adjoints are
+Stratonovich-only). The augmented (y, a, γ) system is integrated backward
+with a Heun (Stratonovich) scheme; Brownian increments are re-queried from
+the diffusion term's control, which must be backed by a replayable path
+(e.g. a `VirtualBrownianTree`). Per step, the diffusion map with the
+increment frozen, `y ↦ prod (g t y θ) c`, is an ordinary `Y → Y` map, so
+both adjoint contractions come from the same `AdjointBackend.vjp` used by
+the ODE adjoints. -/
+
+/-- One backward Stratonovich-Heun step of the augmented adjoint system,
+    from `tHi` down to `tLo` (so `h = tLo − tHi < 0`); `c` is the control
+    increment queried over `(tHi, tLo)`, already orientation-correct. -/
+private def sdeAdjointHeunStep
+    {Y Args Control : Type}
+    [DiffEqSpace Y] [DiffEqSpace Args]
+    [AdjointBackend Y Args]
+    (drift : ODETerm Y Args)
+    (diffusion : ControlTerm Y Y Control Args)
+    (tHi tLo : Time)
+    (c : Control)
+    (y a : Y) (γ : Args) (args : Args) :
+    (Y × Y × Args) :=
+  let h := tLo - tHi
+  let diffMap := fun (t : Time) (y' : Y) (θ : Args) =>
+    diffusion.prod (diffusion.vectorField t y' θ) c
+  -- augmented vector field at (t, y, a): returns (dy-drift, da, dγ) pieces
+  let eval := fun (t : Time) (y' a' : Y) =>
+    let f := drift.vectorField t y' args
+    let (_, jfA, gfA) :=
+      (AdjointBackend.vjp (Y := Y) (Args := Args)) drift.vectorField t y' args a'
+    let gInc := diffMap t y' args
+    let (_, jgA, ggA) :=
+      (AdjointBackend.vjp (Y := Y) (Args := Args)) diffMap t y' args a'
+    -- (Δy, Δa, Δγ) over this step for drift·h and diffusion·c respectively
+    ( DiffEqSpace.add (DiffEqSpace.scale h f) gInc
+    , DiffEqSpace.scale (-1.0) (DiffEqSpace.add (DiffEqSpace.scale h jfA) jgA)
+    , DiffEqSpace.scale (-1.0) (DiffEqSpace.add (DiffEqSpace.scale h gfA) ggA) )
+  let (dy1, da1, dγ1) := eval tHi y a
+  -- predictor
+  let yP := DiffEqSpace.add y dy1
+  let aP := DiffEqSpace.add a da1
+  let (dy2, da2, dγ2) := eval tLo yP aP
+  -- trapezoidal corrector
+  ( DiffEqSpace.add y (DiffEqSpace.scale 0.5 (DiffEqSpace.add dy1 dy2))
+  , DiffEqSpace.add a (DiffEqSpace.scale 0.5 (DiffEqSpace.add da1 da2))
+  , DiffEqSpace.add γ (DiffEqSpace.scale 0.5 (DiffEqSpace.add dγ1 dγ2)) )
+
+/-- Backsolve (continuous, optimise-then-discretise) adjoint for a
+    single-noise Stratonovich SDE given as drift `ODETerm` plus diffusion
+    `ControlTerm` (the standard `MultiTerm` SDE splitting, with `VF = Y`).
+
+    Integrates the augmented `(y, a, γ)` system backward from `(yT, adjY1,
+    0)` over `steps` uniform steps, re-querying the diffusion control over
+    each backward subinterval — the control must be replayable. Gradients
+    are with respect to the initial state and `args` (which may feed the
+    drift, the diffusion, or both). -/
+def sdeBacksolveAdjointStratonovich
+    {Y Args Control : Type}
+    [DiffEqSpace Y] [DiffEqSpace Args]
+    [AdjointBackend Y Args]
+    [Inhabited Y] [Inhabited Args]
+    (drift : ODETerm Y Args)
+    (diffusion : ControlTerm Y Y Control Args)
+    (t0 t1 : Time)
+    (yT : Y)
+    (args : Args)
+    (adjY1 : Y)
+    (steps : Nat := 256) :
+    AdjointResult Y Args := Id.run do
+  let n := Nat.max steps 1
+  let dt := (t1 - t0) / Float.ofNat n
+  let mut y := yT
+  let mut a := adjY1
+  let mut γ := zeroLike args
+  for k in [:n] do
+    let tHi := t1 - Float.ofNat k * dt
+    let tLo := if k + 1 == n then t0 else t1 - Float.ofNat (k + 1) * dt
+    let c := diffusion.control tHi tLo
+    let (y', a', γ') := sdeAdjointHeunStep drift diffusion tHi tLo c y a γ args
+    y := y'
+    a := a'
+    γ := γ'
+  return { adjY0 := a, adjArgs := γ }
+
+/-- IMEX twin of `runPrimalLoopTrace` for `MultiTerm` drift splittings. -/
+private def runPrimalLoopTraceIMEX
+    {Y Args Controller : Type}
+    [DiffEqSpace Y]
+    [DiffEqSeminorm Y]
+    [DiffEqElem Y]
+    [Inhabited Y]
+    [StepSizeController Controller]
+    [StepSizeControllerValidation Controller]
+    (terms : MultiTerm (ODETerm Y Args) (ODETerm Y Args))
+    (solver : AbstractSolver (MultiTerm (ODETerm Y Args) (ODETerm Y Args)) Y (Y × Y) (Time × Time) Args)
+    (t0 t1 : Time)
+    (dt0 : Option Time)
+    (y0 : Y)
+    (args : Args)
+    (maxSteps : Nat)
+    (controller : Controller) :
+    Option (SolveLoopState Y solver.SolverState (StepSizeController.State (C := Controller))) :=
+  let controllerInvalid :=
+    (inferInstance : StepSizeControllerValidation Controller).validate controller t0 t1 dt0
+  if controllerInvalid.isSome || dt0 == some 0.0 || t0 == t1 then
+    none
+  else
+    let errorOrder := solver.errorOrder terms
+    let initCtrlBase :=
+      StepSizeController.init controller terms t0 t1 y0 args dt0 solver.func errorOrder
+    let dtAbs := if initCtrlBase.dt < 0.0 then -initCtrlBase.dt else initCtrlBase.dt
+    let dt := if t1 >= t0 then dtAbs else -dtAbs
+    let initCtrl : StepSizeState (StepSizeController.State (C := Controller)) :=
+      { initCtrlBase with dt := dt }
+    let initState := solver.init terms t0 t1 y0 args
+    let loopInit :=
+      initialSolveLoopState t0 t1 y0 initState initCtrl false #[]
+    some <|
+      runSolveLoop terms solver controller t1 args (some maxSteps) #[] errorOrder loopInit
+
+/-- Direct (discretise-then-optimise) adjoint for IMEX additive-RK solvers
+    over a `MultiTerm` explicit/implicit drift splitting. Mirrors
+    `diffeqsolveDirectAdjoint`: solves the primal, then replays accepted
+    steps through the paired-tableau step adjoint. -/
+def diffeqsolveDirectAdjointIMEX
+    {Y Args : Type}
+    [DiffEqSpace Y] [DiffEqSpace Args]
+    [DiffEqSeminorm Y] [DiffEqElem Y]
+    [AdjointBackend Y Args]
+    [Inhabited Y] [Inhabited Args]
+    (terms : MultiTerm (ODETerm Y Args) (ODETerm Y Args))
+    (solver : AbstractSolver (MultiTerm (ODETerm Y Args) (ODETerm Y Args)) Y (Y × Y) (Time × Time) Args)
+    (t0 t1 : Time)
+    (dt0 : Option Time)
+    (y0 : Y)
+    (args : Args)
+    (adjY1 : Y)
+    (saveat : SaveAt := {})
+    (maxSteps : Nat := 4096)
+    (controller : ConstantStepSize := default) :
+    (Solution Y solver.SolverState (StepSizeController.State (C := ConstantStepSize)) ×
+      Option (AdjointResult Y Args)) :=
+  let sol :=
+    diffeqsolve
+      (Term := MultiTerm (ODETerm Y Args) (ODETerm Y Args))
+      (Y := Y)
+      (VF := (Y × Y))
+      (Control := (Time × Time))
+      (Args := Args)
+      (Controller := ConstantStepSize)
+      terms solver t0 t1 dt0 y0 args (saveat := saveat) (maxSteps := maxSteps)
+      (controller := controller)
+  if sol.result != Result.successful then
+    (sol, none)
+  else
+    let adj :=
+      if t0 == t1 then
+        some { adjY0 := adjY1, adjArgs := zeroLike args }
+      else
+        match solver.odeStepAdjoint? with
+        | some (.imexDirk spec) =>
+            match runPrimalLoopTraceIMEX (Controller := ConstantStepSize)
+                terms solver t0 t1 dt0 y0 args maxSteps controller with
+            | some loopResult =>
+                let hasRejected := loopResult.attempts.any (fun attempt => !attempt.accepted)
+                if loopResult.result != Result.successful || hasRejected then
+                  none
+                else
+                  imexAdjointOverAcceptedAttempts spec terms.term1 terms.term2
+                    loopResult.attempts args adjY1
+            | none => none
+        | _ => none
+    (sol, adj)
 
 private def terminalSolveValue
     {Y Args Controller : Type}

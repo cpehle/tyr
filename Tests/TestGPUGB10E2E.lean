@@ -4,6 +4,7 @@ import Examples.GPU.Parity
 import Examples.GPU.RunLayerNorm
 import Examples.GPU.RunRMSNorm
 import Examples.GPU.RunMhaGB10
+import Examples.GPU.RunRKCombine
 
 namespace Tests.GPUGB10E2E
 
@@ -63,5 +64,13 @@ def testRMSNormGB10BFloat16TorchParity : IO Unit :=
     Examples.GPU.isBlackwellFamily
     "requires TYR_GPU_FAMILY=BLACKWELL"
     Examples.GPU.RunRMSNorm.runBFloat16Once
+
+@[test]
+def testRKCombineGB10TorchParity : IO Unit :=
+  runGpuBoolTestIf
+    "rk_combine_gb10_tyr_vs_torch"
+    Examples.GPU.isBlackwellFamily
+    "requires TYR_GPU_FAMILY=BLACKWELL"
+    Examples.GPU.RunRKCombine.runOnce
 
 end Tests.GPUGB10E2E

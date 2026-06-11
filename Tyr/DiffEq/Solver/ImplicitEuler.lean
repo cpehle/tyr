@@ -24,6 +24,10 @@ def ImplicitEuler.solver (cfg : ImplicitEuler := {}) {Term Y VF Args : Type}
   order := fun _ => 1
   errorOrder := fun _ => 2.0
   strongOrder := fun _ => 0.0
+  -- Backward Euler is the one-stage DIRK with a = [[1]], b = [1], c = [1].
+  odeStepAdjoint? := some (.dirk {
+    tableau := { a := #[#[1.0]], b := #[1.0], c := #[1.0] }
+  })
   init := fun _ _ _ _ _ => ()
   step := fun term t0 t1 y0 args state _madeJump =>
     let inst := (inferInstance : TermLike Term Y VF Time Args)

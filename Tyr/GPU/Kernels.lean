@@ -1,5 +1,6 @@
 import Tyr.GPU.Kernels.Attention
 import Tyr.GPU.Kernels.Experimental
+import Tyr.GPU.Kernels.RKCombine
 import Tyr.GPU.Kernels.Gemm
 import Tyr.GPU.Kernels.Normalization
 import Tyr.GPU.Kernels.Parallel
