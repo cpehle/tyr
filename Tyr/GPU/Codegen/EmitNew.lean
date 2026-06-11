@@ -1174,6 +1174,10 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout)
     s!"{indent}auto {dst.toIdent} = ::log2f(static_cast<float>({src.toIdent}));\n"
   | .scalarUnary .Rsqrt dst src =>
     s!"{indent}auto {dst.toIdent} = ::rsqrtf(static_cast<float>({src.toIdent}));\n"
+  | .scalarUnary .Sqrt dst src =>
+    s!"{indent}auto {dst.toIdent} = ::sqrtf(static_cast<float>({src.toIdent}));\n"
+  | .scalarUnary .Cos dst src =>
+    s!"{indent}auto {dst.toIdent} = ::cosf(static_cast<float>({src.toIdent}));\n"
   | .scalarCompare .Eq dst a b =>
     s!"{indent}auto {dst.toIdent} = ({a.toIdent} == {b.toIdent});\n"
   | .scalarCompare .Lt dst a b =>

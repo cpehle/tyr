@@ -143,6 +143,8 @@ inductive ScalarUnaryOp where
   | Log
   | Log2
   | Rsqrt
+  | Sqrt
+  | Cos
   deriving Repr, BEq, Hashable, Inhabited, Lean.ToExpr
 
 /-- Scalar comparison operations on runtime indices/parameters. -/
