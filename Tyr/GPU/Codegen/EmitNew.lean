@@ -22,6 +22,30 @@ If `Ops`/`Notation` are "authoring-time DSL", this module is the backend compile
 
 namespace Tyr.GPU.Codegen
 
+/-- Render a Float as an exact C/CUDA literal. Lean's `Float.toString`
+    formats at 6 decimals, which silently truncated kernel constants
+    (e.g. `1e-12` became `0.000000f`); hex-float literals round-trip the
+    full IEEE-754 value and are valid C++17/CUDA. -/
+def floatToCLiteral (value : Float) : String :=
+  if value != value then
+    "NAN"
+  else if value == 0.0 then
+    (if 1.0 / value < 0.0 then "-0.0" else "0.0")
+  else if value.isInf then
+    (if value > 0.0 then "INFINITY" else "-INFINITY")
+  else
+    let bits := value.toBits
+    let sign := if bits >>> 63 == 1 then "-" else ""
+    let expBits : Int := ((bits >>> 52) &&& 0x7FF).toNat
+    let mant := (bits &&& 0xFFFFFFFFFFFFF).toNat
+    let hexDigits := String.mk ((Nat.toDigits 16 mant))
+    let pad := String.mk (List.replicate (13 - hexDigits.length) '0')
+    if expBits == 0 then
+      s!"{sign}0x0.{pad}{hexDigits}p-1022"
+    else
+      s!"{sign}0x1.{pad}{hexDigits}p{expBits - 1023}"
+
+
 open Tyr.GPU
 
 /-- Zero literal for generated mutable scalar declarations. -/
@@ -760,16 +784,16 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout)
   -- Scalar operations
   | .scalarMul dst src scalar =>
     if dst == src then
-      s!"{indent}warp::mul({dst.toIdent}, {src.toIdent}, {scalar}f);\n"
+      s!"{indent}warp::mul({dst.toIdent}, {src.toIdent}, {floatToCLiteral scalar}f);\n"
     else
       s!"{indent}warp::copy({dst.toIdent}, {src.toIdent});\n" ++
-      s!"{indent}warp::mul({dst.toIdent}, {dst.toIdent}, {scalar}f);\n"
+      s!"{indent}warp::mul({dst.toIdent}, {dst.toIdent}, {floatToCLiteral scalar}f);\n"
   | .scalarAdd dst src scalar =>
     if dst == src then
-      s!"{indent}warp::add({dst.toIdent}, {src.toIdent}, {scalar}f);\n"
+      s!"{indent}warp::add({dst.toIdent}, {src.toIdent}, {floatToCLiteral scalar}f);\n"
     else
       s!"{indent}warp::copy({dst.toIdent}, {src.toIdent});\n" ++
-      s!"{indent}warp::add({dst.toIdent}, {dst.toIdent}, {scalar}f);\n"
+      s!"{indent}warp::add({dst.toIdent}, {dst.toIdent}, {floatToCLiteral scalar}f);\n"
 
   -- Broadcasting
   | .broadcast axis dst vec =>
@@ -1163,7 +1187,7 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout)
   | .constUInt64 dst value =>
     s!"{indent}uint64_t {dst.toIdent} = {value}ULL;\n"
   | .constFloat dst value =>
-    s!"{indent}float {dst.toIdent} = {value}f;\n"
+    s!"{indent}float {dst.toIdent} = {floatToCLiteral value}f;\n"
   | .scalarUnary .Neg dst src =>
     s!"{indent}auto {dst.toIdent} = -{src.toIdent};\n"
   | .scalarUnary .Exp dst src =>
@@ -1245,7 +1269,7 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout)
     s!"{indent}static_assert(false, \"unsupported blockReduce op/type: {repr op} {repr ty}\");\n"
   | .vecIota dst start step =>
     s!"{indent}warp::apply({dst.toIdent}, {dst.toIdent}, [] __device__ (int _i, auto _x) \{\n" ++
-    s!"{indent}  return static_cast<decltype(_x)>({start}f + {step}f * static_cast<float>(_i));\n" ++
+    s!"{indent}  return static_cast<decltype(_x)>({floatToCLiteral start}f + {floatToCLiteral step}f * static_cast<float>(_i));\n" ++
     s!"{indent}" ++ "});\n"
   | .vecFillScalar dst scalar =>
     s!"{indent}warp::apply({dst.toIdent}, {dst.toIdent}, [&] __device__ (int _i, auto _x) \{\n" ++
