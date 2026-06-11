@@ -145,8 +145,8 @@ def testScalarMul : IO Unit := do
   let code := generateKernel kernel
   -- Should have two mul operations with scalar
   assertTrue (code.containsSubstr "mul(") "Should have scalar mul"
-  assertTrue (code.containsSubstr "0.500000f") "Should have 0.5 scalar"
-  assertTrue (code.containsSubstr "2.000000f") "Should have 2.0 scalar"
+  assertTrue (code.containsSubstr "0x1.0000000000000p-1f") "Should have 0.5 scalar"
+  assertTrue (code.containsSubstr "0x1.0000000000000p1f") "Should have 2.0 scalar"
 
 /-- Test scalar addition -/
 @[test]
@@ -158,7 +158,7 @@ def testScalarAdd : IO Unit := do
 
   let code := generateKernel kernel
   assertTrue (code.containsSubstr "add(") "Should have scalar add"
-  assertTrue (code.containsSubstr "1.000000f") "Should have 1.0 scalar"
+  assertTrue (code.containsSubstr "0x1.0000000000000p0f") "Should have 1.0 scalar"
 
 /-! ## Notation Tests: Vector Operators -/
 
@@ -649,7 +649,7 @@ def testRKCombineCodegen : IO Unit := do
   assertTrue (code.containsSubstr "mul(") "Should emit scalar multiplies"
   assertTrue (code.containsSubstr "add(") "Should emit accumulation adds"
   assertTrue (code.containsSubstr "zero(") "Should zero the error accumulator"
-  assertTrue (code.containsSubstr "0.091146") "Should bake b₁ = 35/384 into the kernel"
+  assertTrue (code.containsSubstr "0x1.7555555555555p-4") "Should bake b₁ = 35/384 exactly into the kernel"
   -- stage 2 has b = bHat = 0 and must be skipped at codegen time
   assertTrue (!(code.containsSubstr "v14, v2,")) "Zero-weight stage k2 must not be loaded"
   -- y0 + 6 live stages in, y1 + err out: 9 global accesses in one launch
