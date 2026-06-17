@@ -227,4 +227,70 @@ def trainStepMolecule {maxLen vocab : UInt64} {Params : Type} [TensorStruct Para
 
   return (params', optState', report)
 
+def evalMoleculeLoss {maxLen vocab : UInt64} {Params : Type}
+    (cfg : BranchingTrainConfig)
+    (model : BranchingMoleculeModel maxLen vocab Params)
+    (params : Params)
+    (result : BranchingBridgeResult MoleculeAtom)
+    (labelDFM : Option DistNoisyDiscreteConfig := none)
+    : IO BranchingMoleculeLossReport := do
+  torch.autograd.no_grad do
+    let ⟨batch, packed⟩ ← packBranchingMolecule cfg result labelDFM
+    let (coordPred, labelLogits, splitLogits, delLogits) ←
+      model.forward (batch := batch) params packed.coord packed.label packed.t packed.padmask
+    let (_, report) :=
+      moleculeLosses (vocab := vocab) cfg packed coordPred labelLogits splitLogits delLogits
+    pure report
+
+def sampleMoleculeBridgeBatch
+    (bridgeCfg : MoleculeBridgeConfig)
+    (states : Array (BranchingState MoleculeAtom))
+    (batchSize : Nat)
+    (rng : Rng)
+    (branchTime : TimeDist := TimeDist.betaOneThreeHalves)
+    (deletionTime : TimeDist := TimeDist.uniform)
+    (policy : CoalescencePolicy MoleculeAtom := sequentialUniformPolicy MoleculeAtom)
+    (coalescenceFactor : Float := 1.0)
+    (useBranchingTimeProb : Float := 0.0)
+    (maxLen : Option Nat := none)
+    (maxResamples : Nat := 8)
+    (lengthMins : GroupMinsSpec := .uniform 1)
+    (deletionPad : Float := 0.0)
+    : IO (BranchingBridgeResult MoleculeAtom × Rng) := do
+  if states.isEmpty then
+    throw (IO.userError "cannot sample a molecule bridge batch from an empty dataset")
+  if batchSize == 0 then
+    throw (IO.userError "molecule bridge batch size must be positive")
+  let mut rng := rng
+  let mut targets : Array (BranchingState MoleculeAtom) := #[]
+  let mut times : Array Float := #[]
+  for _ in [:batchSize] do
+    let (idx, rng') := randNat rng states.size
+    rng := rng'
+    let (u, rng') := randFloat rng
+    rng := rng'
+    let t := max 1.0e-4 (min 0.9999 u)
+    targets := targets.push states[idx]!
+    times := times.push t
+  let (result, rngOut) :=
+    branchingBridge
+      (fun cfg x0 x1 t0 t => MoleculeBridgeConfig.bridge cfg x0 x1 t0 t)
+      bridgeCfg
+      (fun _root => MoleculeBridgeConfig.maskedAtom bridgeCfg)
+      targets
+      times
+      branchTime
+      deletionTime
+      policy
+      (MoleculeBridgeConfig.anchorMerge bridgeCfg)
+      (coalescenceFactor := coalescenceFactor)
+      (useBranchingTimeProb := useBranchingTimeProb)
+      (maxLen := maxLen)
+      (maxResamples := maxResamples)
+      (lengthMins := lengthMins)
+      (deletionPad := deletionPad)
+      (x1Modifier := maskDeletedMoleculeLabels bridgeCfg)
+      (rng := rng)
+  pure (result, rngOut)
+
 end torch.branching

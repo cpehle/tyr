@@ -254,17 +254,6 @@ def qm9InitialMaskedState
     BranchingState MoleculeAtom :=
   BranchingState.mkDefault #[cfg.maskedAtom coord] #[group]
 
-def maskDeletedMoleculeLabels
-    (cfg : MoleculeBridgeConfig)
-    (state : BranchingState MoleculeAtom) :
-    BranchingState MoleculeAtom :=
-  { state with
-    state := state.state.mapIdx (fun i atom =>
-      if state.del.getD i false then
-        { atom with label := cfg.maskToken }
-      else
-        atom) }
-
 /--
 Default XYZ symbol mapping for preprocessed records whose labels are atomic
 numbers.  Token-id vocabularies can pass their own `labelToSymbol` function to

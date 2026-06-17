@@ -182,4 +182,96 @@ def moleculeTransformerModel {maxLen vocab heads headDim mlp : UInt64} :
   { forward := fun {batch} params coord label t padmask =>
       MoleculeTransformerParams.forward (batch := batch) params coord label t padmask }
 
+private def clampUpper? (cap? : Option Float) (x : Float) : Float :=
+  match cap? with
+  | some cap => min x cap
+  | none => x
+
+private def scalar3d {maxLen channels : UInt64}
+    (x : T #[1, maxLen, channels]) (j k : Nat) : Float :=
+  let row : T #[1, 1, channels] := data.slice x 1 j.toUInt64 1
+  let cell : T #[1, 1, 1] := data.slice row 2 k.toUInt64 1
+  nn.item (reshape cell #[])
+
+private def scalar2d {maxLen : UInt64}
+    (x : T #[1, maxLen]) (j : Nat) : Float :=
+  let cell : T #[1, 1] := data.slice x 1 j.toUInt64 1
+  nn.item (reshape cell #[])
+
+private def packMoleculeStateForTransformer {maxLen vocab : UInt64}
+    (padToken : Int64)
+    (t : Float)
+    (state : BranchingState MoleculeAtom) :
+    IO (T #[1, maxLen, 3] × T #[1, maxLen] × T #[1] × T #[1, maxLen]) := do
+  if state.state.size > maxLen.toNat then
+    throw (IO.userError s!"molecule state length {state.state.size} exceeds transformer maxLen {maxLen}")
+  let maxLenNat := maxLen.toNat
+  let mut coordArr : Array Float := Array.replicate (maxLenNat * 3) 0.0
+  let mut labelArr : Array Int64 := Array.replicate maxLenNat padToken
+  let mut padArr : Array Int64 := Array.replicate maxLenNat 0
+  for j in [:state.state.size] do
+    let atom := state.state[j]!
+    if atom.label >= vocab.toNat then
+      throw (IO.userError s!"molecule label {atom.label} is outside transformer vocab {vocab}")
+    let offset := j * 3
+    coordArr := coordArr.set! offset atom.coord.x
+    coordArr := coordArr.set! (offset + 1) atom.coord.y
+    coordArr := coordArr.set! (offset + 2) atom.coord.z
+    labelArr := labelArr.set! j (Int64.ofNat atom.label)
+    padArr := padArr.set! j 1
+  let coord := reshape (data.fromFloatArray coordArr) #[1, maxLen, 3]
+  let label := reshape (data.fromInt64Array labelArr) #[1, maxLen]
+  let time := reshape (data.fromFloatArray #[t]) #[1]
+  let padmask := toFloat' (reshape (data.fromInt64Array padArr) #[1, maxLen])
+  pure (coord, label, time, padmask)
+
+private def tensorVec3 {maxLen : UInt64}
+    (coordPred : T #[1, maxLen, 3]) (j : Nat) : Vec3 :=
+  { x := scalar3d coordPred j 0,
+    y := scalar3d coordPred j 1,
+    z := scalar3d coordPred j 2 }
+
+private def tensorLabelLogits {maxLen vocab : UInt64}
+    (labelLogits : T #[1, maxLen, vocab]) (j : Nat) : Array Float := Id.run do
+  let mut out : Array Float := #[]
+  for k in [:vocab.toNat] do
+    out := out.push (scalar3d labelLogits j k)
+  out
+
+def moleculeTransformerPrediction {maxLen vocab heads headDim mlp : UInt64}
+    (padToken : Int64)
+    (params : MoleculeTransformerParams vocab heads headDim mlp)
+    (t : Float)
+    (state : BranchingState MoleculeAtom)
+    (splitLogitCap? : Option Float := none) :
+    IO MoleculeModelPrediction := do
+  torch.autograd.no_grad do
+    let (coord, label, time, padmask) ←
+      packMoleculeStateForTransformer (maxLen := maxLen) (vocab := vocab) padToken t state
+    let (coordPred, labelLogits, splitLogits, delLogits) ←
+      MoleculeTransformerParams.forward (batch := 1) params coord label time padmask
+    let n := state.state.size
+    let canSplit := n < maxLen.toNat
+    let coordTargets := (Array.range n).map (fun j => tensorVec3 coordPred j)
+    let labelTargets := (Array.range n).map (fun j => tensorLabelLogits labelLogits j)
+    let splitTargets := (Array.range n).map (fun j =>
+      if canSplit then clampUpper? splitLogitCap? (scalar2d splitLogits j) else -100.0)
+    let delTargets := (Array.range n).map (fun j => scalar2d delLogits j)
+    pure {
+      coordTargets
+      labelLogits := labelTargets
+      splitLogits := splitTargets
+      delLogits := delTargets
+    }
+
+def moleculeTransformerIOModel {maxLen vocab heads headDim mlp : UInt64}
+    (padToken : Int64)
+    (params : MoleculeTransformerParams vocab heads headDim mlp)
+    (splitLogitCap? : Option Float := none) :
+    Float → BranchingState MoleculeAtom → IO MoleculeModelPrediction :=
+  fun t state =>
+    moleculeTransformerPrediction (maxLen := maxLen) (vocab := vocab)
+      (heads := heads) (headDim := headDim) (mlp := mlp)
+      padToken params t state (splitLogitCap? := splitLogitCap?)
+
 end torch.branching
