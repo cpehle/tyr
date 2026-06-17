@@ -6,7 +6,7 @@ import Tyr.Model.BranchingFlows.QM9
 /-!
   Examples/BranchingFlows/MoleculeTrainDemo.lean
 
-  QM9-shaped molecule training smoke.
+  QM9-shaped molecule overfit training check.
   Parses a tiny preprocessed molecule fixture, builds a BranchingFlows bridge
   batch, trains a minimal coordinate/label model, and checks that the loss drops.
 -/

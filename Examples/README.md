@@ -274,6 +274,7 @@ Combinatorial branching flow sampler -- a port of branching flow networks to Lea
 lake exe BranchingFlowsContinuousTrain
 lake exe BranchingFlowsMoleculeTrain
 lake exe BranchingFlowsMoleculeTransformerTrain
+lake exe BranchingFlowsMoleculeTrainGenerate
 ```
 
 Demo files:
@@ -283,7 +284,8 @@ Demo files:
 - `MixedTrainDemo.lean` -- Mixed continuous/discrete training
 - `MoleculeTrainDemo.lean` -- QM9-shaped coordinate/label training with an overfit loss-decrease check
 - `MoleculeTransformerTrainDemo.lean` -- QM9-shaped transformer training with coordinate, label, split, and deletion loss checks
-- `MoleculeGenerationDemo.lean` -- Molecule bridge/generation smoke with XYZ export
+- `MoleculeGenerationDemo.lean` -- Oracle molecule bridge/generation example with XYZ export
+- `MoleculeTrainGenerate.lean` -- Dataset-backed molecule transformer training, evaluation, and learned XYZ generation
 
 Torch-backed training demos should run through Lake executables or compiled
 targets so Tyr's native Torch bridge is linked. The training executables print
