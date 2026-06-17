@@ -162,6 +162,17 @@ def stepAtomFromLogits
 
 end MoleculeBridgeConfig
 
+def maskDeletedMoleculeLabels
+    (cfg : MoleculeBridgeConfig)
+    (state : BranchingState MoleculeAtom) :
+    BranchingState MoleculeAtom :=
+  { state with
+    state := state.state.mapIdx (fun i atom =>
+      if state.del.getD i false then
+        { atom with label := cfg.maskToken }
+      else
+        atom) }
+
 structure MoleculeModelPrediction where
   coordTargets : Array Vec3
   labelLogits : Array (Array Float)
@@ -237,5 +248,47 @@ def moleculeBranchingGenerate
     trajectory := trajectory.push state
     events := events.push result.events
   ({ finalState := state, trajectory, events, times := schedule }, rng)
+
+private def truncateBranchingState (limit : Nat)
+    (state : BranchingState α) : BranchingState α :=
+  let n := Nat.min limit state.state.size
+  { state with
+    state := state.state.extract 0 n
+    groupings := state.groupings.extract 0 n
+    del := state.del.extract 0 n
+    ids := state.ids.extract 0 n
+    branchmask := state.branchmask.extract 0 n
+    flowmask := state.flowmask.extract 0 n
+    padmask := state.padmask.extract 0 n }
+
+def moleculeBranchingGenerateIO
+    (flow : CoalescentFlow MoleculeBridgeConfig MoleculeAtom)
+    (x0 : BranchingState MoleculeAtom)
+    (model : Float → BranchingState MoleculeAtom → IO MoleculeModelPrediction)
+    (schedule : Array Float)
+    (splitAllowedAfterBaseStep : MoleculeAtom → MoleculeAtom → Bool := fun _ _ => true)
+    (maxStateLen? : Option Nat := none)
+    (rng : Rng := { state := 0 }) :
+    IO (BranchingGenerateResult MoleculeAtom × Rng) := do
+  if schedule.size <= 1 then
+    return ({ finalState := x0, trajectory := #[x0], events := #[], times := schedule }, rng)
+  let mut state := x0
+  let mut trajectory : Array (BranchingState MoleculeAtom) := #[x0]
+  let mut events : Array (Array BranchingStepEvent) := #[]
+  let mut rng := rng
+  for i in [:schedule.size - 1] do
+    let s1 := schedule[i]!
+    let s2 := schedule[i + 1]!
+    let prediction ← model s1 state
+    let (result, rng') :=
+      moleculeBranchingStep flow state prediction s1 s2 splitAllowedAfterBaseStep rng
+    rng := rng'
+    state :=
+      match maxStateLen? with
+      | some limit => truncateBranchingState limit result.state
+      | none => result.state
+    trajectory := trajectory.push state
+    events := events.push result.events
+  return ({ finalState := state, trajectory, events, times := schedule }, rng)
 
 end torch.branching
