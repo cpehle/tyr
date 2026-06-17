@@ -1,3 +1,7 @@
+import Tyr
+import Tyr.Optim
+import Tyr.Model.BranchingFlows
+
 /-!
   Torch-integrated training helpers for the BranchingFlows port.
 
@@ -6,9 +10,6 @@
   - Masked losses for anchor prediction, split counts, and deletion flags.
   - A minimal training step using `Tyr.Optim`.
 -/
-import Tyr
-import Tyr.Optim
-import Tyr.Model.BranchingFlows
 
 namespace torch.branching
 
@@ -68,7 +69,7 @@ private def maskedCrossEntropy {batch maxLen vocab : UInt64}
   let per := nn.cross_entropy_none logits2 targets2
   let masked := per * mask2
   let denom := nn.sumAll mask2
-  (nn.sumAll masked) / (denom + 1.0e-8)
+  nn.div (nn.sumAll masked) (denom + (1.0e-8 : Float))
 
 private def maskedMSE {batch maxLen : UInt64}
     (pred target mask : T #[batch, maxLen]) : T #[] :=
@@ -76,23 +77,32 @@ private def maskedMSE {batch maxLen : UInt64}
   let sq := diff * diff
   let masked := sq * mask
   let denom := nn.sumAll mask
-  (nn.sumAll masked) / (denom + 1.0e-8)
+  nn.div (nn.sumAll masked) (denom + (1.0e-8 : Float))
 
 private def maskedMSE3d {batch maxLen dim : UInt64}
     (pred target : T #[batch, maxLen, dim]) (mask : T #[batch, maxLen]) : T #[] :=
-  let mask3 := torch.expand (torch.unsqueeze mask 2) #[batch, maxLen, dim]
+  let mask3 := nn.expand (nn.unsqueeze mask 2) #[batch, maxLen, dim]
   let diff := pred - target
   let sq := diff * diff
   let masked := sq * mask3
   let denom := nn.sumAll mask3
-  (nn.sumAll masked) / (denom + 1.0e-8)
+  nn.div (nn.sumAll masked) (denom + (1.0e-8 : Float))
 
-private def maskedBCEWithLogits {batch maxLen : UInt64}
+def maskedSplitPoissonLoss {batch maxLen : UInt64}
     (logits target mask : T #[batch, maxLen]) : T #[] :=
-  let probs := nn.sigmoid logits
-  let loss := nn.binary_cross_entropy probs target (some mask) "sum"
+  let mu := nn.exp (torch.clampFloat logits (-100.0) 11.0)
+  let safeTarget := torch.clampFloat target 1.0e-8 1.0e20
+  let per := mu - target * nn.log mu - (target - target * nn.log safeTarget)
+  let masked := per * mask
   let denom := nn.sumAll mask
-  loss / (denom + 1.0e-8)
+  nn.div (nn.sumAll masked) (denom + (1.0e-8 : Float))
+
+def maskedBCEWithLogits {batch maxLen : UInt64}
+    (logits target mask : T #[batch, maxLen]) : T #[] :=
+  let per := nn.softplus logits - target * logits
+  let loss := nn.sumAll (per * mask)
+  let denom := nn.sumAll mask
+  nn.div loss (denom + (1.0e-8 : Float))
 
 def packBranchingNat (cfg : BranchingTrainConfig) (result : BranchingBridgeResult Nat)
     : IO (Sigma fun batch => BranchingBatch batch cfg.maxLen) := do
@@ -132,10 +142,10 @@ def packBranchingNat (cfg : BranchingTrainConfig) (result : BranchingBridgeResul
       let idx := bi * maxLenNat + j
       if h : j < x.state.size then
         let sVal := x.state[j]'h
-        let aVal := anchors[j]'h
-        let spVal := splits[j]'h
-        let dVal := dels[j]'h
-        let fVal := x.flowmask[j]'h
+        let aVal := anchors.getD j 0
+        let spVal := splits.getD j 0
+        let dVal := dels.getD j false
+        let fVal := x.flowmask.getD j false
         stateArr := stateArr.set! idx (Int64.ofNat sVal)
         anchorArr := anchorArr.set! idx (Int64.ofNat aVal)
         splitsArr := splitsArr.set! idx (Int64.ofNat spVal)
@@ -164,16 +174,16 @@ private def stack1dDyn {dim : UInt64} (tensors : Array (T #[dim])) (len : UInt64
   if tensors.isEmpty then
     reshape (torch.zeros #[0, dim]) #[len, dim]
   else
-    let unsq := tensors.map (fun t => torch.unsqueeze t 0) -- [1, dim]
-    reshape (torch.cat_impl unsq 0) #[len, dim]
+    let unsq := tensors.map (fun t => nn.unsqueeze t 0) -- [1, dim]
+    reshape (nn.cat_impl unsq 0) #[len, dim]
 
-private def stackBatch2d {batch maxLen dim : UInt64} (tensors : Array (T #[maxLen, dim]))
-    (batchSize : UInt64) : T #[batch, maxLen, dim] :=
+private def stackBatch2d {batch maxLen dim : UInt64} (tensors : Array (T #[maxLen, dim])) :
+    T #[batch, maxLen, dim] :=
   if tensors.isEmpty then
     reshape (torch.zeros #[0, maxLen, dim]) #[batch, maxLen, dim]
   else
-    let unsq := tensors.map (fun t => torch.unsqueeze t 0) -- [1, maxLen, dim]
-    reshape (torch.cat_impl unsq 0) #[batch, maxLen, dim]
+    let unsq := tensors.map (fun t => nn.unsqueeze t 0) -- [1, maxLen, dim]
+    reshape (nn.cat_impl unsq 0) #[batch, maxLen, dim]
 
 def packBranchingTensor {dim : UInt64} (cfg : BranchingTrainConfig)
     (result : BranchingBridgeResult (T #[dim]))
@@ -215,17 +225,17 @@ def packBranchingTensor {dim : UInt64} (cfg : BranchingTrainConfig)
     let xa := stack1dDyn (dim := dim) anchors lenU
     let padU := cfg.maxLen - lenU
     let padT : T #[padU, dim] := torch.zeros #[padU, dim]
-    let xsPad := reshape (torch.cat xs padT 0) #[cfg.maxLen, dim]
-    let xaPad := reshape (torch.cat xa padT 0) #[cfg.maxLen, dim]
+    let xsPad := reshape (nn.cat xs padT 0) #[cfg.maxLen, dim]
+    let xaPad := reshape (nn.cat xa padT 0) #[cfg.maxLen, dim]
     paddedStates := paddedStates.push xsPad
     paddedAnchors := paddedAnchors.push xaPad
 
     for j in [:maxLenNat] do
       let idx := bi * maxLenNat + j
-      if h : j < x.state.size then
-        let spVal := splits[j]'h
-        let dVal := dels[j]'h
-        let fVal := x.flowmask[j]'h
+      if j < x.state.size then
+        let spVal := splits.getD j 0
+        let dVal := dels.getD j false
+        let fVal := x.flowmask.getD j false
         padArr := padArr.set! idx 1
         flowArr := flowArr.set! idx (if fVal then 1 else 0)
         splitsArr := splitsArr.set! idx (Int64.ofNat spVal)
@@ -234,8 +244,8 @@ def packBranchingTensor {dim : UInt64} (cfg : BranchingTrainConfig)
         pure ()
 
   let batchU : UInt64 := batchNat.toUInt64
-  let state := stackBatch2d (batch := batchU) (maxLen := cfg.maxLen) (dim := dim) paddedStates batchU
-  let anchor := stackBatch2d (batch := batchU) (maxLen := cfg.maxLen) (dim := dim) paddedAnchors batchU
+  let state := stackBatch2d (batch := batchU) (maxLen := cfg.maxLen) (dim := dim) paddedStates
+  let anchor := stackBatch2d (batch := batchU) (maxLen := cfg.maxLen) (dim := dim) paddedAnchors
   let padmask := toFloat' (reshape (data.fromInt64Array padArr) #[batchU, cfg.maxLen])
   let flowmask := toFloat' (reshape (data.fromInt64Array flowArr) #[batchU, cfg.maxLen])
   let splitsTarget := toFloat' (reshape (data.fromInt64Array splitsArr) #[batchU, cfg.maxLen])
@@ -263,13 +273,13 @@ def trainStep {maxLen vocab : UInt64} {Params : Type} [TensorStruct Params]
     (lr : Float)
     (clipGrads : Params → Float → IO Unit := fun _ _ => pure ())
     : IO (Params × Optim.AdamWState Params × BranchingLossReport) := do
-  let params := TensorStruct.zeroGrads params
+  let params := TensorStruct.zeroGrads (TensorStruct.makeLeafParams params)
   let ⟨batch, packed⟩ ← packBranchingNat cfg result
   let (anchorLogits, splitLogits, delLogits) ← model.forward (batch := batch) params packed.state packed.t
   let mask := floatMask packed.padmask packed.flowmask
 
   let anchorLoss := maskedCrossEntropy anchorLogits packed.anchor mask
-  let splitLoss := maskedMSE splitLogits packed.splitsTarget mask
+  let splitLoss := maskedSplitPoissonLoss splitLogits packed.splitsTarget mask
   let delLoss := maskedBCEWithLogits delLogits packed.delTarget mask
   let totalLoss := anchorLoss * cfg.anchorWeight + splitLoss * cfg.splitsWeight + delLoss * cfg.delWeight
 
@@ -298,13 +308,13 @@ def trainStepContinuous {maxLen dim : UInt64} {Params : Type} [TensorStruct Para
     (lr : Float)
     (clipGrads : Params → Float → IO Unit := fun _ _ => pure ())
     : IO (Params × Optim.AdamWState Params × BranchingLossReport) := do
-  let params := TensorStruct.zeroGrads params
+  let params := TensorStruct.zeroGrads (TensorStruct.makeLeafParams params)
   let ⟨batch, packed⟩ ← packBranchingTensor (dim := dim) cfg result
   let (anchorPred, splitLogits, delLogits) ← model.forward (batch := batch) params packed.state packed.t
   let mask := floatMask packed.padmask packed.flowmask
 
   let anchorLoss := maskedMSE3d anchorPred packed.anchor mask
-  let splitLoss := maskedMSE splitLogits packed.splitsTarget mask
+  let splitLoss := maskedSplitPoissonLoss splitLogits packed.splitsTarget mask
   let delLoss := maskedBCEWithLogits delLogits packed.delTarget mask
   let totalLoss := anchorLoss * cfg.anchorWeight + splitLoss * cfg.splitsWeight + delLoss * cfg.delWeight
 

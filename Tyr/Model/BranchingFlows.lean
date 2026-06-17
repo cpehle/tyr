@@ -90,12 +90,156 @@ def randExponential (r : Rng) : Float × Rng :=
   let u := if u <= 1e-12 then 1e-12 else u
   (-Float.log u, r')
 
+def randNormal (r : Rng) : Float × Rng :=
+  let (u1, r') := randFloat r
+  let (u2, r'') := randFloat r'
+  let u1 := if u1 <= 1.0e-12 then 1.0e-12 else u1
+  let radius := Float.sqrt (-2.0 * Float.log u1)
+  let angle := 2.0 * 3.14159265358979323846 * u2
+  (radius * Float.cos angle, r'')
+
 /-! ## Time distributions -/
 
 structure TimeDist where
   cdf : Float → Float
   pdf : Float → Float
   quantile : Float → Float
+
+namespace TimeDist
+
+private def clamp01 (x : Float) : Float :=
+  max 0.0 (min x 1.0)
+
+private def bisectQuantile (cdf : Float → Float) (p : Float) (steps : Nat := 48) : Float := Id.run do
+  let target := clamp01 p
+  let mut lo := 0.0
+  let mut hi := 1.0
+  for _ in [:steps] do
+    let mid := (lo + hi) / 2.0
+    if cdf mid < target then
+      lo := mid
+    else
+      hi := mid
+  return (lo + hi) / 2.0
+
+def uniform : TimeDist :=
+  { cdf := fun t => clamp01 t,
+    pdf := fun t => if t < 0.0 || t > 1.0 then 0.0 else 1.0,
+    quantile := fun p => clamp01 p }
+
+/-- Closed-form `Beta(1, 2)` distribution on `[0, 1]`, used by the Julia demo. -/
+def betaOneTwo : TimeDist :=
+  { cdf := fun t =>
+      let x := clamp01 t
+      1.0 - Float.pow (1.0 - x) 2.0,
+    pdf := fun t =>
+      if t < 0.0 || t > 1.0 then 0.0 else 2.0 * (1.0 - t),
+    quantile := fun p =>
+      let q := clamp01 p
+      1.0 - Float.pow (1.0 - q) (1.0 / 2.0) }
+
+/-- Closed-form `Beta(1, 3/2)` split-time distribution used by the QM9 setup. -/
+def betaOneThreeHalves : TimeDist :=
+  { cdf := fun t =>
+      let x := clamp01 t
+      1.0 - Float.pow (1.0 - x) (3.0 / 2.0),
+    pdf := fun t =>
+      if t < 0.0 || t > 1.0 then 0.0 else (3.0 / 2.0) * Float.pow (1.0 - t) (1.0 / 2.0),
+    quantile := fun p =>
+      let q := clamp01 p
+      1.0 - Float.pow (1.0 - q) (2.0 / 3.0) }
+
+/-- `Beta(2, 2)` distribution on `[0, 1]`, used by the QM9 DFM hazards. -/
+def betaTwoTwo : TimeDist :=
+  let cdf := fun t =>
+    let x := clamp01 t
+    3.0 * x * x - 2.0 * x * x * x
+  { cdf := cdf,
+    pdf := fun t =>
+      if t < 0.0 || t > 1.0 then 0.0 else 6.0 * t * (1.0 - t),
+    quantile := fun p => bisectQuantile cdf p }
+
+def survival (dist : TimeDist) (t : Float) : Float :=
+  max (1.0 - dist.cdf t) 0.0
+
+def hazard (dist : TimeDist) (t : Float) : Float :=
+  let s := dist.survival t
+  if s > 0.0 then dist.pdf t / s else 0.0
+
+/-- Density at `t` after truncating a time distribution to `[start, 1]`. -/
+def truncatedPdfFrom (dist : TimeDist) (start t : Float) : Float :=
+  let s := dist.survival start
+  if s > 0.0 then dist.pdf t / s else 0.0
+
+end TimeDist
+
+private def clampProbability (p : Float) : Float :=
+  max 0.0 (min p 1.0)
+
+def defaultSplitTransform (x : Float) : Float :=
+  Float.exp (max (-100.0) (min x 11.0))
+
+private def sigmoid (x : Float) : Float :=
+  1.0 / (1.0 + Float.exp (-x))
+
+/-! ## Training loss helpers -/
+
+def xlogy (x y : Float) : Float :=
+  if x == 0.0 then 0.0 else x * Float.log y
+
+def poissonBregmanLoss (mu count : Float) : Float :=
+  mu - xlogy count mu
+
+/-- Shifted Poisson Bregman loss used by `BranchingFlows.jl` for split counts. -/
+def shiftedPoissonBregmanLoss (mu count : Float) : Float :=
+  poissonBregmanLoss mu count - (count - xlogy count count)
+
+def splitCountLoss (splitTransform : Float → Float) (logit : Float) (count : Nat) : Float :=
+  shiftedPoissonBregmanLoss (splitTransform logit) count.toFloat
+
+private def relu (x : Float) : Float :=
+  if x < 0.0 then 0.0 else x
+
+def softplus (x : Float) : Float :=
+  Float.log (1.0 + Float.exp (-(Float.abs x))) + relu x
+
+def logSigmoid (x : Float) : Float :=
+  -softplus (-x)
+
+/-- Stable logit binary cross entropy, matching the Julia deletion loss. -/
+def logitBinaryCrossEntropy (logit : Float) (target : Bool) : Float :=
+  let y := if target then 1.0 else 0.0
+  (1.0 - y) * logit - logSigmoid logit
+
+def maskedScaledMean (values : Array Float) (mask : Array Bool) (scale : Float := 1.0) : Float := Id.run do
+  let mut total := 0.0
+  let mut count := 0
+  for i in [:values.size] do
+    if mask.getD i false then
+      total := total + values[i]! * scale
+      count := count + 1
+  return if count = 0 then 0.0 else total / count.toFloat
+
+def splitCountLosses (splitTransform : Float → Float) (logits : Array Float) (targets : Array Nat) :
+    Array Float :=
+  logits.mapIdx (fun i logit => splitCountLoss splitTransform logit (targets.getD i 0))
+
+def deletionLosses (logits : Array Float) (targets : Array Bool) : Array Float :=
+  logits.mapIdx (fun i logit => logitBinaryCrossEntropy logit (targets.getD i false))
+
+def maskedSplitCountLoss
+    (splitTransform : Float → Float)
+    (logits : Array Float)
+    (targets : Array Nat)
+    (mask : Array Bool)
+    (scale : Float := 1.0) : Float :=
+  maskedScaledMean (splitCountLosses splitTransform logits targets) mask scale
+
+def maskedDeletionLoss
+    (logits : Array Float)
+    (targets mask : Array Bool)
+    (scale : Float := 1.0) : Float :=
+  maskedScaledMean (deletionLosses logits targets) mask scale
 
 /-! ## Flow tree node -/
 
@@ -681,6 +825,232 @@ structure CoalescentFlow (P α : Type) where
   splitTransform : Float → Float
   policy : CoalescencePolicy α
   deletionTime : TimeDist
+
+namespace CoalescentFlow
+
+def mkWithPolicy
+    (base : P)
+    (branchTime : TimeDist)
+    (policy : CoalescencePolicy α)
+    (deletionTime : TimeDist := TimeDist.uniform)
+    (splitTransform : Float → Float := defaultSplitTransform) :
+    CoalescentFlow P α :=
+  { base, branchTime, splitTransform, policy, deletionTime }
+
+def mkDefault
+    [Inhabited α]
+    (base : P)
+    (branchTime : TimeDist)
+    (deletionTime : TimeDist := TimeDist.uniform)
+    (splitTransform : Float → Float := defaultSplitTransform) :
+    CoalescentFlow P α :=
+  mkWithPolicy base branchTime (sequentialUniformPolicy α) deletionTime splitTransform
+
+end CoalescentFlow
+
+/-! ## Forward-time generation helpers -/
+
+structure BranchingStepPrediction (α : Type) where
+  targets : Array α
+  splitLogits : Array Float
+  delLogits : Array Float
+  deriving Repr, Inhabited
+
+structure BranchingStepEvent where
+  sourceIndex : Nat
+  sourceId : Int
+  group : Int
+  splitCount : Nat
+  deleted : Bool
+  t0 : Float
+  t1 : Float
+  deriving Repr, Inhabited
+
+structure BranchingStepResult (α : Type) where
+  state : BranchingState α
+  events : Array BranchingStepEvent
+  deriving Repr, Inhabited
+
+structure BranchingGenerateResult (α : Type) where
+  finalState : BranchingState α
+  trajectory : Array (BranchingState α)
+  events : Array (Array BranchingStepEvent)
+  times : Array Float
+  deriving Repr, Inhabited
+
+private def maskBaseStep (x : BranchingState α) (stepped : Array α) [Inhabited α] : Array α := Id.run do
+  let mut out : Array α := #[]
+  for i in [:x.state.size] do
+    let old := x.state.getD i default
+    if x.flowmask.getD i false then
+      out := out.push (stepped.getD i old)
+    else
+      out := out.push old
+  out
+
+private def appendGeneratedElement
+    (state : Array α)
+    (groupings : Array Int)
+    (ids : Array Int)
+    (branchmask : Array Bool)
+    (flowmask : Array Bool)
+    (padmask : Array Bool)
+    (value : α)
+    (group : Int)
+    (id : Int)
+    (branchable flowable : Bool) :
+    Array α × Array Int × Array Int × Array Bool × Array Bool × Array Bool :=
+  (state.push value,
+   groupings.push group,
+   ids.push id,
+   branchmask.push branchable,
+   flowmask.push flowable,
+   padmask.push true)
+
+def branchingStep
+    (baseStep : P → BranchingState α → Array α → Float → Float → Array α)
+    (flow : CoalescentFlow P α)
+    (x : BranchingState α)
+    (prediction : BranchingStepPrediction α)
+    (s1 s2 : Float)
+    (splitAllowedAfterBaseStep : α → α → Bool := fun _ _ => true)
+    (rng : Rng := { state := 0 })
+    : BranchingStepResult α × Rng := Id.run do
+  let n := x.state.size
+  let dt := max (s2 - s1) 0.0
+  let stepped := maskBaseStep x (baseStep flow.base x prediction.targets s1 s2)
+  let splitDensity := flow.branchTime.truncatedPdfFrom s1 s1
+  let baseDelP := 1.0 - Float.exp (-(flow.deletionTime.hazard s1) * dt)
+  let mut rng := rng
+  let mut splits : Array Nat := Array.replicate n 0
+  let mut deleted : Array Bool := Array.replicate n false
+  for i in [:n] do
+    if x.branchmask.getD i false then
+      let splitLogit := prediction.splitLogits.getD i 0.0
+      let lambda := max (dt * flow.splitTransform splitLogit * splitDensity) 0.0
+      let (k0, rng') := randPoisson rng lambda
+      rng := rng'
+      let old := x.state.getD i default
+      let new := stepped.getD i old
+      let k := if splitAllowedAfterBaseStep old new then k0 else 0
+      splits := splits.set! i k
+      let delLogit := prediction.delLogits.getD i (-100.0)
+      let pDel := clampProbability (sigmoid delLogit * baseDelP)
+      let (d, rng') := randBernoulli rng pDel
+      rng := rng'
+      if d then
+        deleted := deleted.set! i true
+        splits := splits.set! i 0
+
+  let deletedCount := deleted.foldl (init := 0) (fun acc d => if d then acc + 1 else acc)
+  if n > 0 && deletedCount == n then
+    let deletedIdxs := (Array.range n).filter (fun i => deleted.getD i false)
+    let (k, rng') := randNat rng deletedIdxs.size
+    rng := rng'
+    deleted := deleted.set! (deletedIdxs.getD k 0) false
+
+  let mut events : Array BranchingStepEvent := #[]
+  let mut primaryState : Array α := #[]
+  let mut primaryGroups : Array Int := #[]
+  let mut primaryIds : Array Int := #[]
+  let mut primaryBranchmask : Array Bool := #[]
+  let mut primaryFlowmask : Array Bool := #[]
+  let mut primaryPadmask : Array Bool := #[]
+  let mut appendedState : Array α := #[]
+  let mut appendedGroups : Array Int := #[]
+  let mut appendedIds : Array Int := #[]
+  let mut appendedBranchmask : Array Bool := #[]
+  let mut appendedFlowmask : Array Bool := #[]
+  let mut appendedPadmask : Array Bool := #[]
+
+  for i in [:n] do
+    let splitCount := splits.getD i 0
+    let wasDeleted := deleted.getD i false
+    if splitCount > 0 || wasDeleted then
+      events := events.push {
+        sourceIndex := i
+        sourceId := x.ids.getD i 0
+        group := x.groupings.getD i 0
+        splitCount := splitCount
+        deleted := wasDeleted
+        t0 := s1
+        t1 := s2
+      }
+    if !wasDeleted then
+      let value := stepped.getD i (x.state.getD i default)
+      let group := x.groupings.getD i 0
+      let id := x.ids.getD i 0
+      let branchable := x.branchmask.getD i false
+      let flowable := x.flowmask.getD i false
+      let tuple :=
+        appendGeneratedElement primaryState primaryGroups primaryIds primaryBranchmask primaryFlowmask primaryPadmask
+          value group id branchable flowable
+      primaryState := tuple.1
+      primaryGroups := tuple.2.1
+      primaryIds := tuple.2.2.1
+      primaryBranchmask := tuple.2.2.2.1
+      primaryFlowmask := tuple.2.2.2.2.1
+      primaryPadmask := tuple.2.2.2.2.2
+      for _ in [:splitCount] do
+        if flow.policy.shouldAppendOnSplit then
+          let tuple :=
+            appendGeneratedElement appendedState appendedGroups appendedIds appendedBranchmask appendedFlowmask appendedPadmask
+              value group id branchable flowable
+          appendedState := tuple.1
+          appendedGroups := tuple.2.1
+          appendedIds := tuple.2.2.1
+          appendedBranchmask := tuple.2.2.2.1
+          appendedFlowmask := tuple.2.2.2.2.1
+          appendedPadmask := tuple.2.2.2.2.2
+        else
+          let tuple :=
+            appendGeneratedElement primaryState primaryGroups primaryIds primaryBranchmask primaryFlowmask primaryPadmask
+              value group id branchable flowable
+          primaryState := tuple.1
+          primaryGroups := tuple.2.1
+          primaryIds := tuple.2.2.1
+          primaryBranchmask := tuple.2.2.2.1
+          primaryFlowmask := tuple.2.2.2.2.1
+          primaryPadmask := tuple.2.2.2.2.2
+
+  let newState := primaryState ++ appendedState
+  let newGroups := primaryGroups ++ appendedGroups
+  let newIds := primaryIds ++ appendedIds
+  let newBranchmask := primaryBranchmask ++ appendedBranchmask
+  let newFlowmask := primaryFlowmask ++ appendedFlowmask
+  let newPadmask := primaryPadmask ++ appendedPadmask
+  let newDel := Array.replicate newState.size false
+  let out : BranchingState α :=
+    { state := newState, groupings := newGroups, del := newDel, ids := newIds,
+      branchmask := newBranchmask, flowmask := newFlowmask, padmask := newPadmask }
+  ({ state := out, events }, rng)
+
+def branchingGenerate
+    (baseStep : P → BranchingState α → Array α → Float → Float → Array α)
+    (flow : CoalescentFlow P α)
+    (x0 : BranchingState α)
+    (model : Float → BranchingState α → BranchingStepPrediction α)
+    (schedule : Array Float)
+    (splitAllowedAfterBaseStep : α → α → Bool := fun _ _ => true)
+    (rng : Rng := { state := 0 })
+    : BranchingGenerateResult α × Rng := Id.run do
+  if schedule.size <= 1 then
+    return ({ finalState := x0, trajectory := #[x0], events := #[], times := schedule }, rng)
+  let mut state := x0
+  let mut trajectory : Array (BranchingState α) := #[x0]
+  let mut events : Array (Array BranchingStepEvent) := #[]
+  let mut rng := rng
+  for i in [:schedule.size - 1] do
+    let s1 := schedule[i]!
+    let s2 := schedule[i + 1]!
+    let prediction := model s1 state
+    let (result, rng') :=
+      branchingStep baseStep flow state prediction s1 s2 splitAllowedAfterBaseStep rng
+    rng := rng'
+    state := result.state
+    trajectory := trajectory.push state
+    events := events.push result.events
+  ({ finalState := state, trajectory, events, times := schedule }, rng)
 
 partial def treeBridge
     (bridge : P → α → α → Float → Float → α)
