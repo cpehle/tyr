@@ -412,35 +412,35 @@ def sequentialPairs (nodes : Array (FlowNode α)) : Array Nat := Id.run do
       idx := idx.push i
   return idx
 
-def sequentialUniformSelect (nodes : Array (FlowNode α)) (groupMins : Option GroupMins) (rng : Rng)
-    : Option (Nat × Nat) × Rng := Id.run do
+def eligibleSequentialPairStarts
+    (nodes : Array (FlowNode α))
+    (groupMins : Option GroupMins) :
+    Array Nat := Id.run do
   let n := nodes.size
   if n <= 1 then
-    return (none, rng)
-  let mut eligible : Array Nat := #[]
+    return #[]
   let mut groupSizes : Std.HashMap Int Nat := {}
-  match groupMins with
-  | none =>
-      -- Just collect eligible adjacent pairs
-      for i in [:n-1] do
-        let a := nodes[i]!
-        let b := nodes[i+1]!
-        if a.branchable && b.branchable && a.group == b.group then
-          eligible := eligible.push i
-  | some mins =>
-      -- Count branchable sizes per group
-      for node in nodes do
-        if node.branchable then
-          let c := groupSizes.getD node.group 0
-          groupSizes := groupSizes.insert node.group (c + 1)
-      for i in [:n-1] do
-        let a := nodes[i]!
-        let b := nodes[i+1]!
-        if a.branchable && b.branchable && a.group == b.group then
-          let minSize := mins.getD a.group 0
-          let size := groupSizes.getD a.group 0
-          if size > minSize then
-            eligible := eligible.push i
+  if groupMins.isSome then
+    for node in nodes do
+      if node.branchable then
+        let c := groupSizes.getD node.group 0
+        groupSizes := groupSizes.insert node.group (c + 1)
+  let mut eligible : Array Nat := #[]
+  for i in [:n-1] do
+    let a := nodes[i]!
+    let b := nodes[i+1]!
+    if a.branchable && b.branchable && a.group == b.group then
+      let allowed :=
+        match groupMins with
+        | none => true
+        | some mins => groupSizes.getD a.group 0 > mins.getD a.group 0
+      if allowed then
+        eligible := eligible.push i
+  return eligible
+
+def sequentialUniformSelect (nodes : Array (FlowNode α)) (groupMins : Option GroupMins) (rng : Rng)
+    : Option (Nat × Nat) × Rng := Id.run do
+  let eligible := eligibleSequentialPairStarts nodes groupMins
   if eligible.isEmpty then
     return (none, rng)
   else
@@ -529,6 +529,113 @@ def balancedSequentialSelect (alpha : Float) (nodes : Array (FlowNode α))
 
 def balancedSequentialPolicy (α : Type) [Inhabited α] (alpha : Float := 1.0) : CoalescencePolicy α :=
   { select := balancedSequentialSelect alpha,
+    maxCoalescences := fun nodes => (sequentialPairs nodes).size }
+
+def richGetRicherSequentialSelect (alpha : Float) (nodes : Array (FlowNode α))
+    (groupMins : Option GroupMins) (rng : Rng)
+    : Option (Nat × Nat) × Rng := Id.run do
+  let alpha := if alpha < 0.0 then 0.0 else alpha
+  let eligible := eligibleSequentialPairStarts nodes groupMins
+  let mut weights : Array Float := #[]
+  for i in eligible do
+    let a := nodes[i]!
+    let b := nodes[i+1]!
+    weights := weights.push (Float.pow (a.weight + b.weight).toFloat alpha)
+  let (k, rng') := weightedIndex weights rng
+  match k with
+  | none => return (none, rng')
+  | some k =>
+      let i := eligible[k]!
+      return (some (i, i+1), rng')
+
+def richGetRicherSequentialPolicy (α : Type) [Inhabited α] (alpha : Float := 1.0) :
+    CoalescencePolicy α :=
+  { select := richGetRicherSequentialSelect alpha,
+    maxCoalescences := fun nodes => (sequentialPairs nodes).size }
+
+private def approxFloat (a b atol rtol : Float) : Bool :=
+  Float.abs (a - b) <= atol + rtol * Float.abs b
+
+def sequentialProximitySelect
+    (distance : α → α → Float)
+    (tieAtol tieRtol : Float)
+    (nodes : Array (FlowNode α))
+    (groupMins : Option GroupMins)
+    (rng : Rng) :
+    Option (Nat × Nat) × Rng := Id.run do
+  let eligible := eligibleSequentialPairStarts nodes groupMins
+  if eligible.isEmpty then
+    return (none, rng)
+  let mut best? : Option Float := none
+  let mut dists : Array Float := #[]
+  for i in eligible do
+    let d := distance nodes[i]!.data nodes[i+1]!.data
+    dists := dists.push d
+    best? :=
+      match best? with
+      | none => some d
+      | some best => some (min best d)
+  let best := best?.getD 0.0
+  let mut tied : Array Nat := #[]
+  for j in [:eligible.size] do
+    if approxFloat dists[j]! best tieAtol tieRtol then
+      tied := tied.push (eligible[j]!)
+  if tied.isEmpty then
+    return (none, rng)
+  let (k, rng') := randNat rng tied.size
+  let i := tied[k]!
+  return (some (i, i+1), rng')
+
+def sequentialProximityPolicy (α : Type) [Inhabited α]
+    (distance : α → α → Float)
+    (tieAtol : Float := 0.0)
+    (tieRtol : Float := 0.0) :
+    CoalescencePolicy α :=
+  { select := sequentialProximitySelect distance tieAtol tieRtol,
+    maxCoalescences := fun nodes => (sequentialPairs nodes).size }
+
+private def deepLineagePairStarts
+    (minCount targetTrunks : Nat)
+    (nodes : Array (FlowNode α))
+    (groupMins : Option GroupMins) :
+    Array Nat := Id.run do
+  let minCount := Nat.max 1 minCount
+  let targetTrunks := Nat.max 1 targetTrunks
+  let pairs := eligibleSequentialPairStarts nodes groupMins
+  if pairs.isEmpty then
+    return pairs
+  let mut deepCounts : Std.HashMap Int Nat := {}
+  for node in nodes do
+    if node.branchable && node.weight >= minCount then
+      let c := deepCounts.getD node.group 0
+      deepCounts := deepCounts.insert node.group (c + 1)
+  let mut filtered : Array Nat := #[]
+  for i in pairs do
+    let a := nodes[i]!
+    let b := nodes[i+1]!
+    let deepActive := deepCounts.getD a.group 0 >= targetTrunks
+    if !deepActive || a.weight >= minCount || b.weight >= minCount then
+      filtered := filtered.push i
+  if filtered.isEmpty then pairs else filtered
+
+def sequentialDeepLineageSelect
+    (minCount targetTrunks : Nat)
+    (nodes : Array (FlowNode α))
+    (groupMins : Option GroupMins)
+    (rng : Rng) :
+    Option (Nat × Nat) × Rng := Id.run do
+  let eligible := deepLineagePairStarts minCount targetTrunks nodes groupMins
+  if eligible.isEmpty then
+    return (none, rng)
+  let (k, rng') := randNat rng eligible.size
+  let i := eligible[k]!
+  return (some (i, i+1), rng')
+
+def sequentialDeepLineagePolicy (α : Type) [Inhabited α]
+    (minCount : Nat := 2)
+    (targetTrunks : Nat := 1) :
+    CoalescencePolicy α :=
+  { select := sequentialDeepLineageSelect minCount targetTrunks,
     maxCoalescences := fun nodes => (sequentialPairs nodes).size }
 
 /-! ## Forest sampling -/

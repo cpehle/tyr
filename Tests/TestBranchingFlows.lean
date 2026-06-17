@@ -57,6 +57,18 @@ private def mkState (vals : Array Nat) (groups : Array Int) : BranchingState Nat
     flowmask := Array.replicate n true,
     padmask := Array.replicate n true }
 
+private def mkPolicyNode (value : Float) (weight : Nat) : FlowNode Float :=
+  { (FlowNode.leaf 1.0 value 0 true false true (Int.ofNat weight)) with
+    weight := weight }
+
+private def expectSelectedPair (what : String) (selected : Option (Nat × Nat)) (expected : Nat × Nat) :
+    IO Unit := do
+  match selected with
+  | none => LeanTest.fail s!"{what}: expected {expected}, got none"
+  | some got =>
+      LeanTest.assertEqual got.1 expected.1 s!"{what}: selected left index"
+      LeanTest.assertEqual got.2 expected.2 s!"{what}: selected right index"
+
 @[test]
 def testBranchingSampleForestSimple : IO Unit := do
   let elements : Array Nat := #[1, 2]
@@ -77,6 +89,42 @@ def testBranchingSampleForestSimple : IO Unit := do
   LeanTest.assertEqual root.weight 2 "Merged weight is 2"
   LeanTest.assertEqual root.group 0 "Group preserved"
   LeanTest.assertEqual root.children.size 2 "Root has two children"
+
+@[test]
+def testBranchingRichGetRicherSequentialPolicy : IO Unit := do
+  let nodes := #[
+    mkPolicyNode 0.0 1,
+    mkPolicyNode 1.0 1,
+    mkPolicyNode 2.0 1000
+  ]
+  let policy := richGetRicherSequentialPolicy Float (alpha := 4.0)
+  let (selected, _rng) := policy.select nodes none { state := 1 }
+  expectSelectedPair "Rich-get-richer policy should choose the much heavier adjacent pair"
+    selected (1, 2)
+
+@[test]
+def testBranchingSequentialProximityPolicy : IO Unit := do
+  let nodes := #[
+    mkPolicyNode 0.0 1,
+    mkPolicyNode 10.0 1,
+    mkPolicyNode 10.1 1
+  ]
+  let policy := sequentialProximityPolicy Float (fun a b => Float.abs (a - b))
+  let (selected, _rng) := policy.select nodes none { state := 2 }
+  expectSelectedPair "Proximity policy should choose the closest adjacent features"
+    selected (1, 2)
+
+@[test]
+def testBranchingSequentialDeepLineagePolicy : IO Unit := do
+  let nodes := #[
+    mkPolicyNode 0.0 1,
+    mkPolicyNode 1.0 1,
+    mkPolicyNode 2.0 3
+  ]
+  let policy := sequentialDeepLineagePolicy Float (minCount := 2) (targetTrunks := 1)
+  let (selected, _rng) := policy.select nodes none { state := 3 }
+  expectSelectedPair "Deep-lineage policy should require an existing deep lineage once active"
+    selected (1, 2)
 
 @[test]
 def testBranchingFixedcountInsertionsLength : IO Unit := do
