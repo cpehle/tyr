@@ -48,6 +48,7 @@ import Tyr.DiffEq.Solver.SIL3
 import Tyr.DiffEq.Solver.LeapfrogMidpoint
 import Tyr.DiffEq.StepSizeController
 import Tyr.DiffEq.Integrate
+import Tyr.DiffEq.EventSkeleton
 import Tyr.DiffEq.Adjoint
 
 /-!
