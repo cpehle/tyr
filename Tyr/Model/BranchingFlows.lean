@@ -1312,9 +1312,17 @@ def branchingBridge
       let mut groupNumEvents : Std.HashMap Int Nat := {}
       for (g, count) in counts.toList do
         let minLen := mins.getD g 1
-        let target := deletionPad * (Nat.max count minLen).toFloat
-        let lam := max (target - count.toFloat) 0.0
-        let (k, rng') := randPoisson rng lam
+        let floorLen := Nat.max count minLen
+        let (k, rng') :=
+          if deletionPad >= 1.0 then
+            let deterministicExtra := floorLen - count
+            let stochasticMean := max ((deletionPad - 1.0) * floorLen.toFloat) 0.0
+            let (stochasticExtra, rng') := randPoisson rng stochasticMean
+            (deterministicExtra + stochasticExtra, rng')
+          else
+            let target := deletionPad * floorLen.toFloat
+            let lam := max (target - count.toFloat) 0.0
+            randPoisson rng lam
         rng := rng'
         if k > 0 then
           groupNumEvents := groupNumEvents.insert g k

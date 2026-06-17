@@ -69,6 +69,9 @@ private def expectSelectedPair (what : String) (selected : Option (Nat × Nat)) 
       LeanTest.assertEqual got.1 expected.1 s!"{what}: selected left index"
       LeanTest.assertEqual got.2 expected.2 s!"{what}: selected right index"
 
+private def countTrue (xs : Array Bool) : Nat :=
+  xs.foldl (fun acc x => if x then acc + 1 else acc) 0
+
 @[test]
 def testBranchingSampleForestSimple : IO Unit := do
   let elements : Array Nat := #[1, 2]
@@ -137,6 +140,38 @@ def testBranchingFixedcountInsertionsLength : IO Unit := do
   LeanTest.assertEqual x'.branchmask.size x'.state.size "Branchmask match length"
   LeanTest.assertEqual x'.flowmask.size x'.state.size "Flowmask match length"
   LeanTest.assertEqual x'.padmask.size x'.state.size "Padmask match length"
+
+@[test]
+def testBranchingDeletionPadFloorSemantics : IO Unit := do
+  let x1 := mkState #[10, 20, 30] #[0, 0, 0]
+  let bridge (_ : Unit) (_x0 x1 : Nat) (_t0 _t1 : Float) : Nat := x1
+  let x0Sampler (_root : FlowNode Nat) : Nat := 0
+  let merger (a _b : Nat) (_w1 _w2 : Nat) : Nat := a
+  let run (deletionPad : Float) (seed : UInt64) :=
+    branchingBridge bridge () x0Sampler #[x1] #[0.0]
+      noEventTimeDist noEventTimeDist (sequentialUniformPolicy Nat) merger
+      (coalescenceFactor := 0.0)
+      (lengthMins := .uniform 10)
+      (deletionPad := deletionPad)
+      (rng := { state := seed })
+
+  let (noPad, _rng) := run 0.0 11
+  LeanTest.assertEqual noPad.Xt[0]!.state.size 3
+    "deletionPad=0 should not pad solely because lengthMins is larger"
+  LeanTest.assertEqual (countTrue noPad.del[0]!) 0
+    "deletionPad=0 should not mark deletion targets"
+
+  let (floorPad, _rng) := run 1.0 11
+  LeanTest.assertEqual floorPad.Xt[0]!.state.size 10
+    "deletionPad=1 should deterministically pad to the group length floor"
+  LeanTest.assertEqual (countTrue floorPad.del[0]!) 7
+    "deletionPad=1 should create exactly the floor deficit as deletion targets"
+
+  let (extraPad, _rng) := run 2.0 11
+  LeanTest.assertTrue (extraPad.Xt[0]!.state.size >= floorPad.Xt[0]!.state.size)
+    "deletionPad>1 should preserve the deterministic floor"
+  LeanTest.assertTrue (extraPad.Xt[0]!.state.size > 10)
+    s!"deletionPad>1 should add stochastic excess for this seed, got length {extraPad.Xt[0]!.state.size}"
 
 @[test]
 def testBranchingTimeDistDefaults : IO Unit := do
