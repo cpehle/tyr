@@ -271,14 +271,23 @@ Useful flags:
 Combinatorial branching flow sampler -- a port of branching flow networks to Lean. Includes continuous, discrete, and mixed training demos. No external data needed.
 
 ```bash
-lake build  # Part of Examples lib, no standalone executable yet
+lake exe BranchingFlowsContinuousTrain
+lake exe BranchingFlowsMoleculeTrain
+lake exe BranchingFlowsMoleculeTransformerTrain
 ```
 
 Demo files:
 - `BranchingFlowsDemo.lean` -- Minimal deterministic demo
-- `ContinuousTrainDemo.lean` -- Continuous state training
+- `ContinuousTrainDemo.lean` -- Continuous state training with an overfit loss-decrease check
 - `DiscreteTrainDemo.lean` -- Discrete state training
 - `MixedTrainDemo.lean` -- Mixed continuous/discrete training
+- `MoleculeTrainDemo.lean` -- QM9-shaped coordinate/label training with an overfit loss-decrease check
+- `MoleculeTransformerTrainDemo.lean` -- QM9-shaped transformer training with coordinate, label, split, and deletion loss checks
+- `MoleculeGenerationDemo.lean` -- Molecule bridge/generation smoke with XYZ export
+
+Torch-backed training demos should run through Lake executables or compiled
+targets so Tyr's native Torch bridge is linked. The training executables print
+initial/final losses and fail if the tiny model does not improve.
 
 ## NanoProof
 

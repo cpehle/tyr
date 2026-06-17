@@ -635,6 +635,24 @@ lean_exe test_runner_experimental where
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
+/-- BranchingFlows continuous overfit training smoke. -/
+lean_exe BranchingFlowsContinuousTrain where
+  root := `Examples.BranchingFlows.ContinuousTrainDemo
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
+/-- BranchingFlows molecule overfit training smoke. -/
+lean_exe BranchingFlowsMoleculeTrain where
+  root := `Examples.BranchingFlows.MoleculeTrainDemo
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
+/-- BranchingFlows molecule transformer overfit training smoke. -/
+lean_exe BranchingFlowsMoleculeTransformerTrain where
+  root := `Examples.BranchingFlows.MoleculeTransformerTrainDemo
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
 /-- Manual FFI failure-mode probe (intentionally crashes; not in the suite).
     Run it to check that an uncaught libtorch exception terminates with an
     intelligible message instead of a bare SIGABRT/SIGSEGV. -/
