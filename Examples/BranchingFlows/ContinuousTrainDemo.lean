@@ -1,13 +1,15 @@
-/-!
-  Examples/BranchingFlows/ContinuousTrainDemo.lean
-
-  Minimal continuous-flow training demo using BranchingFlows + Torch.
-  Shows how to build a branching batch and run a single training step.
--/
 import Tyr
 import Tyr.Optim
 import Tyr.Model.BranchingFlows
 import Tyr.Model.BranchingFlowsTrain
+
+/-!
+  Examples/BranchingFlows/ContinuousTrainDemo.lean
+
+  Continuous-flow training demo using BranchingFlows + Torch.
+  Builds a fixed bridge batch, trains a tiny affine endpoint predictor, and
+  checks that the anchor loss decreases.
+-/
 
 namespace Examples.BranchingFlows
 
@@ -35,58 +37,75 @@ structure ToyParams (dim : UInt64) where
 namespace ToyParams
 
 def init (dim : UInt64) : IO (ToyParams dim) := do
-  let W ← torch.randn #[dim, dim]
-  let b ← torch.zeros #[dim]
+  let W := torch.zeros #[dim, dim]
+  let b := torch.zeros #[dim]
   pure { W, b }
 
 end ToyParams
 
 def toyModel {maxLen dim : UInt64} : BranchingModelContinuous maxLen dim (ToyParams dim) :=
-  { forward := fun {batch} params state t => do
+  { forward := fun {batch} params state _t => do
       let anchorPred := torch.affine3d state params.W params.b
       let splitLogits := torch.zeros #[batch, maxLen]
       let delLogits := torch.zeros #[batch, maxLen]
       pure (anchorPred, splitLogits, delLogits) }
 
-private def randomState {dim : UInt64} (len : Nat) : IO (BranchingState (T #[dim])) := do
-  let mut xs : Array (T #[dim]) := #[]
-  for _ in [:len] do
-    let x ← torch.randn #[dim]
-    xs := xs.push x
-  let groups := Array.replicate len 0
-  pure (BranchingState.mkDefault xs groups)
+private def mkVec2 (x y : Float) : T #[2] :=
+  reshape (torch.data.fromFloatArray #[x, y]) #[2]
+
+private def fixedState : BranchingState (T #[2]) :=
+  BranchingState.mkDefault
+    #[mkVec2 1.0 2.0, mkVec2 (-1.0) 0.5, mkVec2 0.25 (-0.75), mkVec2 2.0 (-1.0)]
+    #[0, 0, 0, 0]
 
 def runDemo : IO Unit := do
   let dim : UInt64 := 2
-  let maxLen : UInt64 := 16
-  let x1 ← randomState (dim := dim) 6
+  let maxLen : UInt64 := 8
+  let steps : Nat := 80
+  let lr : Float := 5.0e-2
+  let x1 := fixedState
   let x1s := #[x1]
   let times := #[0.5]
-  let x0Sampler : FlowNode (T #[dim]) → T #[dim] := fun node => node.data
+  let x0Sampler : FlowNode (T #[dim]) → T #[dim] := fun _node => torch.zeros #[dim]
 
   let (bridgeResult, _rng) :=
     branchingBridge (linBridge (dim := dim)) () x0Sampler x1s times
       uniformTimeDist uniformTimeDist (sequentialUniformPolicy (T #[dim]))
       canonicalAnchorMerge
+      (coalescenceFactor := 0.0)
       (maxLen := some maxLen.toNat)
       (rng := { state := 123 })
 
   let cfg : BranchingTrainConfig := {
     maxLen := maxLen
     anchorWeight := 1.0
-    splitsWeight := 0.1
-    delWeight := 0.1
-    gradClip := 1.0
+    splitsWeight := 0.0
+    delWeight := 0.0
+    weightDecay := 0.0
+    gradClip := 0.0
   }
 
   let params ← ToyParams.init dim
-  let opt := Optim.adamw (lr := 1.0e-3)
+  let opt := Optim.adamw (lr := lr) (weight_decay := 0.0)
   let optState := opt.init params
-  let (params', _optState', report) ←
-    trainStepContinuous (maxLen := maxLen) (dim := dim) cfg (toyModel (maxLen := maxLen) (dim := dim))
-      params optState bridgeResult 1.0e-3
-  let _params' : ToyParams dim := params'
-  IO.println s!"Branching training step: {report}"
+  let mut params := params
+  let mut optState := optState
+  let mut firstLoss := 0.0
+  let mut lastLoss := 0.0
+  for step in [:steps] do
+    let (params', optState', report) ←
+      trainStepContinuous (maxLen := maxLen) (dim := dim) cfg
+        (toyModel (maxLen := maxLen) (dim := dim)) params optState bridgeResult lr
+    params := params'
+    optState := optState'
+    if step == 0 then
+      firstLoss := report.anchor
+    lastLoss := report.anchor
+    if step % 20 == 0 then
+      IO.println s!"continuous_branching step={step} anchor_loss={report.anchor}"
+  if !(lastLoss < firstLoss * 0.5) then
+    throw (IO.userError s!"continuous BranchingFlows training did not reduce anchor loss enough: first={firstLoss}, last={lastLoss}")
+  IO.println s!"continuous_branching init_loss={firstLoss} final_loss={lastLoss}"
 
 def _root_.main (_args : List String) : IO UInt32 := do
   runDemo

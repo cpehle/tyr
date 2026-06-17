@@ -1,13 +1,14 @@
+import Tyr
+import Tyr.Optim
+import Tyr.Model.BranchingFlows
+import Tyr.Model.BranchingFlowsTrain
+
 /-!
   Examples/BranchingFlows/DiscreteTrainDemo.lean
 
   Minimal discrete-flow training demo using BranchingFlows + Torch.
   This mirrors the Julia demo structure with a lightweight token model.
 -/
-import Tyr
-import Tyr.Optim
-import Tyr.Model.BranchingFlows
-import Tyr.Model.BranchingFlowsTrain
 
 namespace Examples.BranchingFlows
 
@@ -22,7 +23,7 @@ private def uniformTimeDist : TimeDist :=
     pdf := fun t => if t < 0.0 || t > 1.0 then 0.0 else 1.0,
     quantile := fun p => clamp01 p }
 
-private def discreteBridge (_ : Unit) (x0 x1 : Nat) (_t0 _t1 : Float) : Nat :=
+private def discreteBridge (_ : Unit) (_x0 x1 : Nat) (_t0 _t1 : Float) : Nat :=
   x1
 
 structure ToyParams (vocab hidden : UInt64) where
@@ -50,8 +51,8 @@ def toyModel {maxLen vocab hidden : UInt64} : BranchingModel maxLen vocab (ToyPa
       let logits := torch.affine3d emb params.proj bias
       let split3 := torch.linear3d (x := emb) (weight := params.splitW)
       let del3 := torch.linear3d (x := emb) (weight := params.delW)
-      let splitLogits := torch.squeeze split3 2
-      let delLogits := torch.squeeze del3 2
+      let splitLogits := nn.squeeze split3 2
+      let delLogits := nn.squeeze del3 2
       pure (logits, splitLogits, delLogits) }
 
 def runDemo : IO Unit := do
@@ -65,7 +66,7 @@ def runDemo : IO Unit := do
   let x1s := #[x1]
   let times := #[0.4]
   let x0Sampler : FlowNode Nat → Nat := fun node => node.data
-  let merger := fun (a b : Nat) (_w1 _w2 : Nat) => a
+  let merger := fun (a _b : Nat) (_w1 _w2 : Nat) => a
 
   let (bridgeResult, _rng) :=
     branchingBridge discreteBridge () x0Sampler x1s times
@@ -88,7 +89,7 @@ def runDemo : IO Unit := do
   let (_params', _optState', report) ←
     trainStep (maxLen := maxLen) (vocab := vocab) cfg (toyModel (maxLen := maxLen) (vocab := vocab) (hidden := hidden))
       params optState bridgeResult 1.0e-3
-  IO.println s!"Discrete branching training step: {report}"
+  IO.println s!"Discrete branching training step: {reprStr report}"
 
 def _root_.main (_args : List String) : IO UInt32 := do
   runDemo

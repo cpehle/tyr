@@ -1,13 +1,14 @@
+import Tyr
+import Tyr.Optim
+import Tyr.Model.BranchingFlows
+import Tyr.Model.BranchingFlowsTrain
+
 /-!
   Examples/BranchingFlows/MixedTrainDemo.lean
 
   Mixed continuous + discrete branching demo (full Julia-style loop).
   Generates synthetic data, trains a tiny model, and writes .pt tensors for plotting.
 -/
-import Tyr
-import Tyr.Optim
-import Tyr.Model.BranchingFlows
-import Tyr.Model.BranchingFlowsTrain
 
 namespace Examples.BranchingFlows
 
@@ -26,7 +27,7 @@ private def linBridge2d (_ : Unit) (x0 x1 : T #[2]) (t0 t1 : Float) : T #[2] :=
   let dt := t1 - t0
   x0 + (x1 - x0) * dt
 
-private def discreteBridge (_ : Unit) (x0 x1 : Nat) (_t0 _t1 : Float) : Nat :=
+private def discreteBridge (_ : Unit) (_x0 x1 : Nat) (_t0 _t1 : Float) : Nat :=
   x1
 
 structure MixParams (vocab hidden : UInt64) where
@@ -49,18 +50,18 @@ namespace MixParams
 
 def init (vocab hidden : UInt64) : IO (MixParams vocab hidden) := do
   let contW ← torch.randn #[2, hidden]
-  let contB ← torch.zeros #[hidden]
+  let contB := torch.zeros #[hidden]
   let timeW ← torch.randn #[1, hidden]
-  let timeB ← torch.zeros #[hidden]
+  let timeB := torch.zeros #[hidden]
   let embed ← torch.randn #[vocab, hidden]
   let locW ← torch.randn #[hidden, 2]
-  let locB ← torch.zeros #[2]
+  let locB := torch.zeros #[2]
   let proj ← torch.randn #[hidden, vocab]
-  let tokB ← torch.zeros #[vocab]
+  let tokB := torch.zeros #[vocab]
   let splitW ← torch.randn #[1, hidden]
-  let splitB ← torch.zeros #[1]
+  let splitB := torch.zeros #[1]
   let delW ← torch.randn #[1, hidden]
-  let delB ← torch.zeros #[1]
+  let delB := torch.zeros #[1]
   pure { contW, contB, timeW, timeB, embed, locW, locB, proj, tokB, splitW, splitB, delW, delB }
 
 end MixParams
@@ -85,9 +86,7 @@ private def f (x : Float) : Float :=
   x + Float.sin (3.0 * x)
 
 private def mkPoint (x y : Float) : T #[2] :=
-  let xi := reshape (torch.full #[] x) #[1]
-  let yi := reshape (torch.full #[] y) #[1]
-  reshape (torch.data.stack1d #[xi, yi] 0) #[2]
+  reshape (torch.data.fromFloatArray #[x, y]) #[2]
 
 private def X1target (rng : Rng) : BranchingState (T #[2] × Nat) × Rng := Id.run do
   let (n, rng') := randLen rng
@@ -106,7 +105,8 @@ private def X1target (rng : Rng) : BranchingState (T #[2] × Nat) × Rng := Id.r
       toks := toks.set! i 2
   let state := Array.zipWith (fun p t => (p, t)) points toks
   let groups := Array.replicate n 0
-  ({ state := state, groupings := groups, del := Array.replicate n false, ids := Array.ofFn (fun i => Int.ofNat (i.val + 1)),
+  ({ state := state, groupings := groups, del := Array.replicate n false,
+     ids := (Array.range n).map (fun i => Int.ofNat (i + 1)),
      branchmask := Array.replicate n true, flowmask := Array.replicate n true, padmask := Array.replicate n true }, rng''')
 
 private def mergeTuple (a b : (T #[2] × Nat)) (w1 w2 : Nat) : (T #[2] × Nat) :=
@@ -151,7 +151,7 @@ private def maskedCrossEntropy {batch maxLen vocab : UInt64}
   let per := torch.nn.cross_entropy_none logits2 targets2
   let masked := per * mask2
   let denom := torch.nn.sumAll mask2
-  (torch.nn.sumAll masked) / (denom + 1.0e-8)
+  nn.div (torch.nn.sumAll masked) (denom + (1.0e-8 : Float))
 
 private def maskedMSE {batch maxLen : UInt64}
     (pred target mask : T #[batch, maxLen]) : T #[] :=
@@ -159,23 +159,23 @@ private def maskedMSE {batch maxLen : UInt64}
   let sq := diff * diff
   let masked := sq * mask
   let denom := torch.nn.sumAll mask
-  (torch.nn.sumAll masked) / (denom + 1.0e-8)
+  nn.div (torch.nn.sumAll masked) (denom + (1.0e-8 : Float))
 
 private def maskedMSE3d {batch maxLen dim : UInt64}
     (pred target : T #[batch, maxLen, dim]) (mask : T #[batch, maxLen]) : T #[] :=
-  let mask3 := torch.expand (torch.unsqueeze mask 2) #[batch, maxLen, dim]
+  let mask3 := nn.expand (nn.unsqueeze mask 2) #[batch, maxLen, dim]
   let diff := pred - target
   let sq := diff * diff
   let masked := sq * mask3
   let denom := torch.nn.sumAll mask3
-  (torch.nn.sumAll masked) / (denom + 1.0e-8)
+  nn.div (torch.nn.sumAll masked) (denom + (1.0e-8 : Float))
 
 private def maskedBCEWithLogits {batch maxLen : UInt64}
     (logits target mask : T #[batch, maxLen]) : T #[] :=
   let probs := torch.nn.sigmoid logits
   let loss := torch.nn.binary_cross_entropy probs target (some mask) "sum"
   let denom := torch.nn.sumAll mask
-  loss / (denom + 1.0e-8)
+  nn.div loss (denom + (1.0e-8 : Float))
 
 def runDemo : IO Unit := do
   let vocab : UInt64 := 3
@@ -194,6 +194,7 @@ def runDemo : IO Unit := do
   }
 
   let params ← MixParams.init vocab hidden
+  let params := TensorStruct.makeLeafParams params
   let opt := Optim.adamw (lr := 1.0e-3)
   let mut optState := opt.init params
   let mut params := params
@@ -230,22 +231,22 @@ def runDemo : IO Unit := do
     let ⟨batchU, packedCont⟩ ← packBranchingTensor (dim := 2) cfg resCont
     let ⟨_, packedDisc⟩ ← packBranchingNat cfg resDisc
 
-    let params := TensorStruct.zeroGrads params
+    let paramsTrain := TensorStruct.zeroGrads (TensorStruct.makeLeafParams params)
     let t := packedDisc.t
-    let contEmb := torch.affine3d packedCont.state params.contW params.contB
-    let discEmb := torch.nn.embedding (batch := batchU) (seq := maxLen) (vocab := vocab) (embed := hidden) packedDisc.state params.embed
-    let t1 := torch.unsqueeze t 1
-    let t2 := torch.unsqueeze t1 1
-    let tExp := torch.expand t2 #[batchU, maxLen, 1]
-    let timeEmb := torch.affine3d tExp params.timeW params.timeB
-    let hiddenState := torch.tanh (contEmb + discEmb + timeEmb)
+    let contEmb := torch.affine3d packedCont.state paramsTrain.contW paramsTrain.contB
+    let discEmb := torch.nn.embedding (batch := batchU) (seq := maxLen) (vocab := vocab) (embed := hidden) packedDisc.state paramsTrain.embed
+    let t1 := nn.unsqueeze t 1
+    let t2 := nn.unsqueeze t1 1
+    let tExp := nn.expand t2 #[batchU, maxLen, 1]
+    let timeEmb := torch.affine3d tExp paramsTrain.timeW paramsTrain.timeB
+    let hiddenState := nn.tanh (contEmb + discEmb + timeEmb)
 
-    let predLoc := torch.affine3d hiddenState params.locW params.locB
-    let predTok := torch.affine3d hiddenState params.proj params.tokB
-    let split3 := torch.affine3d hiddenState params.splitW params.splitB
-    let del3 := torch.affine3d hiddenState params.delW params.delB
-    let splitLogits := torch.squeeze split3 2
-    let delLogits := torch.squeeze del3 2
+    let predLoc := torch.affine3d hiddenState paramsTrain.locW paramsTrain.locB
+    let predTok := torch.affine3d hiddenState paramsTrain.proj paramsTrain.tokB
+    let split3 := torch.affine3d hiddenState paramsTrain.splitW paramsTrain.splitB
+    let del3 := torch.affine3d hiddenState paramsTrain.delW paramsTrain.delB
+    let splitLogits := nn.squeeze split3 2
+    let delLogits := nn.squeeze del3 2
 
     let mask := packedDisc.padmask * packedDisc.flowmask
     let contLoss := maskedMSE3d predLoc packedCont.anchor mask
@@ -258,8 +259,8 @@ def runDemo : IO Unit := do
     if cfg.gradClip > 0 then
       pure ()
 
-    let grads := TensorStruct.grads params
-    let (params', optState') := Optim.step opt params grads optState
+    let grads := TensorStruct.grads paramsTrain
+    let (params', optState') := Optim.step opt paramsTrain grads optState
     params := params'
     optState := optState'
 
@@ -284,11 +285,11 @@ def runDemo : IO Unit := do
   let ⟨_, packedDisc⟩ ← packBranchingNat cfg resDisc
   let contEmb := torch.affine3d packedCont.state params.contW params.contB
   let discEmb := torch.nn.embedding (batch := batchU) (seq := maxLen) (vocab := vocab) (embed := hidden) packedDisc.state params.embed
-  let t1 := torch.unsqueeze packedDisc.t 1
-  let t2 := torch.unsqueeze t1 1
-  let tExp := torch.expand t2 #[batchU, maxLen, 1]
+  let t1 := nn.unsqueeze packedDisc.t 1
+  let t2 := nn.unsqueeze t1 1
+  let tExp := nn.expand t2 #[batchU, maxLen, 1]
   let timeEmb := torch.affine3d tExp params.timeW params.timeB
-  let hiddenState := torch.tanh (contEmb + discEmb + timeEmb)
+  let hiddenState := nn.tanh (contEmb + discEmb + timeEmb)
   let predLoc := torch.affine3d hiddenState params.locW params.locB
 
   torch.data.saveTensor predLoc "examples_branching_mixed_pred.pt"
