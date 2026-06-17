@@ -1,4 +1,5 @@
 import Tyr.DiffEq
+import Tyr.EventSkeleton.Interval
 import Tyr.Model.BranchingFlows
 
 /-!
@@ -13,6 +14,7 @@ import Tyr.Model.BranchingFlows
 namespace torch.branching
 
 open torch.DiffEq
+open Tyr.EventSkeleton
 
 /-- Configuration for using a Tyr `DiffEq` solver as a BranchingFlows bridge.
 
@@ -324,7 +326,8 @@ def branchAggregateMove?
     Option SkeletonMove :=
   if seg.descendants > 1 then
     some {
-      (BranchEventData.branchAggregateMove vertexId) with
+      kind := .branchAggregate
+      targets := #[vertexId]
       label := s!"branching-aggregate:{seg.id}:w={seg.descendants}"
     }
   else
@@ -376,7 +379,8 @@ def branchAggregateMove?
     Option SkeletonMove :=
   if event.hasTopologyEvent then
     some {
-      (BranchEventData.branchAggregateMove vertexId) with
+      kind := .branchAggregate
+      targets := #[vertexId]
       label :=
         if event.deleted then
           s!"branching-delete-aggregate:{event.sourceId}"

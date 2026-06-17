@@ -2,10 +2,18 @@ import Tyr
 import Tyr.Manifolds.Orthogonal
 import Tyr.Manifolds.Grassmann
 import Tyr.Model.BranchingFlows
+import Tyr.Model.BranchingFlows.DiffEq
+import Tyr.Model.BranchingFlows.Discrete
+import Tyr.Model.BranchingFlows.Molecule
+import Tyr.Model.BranchingFlows.QM9
+import Tyr.Model.BranchingFlows.MoleculeTrain
+import Tyr.Model.BranchingFlowsTrain
 import LeanTest
 
 open torch
 open torch.branching
+open torch.DiffEq
+open Tyr.EventSkeleton
 open Tyr.AD
 
 private def clamp01 (x : Float) : Float :=
@@ -15,6 +23,29 @@ private def uniformTimeDist : TimeDist :=
   { cdf := fun t => clamp01 t,
     pdf := fun t => if t < 0.0 || t > 1.0 then 0.0 else 1.0,
     quantile := fun p => clamp01 p }
+
+private def noEventTimeDist : TimeDist :=
+  { cdf := fun _ => 0.0,
+    pdf := fun _ => 0.0,
+    quantile := fun _ => 0.0 }
+
+private def sumFloatArray (xs : Array Float) : Float :=
+  xs.foldl (fun acc x => acc + x) 0.0
+
+private def expectOk {α : Type} (what : String) (r : Except String α) : IO α := do
+  match r with
+  | .ok x => pure x
+  | .error e => LeanTest.fail s!"{what}: {e}"
+
+private def expectError {α : Type} (what : String) (r : Except String α) : IO String := do
+  match r with
+  | .ok _ => LeanTest.fail s!"{what}: expected error"
+  | .error e => pure e
+
+private def nearSureEventTimeDist : TimeDist :=
+  { cdf := fun _ => 0.0,
+    pdf := fun _ => 1.0e9,
+    quantile := fun _ => 0.0 }
 
 private def mkState (vals : Array Nat) (groups : Array Int) : BranchingState Nat :=
   let n := vals.size
@@ -58,6 +89,670 @@ def testBranchingFixedcountInsertionsLength : IO Unit := do
   LeanTest.assertEqual x'.branchmask.size x'.state.size "Branchmask match length"
   LeanTest.assertEqual x'.flowmask.size x'.state.size "Flowmask match length"
   LeanTest.assertEqual x'.padmask.size x'.state.size "Padmask match length"
+
+@[test]
+def testBranchingTimeDistDefaults : IO Unit := do
+  LeanTest.assertTrue (Float.abs ((TimeDist.uniform).quantile 0.25 - 0.25) < 1.0e-12)
+    "Uniform time distribution should invert directly"
+  let q13 := (TimeDist.betaOneThreeHalves).quantile ((TimeDist.betaOneThreeHalves).cdf 0.25)
+  LeanTest.assertTrue (Float.abs (q13 - 0.25) < 1.0e-10)
+    s!"Beta(1,3/2) quantile should invert cdf, got {q13}"
+  let q22 := (TimeDist.betaTwoTwo).quantile 0.5
+  LeanTest.assertTrue (Float.abs (q22 - 0.5) < 1.0e-8)
+    s!"Beta(2,2) median should be near 0.5, got {q22}"
+  LeanTest.assertTrue ((TimeDist.betaOneThreeHalves).hazard 0.5 > 0.0)
+    "Beta split-time distribution should expose a positive hazard inside support"
+
+@[test]
+def testBranchingLossHelpers : IO Unit := do
+  LeanTest.assertTrue (Float.abs (defaultSplitTransform 0.0 - 1.0) < 1.0e-12)
+    "Default split transform should map zero logits to unit intensity"
+  LeanTest.assertTrue (Float.abs (splitCountLoss defaultSplitTransform 0.0 1) < 1.0e-12)
+    "Unit predicted intensity should have zero shifted Poisson loss for count one"
+  LeanTest.assertTrue (Float.abs (splitCountLoss defaultSplitTransform 0.0 0 - 1.0) < 1.0e-12)
+    "Unit predicted intensity should pay loss one for count zero"
+  let splitLoss := maskedSplitCountLoss defaultSplitTransform #[0.0, 0.0] #[1, 0] #[true, false]
+  LeanTest.assertTrue (Float.abs splitLoss < 1.0e-12)
+    s!"Masked split loss should ignore inactive positions, got {splitLoss}"
+  let bce := logitBinaryCrossEntropy 0.0 true
+  LeanTest.assertTrue (Float.abs (bce - Float.log 2.0) < 1.0e-12)
+    s!"Zero-logit deletion BCE should equal log(2), got {bce}"
+  let delLoss := maskedDeletionLoss #[0.0, 100.0] #[true, false] #[true, false]
+  LeanTest.assertTrue (Float.abs (delLoss - Float.log 2.0) < 1.0e-12)
+    s!"Masked deletion loss should ignore inactive positions, got {delLoss}"
+
+@[test]
+def testBranchingTensorTrainingLosses : IO Unit := do
+  let logits : T #[1, 2] := reshape (data.fromFloatArray #[0.0, 0.0]) #[1, 2]
+  let splitTarget : T #[1, 2] := reshape (data.fromFloatArray #[1.0, 0.0]) #[1, 2]
+  let firstOnly : T #[1, 2] := reshape (data.fromFloatArray #[1.0, 0.0]) #[1, 2]
+  let splitLoss := nn.item (maskedSplitPoissonLoss logits splitTarget firstOnly)
+  LeanTest.assertTrue (Float.abs splitLoss < 1.0e-6)
+    s!"Unit split intensity should have zero tensor Poisson loss for count one, got {splitLoss}"
+  let delTarget : T #[1, 2] := reshape (data.fromFloatArray #[1.0, 0.0]) #[1, 2]
+  let delLoss := nn.item (maskedBCEWithLogits logits delTarget firstOnly)
+  LeanTest.assertTrue (Float.abs (delLoss - Float.log 2.0) < 1.0e-6)
+    s!"Zero-logit tensor deletion BCE should equal log(2), got {delLoss}"
+
+private def targetStep (_ : Unit) (x : BranchingState Nat) (targets : Array Nat)
+    (_s1 _s2 : Float) : Array Nat :=
+  (Array.range x.state.size).map (fun i => targets.getD i (x.state.getD i 0))
+
+@[test]
+def testBranchingStepAppliesBaseStepAndSplitsAdjacently : IO Unit := do
+  let flow : CoalescentFlow Unit Nat :=
+    CoalescentFlow.mkDefault () uniformTimeDist noEventTimeDist (fun _ => 30.0)
+  let x := mkState #[1] #[0]
+  let prediction : BranchingStepPrediction Nat := {
+    targets := #[10]
+    splitLogits := #[0.0]
+    delLogits := #[-100.0]
+  }
+  let (result, _rng) := branchingStep targetStep flow x prediction 0.0 1.0 (rng := { state := 7 })
+  LeanTest.assertTrue (result.state.state.size > 1)
+    s!"High split intensity should create adjacent duplicates, got length {result.state.state.size}"
+  LeanTest.assertTrue (result.state.state.all (fun v => v == 10))
+    s!"All generated elements should use the base-step target, got {result.state.state}"
+  LeanTest.assertEqual result.state.groupings.size result.state.state.size
+    "Generated groupings should match state length"
+  LeanTest.assertEqual result.state.branchmask.size result.state.state.size
+    "Generated branchmask should match state length"
+  LeanTest.assertTrue (result.events.size == 1 && result.events[0]!.splitCount > 0)
+    s!"Split event should be recorded, got {reprStr result.events}"
+
+@[test]
+def testBranchingStepDeletionKeepsNonemptyState : IO Unit := do
+  let flow : CoalescentFlow Unit Nat := {
+    base := ()
+    branchTime := uniformTimeDist
+    splitTransform := fun _ => 0.0
+    policy := sequentialUniformPolicy Nat
+    deletionTime := nearSureEventTimeDist
+  }
+  let x := mkState #[1, 2] #[0, 0]
+  let prediction : BranchingStepPrediction Nat := {
+    targets := #[11, 22]
+    splitLogits := #[0.0, 0.0]
+    delLogits := #[100.0, 100.0]
+  }
+  let (result, _rng) := branchingStep targetStep flow x prediction 0.0 1.0 (rng := { state := 9 })
+  LeanTest.assertEqual result.state.state.size 1
+    "Deletion step should remove elements but preserve a nonempty state"
+  LeanTest.assertTrue (result.state.state[0]! == 11 || result.state.state[0]! == 22)
+    s!"Surviving element should still be base-stepped, got {result.state.state}"
+  LeanTest.assertTrue (result.events.size == 1 && result.events[0]!.deleted)
+    s!"Exactly one committed deletion should be recorded after the nonempty guard, got {reprStr result.events}"
+
+@[test]
+def testBranchingGenerateRunsSchedule : IO Unit := do
+  let flow : CoalescentFlow Unit Nat := {
+    base := ()
+    branchTime := uniformTimeDist
+    splitTransform := fun _ => 0.0
+    policy := sequentialUniformPolicy Nat
+    deletionTime := noEventTimeDist
+  }
+  let model (_t : Float) (state : BranchingState Nat) : BranchingStepPrediction Nat := {
+    targets := state.state.map (fun v => v + 1)
+    splitLogits := Array.replicate state.state.size 0.0
+    delLogits := Array.replicate state.state.size (-100.0)
+  }
+  let (result, _rng) :=
+    branchingGenerate targetStep flow (mkState #[3, 4] #[0, 0]) model #[0.0, 0.5, 1.0]
+      (rng := { state := 11 })
+  LeanTest.assertEqual result.finalState.state #[5, 6]
+    s!"Two generation steps should apply the model twice, got {result.finalState.state}"
+  LeanTest.assertEqual result.trajectory.size 3
+    "Trajectory should include initial state plus one state per schedule interval"
+  LeanTest.assertEqual result.events.size 2
+    "Event batches should align with schedule intervals"
+
+@[test]
+def testBranchingDiffEqODEBridge : IO Unit := do
+  let solver :=
+    Euler.solver (Term := ODETerm Float Unit) (Y := Float) (VF := Float) (Control := Time) (Args := Unit)
+  let cfg : ODEBridgeConfig Float Unit ConstantStepSize :=
+    ODEBridgeConfig.mk
+      (Y := Float)
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      (fun anchor _t y _ => anchor - y)
+      solver
+      ()
+      ({} : ConstantStepSize)
+      (dt0 := some 0.25)
+  let bridgedFinal := DiffEqBridgeConfig.bridge cfg 0.0 1.0 0.0 1.0
+  LeanTest.assertTrue (bridgedFinal > 0.6 && bridgedFinal < 1.0)
+    s!"ODE bridge should move toward the endpoint anchor, got {bridgedFinal}"
+  let bridgedHalf := DiffEqBridgeConfig.bridge cfg 0.0 1.0 0.0 0.5
+
+  let x1 : BranchingState Float := BranchingState.mkDefault #[1.0] #[0]
+  let (result, _rng) :=
+    branchingBridge
+      (fun cfg x0 x1 t0 t1 => DiffEqBridgeConfig.bridge cfg x0 x1 t0 t1)
+      cfg
+      (fun _root => 0.0)
+      #[x1]
+      #[0.5]
+      uniformTimeDist
+      uniformTimeDist
+      (sequentialUniformPolicy Float)
+      canonicalAnchorMerge
+      (coalescenceFactor := 0.0)
+      (rng := { state := 123 })
+  LeanTest.assertEqual result.Xt.size 1 "Expected one bridged batch"
+  LeanTest.assertEqual result.Xt[0]!.state.size 1 "Expected one bridged segment"
+  LeanTest.assertTrue (Float.abs (result.Xt[0]!.state[0]! - bridgedHalf) < 1.0e-12)
+    s!"Branching bridge should use the DiffEq bridge result, got {result.Xt[0]!.state[0]!}"
+
+@[test]
+def testBranchingDiffEqSDEBridge : IO Unit := do
+  let bm : ScalarBrownianPath := { t0 := 0.0, t1 := 1.0, seed := 991 }
+  let bmPath := (ScalarBrownianPath.toAbstract bm).toPath
+  let drift : ODETerm Float Unit := { vectorField := fun _t _y _ => 0.0 }
+  let diffusion : ControlTerm Float Float Float Unit :=
+    ControlTerm.ofPath (fun _t _y _ => 1.0) bmPath (fun vf control => vf * control)
+  let solver :=
+    EulerMaruyama.solver
+      (Drift := ODETerm Float Unit)
+      (Diffusion := ControlTerm Float Float Float Unit)
+      (Y := Float)
+      (VFd := Float)
+      (VFg := Float)
+      (Control := Float)
+      (Args := Unit)
+  let cfg :
+      SDEBridgeConfig
+        (ODETerm Float Unit)
+        (ControlTerm Float Float Float Unit)
+        Float
+        Float
+        Float
+        Float
+        Unit
+        ConstantStepSize :=
+    SDEBridgeConfig.mk
+      (Drift := ODETerm Float Unit)
+      (Diffusion := ControlTerm Float Float Float Unit)
+      (Y := Float)
+      (VFd := Float)
+      (VFg := Float)
+      (Control := Float)
+      (Args := Unit)
+      (Controller := ConstantStepSize)
+      (fun _anchor => drift)
+      (fun _anchor => diffusion)
+      solver
+      ()
+      ({} : ConstantStepSize)
+      (dt0 := some 1.0)
+  let bridged := DiffEqBridgeConfig.bridge cfg 0.0 0.0 0.0 1.0
+  let expected := (ScalarBrownianPath.increment bm 0.0 1.0).W
+  LeanTest.assertTrue (Float.abs (bridged - expected) < 1.0e-12)
+    s!"SDE bridge should reproduce the deterministic Brownian increment, got {bridged}, expected {expected}"
+
+@[test]
+def testBranchingOUBridgeBrownianLimit : IO Unit := do
+  let cfg := OUBridgeConfig.constantVariance 0.0 1.0
+  let mean := OUBridgeConfig.bridgeMean cfg 0.0 10.0 0.0 0.5
+  LeanTest.assertTrue (Float.abs (mean - 5.0) < 1.0e-12)
+    s!"Zero-theta OU bridge should reduce to Brownian linear interpolation, got {mean}"
+  let variance := OUBridgeConfig.bridgeVariance cfg 0.0 0.5
+  LeanTest.assertTrue (Float.abs (variance - 0.25) < 1.0e-12)
+    s!"Zero-theta OU bridge variance should reduce to Brownian bridge variance, got {variance}"
+  let endpoint := OUBridgeConfig.bridgeMean cfg 0.0 10.0 0.0 1.0
+  LeanTest.assertTrue (Float.abs (endpoint - 10.0) < 1.0e-12)
+    s!"OU bridge should hit the terminal anchor, got {endpoint}"
+
+@[test]
+def testBranchingOUBridgeMeanMatchesGaussianConditioning : IO Unit := do
+  let cfg := OUBridgeConfig.constantVariance 1.0 1.0
+  let got := OUBridgeConfig.bridgeMean cfg 0.0 1.0 0.0 0.5
+  let v0t := (1.0 - Float.exp (-1.0)) / 2.0
+  let v0T := (1.0 - Float.exp (-2.0)) / 2.0
+  let expected := Float.exp (-0.5) * v0t / v0T
+  LeanTest.assertTrue (Float.abs (got - expected) < 1.0e-4)
+    s!"OU bridge mean should match Gaussian conditioning, got {got}, expected {expected}"
+
+@[test]
+def testBranchingOUBridgeIntegratesWithBranchingBridge : IO Unit := do
+  let cfg := OUBridgeConfig.constantVariance 0.0 1.0
+  let x1 : BranchingState Float := BranchingState.mkDefault #[1.0] #[0]
+  let expected := OUBridgeConfig.bridge cfg 0.0 1.0 0.0 0.5
+  let (result, _rng) :=
+    branchingBridge
+      (fun cfg x0 x1 t0 t => OUBridgeConfig.bridge cfg x0 x1 t0 t)
+      cfg
+      (fun _root => 0.0)
+      #[x1]
+      #[0.5]
+      uniformTimeDist
+      noEventTimeDist
+      (sequentialUniformPolicy Float)
+      canonicalAnchorMerge
+      (coalescenceFactor := 0.0)
+      (rng := { state := 321 })
+  LeanTest.assertEqual result.Xt.size 1 "Expected one bridged batch"
+  LeanTest.assertEqual result.Xt[0]!.state.size 1 "Expected one OU-bridged segment"
+  LeanTest.assertTrue (Float.abs (result.Xt[0]!.state[0]! - expected) < 1.0e-12)
+    s!"Branching bridge should use the analytic OU bridge result, got {result.Xt[0]!.state[0]!}, expected {expected}"
+
+@[test]
+def testBranchingDistNoisyDiscreteSchedule : IO Unit := do
+  let cfg := DistNoisyDiscreteConfig.qm9 10 9
+  let (w10, w20, w30) := cfg.weights 0.0
+  LeanTest.assertTrue (Float.abs w10 < 1.0e-12 && Float.abs w20 < 1.0e-12)
+    s!"DFM t=0 should have no target/uniform mass, got {(w10, w20, w30)}"
+  LeanTest.assertTrue (Float.abs (w30 - 1.0) < 1.0e-12)
+    s!"DFM t=0 should stay at source, got source weight {w30}"
+  let (w11, w21, w31) := cfg.weights 1.0
+  LeanTest.assertTrue (Float.abs (w11 - 1.0) < 1.0e-12)
+    s!"DFM t=1 should hit target, got target weight {w11}"
+  LeanTest.assertTrue (Float.abs w21 < 1.0e-12 && Float.abs w31 < 1.0e-12)
+    s!"DFM t=1 should remove uniform/source mass, got {(w11, w21, w31)}"
+  let (wm1, wm2, wm3) := cfg.weights 0.5
+  LeanTest.assertTrue (Float.abs (wm1 - 0.5) < 1.0e-12)
+    s!"Beta(2,2) midpoint should give target mass 0.5, got {wm1}"
+  LeanTest.assertTrue (Float.abs (wm2 - 0.05) < 1.0e-12)
+    s!"QM9 DFM midpoint should give uniform mass 0.05, got {wm2}"
+  LeanTest.assertTrue (Float.abs (wm3 - 0.45) < 1.0e-12)
+    s!"QM9 DFM midpoint should leave source mass 0.45, got {wm3}"
+
+@[test]
+def testBranchingDistNoisyDiscreteConditionalBridgeAndStep : IO Unit := do
+  let cfg := DistNoisyDiscreteConfig.qm9 10 9
+  let (sameTarget, sameUniform, sameSource) := cfg.conditionalWeights 0.25 0.25
+  LeanTest.assertTrue (Float.abs sameTarget < 1.0e-12 && Float.abs sameUniform < 1.0e-12)
+    s!"Conditional DFM should not move when t0=t, got {(sameTarget, sameUniform, sameSource)}"
+  LeanTest.assertTrue (Float.abs (sameSource - 1.0) < 1.0e-12)
+    s!"Conditional DFM should keep current source when t0=t, got {sameSource}"
+  LeanTest.assertEqual (cfg.modeBridgeFrom 9 2 0.0 0.0) 9
+    "Deterministic DFM representative should use source at t=0"
+  LeanTest.assertEqual (cfg.modeBridgeFrom 9 2 0.0 1.0) 2
+    "Deterministic DFM representative should use target at t=1"
+
+  let logits := (Array.replicate 10 (-10.0)).set! 2 10.0
+  let probs := cfg.stepDistribution 9 logits 0.5 0.6
+  LeanTest.assertEqual probs.size 10 "DFM Euler step should preserve vocabulary size"
+  LeanTest.assertTrue (Float.abs (sumFloatArray probs - 1.0) < 1.0e-12)
+    s!"DFM Euler step should normalize probabilities, got {sumFloatArray probs}"
+  LeanTest.assertTrue (probs[2]! > 0.25)
+    s!"DFM Euler step should move probability toward model target, got target prob {probs[2]!}"
+  LeanTest.assertTrue (probs[9]! > 0.5)
+    s!"DFM Euler step should retain source/mask mass for a small step, got mask prob {probs[9]!}"
+
+@[test]
+def testBranchingMoleculeAnchorMergeMasksLabelAndAveragesCoords : IO Unit := do
+  let cfg : MoleculeBridgeConfig := {
+    coordOU := OUBridgeConfig.constantVariance 0.0 1.0
+    maskToken := 99
+  }
+  let a : MoleculeAtom := { coord := { x := 0.0, y := 2.0, z := 4.0 }, label := 6 }
+  let b : MoleculeAtom := { coord := { x := 10.0, y := 20.0, z := 30.0 }, label := 8 }
+  let merged := MoleculeBridgeConfig.anchorMerge cfg a b 1 3
+  LeanTest.assertTrue (Float.abs (merged.coord.x - 7.5) < 1.0e-12)
+    s!"Molecule anchor x coordinate should be weighted, got {merged.coord.x}"
+  LeanTest.assertTrue (Float.abs (merged.coord.y - 15.5) < 1.0e-12)
+    s!"Molecule anchor y coordinate should be weighted, got {merged.coord.y}"
+  LeanTest.assertTrue (Float.abs (merged.coord.z - 23.5) < 1.0e-12)
+    s!"Molecule anchor z coordinate should be weighted, got {merged.coord.z}"
+  LeanTest.assertEqual merged.label 99
+    "Molecule anchor labels should be replaced with the mask token"
+
+@[test]
+def testBranchingMoleculeBridgeLiftsOUOverCoordinates : IO Unit := do
+  let cfg : MoleculeBridgeConfig := {
+    coordOU := OUBridgeConfig.constantVariance 0.0 1.0
+    maskToken := 99
+  }
+  let x0 := MoleculeBridgeConfig.maskedAtom cfg { x := 0.0, y := 0.0, z := 0.0 }
+  let x1 : MoleculeAtom := { coord := { x := 10.0, y := 20.0, z := 30.0 }, label := 6 }
+  let half := MoleculeBridgeConfig.bridge cfg x0 x1 0.0 0.5
+  LeanTest.assertTrue (Float.abs (half.coord.x - 5.0) < 1.0e-12)
+    s!"Molecule OU bridge x coordinate should interpolate, got {half.coord.x}"
+  LeanTest.assertTrue (Float.abs (half.coord.y - 10.0) < 1.0e-12)
+    s!"Molecule OU bridge y coordinate should interpolate, got {half.coord.y}"
+  LeanTest.assertTrue (Float.abs (half.coord.z - 15.0) < 1.0e-12)
+    s!"Molecule OU bridge z coordinate should interpolate, got {half.coord.z}"
+  LeanTest.assertEqual half.label 99
+    "Intermediate molecule label should stay masked when no DFM label bridge is configured"
+  let terminal := MoleculeBridgeConfig.bridge cfg x0 x1 0.0 1.0
+  LeanTest.assertEqual terminal.label 6
+    "Molecule coordinate bridge should still expose the terminal label at t=1"
+
+@[test]
+def testBranchingMoleculeBridgeUsesDiscreteDFMWhenConfigured : IO Unit := do
+  let cfg := MoleculeBridgeConfig.qm9 10 9
+  let x0 := MoleculeBridgeConfig.maskedAtom cfg { x := 0.0, y := 0.0, z := 0.0 }
+  let x1 : MoleculeAtom := { coord := { x := 10.0, y := 20.0, z := 30.0 }, label := 6 }
+  let start := MoleculeBridgeConfig.bridge cfg x0 x1 0.0 0.0
+  LeanTest.assertEqual start.label 9
+    "QM9 molecule bridge should start at the mask/source label"
+  let nearTerminal := MoleculeBridgeConfig.bridge cfg x0 x1 0.0 0.9
+  LeanTest.assertEqual nearTerminal.label 6
+    "QM9 molecule bridge should use the DFM target label when target mass dominates"
+  let terminal := MoleculeBridgeConfig.bridge cfg x0 x1 0.0 1.0
+  LeanTest.assertEqual terminal.label 6
+    "QM9 molecule bridge should expose the endpoint label at t=1"
+
+@[test]
+def testBranchingMoleculeModelPredictionUsesDFMStep : IO Unit := do
+  let labelDFM := DistNoisyDiscreteConfig.qm9 10 9
+  let cfg : MoleculeBridgeConfig := {
+    coordOU := OUBridgeConfig.constantVariance 0.0 1.0
+    maskToken := 9
+    labelDFM := some labelDFM
+  }
+  let x0Atom := MoleculeBridgeConfig.maskedAtom cfg { x := 0.0, y := 0.0, z := 0.0 }
+  let x0 : BranchingState MoleculeAtom := BranchingState.mkDefault #[x0Atom] #[0]
+  let labelLogits := (Array.replicate 10 (-10.0)).set! 6 10.0
+  let prediction : MoleculeModelPrediction := {
+    coordTargets := #[{ x := 10.0, y := 0.0, z := 0.0 }]
+    labelLogits := #[labelLogits]
+    splitLogits := #[-100.0]
+    delLogits := #[-100.0]
+  }
+  let flow : CoalescentFlow MoleculeBridgeConfig MoleculeAtom :=
+    CoalescentFlow.mkDefault cfg noEventTimeDist noEventTimeDist (fun _ => 0.0)
+  let (result, _rng) := moleculeBranchingStep flow x0 prediction 0.8 0.9 (rng := { state := 777 })
+  LeanTest.assertEqual result.state.state.size 1
+    "Molecule DFM model step should preserve one atom when split/deletion hazards are disabled"
+  let got := result.state.state[0]!
+  LeanTest.assertTrue (Float.abs (got.coord.x - 5.0) < 1.0e-12)
+    s!"Molecule model prediction should OU-step coordinates, got x={got.coord.x}"
+  LeanTest.assertEqual got.label 6
+    "Molecule model prediction should DFM-step labels from model logits"
+
+@[test]
+def testBranchingMoleculeGenerateUsesPredictionIntervals : IO Unit := do
+  let cfg : MoleculeBridgeConfig := {
+    coordOU := OUBridgeConfig.constantVariance 0.0 1.0
+    maskToken := 9
+    labelDFM := some (DistNoisyDiscreteConfig.qm9 10 9)
+  }
+  let x0Atom := MoleculeBridgeConfig.maskedAtom cfg { x := 0.0, y := 0.0, z := 0.0 }
+  let x0 : BranchingState MoleculeAtom := BranchingState.mkDefault #[x0Atom] #[0]
+  let labelLogits := (Array.replicate 10 (-10.0)).set! 6 10.0
+  let model (_t : Float) (_state : BranchingState MoleculeAtom) : MoleculeModelPrediction := {
+    coordTargets := #[{ x := 10.0, y := 0.0, z := 0.0 }]
+    labelLogits := #[labelLogits]
+    splitLogits := #[-100.0]
+    delLogits := #[-100.0]
+  }
+  let flow : CoalescentFlow MoleculeBridgeConfig MoleculeAtom :=
+    CoalescentFlow.mkDefault cfg noEventTimeDist noEventTimeDist (fun _ => 0.0)
+  let (result, _rng) := moleculeBranchingGenerate flow x0 model #[0.0, 0.5, 1.0] (rng := { state := 888 })
+  LeanTest.assertEqual result.trajectory.size 3
+    "Molecule generation should preserve one trajectory state per schedule time"
+  LeanTest.assertEqual result.finalState.state.size 1
+    "Molecule generation should preserve one atom when split/deletion hazards are disabled"
+  let got := result.finalState.state[0]!
+  LeanTest.assertTrue (Float.abs (got.coord.x - 10.0) < 1.0e-12)
+    s!"Molecule generation should apply the final interval endpoint, got x={got.coord.x}"
+  LeanTest.assertEqual got.label 6
+    "Molecule generation should DFM-step labels across schedule intervals"
+
+@[test]
+def testBranchingQM9JsonLoaderBuildsMoleculeState : IO Unit := do
+  let raw :=
+    "{\"name\":\"water\",\"smiles\":\"O\",\"atoms\":[{\"label\":8,\"x\":0.0,\"y\":0.1,\"z\":-0.2},{\"atom_label\":1,\"coord\":[0.9,0.0,0.3]}]}"
+  let mol ← expectOk "parse preprocessed QM9 molecule" (parseQM9MoleculeJson raw)
+  LeanTest.assertTrue (mol.name? == some "water")
+    s!"Expected molecule name metadata, got {mol.name?}"
+  LeanTest.assertTrue (mol.smiles? == some "O")
+    s!"Expected molecule smiles metadata, got {mol.smiles?}"
+  let cfg : QM9StateConfig := {
+    group := 3
+    firstId := 41
+    vocabSize? := some 10
+    maskToken? := some 9
+  }
+  let state ← expectOk "convert preprocessed QM9 molecule" (mol.toBranchingState cfg)
+  LeanTest.assertEqual state.state.size 2 "QM9 loader should preserve atom count"
+  LeanTest.assertEqual state.groupings #[3, 3]
+    "QM9 loader should assign the configured group to all atoms"
+  LeanTest.assertEqual state.ids #[41, 42]
+    "QM9 loader should assign stable sequential ids"
+  LeanTest.assertTrue (state.branchmask.all id && state.flowmask.all id && state.padmask.all id)
+    "QM9 loader should mark all terminal atoms active"
+  LeanTest.assertEqual state.state[0]!.label 8
+    "QM9 loader should parse numeric labels"
+  LeanTest.assertEqual state.state[1]!.label 1
+    "QM9 loader should accept atom_label as a label-field alias"
+  LeanTest.assertTrue (Float.abs (state.state[0]!.coord.y - 0.1) < 1.0e-12)
+    s!"QM9 loader should parse x/y/z coordinates, got {reprStr state.state[0]!.coord}"
+  LeanTest.assertTrue (Float.abs (state.state[1]!.coord.x - 0.9) < 1.0e-12)
+    s!"QM9 loader should parse coord-array coordinates, got {reprStr state.state[1]!.coord}"
+  let xyz := moleculeStateToXYZ state "water fixture"
+  LeanTest.assertTrue (xyz.startsWith "2\nwater fixture\n")
+    s!"XYZ export should include atom count and comment header, got {xyz}"
+  LeanTest.assertTrue (xyz.contains "O ")
+    s!"XYZ export should map atomic-number labels to element symbols, got {xyz}"
+  let tokenXyz := moleculeStateToXYZ state "token fixture" (labelSymbolFromArray #["X", "H", "C", "N", "O", "F", "G", "I", "O", "*"])
+  LeanTest.assertTrue (tokenXyz.contains "H ")
+    s!"XYZ export should accept token-vocabulary label maps, got {tokenXyz}"
+
+  let vocabErr ← expectError "reject label outside configured vocabulary"
+    (mol.toBranchingState { cfg with vocabSize? := some 8 })
+  LeanTest.assertTrue (!vocabErr.isEmpty)
+    "Invalid QM9 labels should produce a useful error"
+
+  let maskRaw := "{\"atoms\":[{\"label\":9,\"coord\":[0.0,0.0,0.0]}]}"
+  let maskMol ← expectOk "parse mask-token molecule" (parseQM9MoleculeJson maskRaw)
+  let maskErr ← expectError "reject terminal mask token"
+    (maskMol.toBranchingState { vocabSize? := some 10, maskToken? := some 9 })
+  LeanTest.assertTrue (!maskErr.isEmpty)
+    "Terminal QM9 records should reject the reserved mask token by default"
+  let deletedState : BranchingState MoleculeAtom := {
+    state with
+    del := #[false, true]
+  }
+  let maskedDeleted := maskDeletedMoleculeLabels (MoleculeBridgeConfig.qm9 10 9) deletedState
+  LeanTest.assertEqual maskedDeleted.state[0]!.label state.state[0]!.label
+    "Deleted-label masking should preserve non-deleted molecule labels"
+  LeanTest.assertEqual maskedDeleted.state[1]!.label 9
+    "Deleted-label masking should replace deleted molecule labels with the mask token"
+
+@[test]
+def testBranchingQM9JsonlLoaderAndMaskedInitialState : IO Unit := do
+  let raw :=
+    "{\"atoms\":[{\"label\":6,\"coord\":[0.0,0.0,0.0]}]}\n\n{\"canonical_smiles\":\"N\",\"atoms\":[{\"label\":7,\"x\":1.0,\"y\":2.0,\"z\":3.0}]}"
+  let records ← expectOk "parse preprocessed QM9 jsonl" (parseQM9MoleculeJsonl raw)
+  LeanTest.assertEqual records.size 2
+    "QM9 JSONL parser should ignore blank lines and parse both molecules"
+  LeanTest.assertTrue (records[1]!.smiles? == some "N")
+    s!"QM9 JSONL parser should accept canonical_smiles metadata, got {records[1]!.smiles?}"
+  let states ← expectOk "convert preprocessed QM9 jsonl batch"
+    (qm9RecordsToBranchingStates records { vocabSize? := some 10, maskToken? := some 9 })
+  LeanTest.assertEqual states.size 2 "QM9 JSONL state conversion should preserve batch size"
+  LeanTest.assertEqual states[0]!.state[0]!.label 6
+    "QM9 JSONL state conversion should preserve first atom label"
+  LeanTest.assertTrue (Float.abs (states[1]!.state[0]!.coord.z - 3.0) < 1.0e-12)
+    s!"QM9 JSONL state conversion should preserve coordinates, got {reprStr states[1]!.state[0]!.coord}"
+
+  let bridgeCfg := MoleculeBridgeConfig.qm9 10 9
+  let x0 := qm9InitialMaskedState bridgeCfg (group := 5) (coord := { x := 0.25, y := -0.5, z := 0.75 })
+  LeanTest.assertEqual x0.state.size 1
+    "QM9 generation source state should have length one"
+  LeanTest.assertEqual x0.groupings #[5]
+    "QM9 generation source state should use the requested group"
+  LeanTest.assertEqual x0.state[0]!.label 9
+    "QM9 generation source state should use the mask token"
+  LeanTest.assertTrue (Float.abs (x0.state[0]!.coord.x - 0.25) < 1.0e-12)
+    s!"QM9 generation source state should preserve the requested initial coordinate, got {reprStr x0.state[0]!.coord}"
+
+@[test]
+def testBranchingMoleculeBridgeIntegratesWithBranchingBridge : IO Unit := do
+  let cfg : MoleculeBridgeConfig := {
+    coordOU := OUBridgeConfig.constantVariance 0.0 1.0
+    maskToken := 99
+  }
+  let x1Atom : MoleculeAtom := { coord := { x := 2.0, y := 4.0, z := 6.0 }, label := 6 }
+  let x1 : BranchingState MoleculeAtom := BranchingState.mkDefault #[x1Atom] #[0]
+  let expected := MoleculeBridgeConfig.bridge cfg (MoleculeBridgeConfig.maskedAtom cfg) x1Atom 0.0 0.5
+  let (result, _rng) :=
+    branchingBridge
+      (fun cfg x0 x1 t0 t => MoleculeBridgeConfig.bridge cfg x0 x1 t0 t)
+      cfg
+      (fun _root => MoleculeBridgeConfig.maskedAtom cfg)
+      #[x1]
+      #[0.5]
+      uniformTimeDist
+      noEventTimeDist
+      (sequentialUniformPolicy MoleculeAtom)
+      (MoleculeBridgeConfig.anchorMerge cfg)
+      (coalescenceFactor := 0.0)
+      (rng := { state := 654 })
+  LeanTest.assertEqual result.Xt.size 1 "Expected one molecule-bridged batch"
+  LeanTest.assertEqual result.Xt[0]!.state.size 1 "Expected one molecule-bridged segment"
+  let got := result.Xt[0]!.state[0]!
+  LeanTest.assertTrue (Float.abs (got.coord.x - expected.coord.x) < 1.0e-12)
+    s!"Branching bridge should use molecule OU x coordinate, got {got.coord.x}"
+  LeanTest.assertTrue (Float.abs (got.coord.y - expected.coord.y) < 1.0e-12)
+    s!"Branching bridge should use molecule OU y coordinate, got {got.coord.y}"
+  LeanTest.assertTrue (Float.abs (got.coord.z - expected.coord.z) < 1.0e-12)
+    s!"Branching bridge should use molecule OU z coordinate, got {got.coord.z}"
+  LeanTest.assertEqual got.label expected.label
+    "Branching bridge should preserve molecule label semantics"
+
+@[test]
+def testBranchingMoleculePackingAndLosses : IO Unit := do
+  let atom : MoleculeAtom := { coord := { x := 1.0, y := 2.0, z := 3.0 }, label := 9 }
+  let anchor : MoleculeAtom := { coord := { x := 4.0, y := 5.0, z := 6.0 }, label := 6 }
+  let state : BranchingState MoleculeAtom := {
+    state := #[atom]
+    groupings := #[0]
+    del := #[false]
+    ids := #[1]
+    branchmask := #[true]
+    flowmask := #[true]
+    padmask := #[true]
+  }
+  let result : BranchingBridgeResult MoleculeAtom := {
+    t := #[0.25]
+    segments := #[#[]]
+    Xt := #[state]
+    X1anchor := #[#[anchor]]
+    descendants := #[#[1]]
+    del := #[#[true]]
+    splitsTarget := #[#[2]]
+    prevCoalescence := #[#[0.0]]
+  }
+  let cfg : BranchingTrainConfig := { maxLen := 2, padToken := 0 }
+  let ⟨batch, packed⟩ ← packBranchingMolecule cfg result
+  LeanTest.assertEqual batch (1 : UInt64) "Packed molecule batch should preserve batch size"
+  LeanTest.assertTrue (Float.abs (nn.item (nn.sumAll packed.coord) - 6.0) < 1.0e-6)
+    "Packed molecule coordinates should contain the bridge state coordinates"
+  LeanTest.assertTrue (Float.abs (nn.item (nn.sumAll packed.coordAnchor) - 15.0) < 1.0e-6)
+    "Packed molecule anchor coordinates should contain endpoint coordinates"
+  LeanTest.assertTrue (Float.abs (nn.item (nn.sumAll (toFloat' packed.label)) - 9.0) < 1.0e-6)
+    "Packed molecule labels should contain atom labels and pad with the configured pad token"
+  LeanTest.assertTrue (Float.abs (nn.item (nn.sumAll (toFloat' packed.labelAnchor)) - 6.0) < 1.0e-6)
+    "Packed molecule anchor labels should contain atom-label targets"
+  LeanTest.assertTrue (Float.abs (nn.item (nn.sumAll packed.padmask) - 1.0) < 1.0e-6)
+    "Packed molecule pad mask should mark only real atoms"
+  LeanTest.assertTrue (Float.abs (nn.item (nn.sumAll packed.splitsTarget) - 2.0) < 1.0e-6)
+    "Packed molecule split targets should preserve BranchingBridgeResult targets"
+  LeanTest.assertTrue (Float.abs (nn.item (nn.sumAll packed.delTarget) - 1.0) < 1.0e-6)
+    "Packed molecule deletion targets should preserve BranchingBridgeResult targets"
+
+  let totalLogits := batch.toNat * cfg.maxLen.toNat * 10
+  let labelLogits : T #[batch, cfg.maxLen, 10] :=
+    reshape (data.fromFloatArray (Array.replicate totalLogits 0.0)) #[batch, cfg.maxLen, 10]
+  let flat := batch.toNat * cfg.maxLen.toNat
+  let splitLogits : T #[batch, cfg.maxLen] :=
+    reshape (data.fromFloatArray (Array.replicate flat 0.0)) #[batch, cfg.maxLen]
+  let delLogits : T #[batch, cfg.maxLen] :=
+    reshape (data.fromFloatArray (Array.replicate flat 0.0)) #[batch, cfg.maxLen]
+  let (_loss, report) := moleculeLosses cfg packed packed.coordAnchor labelLogits splitLogits delLogits
+  LeanTest.assertTrue (Float.abs report.coord < 1.0e-6)
+    s!"Coordinate loss should be zero when prediction equals anchor, got {report.coord}"
+  LeanTest.assertTrue (report.label > 2.0 && report.label < 2.5)
+    s!"Uniform 10-way label logits should produce about log(10), got {report.label}"
+  LeanTest.assertTrue (report.splits > 0.0 && report.del > 0.0)
+    s!"Molecule loss report should include split and deletion terms, got {reprStr report}"
+
+  let labelDFM := DistNoisyDiscreteConfig.qm9 10 9
+  let ⟨batchDfm, packedDfm⟩ ← packBranchingMoleculeWithDFM cfg labelDFM result
+  LeanTest.assertEqual batchDfm (1 : UInt64) "DFM-packed molecule batch should preserve batch size"
+  let scaleSum := nn.item (nn.sumAll packedDfm.labelLossScale)
+  LeanTest.assertTrue (scaleSum > 1.2 && scaleSum < 1.3)
+    s!"DFM-packed molecule batch should carry Flowfusion label scale at t=0.25, got {scaleSum}"
+  let totalDfmLogits := batchDfm.toNat * cfg.maxLen.toNat * 10
+  let labelLogitsDfm : T #[batchDfm, cfg.maxLen, 10] :=
+    reshape (data.fromFloatArray (Array.replicate totalDfmLogits 0.0)) #[batchDfm, cfg.maxLen, 10]
+  let flatDfm := batchDfm.toNat * cfg.maxLen.toNat
+  let splitLogitsDfm : T #[batchDfm, cfg.maxLen] :=
+    reshape (data.fromFloatArray (Array.replicate flatDfm 0.0)) #[batchDfm, cfg.maxLen]
+  let delLogitsDfm : T #[batchDfm, cfg.maxLen] :=
+    reshape (data.fromFloatArray (Array.replicate flatDfm 0.0)) #[batchDfm, cfg.maxLen]
+  let (_dfmLoss, dfmReport) :=
+    moleculeLosses cfg packedDfm packedDfm.coordAnchor labelLogitsDfm splitLogitsDfm delLogitsDfm
+  LeanTest.assertTrue (dfmReport.label > report.label)
+    s!"DFM label loss should apply the time scale, unscaled={report.label}, scaled={dfmReport.label}"
+
+@[test]
+def testBranchingSegmentsProjectToEventSkeleton : IO Unit := do
+  let seg : Segment Float := {
+    Xt := 0.5
+    t := 0.75
+    anchor := 1.0
+    descendants := 3
+    del := false
+    branchable := true
+    flowable := true
+    group := 0
+    lastCoalescence := 0.25
+    id := 11
+  }
+  let interval := Segment.toAcceptedStepSegment 0 0 seg
+  LeanTest.assertTrue (Float.abs (interval.tStart - 0.25) < 1.0e-12)
+    s!"Projected interval should start at last coalescence, got {interval.tStart}"
+  LeanTest.assertTrue (Float.abs (interval.tAfter - 0.75) < 1.0e-12)
+    s!"Projected interval should end at the segment time, got {interval.tAfter}"
+  LeanTest.assertTrue interval.crossedJumpFlag
+    "Segments with multiple descendants should mark a branch crossing"
+
+  let graph := graphFromBranchingSegments #[seg]
+  LeanTest.assertEqual graph.vertices.size 2
+    "One interval plus one branch vertex should be projected"
+  LeanTest.assertTrue (graph.containsMoveKind .intervalAdjoint)
+    "Projected graph should include interval adjoint work"
+  LeanTest.assertTrue (graph.containsMoveKind .checkpointBoundary)
+    "Projected graph should include checkpoint boundaries by default"
+  LeanTest.assertTrue (graph.containsMoveKind .branchAggregate)
+    "Projected graph should include branch aggregation for descendant-count segments"
+
+@[test]
+def testBranchingStepEventsProjectToEventSkeleton : IO Unit := do
+  let event : BranchingStepEvent := {
+    sourceIndex := 0
+    sourceId := 21
+    group := 0
+    splitCount := 2
+    deleted := false
+    t0 := 0.0
+    t1 := 0.5
+  }
+  let graph := graphFromBranchingStepEvents #[event]
+  LeanTest.assertTrue (graph.containsMoveKind .intervalAdjoint)
+    "Step-event graph should include interval adjoint work"
+  LeanTest.assertTrue (graph.containsMoveKind .checkpointBoundary)
+    "Step-event graph should include checkpoint boundaries by default"
+  LeanTest.assertTrue (graph.containsMoveKind .branchAggregate)
+    "Step-event graph should include branch aggregation for split events"
+
+  let generated : BranchingGenerateResult Nat := {
+    finalState := mkState #[1] #[0]
+    trajectory := #[mkState #[0] #[0], mkState #[0] #[0], mkState #[1] #[0]]
+    events := #[#[], #[event]]
+    times := #[0.0, 0.5, 1.0]
+  }
+  let generatedGraph := graphFromBranchingGenerateResult generated
+  LeanTest.assertTrue (generatedGraph.vertices.size >= 3)
+    s!"Generation graph should include a quiet interval plus split interval/branch vertices, got {generatedGraph.vertices.size}"
+  LeanTest.assertTrue (generatedGraph.containsMoveKind .branchAggregate)
+    "Generation graph should preserve branch aggregation moves"
 
 @[test]
 def testGeodesicInterpolateFloat : IO Unit := do
