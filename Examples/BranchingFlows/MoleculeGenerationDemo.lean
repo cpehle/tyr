@@ -4,7 +4,7 @@ import Tyr.Model.BranchingFlows.QM9
 /-!
   Examples/BranchingFlows/MoleculeGenerationDemo.lean
 
-  Molecule-shaped BranchingFlows smoke demo.
+  Molecule-shaped BranchingFlows oracle generation demo.
 
   It uses the preprocessed QM9 JSONL boundary, constructs native molecule
   `BranchingState`s, samples a training bridge, runs an oracle-style forward

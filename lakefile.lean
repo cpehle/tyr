@@ -635,21 +635,27 @@ lean_exe test_runner_experimental where
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
-/-- BranchingFlows continuous overfit training smoke. -/
+/-- BranchingFlows continuous overfit training check. -/
 lean_exe BranchingFlowsContinuousTrain where
   root := `Examples.BranchingFlows.ContinuousTrainDemo
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
-/-- BranchingFlows molecule overfit training smoke. -/
+/-- BranchingFlows molecule overfit training check. -/
 lean_exe BranchingFlowsMoleculeTrain where
   root := `Examples.BranchingFlows.MoleculeTrainDemo
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
-/-- BranchingFlows molecule transformer overfit training smoke. -/
+/-- BranchingFlows molecule transformer overfit training check. -/
 lean_exe BranchingFlowsMoleculeTransformerTrain where
   root := `Examples.BranchingFlows.MoleculeTransformerTrainDemo
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
+/-- Dataset-backed BranchingFlows molecule transformer training and generation. -/
+lean_exe BranchingFlowsMoleculeTrainGenerate where
+  root := `Examples.BranchingFlows.MoleculeTrainGenerate
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 

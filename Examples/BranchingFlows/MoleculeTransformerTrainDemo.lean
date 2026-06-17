@@ -6,7 +6,7 @@ import Tyr.Model.BranchingFlows.QM9
 /-!
   Examples/BranchingFlows/MoleculeTransformerTrainDemo.lean
 
-  QM9-shaped molecule transformer training smoke.
+  QM9-shaped molecule transformer overfit training check.
   This uses the same bridge packing and trainStepMolecule loss path as the
   molecule example, but the trainable model is a transformer with pairwise
   coordinate-distance attention bias and all four molecule heads.
