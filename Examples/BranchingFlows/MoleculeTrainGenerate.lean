@@ -46,9 +46,14 @@ structure RunOptions where
   vocabSize : Nat := 10
   maskToken : Nat := 0
   maxLen : UInt64 := 16
+  fullArchitecture : Bool := false
+  hiddenDim : UInt64 := 16
   heads : UInt64 := 2
   headDim : UInt64 := 8
   mlp : UInt64 := 48
+  rffDim : UInt64 := 8
+  layers : UInt64 := 2
+  coordUpdateLayers : Nat := 1
   lr : Float := 8.0e-3
   lrEnd : Float := 0.0
   weightDecay : Float := 1.0e-4
@@ -69,7 +74,8 @@ private def usage : String :=
   "[--profile smoke|paper-qm9-main|paper-qm9-appendix] [--out-prefix prefix] " ++
   "[--checkpoint-dir dir] [--resume-checkpoint dir] [--no-checkpoint] " ++
   "[--steps n] [--total-steps n] [--batch-size n] [--max-len n] " ++
-  "[--heads n] [--head-dim n] [--mlp n] [--lr x] [--seed n]"
+  "[--architecture compact|full] [--hidden-dim n] [--heads n] [--head-dim n] " ++
+  "[--mlp n] [--rff-dim n] [--layers n] [--coord-update-layers n] [--lr x] [--seed n]"
 
 private def parseNatArg (name value : String) : IO Nat := do
   match value.toNat? with
@@ -118,9 +124,14 @@ private def applyProfile (name : String) (opts : RunOptions) : IO RunOptions := 
         totalSteps := 800000
         batchSize := 128
         maxLen := 64
+        fullArchitecture := true
+        hiddenDim := 384
         heads := 12
-        headDim := 32
+        headDim := 64
         mlp := 1536
+        rffDim := 64
+        layers := 12
+        coordUpdateLayers := 6
         lr := 0.005
         lrEnd := 0.0
         warmupSteps := 0
@@ -138,9 +149,14 @@ private def applyProfile (name : String) (opts : RunOptions) : IO RunOptions := 
         totalSteps := 500000
         batchSize := 128
         maxLen := 64
+        fullArchitecture := true
+        hiddenDim := 384
         heads := 12
-        headDim := 32
+        headDim := 64
         mlp := 1536
+        rffDim := 64
+        layers := 12
+        coordUpdateLayers := 6
         lr := 0.005
         lrEnd := 0.0
         warmupSteps := 0
@@ -192,12 +208,29 @@ partial def parseArgsLoop (args : List String) (opts : RunOptions) : IO RunOptio
       parseArgsLoop rest { opts with maskToken := (← parseNatArg "--mask-token" value) }
   | "--max-len" :: value :: rest =>
       parseArgsLoop rest { opts with maxLen := (← parseUInt64Arg "--max-len" value) }
+  | "--architecture" :: value :: rest =>
+      match value with
+      | "compact" => parseArgsLoop rest { opts with fullArchitecture := false }
+      | "full" => parseArgsLoop rest { opts with fullArchitecture := true }
+      | _ => throw (IO.userError s!"--architecture expects compact or full, got '{value}'")
+  | "--full-architecture" :: rest =>
+      parseArgsLoop rest { opts with fullArchitecture := true }
+  | "--compact-architecture" :: rest =>
+      parseArgsLoop rest { opts with fullArchitecture := false }
+  | "--hidden-dim" :: value :: rest =>
+      parseArgsLoop rest { opts with hiddenDim := (← parseUInt64Arg "--hidden-dim" value) }
   | "--heads" :: value :: rest =>
       parseArgsLoop rest { opts with heads := (← parseUInt64Arg "--heads" value) }
   | "--head-dim" :: value :: rest =>
       parseArgsLoop rest { opts with headDim := (← parseUInt64Arg "--head-dim" value) }
   | "--mlp" :: value :: rest =>
       parseArgsLoop rest { opts with mlp := (← parseUInt64Arg "--mlp" value) }
+  | "--rff-dim" :: value :: rest =>
+      parseArgsLoop rest { opts with rffDim := (← parseUInt64Arg "--rff-dim" value) }
+  | "--layers" :: value :: rest =>
+      parseArgsLoop rest { opts with layers := (← parseUInt64Arg "--layers" value) }
+  | "--coord-update-layers" :: value :: rest =>
+      parseArgsLoop rest { opts with coordUpdateLayers := (← parseNatArg "--coord-update-layers" value) }
   | "--lr" :: value :: rest =>
       parseArgsLoop rest { opts with lr := (← parseFloatArg "--lr" value) }
   | "--lr-end" :: value :: rest =>
@@ -307,58 +340,20 @@ private def generatedPath (outPrefix : String) (sampleCount i : Nat) : String :=
   else
     outPrefix ++ "_generated_" ++ toString i ++ ".xyz"
 
-def run (opts : RunOptions) : IO Unit := do
-  if opts.steps == 0 then
-    throw (IO.userError "training steps must be positive")
-  if opts.batchSize == 0 then
-    throw (IO.userError "batch size must be positive")
-  if opts.totalSteps == 0 then
-    throw (IO.userError "total steps must be positive")
-  if opts.sampleCount == 0 then
-    throw (IO.userError "sample count must be positive")
-  if opts.vocabSize == 0 then
-    throw (IO.userError "vocab size must be positive")
-  if opts.maskToken >= opts.vocabSize then
-    throw (IO.userError s!"mask token {opts.maskToken} is outside vocab size {opts.vocabSize}")
-  if opts.maxLen == 0 then
-    throw (IO.userError "max length must be positive")
-  if opts.heads == 0 || opts.headDim == 0 || opts.mlp == 0 then
-    throw (IO.userError "heads, head-dim, and mlp must be positive")
-  if opts.requireData then
-    match opts.dataPath? with
-    | some path =>
-        if path == "-" then
-          throw (IO.userError "--require-data cannot use embedded fixture data")
-    | none =>
-        throw (IO.userError "--require-data requires --data")
+private def architectureName (opts : RunOptions) : String :=
+  if opts.fullArchitecture then "full" else "compact"
 
-  let vocab : UInt64 := opts.vocabSize.toUInt64
-  let bridgeCfg := MoleculeBridgeConfig.qm9 opts.vocabSize opts.maskToken
-  let labelDFM := DistNoisyDiscreteConfig.qm9 opts.vocabSize opts.maskToken
-  let records ← loadRecords opts
-  let allStates ← exceptToIO "convert molecule records"
-    (qm9RecordsToBranchingStates records { vocabSize? := some opts.vocabSize, maskToken? := some opts.maskToken })
-  let states := allStates.filter (fun state => state.state.size <= opts.maxLen.toNat)
-  if states.isEmpty then
-    throw (IO.userError s!"no molecules fit maxLen={opts.maxLen}")
-  let (trainStates, evalStates) := splitTrainEval states
-  let evalStates := if evalStates.isEmpty then trainStates else evalStates
-
-  let trainCfg : BranchingTrainConfig := {
-    maxLen := opts.maxLen
-    padToken := 0
-    anchorWeight := 1.0
-    splitsWeight := opts.splitsWeight
-    delWeight := opts.delWeight
-    weightDecay := opts.weightDecay
-    gradClip := opts.gradClip
-  }
-  let model :=
-    moleculeTransformerModel (maxLen := opts.maxLen) (vocab := vocab)
-      (heads := opts.heads) (headDim := opts.headDim) (mlp := opts.mlp)
-
-  torch.manualSeed opts.seed
-  let initParams ← MoleculeTransformerParams.init vocab opts.heads opts.headDim opts.mlp
+private def runWithModel {Params : Type} [TensorStruct Params] {maxLen vocab : UInt64}
+    (opts : RunOptions)
+    (recordsCount usableCount : Nat)
+    (trainStates evalStates : Array (BranchingState MoleculeAtom))
+    (bridgeCfg : MoleculeBridgeConfig)
+    (labelDFM : DistNoisyDiscreteConfig)
+    (trainCfg : BranchingTrainConfig)
+    (model : BranchingMoleculeModel maxLen vocab Params)
+    (initParams : Params)
+    (makeLearnedModel : Params → Float → BranchingState MoleculeAtom → IO MoleculeModelPrediction) :
+    IO Unit := do
   let (initParams, startIteration, resumedMeta?) ←
     match opts.resumeCheckpoint? with
     | none => pure (initParams, 0, none)
@@ -393,7 +388,7 @@ def run (opts : RunOptions) : IO Unit := do
       (maxLen := some opts.maxLen.toNat) (deletionPad := opts.deletionPad)
   rng := rng'
   let initTrain ←
-    evalMoleculeLoss (maxLen := opts.maxLen) (vocab := vocab) trainCfg model params fixedTrainBridge
+    evalMoleculeLoss (maxLen := maxLen) (vocab := vocab) trainCfg model params fixedTrainBridge
       (some labelDFM)
   let mut lastReport := initTrain
 
@@ -405,7 +400,7 @@ def run (opts : RunOptions) : IO Unit := do
         (maxLen := some opts.maxLen.toNat) (deletionPad := opts.deletionPad)
     rng := rng'
     let (params', optState', report) ←
-      trainStepMolecule (maxLen := opts.maxLen) (vocab := vocab) trainCfg model
+      trainStepMolecule (maxLen := maxLen) (vocab := vocab) trainCfg model
         params optState bridgeBatch lr (some labelDFM)
     params := params'
     optState := optState'
@@ -414,7 +409,7 @@ def run (opts : RunOptions) : IO Unit := do
       IO.println s!"molecule_train step={globalStep} lr={lr} total={report.total} coord={report.coord} label={report.label} splits={report.splits} del={report.del}"
 
   let finalTrain ←
-    evalMoleculeLoss (maxLen := opts.maxLen) (vocab := vocab) trainCfg model params fixedTrainBridge
+    evalMoleculeLoss (maxLen := maxLen) (vocab := vocab) trainCfg model params fixedTrainBridge
       (some labelDFM)
   if !(Float.isFinite finalTrain.total) then
     throw (IO.userError "final train loss is not finite")
@@ -439,7 +434,7 @@ def run (opts : RunOptions) : IO Unit := do
       (maxLen := some opts.maxLen.toNat) (deletionPad := opts.deletionPad)
   rng := rng'
   let evalReport ←
-    evalMoleculeLoss (maxLen := opts.maxLen) (vocab := vocab) trainCfg model params evalBridge
+    evalMoleculeLoss (maxLen := maxLen) (vocab := vocab) trainCfg model params evalBridge
       (some labelDFM)
 
   let target := evalStates[0]!
@@ -453,10 +448,7 @@ def run (opts : RunOptions) : IO Unit := do
   if opts.generate then
     let flow : CoalescentFlow MoleculeBridgeConfig MoleculeAtom :=
       CoalescentFlow.mkDefault bridgeCfg TimeDist.betaOneThreeHalves noEventTimeDist
-    let learnedModel :=
-      moleculeTransformerIOModel (maxLen := opts.maxLen) (vocab := vocab)
-        (heads := opts.heads) (headDim := opts.headDim) (mlp := opts.mlp)
-        trainCfg.padToken params (splitLogitCap? := some opts.splitLogitCap)
+    let learnedModel := makeLearnedModel params
     let schedule := cosineGenerationSchedule opts.sampleSteps
     for i in [:opts.sampleCount] do
       let (x0Atom, rng') := MoleculeBridgeConfig.sampleInitialAtom bridgeCfg rng
@@ -478,8 +470,8 @@ def run (opts : RunOptions) : IO Unit := do
       writeMoleculeXYZ ⟨generatedPath opts.outputPrefix opts.sampleCount i⟩ generated.finalState
         s!"learned BranchingFlows molecule generation sample={i}" (labelSymbol opts.maskToken)
 
-  IO.println s!"molecule_dataset records={records.size} usable={states.size} train={trainStates.size} eval={evalStates.size}"
-  IO.println s!"molecule_config max_len={opts.maxLen} vocab_size={opts.vocabSize} mask_token={opts.maskToken} heads={opts.heads} head_dim={opts.headDim} mlp={opts.mlp} batch_size={opts.batchSize} steps={opts.steps} total_steps={opts.totalSteps}"
+  IO.println s!"molecule_dataset records={recordsCount} usable={usableCount} train={trainStates.size} eval={evalStates.size}"
+  IO.println s!"molecule_config architecture={architectureName opts} max_len={opts.maxLen} vocab_size={opts.vocabSize} mask_token={opts.maskToken} hidden_dim={opts.hiddenDim} heads={opts.heads} head_dim={opts.headDim} mlp={opts.mlp} rff_dim={opts.rffDim} layers={opts.layers} coord_update_layers={opts.coordUpdateLayers} batch_size={opts.batchSize} steps={opts.steps} total_steps={opts.totalSteps}"
   IO.println s!"molecule_train fixed_initial_total={initTrain.total} fixed_final_total={finalTrain.total}"
   IO.println s!"molecule_train last_batch_total={lastReport.total} eval_total={evalReport.total}"
   if opts.saveCheckpoint then
@@ -491,6 +483,92 @@ def run (opts : RunOptions) : IO Unit := do
   if opts.generate then
     IO.println s!"wrote {opts.outputPrefix}_source.xyz"
     IO.println s!"wrote generated samples under {opts.outputPrefix}_generated*.xyz"
+
+def run (opts : RunOptions) : IO Unit := do
+  if opts.steps == 0 then
+    throw (IO.userError "training steps must be positive")
+  if opts.batchSize == 0 then
+    throw (IO.userError "batch size must be positive")
+  if opts.totalSteps == 0 then
+    throw (IO.userError "total steps must be positive")
+  if opts.sampleCount == 0 then
+    throw (IO.userError "sample count must be positive")
+  if opts.vocabSize == 0 then
+    throw (IO.userError "vocab size must be positive")
+  if opts.maskToken >= opts.vocabSize then
+    throw (IO.userError s!"mask token {opts.maskToken} is outside vocab size {opts.vocabSize}")
+  if opts.maxLen == 0 then
+    throw (IO.userError "max length must be positive")
+  if opts.heads == 0 || opts.headDim == 0 || opts.mlp == 0 then
+    throw (IO.userError "heads, head-dim, and mlp must be positive")
+  if opts.fullArchitecture then
+    if opts.hiddenDim == 0 || opts.rffDim == 0 || opts.layers == 0 then
+      throw (IO.userError "hidden-dim, rff-dim, and layers must be positive for full architecture")
+    if opts.coordUpdateLayers == 0 then
+      throw (IO.userError "coord-update-layers must be positive for full architecture")
+    if opts.headDim % 2 != 0 then
+      throw (IO.userError "full architecture requires an even head-dim for RoPE")
+  if opts.requireData then
+    match opts.dataPath? with
+    | some path =>
+        if path == "-" then
+          throw (IO.userError "--require-data cannot use embedded fixture data")
+    | none =>
+        throw (IO.userError "--require-data requires --data")
+
+  let vocab : UInt64 := opts.vocabSize.toUInt64
+  let bridgeCfg := MoleculeBridgeConfig.qm9 opts.vocabSize opts.maskToken
+  let labelDFM := DistNoisyDiscreteConfig.qm9 opts.vocabSize opts.maskToken
+  let records ← loadRecords opts
+  let allStates ← exceptToIO "convert molecule records"
+    (qm9RecordsToBranchingStates records { vocabSize? := some opts.vocabSize, maskToken? := some opts.maskToken })
+  let states := allStates.filter (fun state => state.state.size <= opts.maxLen.toNat)
+  if states.isEmpty then
+    throw (IO.userError s!"no molecules fit maxLen={opts.maxLen}")
+  let (trainStates, evalStates) := splitTrainEval states
+  let evalStates := if evalStates.isEmpty then trainStates else evalStates
+
+  let trainCfg : BranchingTrainConfig := {
+    maxLen := opts.maxLen
+    padToken := 0
+    anchorWeight := 1.0
+    splitsWeight := opts.splitsWeight
+    delWeight := opts.delWeight
+    weightDecay := opts.weightDecay
+    gradClip := opts.gradClip
+  }
+
+  torch.manualSeed opts.seed
+  if opts.fullArchitecture then
+    let model :=
+      fullMoleculeTransformerModel (maxLen := opts.maxLen) (vocab := vocab)
+        (hidden := opts.hiddenDim) (heads := opts.heads) (headDim := opts.headDim)
+        (mlp := opts.mlp) (rff := opts.rffDim) (layers := opts.layers)
+        (coordUpdateLayers := opts.coordUpdateLayers)
+    let initParams ←
+      FullMoleculeTransformerParams.init vocab opts.hiddenDim opts.heads opts.headDim
+        opts.mlp opts.rffDim opts.layers
+    let makeLearnedModel := fun params =>
+      fullMoleculeTransformerIOModel (maxLen := opts.maxLen) (vocab := vocab)
+        (hidden := opts.hiddenDim) (heads := opts.heads) (headDim := opts.headDim)
+        (mlp := opts.mlp) (rff := opts.rffDim) (layers := opts.layers)
+        trainCfg.padToken params (coordUpdateLayers := opts.coordUpdateLayers)
+        (splitLogitCap? := some opts.splitLogitCap)
+    runWithModel (maxLen := opts.maxLen) (vocab := vocab)
+      opts records.size states.size trainStates evalStates bridgeCfg labelDFM trainCfg
+      model initParams makeLearnedModel
+  else
+    let model :=
+      moleculeTransformerModel (maxLen := opts.maxLen) (vocab := vocab)
+        (heads := opts.heads) (headDim := opts.headDim) (mlp := opts.mlp)
+    let initParams ← MoleculeTransformerParams.init vocab opts.heads opts.headDim opts.mlp
+    let makeLearnedModel := fun params =>
+      moleculeTransformerIOModel (maxLen := opts.maxLen) (vocab := vocab)
+        (heads := opts.heads) (headDim := opts.headDim) (mlp := opts.mlp)
+        trainCfg.padToken params (splitLogitCap? := some opts.splitLogitCap)
+    runWithModel (maxLen := opts.maxLen) (vocab := vocab)
+      opts records.size states.size trainStates evalStates bridgeCfg labelDFM trainCfg
+      model initParams makeLearnedModel
 
 def _root_.main (args : List String) : IO UInt32 := do
   let opts ← parseOptions args

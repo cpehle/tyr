@@ -29,6 +29,13 @@ Useful overrides:
   TYR_QM9_RESUME_CHECKPOINT=/path/to/checkpoint
   TYR_QM9_STEPS=1000
   TYR_QM9_BATCH_SIZE=128
+  TYR_QM9_ARCHITECTURE=full|compact
+  TYR_QM9_HIDDEN_DIM=384
+  TYR_QM9_HEADS=12
+  TYR_QM9_HEAD_DIM=64
+  TYR_QM9_RFF_DIM=64
+  TYR_QM9_LAYERS=12
+  TYR_QM9_COORD_UPDATE_LAYERS=6
   TYR_QM9_SAMPLE_COUNT=10000
   TYR_QM9_SAMPLE_STEPS=1000
   TYR_QM9_MAX_MOLECULES=1000       Cap preprocessing for small dry runs.
@@ -111,6 +118,12 @@ fi
 if [[ -n "${TYR_QM9_MAX_LEN:-}" ]]; then
   run_cmd+=(--max-len "${TYR_QM9_MAX_LEN}")
 fi
+if [[ -n "${TYR_QM9_ARCHITECTURE:-}" ]]; then
+  run_cmd+=(--architecture "${TYR_QM9_ARCHITECTURE}")
+fi
+if [[ -n "${TYR_QM9_HIDDEN_DIM:-}" ]]; then
+  run_cmd+=(--hidden-dim "${TYR_QM9_HIDDEN_DIM}")
+fi
 if [[ -n "${TYR_QM9_HEADS:-}" ]]; then
   run_cmd+=(--heads "${TYR_QM9_HEADS}")
 fi
@@ -119,6 +132,15 @@ if [[ -n "${TYR_QM9_HEAD_DIM:-}" ]]; then
 fi
 if [[ -n "${TYR_QM9_MLP:-}" ]]; then
   run_cmd+=(--mlp "${TYR_QM9_MLP}")
+fi
+if [[ -n "${TYR_QM9_RFF_DIM:-}" ]]; then
+  run_cmd+=(--rff-dim "${TYR_QM9_RFF_DIM}")
+fi
+if [[ -n "${TYR_QM9_LAYERS:-}" ]]; then
+  run_cmd+=(--layers "${TYR_QM9_LAYERS}")
+fi
+if [[ -n "${TYR_QM9_COORD_UPDATE_LAYERS:-}" ]]; then
+  run_cmd+=(--coord-update-layers "${TYR_QM9_COORD_UPDATE_LAYERS}")
 fi
 if [[ -n "${TYR_QM9_LR:-}" ]]; then
   run_cmd+=(--lr "${TYR_QM9_LR}")
@@ -147,6 +169,13 @@ manifest="${run_root}/run.env"
   echo "TYR_QM9_XYZ_DIR=${xyz_dir}"
   echo "TYR_QM9_CHECKPOINT_DIR=${checkpoint_dir}"
   echo "TYR_QM9_OUT_PREFIX=${out_prefix}"
+  echo "TYR_QM9_ARCHITECTURE=${TYR_QM9_ARCHITECTURE:-profile-default}"
+  echo "TYR_QM9_HIDDEN_DIM=${TYR_QM9_HIDDEN_DIM:-profile-default}"
+  echo "TYR_QM9_HEADS=${TYR_QM9_HEADS:-profile-default}"
+  echo "TYR_QM9_HEAD_DIM=${TYR_QM9_HEAD_DIM:-profile-default}"
+  echo "TYR_QM9_RFF_DIM=${TYR_QM9_RFF_DIM:-profile-default}"
+  echo "TYR_QM9_LAYERS=${TYR_QM9_LAYERS:-profile-default}"
+  echo "TYR_QM9_COORD_UPDATE_LAYERS=${TYR_QM9_COORD_UPDATE_LAYERS:-profile-default}"
   echo "TYR_GIT_BRANCH=${git_branch}"
   echo "TYR_GIT_REV=${git_rev}"
   printf 'TYR_QM9_COMMAND='
