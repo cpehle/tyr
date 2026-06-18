@@ -135,6 +135,12 @@ Already close:
   Torch-backed molecule transformer with head-specific pairwise
   coordinate-distance attention bias and endpoint-coordinate, atom-label,
   split-count, and deletion heads.
+- It also contains `FullMoleculeTransformerParams`, the paper-scale architecture
+  used by `BranchingFlowsMoleculeTrainGenerate` paper profiles: stacked
+  transformer blocks, coordinate random Fourier features, per-layer/per-head
+  pairwise spatial attention bias, RoPE sequence encoding, additive coordinate
+  updates in the final layers, and endpoint coordinate/label/split/deletion
+  heads.
 - `Examples/BranchingFlows/MoleculeTransformerTrainDemo.lean` trains that
   transformer on the same QM9-shaped bridge path, with nonzero split and
   deletion loss weights, and fails if any of the four head losses does not
@@ -205,10 +211,8 @@ Missing for paper-faithful molecule generation:
   parsing, heavy-atom order preservation, and nearest-heavy hydrogen insertion.
 - Bridge-variance or stochastic-coordinate training targets if stochastic OU
   bridge samples are used rather than deterministic conditional means.
-- Scaling the molecule transformer from the local one-block overfit smoke to
-  the paper-scale 12-layer architecture with random Fourier position features,
-  RoPE sequence encoding, additive coordinate updates in the final layers, and
-  the published optimizer/schedule.
+- Muon optimizer parity. The paper profiles currently use the published LR and
+  cooldown schedule on Tyr's existing AdamW optimizer path.
 - OpenBabel/RDKit evaluation scripts for generated samples.
 
 ## Practical Replication Order
@@ -278,6 +282,9 @@ run scale described in the appendix variation note:
 
 - 800k training iterations.
 - batch size 128.
+- full molecule architecture: 12 layers, embedding dimension 384, 12 heads,
+  head dimension 64, RFF dimension 64, and coordinate updates in the final six
+  layers.
 - 10k generated samples.
 - cosine inference schedule with 1000 intervals.
 - checkpoint and optimizer-state persistence under the run root.
@@ -291,6 +298,14 @@ Dry-run the full launcher on a small subset:
 ```bash
 TYR_QM9_XYZ_DIR=Examples/BranchingFlows/qm9_xyz \
 TYR_QM9_PROFILE=smoke \
+TYR_QM9_ARCHITECTURE=full \
+TYR_QM9_HIDDEN_DIM=16 \
+TYR_QM9_HEADS=2 \
+TYR_QM9_HEAD_DIM=8 \
+TYR_QM9_MLP=32 \
+TYR_QM9_RFF_DIM=4 \
+TYR_QM9_LAYERS=2 \
+TYR_QM9_COORD_UPDATE_LAYERS=1 \
 TYR_QM9_STEPS=20 \
 TYR_QM9_TOTAL_STEPS=20 \
 TYR_QM9_BATCH_SIZE=2 \
@@ -303,13 +318,10 @@ Current parity status:
 
 - The data order, full QM9 atom vocabulary including fluorine, OU coordinate
   bridge, DFM label bridge, branching/deletion distributions, deletion padding,
-  1000-step cosine sampler, checkpointing, and 10k-sample run shape are wired.
-- The Tyr model used by `BranchingFlowsMoleculeTrainGenerate` is still the
-  compact reusable molecule transformer in
-  `Tyr/Model/BranchingFlows/MoleculeTransformer.lean`. It does not yet
-  implement the paper's full 12-layer architecture with RFF position features,
-  RoPE primary sequence encoding, layer-specific coordinate updates in the final
-  six layers, or Muon optimizer parity.
+  1000-step cosine sampler, checkpointing, 10k-sample run shape, and paper-scale
+  transformer architecture are wired.
+- The remaining known paper-parity gap in the training loop is Muon optimizer
+  parity; the current launcher uses AdamW with the paper LR/cooldown schedule.
 
 The shortest useful local demo is step 1. The shortest paper-faithful QM9
 replication needs the full sequence above plus a substantial GPU training run.
