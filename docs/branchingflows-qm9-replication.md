@@ -252,5 +252,64 @@ lake exe BranchingFlowsMoleculeTrainGenerate \
   --out-prefix /tmp/tyr_qm9_resumed
 ```
 
+## Paper-Scale Run Setup
+
+The launcher below is the reproducible entry point for a full QM9 run.  It
+requires either raw QM9 `.xyz` coordinate files or an already converted Tyr
+JSONL dataset.  Generated data, logs, checkpoints, and sample `.xyz` files are
+written under `output/` by default, which is gitignored.
+
+Raw QM9 `.xyz` input:
+
+```bash
+TYR_QM9_XYZ_DIR=/path/to/qm9_xyz \
+  scripts/branchingflows/run_qm9_paper.sh
+```
+
+Already converted JSONL input:
+
+```bash
+TYR_QM9_JSONL=/path/to/qm9_branching.jsonl \
+  scripts/branchingflows/run_qm9_paper.sh
+```
+
+The default profile is `paper-qm9-main`, matching the main unconditional figure
+run scale described in the appendix variation note:
+
+- 800k training iterations.
+- batch size 128.
+- 10k generated samples.
+- cosine inference schedule with 1000 intervals.
+- checkpoint and optimizer-state persistence under the run root.
+
+Use `TYR_QM9_PROFILE=paper-qm9-appendix` for the 500k-batch appendix recipe.
+Use `scripts/branchingflows/qm9_paper.env.example` as the editable launch
+template.
+
+Dry-run the full launcher on a small subset:
+
+```bash
+TYR_QM9_XYZ_DIR=Examples/BranchingFlows/qm9_xyz \
+TYR_QM9_PROFILE=smoke \
+TYR_QM9_STEPS=20 \
+TYR_QM9_TOTAL_STEPS=20 \
+TYR_QM9_BATCH_SIZE=2 \
+TYR_QM9_SAMPLE_COUNT=2 \
+TYR_QM9_SAMPLE_STEPS=8 \
+  scripts/branchingflows/run_qm9_paper.sh
+```
+
+Current parity status:
+
+- The data order, full QM9 atom vocabulary including fluorine, OU coordinate
+  bridge, DFM label bridge, branching/deletion distributions, deletion padding,
+  1000-step cosine sampler, checkpointing, and 10k-sample run shape are wired.
+- The Tyr model used by `BranchingFlowsMoleculeTrainGenerate` is still the
+  compact reusable molecule transformer in
+  `Tyr/Model/BranchingFlows/MoleculeTransformer.lean`. It does not yet
+  implement the paper's full 12-layer architecture with RFF position features,
+  RoPE primary sequence encoding, layer-specific coordinate updates in the final
+  six layers, or Muon optimizer parity.
+
 The shortest useful local demo is step 1. The shortest paper-faithful QM9
 replication needs the full sequence above plus a substantial GPU training run.
