@@ -166,6 +166,18 @@ The generated file should contain a three-atom water-shaped sample from the
 oracle model. This is a shape and event-path check, not a trained molecular
 model.
 
+Convert QM9 `.xyz` coordinate files into Tyr's JSONL schema with:
+
+```bash
+python3 scripts/qm9_xyz_to_branching_jsonl.py /path/to/qm9_xyz_dir --out data/qm9_branching.jsonl
+```
+
+For a repository-local fixture smoke:
+
+```bash
+python3 scripts/qm9_xyz_to_branching_jsonl.py Examples/BranchingFlows/qm9_xyz --out /tmp/tyr_qm9_fixture.jsonl
+```
+
 Run the local molecule training smoke with:
 
 ```bash
@@ -188,9 +200,9 @@ heads train through `trainStepMolecule`.
 
 Missing for paper-faithful molecule generation:
 
-- A QM9 preprocessing/export path. Keep this outside Lean initially, using
-  Python/RDKit/OpenBabel or `../MoleculeFlow.jl`, and emit a simple tensor/JSONL
-  artifact for Tyr.
+- Full-dataset QM9 preprocessing validation against QM9PACK/RDKit metadata. The
+  repository-local `scripts/qm9_xyz_to_branching_jsonl.py` covers coordinate
+  parsing, heavy-atom order preservation, and nearest-heavy hydrogen insertion.
 - Bridge-variance or stochastic-coordinate training targets if stochastic OU
   bridge samples are used rather than deterministic conditional means.
 - Scaling the molecule transformer from the local one-block overfit smoke to
@@ -207,8 +219,8 @@ Missing for paper-faithful molecule generation:
 2. Use `moleculeBranchingGenerate` for real molecule sampling. Its model sees
    both `s1` and `s2`, so it can convert endpoint coordinate predictions and
    atom-label logits into OU/DFM stepping over each schedule interval.
-3. Add QM9 preprocessing outside Lean that emits the `QM9.lean` JSON/JSONL
-   schema. Test on a tiny fixture batch before training.
+3. Run `scripts/qm9_xyz_to_branching_jsonl.py` on QM9 `.xyz` files to emit the
+   `QM9.lean` JSON/JSONL schema. Test on the tiny fixture batch before training.
 4. Use `lake exe BranchingFlowsMoleculeTrain` to validate the molecule training
    path on a fixed overfit target.
 5. Use `lake exe BranchingFlowsMoleculeTransformerTrain` to validate a
