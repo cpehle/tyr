@@ -1,4 +1,5 @@
 import Tyr
+import Tyr.Checkpoint
 import Tyr.Optim
 import Tyr.Model.BranchingFlows.MoleculeTransformer
 import Tyr.Model.BranchingFlows.QM9
@@ -31,6 +32,9 @@ private def defaultJsonl : String :=
 structure RunOptions where
   dataPath? : Option String := none
   outputPrefix : String := "examples_branching_molecule_trained"
+  checkpointDir : String := "checkpoints/branchingflows_molecule_train_generate"
+  resumeCheckpoint? : Option String := none
+  saveCheckpoint : Bool := true
   steps : Nat := 260
   batchSize : Nat := 4
   seed : UInt64 := 20260618
@@ -38,7 +42,8 @@ structure RunOptions where
 
 private def usage : String :=
   "usage: lake exe BranchingFlowsMoleculeTrainGenerate [--data molecules.jsonl|json] " ++
-  "[--out-prefix prefix] [--steps n] [--batch-size n] [--seed n]"
+  "[--out-prefix prefix] [--checkpoint-dir dir] [--resume-checkpoint dir] " ++
+  "[--no-checkpoint] [--steps n] [--batch-size n] [--seed n]"
 
 private def parseNatArg (name value : String) : IO Nat := do
   match value.toNat? with
@@ -57,6 +62,12 @@ partial def parseArgsLoop (args : List String) (opts : RunOptions) : IO RunOptio
       parseArgsLoop rest { opts with dataPath? := some value }
   | "--out-prefix" :: value :: rest =>
       parseArgsLoop rest { opts with outputPrefix := value }
+  | "--checkpoint-dir" :: value :: rest =>
+      parseArgsLoop rest { opts with checkpointDir := value }
+  | "--resume-checkpoint" :: value :: rest =>
+      parseArgsLoop rest { opts with resumeCheckpoint? := some value }
+  | "--no-checkpoint" :: rest =>
+      parseArgsLoop rest { opts with saveCheckpoint := false }
   | "--steps" :: value :: rest =>
       parseArgsLoop rest { opts with steps := (← parseNatArg "--steps" value) }
   | "--batch-size" :: value :: rest =>
@@ -160,6 +171,14 @@ def run (opts : RunOptions) : IO Unit := do
 
   torch.manualSeed opts.seed
   let initParams ← MoleculeTransformerParams.init vocab heads headDim mlp
+  let (initParams, resumedMeta?) ←
+    match opts.resumeCheckpoint? with
+    | none => pure (initParams, none)
+    | some checkpointDir => do
+        let (loadedParams, checkpointMeta) ←
+          _root_.torch.checkpoint.loadCheckpoint initParams checkpointDir "param"
+        IO.println s!"loaded molecule checkpoint from {checkpointDir} at iteration={checkpointMeta.iteration} trainLoss={checkpointMeta.trainLoss}"
+        pure (loadedParams, some checkpointMeta)
   let opt := Optim.adamw (lr := lr) (weight_decay := trainCfg.weightDecay)
   let initOptState := opt.init initParams
   let mut params := initParams
@@ -195,7 +214,16 @@ def run (opts : RunOptions) : IO Unit := do
   if !(Float.isFinite finalTrain.total) then
     throw (IO.userError "final train loss is not finite")
   if !(finalTrain.total < initTrain.total) then
-    throw (IO.userError s!"training did not reduce fixed train loss: initial={initTrain.total}, final={finalTrain.total}")
+    match resumedMeta? with
+    | some _ =>
+        IO.eprintln s!"warning: resumed training did not reduce fixed train loss over this short run: initial={initTrain.total}, final={finalTrain.total}"
+    | none =>
+        throw (IO.userError s!"training did not reduce fixed train loss: initial={initTrain.total}, final={finalTrain.total}")
+
+  if opts.saveCheckpoint then
+    _root_.torch.checkpoint.saveCheckpoint params opts.steps finalTrain.total finalTrain.total
+      opts.checkpointDir "param"
+    IO.println s!"wrote molecule checkpoint {opts.checkpointDir}"
 
   let (evalBridge, rng') ←
     sampleMoleculeBridgeBatch bridgeCfg evalStates opts.batchSize rng
@@ -233,6 +261,8 @@ def run (opts : RunOptions) : IO Unit := do
   IO.println s!"molecule_dataset records={records.size} usable={states.size} train={trainStates.size} eval={evalStates.size}"
   IO.println s!"molecule_train fixed_initial_total={initTrain.total} fixed_final_total={finalTrain.total}"
   IO.println s!"molecule_train last_batch_total={lastReport.total} eval_total={evalReport.total}"
+  if opts.saveCheckpoint then
+    IO.println s!"molecule_train checkpoint_dir={opts.checkpointDir}"
   IO.println s!"molecule_generate target_atoms={target.state.size} source_atoms={x0.state.size} generated_atoms={generated.finalState.state.size}"
   IO.println s!"molecule_generate splits={countSplits generated.events} deletes={countDeletes generated.events}"
   IO.println s!"wrote {opts.outputPrefix}_target.xyz"

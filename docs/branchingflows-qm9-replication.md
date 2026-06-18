@@ -226,8 +226,31 @@ Missing for paper-faithful molecule generation:
 5. Use `lake exe BranchingFlowsMoleculeTransformerTrain` to validate a
    transformer model with pairwise spatial attention bias and all molecule
    heads on a fixed overfit target, then scale to QM9.
-6. Export generated `.xyz`, convert with OpenBabel, evaluate via
+6. Train and generate with `lake exe BranchingFlowsMoleculeTrainGenerate`; keep
+   `--checkpoint-dir` enabled so the trained Tyr tensor parameters persist.
+7. Export generated `.xyz`, convert with OpenBabel, evaluate via
    `../MoleculeFlow.jl`/RDKit.
+
+Dataset-backed Tyr training/generation with checkpoint output:
+
+```bash
+lake exe BranchingFlowsMoleculeTrainGenerate \
+  --data /tmp/tyr_qm9_fixture.jsonl \
+  --out-prefix /tmp/tyr_qm9_fixture \
+  --checkpoint-dir /tmp/tyr_qm9_checkpoint \
+  --steps 200 \
+  --batch-size 4
+```
+
+Resume from a saved Tyr checkpoint:
+
+```bash
+lake exe BranchingFlowsMoleculeTrainGenerate \
+  --data /tmp/tyr_qm9_fixture.jsonl \
+  --resume-checkpoint /tmp/tyr_qm9_checkpoint \
+  --checkpoint-dir /tmp/tyr_qm9_checkpoint_resumed \
+  --out-prefix /tmp/tyr_qm9_resumed
+```
 
 The shortest useful local demo is step 1. The shortest paper-faithful QM9
 replication needs the full sequence above plus a substantial GPU training run.
