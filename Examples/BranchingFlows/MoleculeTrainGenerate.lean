@@ -31,35 +31,139 @@ private def defaultJsonl : String :=
 
 structure RunOptions where
   dataPath? : Option String := none
+  requireData : Bool := false
   outputPrefix : String := "examples_branching_molecule_trained"
   checkpointDir : String := "checkpoints/branchingflows_molecule_train_generate"
   resumeCheckpoint? : Option String := none
   saveCheckpoint : Bool := true
+  saveOptimizer : Bool := true
+  resumeOptimizer : Bool := true
   steps : Nat := 260
+  totalSteps : Nat := 260
+  warmupSteps : Nat := 0
+  cooldownSteps : Nat := 0
   batchSize : Nat := 4
+  vocabSize : Nat := 10
+  maskToken : Nat := 0
+  maxLen : UInt64 := 16
+  heads : UInt64 := 2
+  headDim : UInt64 := 8
+  mlp : UInt64 := 48
+  lr : Float := 8.0e-3
+  lrEnd : Float := 0.0
+  weightDecay : Float := 1.0e-4
+  gradClip : Float := 0.0
+  splitsWeight : Float := 0.25
+  delWeight : Float := 0.25
+  deletionPad : Float := 1.2
+  logEvery : Nat := 50
+  sampleSteps : Nat := 7
+  sampleCount : Nat := 1
+  generate : Bool := true
+  splitLogitCap : Float := 1.25
   seed : UInt64 := 20260618
   deriving Repr
 
 private def usage : String :=
   "usage: lake exe BranchingFlowsMoleculeTrainGenerate [--data molecules.jsonl|json] " ++
-  "[--out-prefix prefix] [--checkpoint-dir dir] [--resume-checkpoint dir] " ++
-  "[--no-checkpoint] [--steps n] [--batch-size n] [--seed n]"
+  "[--profile smoke|paper-qm9-main|paper-qm9-appendix] [--out-prefix prefix] " ++
+  "[--checkpoint-dir dir] [--resume-checkpoint dir] [--no-checkpoint] " ++
+  "[--steps n] [--total-steps n] [--batch-size n] [--max-len n] " ++
+  "[--heads n] [--head-dim n] [--mlp n] [--lr x] [--seed n]"
 
 private def parseNatArg (name value : String) : IO Nat := do
   match value.toNat? with
   | some n => pure n
   | none => throw (IO.userError s!"{name} expects a natural number, got '{value}'")
 
+private def parseUInt64Arg (name value : String) : IO UInt64 := do
+  pure (← parseNatArg name value).toUInt64
+
 private def parseSeedArg (value : String) : IO UInt64 := do
   let n ← parseNatArg "--seed" value
   pure n.toUInt64
+
+private def parseFloatLit? (s : String) : Option Float :=
+  let trimmed := s.trimAscii.toString
+  if trimmed.isEmpty then
+    none
+  else
+    let negative := trimmed.startsWith "-"
+    let body := if negative then (trimmed.drop 1).toString else trimmed
+    let unsigned? :=
+      match body.splitOn "." with
+      | [whole] =>
+        whole.toNat?.map Nat.toFloat
+      | [whole, frac] =>
+        match whole.toNat?, frac.toNat? with
+        | some w, some f =>
+          let denom : Float := (Nat.pow 10 frac.length).toFloat
+          some (w.toFloat + f.toFloat / denom)
+        | _, _ => none
+      | _ => none
+    unsigned?.map fun x => if negative then -x else x
+
+private def parseFloatArg (name value : String) : IO Float := do
+  match parseFloatLit? value with
+  | some x => pure x
+  | none => throw (IO.userError s!"{name} expects a decimal number, got '{value}'")
+
+private def applyProfile (name : String) (opts : RunOptions) : IO RunOptions := do
+  match name with
+  | "smoke" => pure opts
+  | "paper-qm9-main" | "paper-qm9-unconditional" =>
+      pure { opts with
+        requireData := true
+        steps := 800000
+        totalSteps := 800000
+        batchSize := 128
+        maxLen := 64
+        heads := 12
+        headDim := 32
+        mlp := 1536
+        lr := 0.005
+        lrEnd := 0.0
+        warmupSteps := 0
+        cooldownSteps := 50000
+        deletionPad := 1.2
+        logEvery := 100
+        sampleSteps := 1000
+        sampleCount := 10000
+        generate := true
+      }
+  | "paper-qm9-appendix" =>
+      pure { opts with
+        requireData := true
+        steps := 500000
+        totalSteps := 500000
+        batchSize := 128
+        maxLen := 64
+        heads := 12
+        headDim := 32
+        mlp := 1536
+        lr := 0.005
+        lrEnd := 0.0
+        warmupSteps := 0
+        cooldownSteps := 50000
+        deletionPad := 1.2
+        logEvery := 100
+        sampleSteps := 1000
+        sampleCount := 10000
+        generate := true
+      }
+  | _ =>
+      throw (IO.userError s!"unknown profile '{name}'\n{usage}")
 
 partial def parseArgsLoop (args : List String) (opts : RunOptions) : IO RunOptions := do
   match args with
   | [] => pure opts
   | "--help" :: _ => throw (IO.userError usage)
+  | "--profile" :: value :: rest =>
+      parseArgsLoop rest (← applyProfile value opts)
   | "--data" :: value :: rest =>
       parseArgsLoop rest { opts with dataPath? := some value }
+  | "--require-data" :: rest =>
+      parseArgsLoop rest { opts with requireData := true }
   | "--out-prefix" :: value :: rest =>
       parseArgsLoop rest { opts with outputPrefix := value }
   | "--checkpoint-dir" :: value :: rest =>
@@ -68,10 +172,56 @@ partial def parseArgsLoop (args : List String) (opts : RunOptions) : IO RunOptio
       parseArgsLoop rest { opts with resumeCheckpoint? := some value }
   | "--no-checkpoint" :: rest =>
       parseArgsLoop rest { opts with saveCheckpoint := false }
+  | "--no-optimizer-checkpoint" :: rest =>
+      parseArgsLoop rest { opts with saveOptimizer := false }
+  | "--no-resume-optimizer" :: rest =>
+      parseArgsLoop rest { opts with resumeOptimizer := false }
   | "--steps" :: value :: rest =>
       parseArgsLoop rest { opts with steps := (← parseNatArg "--steps" value) }
+  | "--total-steps" :: value :: rest =>
+      parseArgsLoop rest { opts with totalSteps := (← parseNatArg "--total-steps" value) }
+  | "--warmup-steps" :: value :: rest =>
+      parseArgsLoop rest { opts with warmupSteps := (← parseNatArg "--warmup-steps" value) }
+  | "--cooldown-steps" :: value :: rest =>
+      parseArgsLoop rest { opts with cooldownSteps := (← parseNatArg "--cooldown-steps" value) }
   | "--batch-size" :: value :: rest =>
       parseArgsLoop rest { opts with batchSize := (← parseNatArg "--batch-size" value) }
+  | "--vocab-size" :: value :: rest =>
+      parseArgsLoop rest { opts with vocabSize := (← parseNatArg "--vocab-size" value) }
+  | "--mask-token" :: value :: rest =>
+      parseArgsLoop rest { opts with maskToken := (← parseNatArg "--mask-token" value) }
+  | "--max-len" :: value :: rest =>
+      parseArgsLoop rest { opts with maxLen := (← parseUInt64Arg "--max-len" value) }
+  | "--heads" :: value :: rest =>
+      parseArgsLoop rest { opts with heads := (← parseUInt64Arg "--heads" value) }
+  | "--head-dim" :: value :: rest =>
+      parseArgsLoop rest { opts with headDim := (← parseUInt64Arg "--head-dim" value) }
+  | "--mlp" :: value :: rest =>
+      parseArgsLoop rest { opts with mlp := (← parseUInt64Arg "--mlp" value) }
+  | "--lr" :: value :: rest =>
+      parseArgsLoop rest { opts with lr := (← parseFloatArg "--lr" value) }
+  | "--lr-end" :: value :: rest =>
+      parseArgsLoop rest { opts with lrEnd := (← parseFloatArg "--lr-end" value) }
+  | "--weight-decay" :: value :: rest =>
+      parseArgsLoop rest { opts with weightDecay := (← parseFloatArg "--weight-decay" value) }
+  | "--grad-clip" :: value :: rest =>
+      parseArgsLoop rest { opts with gradClip := (← parseFloatArg "--grad-clip" value) }
+  | "--splits-weight" :: value :: rest =>
+      parseArgsLoop rest { opts with splitsWeight := (← parseFloatArg "--splits-weight" value) }
+  | "--del-weight" :: value :: rest =>
+      parseArgsLoop rest { opts with delWeight := (← parseFloatArg "--del-weight" value) }
+  | "--deletion-pad" :: value :: rest =>
+      parseArgsLoop rest { opts with deletionPad := (← parseFloatArg "--deletion-pad" value) }
+  | "--log-every" :: value :: rest =>
+      parseArgsLoop rest { opts with logEvery := (← parseNatArg "--log-every" value) }
+  | "--sample-steps" :: value :: rest =>
+      parseArgsLoop rest { opts with sampleSteps := (← parseNatArg "--sample-steps" value) }
+  | "--sample-count" :: value :: rest =>
+      parseArgsLoop rest { opts with sampleCount := (← parseNatArg "--sample-count" value) }
+  | "--no-generate" :: rest =>
+      parseArgsLoop rest { opts with generate := false }
+  | "--split-logit-cap" :: value :: rest =>
+      parseArgsLoop rest { opts with splitLogitCap := (← parseFloatArg "--split-logit-cap" value) }
   | "--seed" :: value :: rest =>
       parseArgsLoop rest { opts with seed := (← parseSeedArg value) }
   | flag :: rest =>
@@ -129,87 +279,142 @@ private def countDeletes (events : Array (Array BranchingStepEvent)) : Nat :=
 private def labelSymbol (maskToken label : Nat) : String :=
   if label == maskToken then "X" else qm9AtomicNumberSymbol label
 
+private def scheduledLr (opts : RunOptions) (step : Nat) : Float :=
+  if opts.warmupSteps > 0 && step < opts.warmupSteps then
+    opts.lr * (step.toFloat / opts.warmupSteps.toFloat)
+  else if opts.cooldownSteps > 0 && opts.totalSteps > opts.cooldownSteps &&
+      step >= opts.totalSteps - opts.cooldownSteps then
+    let cooldownStart := opts.totalSteps - opts.cooldownSteps
+    let progress := (step - cooldownStart).toFloat / opts.cooldownSteps.toFloat
+    opts.lr - progress * (opts.lr - opts.lrEnd)
+  else
+    opts.lr
+
+private def cosineGenerationSchedule (steps : Nat) : Array Float := Id.run do
+  if steps == 0 then
+    return #[0.0, 1.0]
+  let pi : Float := 3.14159265358979323846
+  let denom := steps.toFloat
+  let mut out : Array Float := #[]
+  for i in [:steps + 1] do
+    let s := i.toFloat / denom
+    out := out.push (1.0 - ((Float.cos (pi * s) + 1.0) / 2.0))
+  return out
+
+private def generatedPath (outPrefix : String) (sampleCount i : Nat) : String :=
+  if sampleCount == 1 then
+    outPrefix ++ "_generated.xyz"
+  else
+    outPrefix ++ "_generated_" ++ toString i ++ ".xyz"
+
 def run (opts : RunOptions) : IO Unit := do
   if opts.steps == 0 then
     throw (IO.userError "training steps must be positive")
   if opts.batchSize == 0 then
     throw (IO.userError "batch size must be positive")
+  if opts.totalSteps == 0 then
+    throw (IO.userError "total steps must be positive")
+  if opts.sampleCount == 0 then
+    throw (IO.userError "sample count must be positive")
+  if opts.vocabSize == 0 then
+    throw (IO.userError "vocab size must be positive")
+  if opts.maskToken >= opts.vocabSize then
+    throw (IO.userError s!"mask token {opts.maskToken} is outside vocab size {opts.vocabSize}")
+  if opts.maxLen == 0 then
+    throw (IO.userError "max length must be positive")
+  if opts.heads == 0 || opts.headDim == 0 || opts.mlp == 0 then
+    throw (IO.userError "heads, head-dim, and mlp must be positive")
+  if opts.requireData then
+    match opts.dataPath? with
+    | some path =>
+        if path == "-" then
+          throw (IO.userError "--require-data cannot use embedded fixture data")
+    | none =>
+        throw (IO.userError "--require-data requires --data")
 
-  let vocabSize : Nat := 10
-  let vocab : UInt64 := 10
-  let maskToken : Nat := 9
-  let maxLen : UInt64 := 16
-  let heads : UInt64 := 2
-  let headDim : UInt64 := 8
-  let mlp : UInt64 := 48
-  let lr : Float := 8.0e-3
-  let deletionPad : Float := 1.2
-
-  let bridgeCfg := MoleculeBridgeConfig.qm9 vocabSize maskToken
-  let labelDFM := DistNoisyDiscreteConfig.qm9 vocabSize maskToken
+  let vocab : UInt64 := opts.vocabSize.toUInt64
+  let bridgeCfg := MoleculeBridgeConfig.qm9 opts.vocabSize opts.maskToken
+  let labelDFM := DistNoisyDiscreteConfig.qm9 opts.vocabSize opts.maskToken
   let records ← loadRecords opts
   let allStates ← exceptToIO "convert molecule records"
-    (qm9RecordsToBranchingStates records { vocabSize? := some vocabSize, maskToken? := some maskToken })
-  let states := allStates.filter (fun state => state.state.size <= maxLen.toNat)
+    (qm9RecordsToBranchingStates records { vocabSize? := some opts.vocabSize, maskToken? := some opts.maskToken })
+  let states := allStates.filter (fun state => state.state.size <= opts.maxLen.toNat)
   if states.isEmpty then
-    throw (IO.userError s!"no molecules fit maxLen={maxLen}")
+    throw (IO.userError s!"no molecules fit maxLen={opts.maxLen}")
   let (trainStates, evalStates) := splitTrainEval states
   let evalStates := if evalStates.isEmpty then trainStates else evalStates
 
   let trainCfg : BranchingTrainConfig := {
-    maxLen := maxLen
+    maxLen := opts.maxLen
     padToken := 0
     anchorWeight := 1.0
-    splitsWeight := 0.25
-    delWeight := 0.25
-    weightDecay := 1.0e-4
-    gradClip := 0.0
+    splitsWeight := opts.splitsWeight
+    delWeight := opts.delWeight
+    weightDecay := opts.weightDecay
+    gradClip := opts.gradClip
   }
   let model :=
-    moleculeTransformerModel (maxLen := maxLen) (vocab := vocab)
-      (heads := heads) (headDim := headDim) (mlp := mlp)
+    moleculeTransformerModel (maxLen := opts.maxLen) (vocab := vocab)
+      (heads := opts.heads) (headDim := opts.headDim) (mlp := opts.mlp)
 
   torch.manualSeed opts.seed
-  let initParams ← MoleculeTransformerParams.init vocab heads headDim mlp
-  let (initParams, resumedMeta?) ←
+  let initParams ← MoleculeTransformerParams.init vocab opts.heads opts.headDim opts.mlp
+  let (initParams, startIteration, resumedMeta?) ←
     match opts.resumeCheckpoint? with
-    | none => pure (initParams, none)
+    | none => pure (initParams, 0, none)
     | some checkpointDir => do
         let (loadedParams, checkpointMeta) ←
           _root_.torch.checkpoint.loadCheckpoint initParams checkpointDir "param"
         IO.println s!"loaded molecule checkpoint from {checkpointDir} at iteration={checkpointMeta.iteration} trainLoss={checkpointMeta.trainLoss}"
-        pure (loadedParams, some checkpointMeta)
-  let opt := Optim.adamw (lr := lr) (weight_decay := trainCfg.weightDecay)
+        pure (loadedParams, checkpointMeta.iteration, some checkpointMeta)
+  let opt := Optim.adamw (lr := opts.lr) (weight_decay := trainCfg.weightDecay)
   let initOptState := opt.init initParams
+  let initOptState ←
+    match opts.resumeCheckpoint? with
+    | some checkpointDir =>
+        if opts.resumeOptimizer then
+          let hasOptim ← _root_.torch.checkpoint.optimStateExists checkpointDir
+          if hasOptim then
+            let (mu, nu, count) ← _root_.torch.checkpoint.loadOptimizerState initParams checkpointDir
+            IO.println s!"loaded molecule optimizer checkpoint from {checkpointDir} at count={count}"
+            pure { initOptState with fst := { count, mu, nu } }
+          else
+            IO.eprintln s!"warning: no optimizer checkpoint in {checkpointDir}; resuming parameters with fresh optimizer state"
+            pure initOptState
+        else
+          pure initOptState
+    | none => pure initOptState
   let mut params := initParams
   let mut optState := initOptState
   let mut rng : Rng := { state := opts.seed + 17 }
 
   let (fixedTrainBridge, rng') ←
     sampleMoleculeBridgeBatch bridgeCfg trainStates opts.batchSize rng
-      (maxLen := some maxLen.toNat) (deletionPad := deletionPad)
+      (maxLen := some opts.maxLen.toNat) (deletionPad := opts.deletionPad)
   rng := rng'
   let initTrain ←
-    evalMoleculeLoss (maxLen := maxLen) (vocab := vocab) trainCfg model params fixedTrainBridge
+    evalMoleculeLoss (maxLen := opts.maxLen) (vocab := vocab) trainCfg model params fixedTrainBridge
       (some labelDFM)
   let mut lastReport := initTrain
 
   for step in [:opts.steps] do
+    let globalStep := startIteration + step
+    let lr := scheduledLr opts globalStep
     let (bridgeBatch, rng') ←
       sampleMoleculeBridgeBatch bridgeCfg trainStates opts.batchSize rng
-        (maxLen := some maxLen.toNat) (deletionPad := deletionPad)
+        (maxLen := some opts.maxLen.toNat) (deletionPad := opts.deletionPad)
     rng := rng'
     let (params', optState', report) ←
-      trainStepMolecule (maxLen := maxLen) (vocab := vocab) trainCfg model
+      trainStepMolecule (maxLen := opts.maxLen) (vocab := vocab) trainCfg model
         params optState bridgeBatch lr (some labelDFM)
     params := params'
     optState := optState'
     lastReport := report
-    if step % 50 == 0 then
-      IO.println s!"molecule_train step={step} total={report.total} coord={report.coord} label={report.label} splits={report.splits} del={report.del}"
+    if opts.logEvery > 0 && step % opts.logEvery == 0 then
+      IO.println s!"molecule_train step={globalStep} lr={lr} total={report.total} coord={report.coord} label={report.label} splits={report.splits} del={report.del}"
 
   let finalTrain ←
-    evalMoleculeLoss (maxLen := maxLen) (vocab := vocab) trainCfg model params fixedTrainBridge
+    evalMoleculeLoss (maxLen := opts.maxLen) (vocab := vocab) trainCfg model params fixedTrainBridge
       (some labelDFM)
   if !(Float.isFinite finalTrain.total) then
     throw (IO.userError "final train loss is not finite")
@@ -221,53 +426,71 @@ def run (opts : RunOptions) : IO Unit := do
         throw (IO.userError s!"training did not reduce fixed train loss: initial={initTrain.total}, final={finalTrain.total}")
 
   if opts.saveCheckpoint then
-    _root_.torch.checkpoint.saveCheckpoint params opts.steps finalTrain.total finalTrain.total
+    let checkpointIteration := startIteration + opts.steps
+    _root_.torch.checkpoint.saveCheckpoint params checkpointIteration finalTrain.total finalTrain.total
       opts.checkpointDir "param"
+    if opts.saveOptimizer then
+      _root_.torch.checkpoint.saveOptimizerState optState.fst.mu optState.fst.nu
+        optState.fst.count opts.checkpointDir
     IO.println s!"wrote molecule checkpoint {opts.checkpointDir}"
 
   let (evalBridge, rng') ←
     sampleMoleculeBridgeBatch bridgeCfg evalStates opts.batchSize rng
-      (maxLen := some maxLen.toNat) (deletionPad := deletionPad)
+      (maxLen := some opts.maxLen.toNat) (deletionPad := opts.deletionPad)
   rng := rng'
   let evalReport ←
-    evalMoleculeLoss (maxLen := maxLen) (vocab := vocab) trainCfg model params evalBridge
+    evalMoleculeLoss (maxLen := opts.maxLen) (vocab := vocab) trainCfg model params evalBridge
       (some labelDFM)
 
   let target := evalStates[0]!
   writeMoleculeXYZ ⟨opts.outputPrefix ++ "_target.xyz"⟩ target
-    "target molecule from evaluation split" (labelSymbol maskToken)
+    "target molecule from evaluation split" (labelSymbol opts.maskToken)
 
-  let (x0Atom, rng') := MoleculeBridgeConfig.sampleInitialAtom bridgeCfg rng
-  rng := rng'
-  let x0 : BranchingState MoleculeAtom := BranchingState.mkDefault #[x0Atom] #[0]
-  writeMoleculeXYZ ⟨opts.outputPrefix ++ "_source.xyz"⟩ x0
-    "masked source molecule for learned generation" (labelSymbol maskToken)
-
-  let flow : CoalescentFlow MoleculeBridgeConfig MoleculeAtom :=
-    CoalescentFlow.mkDefault bridgeCfg TimeDist.betaOneThreeHalves noEventTimeDist
-  let learnedModel :=
-    moleculeTransformerIOModel (maxLen := maxLen) (vocab := vocab)
-      (heads := heads) (headDim := headDim) (mlp := mlp)
-      trainCfg.padToken params (splitLogitCap? := some 1.25)
-  let schedule : Array Float := #[0.0, 0.15, 0.3, 0.45, 0.6, 0.75, 0.9, 1.0]
-  let (generated, _rng) ←
-    moleculeBranchingGenerateIO flow x0 learnedModel schedule
-      (maxStateLen? := some maxLen.toNat) (rng := rng)
-  if generated.finalState.state.isEmpty then
-    throw (IO.userError "learned molecule generation produced an empty state")
-  writeMoleculeXYZ ⟨opts.outputPrefix ++ "_generated.xyz"⟩ generated.finalState
-    "learned BranchingFlows molecule generation" (labelSymbol maskToken)
+  let mut totalGeneratedSplits := 0
+  let mut totalGeneratedDeletes := 0
+  let mut lastSourceAtoms := 0
+  let mut lastGeneratedAtoms := 0
+  if opts.generate then
+    let flow : CoalescentFlow MoleculeBridgeConfig MoleculeAtom :=
+      CoalescentFlow.mkDefault bridgeCfg TimeDist.betaOneThreeHalves noEventTimeDist
+    let learnedModel :=
+      moleculeTransformerIOModel (maxLen := opts.maxLen) (vocab := vocab)
+        (heads := opts.heads) (headDim := opts.headDim) (mlp := opts.mlp)
+        trainCfg.padToken params (splitLogitCap? := some opts.splitLogitCap)
+    let schedule := cosineGenerationSchedule opts.sampleSteps
+    for i in [:opts.sampleCount] do
+      let (x0Atom, rng') := MoleculeBridgeConfig.sampleInitialAtom bridgeCfg rng
+      rng := rng'
+      let x0 : BranchingState MoleculeAtom := BranchingState.mkDefault #[x0Atom] #[0]
+      if i == 0 then
+        writeMoleculeXYZ ⟨opts.outputPrefix ++ "_source.xyz"⟩ x0
+          "masked source molecule for learned generation" (labelSymbol opts.maskToken)
+      let (generated, rng') ←
+        moleculeBranchingGenerateIO flow x0 learnedModel schedule
+          (maxStateLen? := some opts.maxLen.toNat) (rng := rng)
+      rng := rng'
+      if generated.finalState.state.isEmpty then
+        throw (IO.userError s!"learned molecule generation produced an empty state for sample {i}")
+      totalGeneratedSplits := totalGeneratedSplits + countSplits generated.events
+      totalGeneratedDeletes := totalGeneratedDeletes + countDeletes generated.events
+      lastSourceAtoms := x0.state.size
+      lastGeneratedAtoms := generated.finalState.state.size
+      writeMoleculeXYZ ⟨generatedPath opts.outputPrefix opts.sampleCount i⟩ generated.finalState
+        s!"learned BranchingFlows molecule generation sample={i}" (labelSymbol opts.maskToken)
 
   IO.println s!"molecule_dataset records={records.size} usable={states.size} train={trainStates.size} eval={evalStates.size}"
+  IO.println s!"molecule_config max_len={opts.maxLen} vocab_size={opts.vocabSize} mask_token={opts.maskToken} heads={opts.heads} head_dim={opts.headDim} mlp={opts.mlp} batch_size={opts.batchSize} steps={opts.steps} total_steps={opts.totalSteps}"
   IO.println s!"molecule_train fixed_initial_total={initTrain.total} fixed_final_total={finalTrain.total}"
   IO.println s!"molecule_train last_batch_total={lastReport.total} eval_total={evalReport.total}"
   if opts.saveCheckpoint then
     IO.println s!"molecule_train checkpoint_dir={opts.checkpointDir}"
-  IO.println s!"molecule_generate target_atoms={target.state.size} source_atoms={x0.state.size} generated_atoms={generated.finalState.state.size}"
-  IO.println s!"molecule_generate splits={countSplits generated.events} deletes={countDeletes generated.events}"
+  if opts.generate then
+    IO.println s!"molecule_generate samples={opts.sampleCount} sample_steps={opts.sampleSteps} target_atoms={target.state.size} last_source_atoms={lastSourceAtoms} last_generated_atoms={lastGeneratedAtoms}"
+    IO.println s!"molecule_generate splits={totalGeneratedSplits} deletes={totalGeneratedDeletes}"
   IO.println s!"wrote {opts.outputPrefix}_target.xyz"
-  IO.println s!"wrote {opts.outputPrefix}_source.xyz"
-  IO.println s!"wrote {opts.outputPrefix}_generated.xyz"
+  if opts.generate then
+    IO.println s!"wrote {opts.outputPrefix}_source.xyz"
+    IO.println s!"wrote generated samples under {opts.outputPrefix}_generated*.xyz"
 
 def _root_.main (args : List String) : IO UInt32 := do
   let opts ← parseOptions args
