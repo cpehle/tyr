@@ -677,6 +677,34 @@ static torch::Tensor portable_flash_attn(
   auto v = expand_kv_heads_for_gqa(value, q.size(1), value.size(1), enable_gqa, "value");
 
   if (!attn_mask.has_value() || !attn_mask->defined()) {
+    // On CUDA, prefer native grouped-query flash attention: pass the unexpanded
+    // K/V with enable_gqa and scope the SDP backend to flash, avoiding the
+    // (n_head/n_kv_head)x KV blow-up that head expansion costs at long context.
+    // Restore the backend flags afterwards; fall back to the expanded portable
+    // path on CPU or if flash declines these inputs.
+    // NOTE: the backend flags are process-global; this assumes attention calls
+    // are not issued concurrently from other threads (server runs serially).
+    if (query.is_cuda()) {
+      auto& ctx = at::globalContext();
+      const bool savedMath = ctx.userEnabledMathSDP();
+      const bool savedMem = ctx.userEnabledMemEfficientSDP();
+      const bool savedCudnn = ctx.userEnabledCuDNNSDP();
+      ctx.setSDPUseMath(false);
+      ctx.setSDPUseMemEfficient(false);
+      ctx.setSDPUseCuDNN(false);
+      try {
+        auto out = torch::scaled_dot_product_attention(
+            query, key, value, c10::nullopt, dropout_p, is_causal, scale, enable_gqa);
+        ctx.setSDPUseMath(savedMath);
+        ctx.setSDPUseMemEfficient(savedMem);
+        ctx.setSDPUseCuDNN(savedCudnn);
+        return out;
+      } catch (const std::exception&) {
+        ctx.setSDPUseMath(savedMath);
+        ctx.setSDPUseMemEfficient(savedMem);
+        ctx.setSDPUseCuDNN(savedCudnn);
+      }
+    }
     return torch::scaled_dot_product_attention(
         q, k, v, c10::nullopt, dropout_p, is_causal);
   }
