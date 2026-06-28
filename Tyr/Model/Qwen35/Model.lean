@@ -227,17 +227,17 @@ def forward2d {tokens : UInt64}
     let mut acc : T #[tokens, cfg.hidden_size] := zerosOn device
 
     for slot in [:cfg.num_experts_per_tok.toNat] do
+      -- Gather ONLY the routed expert's weights per token (an embedding row
+      -- lookup) instead of a one-hot contraction over all `num_experts`. This is
+      -- numerically identical to the one-hot selection but ~num_experts x cheaper.
       let idx2d : T #[tokens, 1] := data.slice topIdx 1 slot.toUInt64 1
-      let srcOnes : T #[tokens, 1] := onesOn device
-      let base : T #[tokens, cfg.num_experts] := zerosOn device
-      -- Match the expert-weight dtype (bf16 on CUDA) so the einsum/bmm operands agree;
-      -- castLike is a no-op when weights are fp32 (CPU).
-      let oneHot : T #[tokens, cfg.num_experts] :=
-        castLike m.gate_up_proj (torch.scatter_2d base 1 idx2d srcOnes)
-
-      let tokGateUpDyn : T #[] := torch.einsum2 "te,eih->tih" oneHot m.gate_up_proj
+      let idxRow : T #[1, tokens] := reshape idx2d #[1, tokens]
+      let gateUp2d : T #[cfg.num_experts, 2 * cfg.moe_intermediate_size * cfg.hidden_size] :=
+        reshape m.gate_up_proj #[cfg.num_experts, 2 * cfg.moe_intermediate_size * cfg.hidden_size]
+      let tokGateUpE : T #[1, tokens, 2 * cfg.moe_intermediate_size * cfg.hidden_size] :=
+        nn.embedding idxRow gateUp2d
       let tokGateUp : T #[tokens, 2 * cfg.moe_intermediate_size, cfg.hidden_size] :=
-        reshape tokGateUpDyn #[tokens, 2 * cfg.moe_intermediate_size, cfg.hidden_size]
+        reshape tokGateUpE #[tokens, 2 * cfg.moe_intermediate_size, cfg.hidden_size]
 
       let guDyn : T #[] := torch.einsum2 "tih,th->ti" tokGateUp hidden
       let gu : T #[tokens, 2 * cfg.moe_intermediate_size] := reshape guDyn #[tokens, 2 * cfg.moe_intermediate_size]
@@ -247,9 +247,12 @@ def forward2d {tokens : UInt64}
         data.slice gu 1 cfg.moe_intermediate_size cfg.moe_intermediate_size
       let inter : T #[tokens, cfg.moe_intermediate_size] := nn.silu gate * up
 
-      let tokDownDyn : T #[] := torch.einsum2 "te,ehi->thi" oneHot m.down_proj
+      let down2d : T #[cfg.num_experts, cfg.hidden_size * cfg.moe_intermediate_size] :=
+        reshape m.down_proj #[cfg.num_experts, cfg.hidden_size * cfg.moe_intermediate_size]
+      let tokDownE : T #[1, tokens, cfg.hidden_size * cfg.moe_intermediate_size] :=
+        nn.embedding idxRow down2d
       let tokDown : T #[tokens, cfg.hidden_size, cfg.moe_intermediate_size] :=
-        reshape tokDownDyn #[tokens, cfg.hidden_size, cfg.moe_intermediate_size]
+        reshape tokDownE #[tokens, cfg.hidden_size, cfg.moe_intermediate_size]
 
       let outDyn : T #[] := torch.einsum2 "thi,ti->th" tokDown inter
       let out : T #[tokens, cfg.hidden_size] := reshape outDyn #[tokens, cfg.hidden_size]
