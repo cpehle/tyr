@@ -230,7 +230,10 @@ def forward2d {tokens : UInt64}
       let idx2d : T #[tokens, 1] := data.slice topIdx 1 slot.toUInt64 1
       let srcOnes : T #[tokens, 1] := onesOn device
       let base : T #[tokens, cfg.num_experts] := zerosOn device
-      let oneHot : T #[tokens, cfg.num_experts] := torch.scatter_2d base 1 idx2d srcOnes
+      -- Match the expert-weight dtype (bf16 on CUDA) so the einsum/bmm operands agree;
+      -- castLike is a no-op when weights are fp32 (CPU).
+      let oneHot : T #[tokens, cfg.num_experts] :=
+        castLike m.gate_up_proj (torch.scatter_2d base 1 idx2d srcOnes)
 
       let tokGateUpDyn : T #[] := torch.einsum2 "te,eih->tih" oneHot m.gate_up_proj
       let tokGateUp : T #[tokens, 2 * cfg.moe_intermediate_size, cfg.hidden_size] :=
@@ -255,7 +258,8 @@ def forward2d {tokens : UInt64}
       let w : T #[tokens, cfg.hidden_size] := nn.expand w2d #[tokens, cfg.hidden_size]
       acc := acc + out * w
 
-    return acc
+    -- Restore the model dtype so downstream layers see consistent dtypes.
+    return castLike hidden acc
 
 end Qwen35MoeExperts
 
