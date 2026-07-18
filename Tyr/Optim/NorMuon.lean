@@ -414,6 +414,13 @@ def stepDistributedGroup {s : Shape}
 
     Used for embeddings, scalars, and other non-matrix parameters where
     orthogonalization doesn't apply.
+
+    Note: weight decay here is coupled L2-style (`grad + wd * param`, so the
+    decay is scaled by the learning rate through the momentum update), while
+    `stepSingle` uses decoupled AdamW-style decay
+    (`param ← param - effectiveLr * weightDecay * wdMul * param`). The two
+    paths therefore apply `weightDecay` inconsistently; the coupled form also
+    interacts with momentum, unlike true AdamW.
 -/
 def stepAdamLike {s : Shape} (param : T s) (grad : T s) (state : ParamState s)
     (cfg : Config) (lrMul wdMul : Float) : IO (T s × ParamState s) := do
