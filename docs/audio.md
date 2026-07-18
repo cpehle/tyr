@@ -189,8 +189,8 @@ Notes:
   `[batch, numKvHeads, maxSeqLen, headDim]` buffer on every append
   (`cc/src/tyr.cpp:2306`) — an O(maxSeqLen) copy per layer per token, despite
   the preallocated-buffer design.
-- An out-of-range `layerIdx` makes `attendLayer` return `newQ` unchanged as the
-  "attention output"; the shapes still typecheck, so keep indices valid.
+- An out-of-range `layerIdx` makes `attendLayer` panic with a message naming
+  the index and the layer count — keep indices valid.
 - The in-tree consumer is the GPU parity harness
   `Examples/GPU/RunMhaH100Decode.lean`. Model families under `Tyr/Model/`
   (Qwen, Whisper, …) currently define their own caches instead of reusing this

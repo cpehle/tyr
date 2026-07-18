@@ -4,15 +4,17 @@
 
   Layout: each layer holds preallocated K, V buffers of shape
   `[batch, numKvHeads, maxSeqLen, headDim]`. During generation we write the
-  new token's K, V at position `cache.currentLen` (in-place via `sliceScatter`)
-  and slice the cache to `[..., currentLen+1, ...]` for the attention call.
+  new token's K, V at position `cache.currentLen` via `sliceScatter` — note
+  this is NOT in-place: the C++ op clones the buffer and overwrites the slice
+  in the copy (`cc/src/tyr.cpp` `lean_torch_slice_scatter_along_dim`) — and
+  slice the cache to `[..., currentLen+1, ...]` for the attention call.
 
   The attention call goes through `nn.tyrFlashAttn4d`, which the C++
   `tyr::flash_attn` operator dispatches to the native TK decode kernel
-  (`tkMhaH100DecodeFwd`) when shape-eligible (BF16, qSeq=1, head_dim==128,
-  GQA-valid) and to PyTorch SDPA otherwise. The kernel handles non-multiple-
-  of-64 `kvSeq` via a runtime tail mask, so the cache view never has to be
-  padded.
+  (`tkMhaH100DecodeFwd`) when shape-eligible (BF16, qSeq=1,
+  head_dim ∈ {64, 128, 256}, GQA-valid) and to PyTorch SDPA otherwise. The
+  kernel handles non-multiple-of-64 `kvSeq` via a runtime tail mask, so the
+  cache view never has to be padded.
 
   This module is the canonical home for the cache abstraction. NanoChat,
   Qwen, and any other generation-loop code should import from here. (The
@@ -42,7 +44,7 @@ structure Cache (numLayers batch maxSeqLen numKvHeads headDim : UInt64) where
   seqLens : Array UInt64
   /-- Maximum sequence length this cache can hold -/
   maxLen : UInt64
-  deriving Repr
+  deriving Repr, Inhabited
 
 /-- Initialize empty KV cache for given dimensions.
     `device` defaults to CPU; pass `Device.CUDA n` (or a non-default value) so
@@ -135,8 +137,11 @@ def Cache.appendLayer (cache : Cache numLayers batch maxSeqLen numKvHeads headDi
 
     Returns the updated full cache and the attention output for the new query
     token. The C++ `tyr::flash_attn` dispatcher routes to `tkMhaH100DecodeFwd`
-    when the shape is decode-eligible (head_dim==128, qSeq==1, BF16, GQA-valid),
-    and falls back to PyTorch SDPA otherwise.
+    when the shape is decode-eligible (head_dim ∈ {64, 128, 256}, qSeq==1,
+    BF16, GQA-valid), and falls back to PyTorch SDPA otherwise.
+
+    Panics if `layerIdx` is out of range — an invalid index is a programming
+    error, not a condition to silently absorb.
 
     Does NOT advance `seqLens` — call `cache.incrementSeqLens` once per
     generated token after all layers have been processed for the step. -/
@@ -152,7 +157,8 @@ def Cache.attendLayer
   let cache' := cache.appendLayer layerIdx newK newV
   let validLen := cache.currentLen + 1
   match cache'.layers[layerIdx]? with
-  | none => (cache', newQ)
+  | none =>
+    panic! s!"Cache.attendLayer: layerIdx {layerIdx} out of range (cache has {cache'.layers.size} layers)"
   | some lc =>
     let (kView, vView) := lc.attentionView validLen
     let output := nn.tyrFlashAttn4d newQ kView vView none 0.0 false none enableGqa
