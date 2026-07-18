@@ -53,17 +53,20 @@ structure RunOptions where
   coordUpdateLayers : Nat := 1
   lr : Float := 8.0e-3
   lrEnd : Float := 0.0
-  weightDecay : Float := 1.0e-4
+  weightDecay : Float := 0.01
   gradClip : Float := 0.0
-  splitsWeight : Float := 0.25
-  delWeight : Float := 0.25
+  coordWeight : Float := 10.0
+  labelWeight : Float := 0.3333333333333333
+  splitsWeight : Float := 1.0
+  delWeight : Float := 1.0
+  useBranchingTimeProb : Float := 0.5
   deletionPad : Float := 1.2
   logEvery : Nat := 50
   sampleSteps : Nat := 7
   sampleCount : Nat := 1
   generate : Bool := true
   device : Device := Device.CPU
-  splitLogitCap : Float := 1.25
+  splitLogitCap? : Option Float := none
   coordTargetCap? : Option Float := none
   seed : UInt64 := 20260618
   deriving Repr
@@ -75,6 +78,8 @@ private def usage : String :=
   "[--steps n] [--total-steps n] [--batch-size n] [--max-len n] " ++
   "[--architecture compact|full] [--hidden-dim n] [--heads n] [--head-dim n] " ++
   "[--mlp n] [--rff-dim n] [--layers n] [--coord-update-layers n] [--coord-target-cap x] " ++
+  "[--coord-weight x] [--label-weight x] [--splits-weight x] [--del-weight x] " ++
+  "[--branching-time-prob x] [--split-logit-cap x] " ++
   "[--fixed-labels] [--device cpu|cuda] [--lr x] [--seed n]"
 
 private def parseNatArg (name value : String) : IO Nat := do
@@ -243,10 +248,16 @@ partial def parseArgsLoop (args : List String) (opts : RunOptions) : IO RunOptio
       parseArgsLoop rest { opts with weightDecay := (← parseFloatArg "--weight-decay" value) }
   | "--grad-clip" :: value :: rest =>
       parseArgsLoop rest { opts with gradClip := (← parseFloatArg "--grad-clip" value) }
+  | "--coord-weight" :: value :: rest =>
+      parseArgsLoop rest { opts with coordWeight := (← parseFloatArg "--coord-weight" value) }
+  | "--label-weight" :: value :: rest =>
+      parseArgsLoop rest { opts with labelWeight := (← parseFloatArg "--label-weight" value) }
   | "--splits-weight" :: value :: rest =>
       parseArgsLoop rest { opts with splitsWeight := (← parseFloatArg "--splits-weight" value) }
   | "--del-weight" :: value :: rest =>
       parseArgsLoop rest { opts with delWeight := (← parseFloatArg "--del-weight" value) }
+  | "--branching-time-prob" :: value :: rest =>
+      parseArgsLoop rest { opts with useBranchingTimeProb := (← parseFloatArg "--branching-time-prob" value) }
   | "--deletion-pad" :: value :: rest =>
       parseArgsLoop rest { opts with deletionPad := (← parseFloatArg "--deletion-pad" value) }
   | "--log-every" :: value :: rest =>
@@ -263,7 +274,9 @@ partial def parseArgsLoop (args : List String) (opts : RunOptions) : IO RunOptio
   | "--no-generate" :: rest =>
       parseArgsLoop rest { opts with generate := false }
   | "--split-logit-cap" :: value :: rest =>
-      parseArgsLoop rest { opts with splitLogitCap := (← parseFloatArg "--split-logit-cap" value) }
+      parseArgsLoop rest { opts with splitLogitCap? := some (← parseFloatArg "--split-logit-cap" value) }
+  | "--no-split-logit-cap" :: rest =>
+      parseArgsLoop rest { opts with splitLogitCap? := none }
   | "--coord-target-cap" :: value :: rest =>
       parseArgsLoop rest { opts with coordTargetCap? := some (← parseFloatArg "--coord-target-cap" value) }
   | "--seed" :: value :: rest =>
@@ -391,6 +404,27 @@ private def deviceName : Device → String
   | .MPS => "mps"
   | .CUDA i => s!"cuda:{i}"
 
+private def muonCountPath (dir : String) : String :=
+  dir ++ "/optim_muon_count.txt"
+
+private def muonOptimStateExists (dir : String) : IO Bool :=
+  data.fileExists (muonCountPath dir)
+
+private def saveMuonOptimState [TensorStruct Params]
+    (state : MoleculeMuonState Params) (dir : String) : IO Unit := do
+  _root_.torch.checkpoint.saveParams state.momentum dir "optim_muon_momentum"
+  IO.FS.writeFile (muonCountPath dir) (toString state.step)
+
+private def loadMuonOptimState [TensorStruct Params]
+    (template : Params) (dir : String) : IO (MoleculeMuonState Params) := do
+  let momentum ←
+    _root_.torch.checkpoint.loadParams template dir "optim_muon_momentum"
+  let countRaw ← IO.FS.readFile (muonCountPath dir)
+  let count ← match countRaw.trimAscii.toString.toNat? with
+    | some n => pure n
+    | none => throw (IO.userError s!"invalid Muon optimizer count in {muonCountPath dir}")
+  pure { momentum := TensorStruct.map autograd.detach momentum, step := count }
+
 private def runWithModel {Params : Type} [TensorStruct Params] {maxLen vocab : UInt64}
     (opts : RunOptions)
     (recordsCount usableCount : Nat)
@@ -416,6 +450,7 @@ private def runWithModel {Params : Type} [TensorStruct Params] {maxLen vocab : U
 
   let (fixedTrainBridge, rng') ←
     sampleMoleculeBridgeBatch bridgeCfg trainStates opts.batchSize rng
+      (useBranchingTimeProb := opts.useBranchingTimeProb)
       (maxLen := some opts.maxLen.toNat) (deletionPad := opts.deletionPad)
   rng := rng'
   let initTrain ←
@@ -425,19 +460,18 @@ private def runWithModel {Params : Type} [TensorStruct Params] {maxLen vocab : U
   let mut lastReport := initTrain
 
   if !opts.generateOnly then
-    let opt := Optim.adamw (lr := opts.lr) (weight_decay := trainCfg.weightDecay)
-    let initOptState := opt.init params
+    let initOptState := initMoleculeMuonState params
     let initOptState ←
       match opts.resumeCheckpoint? with
       | some checkpointDir =>
           if opts.resumeOptimizer then
-            let hasOptim ← _root_.torch.checkpoint.optimStateExists checkpointDir
+            let hasOptim ← muonOptimStateExists checkpointDir
             if hasOptim then
-              let (mu, nu, count) ← _root_.torch.checkpoint.loadOptimizerState params checkpointDir
-              IO.println s!"loaded molecule optimizer checkpoint from {checkpointDir} at count={count}"
-              pure { initOptState with fst := { count, mu, nu } }
+              let loaded ← loadMuonOptimState params checkpointDir
+              IO.println s!"loaded molecule Muon optimizer checkpoint from {checkpointDir} at count={loaded.step}"
+              pure loaded
             else
-              IO.eprintln s!"warning: no optimizer checkpoint in {checkpointDir}; resuming parameters with fresh optimizer state"
+              IO.eprintln s!"warning: no Muon optimizer checkpoint in {checkpointDir}; resuming parameters with fresh optimizer state"
               pure initOptState
           else
             pure initOptState
@@ -449,10 +483,11 @@ private def runWithModel {Params : Type} [TensorStruct Params] {maxLen vocab : U
       let lr := scheduledLr opts globalStep
       let (bridgeBatch, rng') ←
         sampleMoleculeBridgeBatch bridgeCfg trainStates opts.batchSize rng
+          (useBranchingTimeProb := opts.useBranchingTimeProb)
           (maxLen := some opts.maxLen.toNat) (deletionPad := opts.deletionPad)
       rng := rng'
       let (params', optState', report) ←
-        trainStepMolecule (maxLen := maxLen) (vocab := vocab) trainCfg model
+        trainStepMoleculeMuon (maxLen := maxLen) (vocab := vocab) trainCfg model
           params optState bridgeBatch lr labelDFM (device := opts.device)
       params := params'
       optState := optState'
@@ -477,12 +512,12 @@ private def runWithModel {Params : Type} [TensorStruct Params] {maxLen vocab : U
       _root_.torch.checkpoint.saveCheckpoint params checkpointIteration finalTrain.total finalTrain.total
         opts.checkpointDir "param"
       if opts.saveOptimizer then
-        _root_.torch.checkpoint.saveOptimizerState optState.fst.mu optState.fst.nu
-          optState.fst.count opts.checkpointDir
+        saveMuonOptimState optState opts.checkpointDir
       IO.println s!"wrote molecule checkpoint {opts.checkpointDir}"
 
   let (evalBridge, rng') ←
     sampleMoleculeBridgeBatch bridgeCfg evalStates opts.batchSize rng
+      (useBranchingTimeProb := opts.useBranchingTimeProb)
       (maxLen := some opts.maxLen.toNat) (deletionPad := opts.deletionPad)
   rng := rng'
   let evalReport ←
@@ -535,7 +570,8 @@ private def runWithModel {Params : Type} [TensorStruct Params] {maxLen vocab : U
 
   IO.println s!"molecule_dataset records={recordsCount} usable={usableCount} train={trainStates.size} eval={evalStates.size}"
   let labelProcess := if opts.fixedLabels then "fixed" else "dfm"
-  IO.println s!"molecule_config architecture={architectureName opts} device={deviceName opts.device} max_len={opts.maxLen} vocab_size={opts.vocabSize} mask_token={opts.maskToken} label_process={labelProcess} hidden_dim={opts.hiddenDim} heads={opts.heads} head_dim={opts.headDim} mlp={opts.mlp} rff_dim={opts.rffDim} layers={opts.layers} coord_update_layers={opts.coordUpdateLayers} batch_size={opts.batchSize} steps={opts.steps} total_steps={opts.totalSteps}"
+  let splitCap := match opts.splitLogitCap? with | some cap => toString cap | none => "none"
+  IO.println s!"molecule_config architecture={architectureName opts} optimizer=muon device={deviceName opts.device} max_len={opts.maxLen} vocab_size={opts.vocabSize} mask_token={opts.maskToken} label_process={labelProcess} hidden_dim={opts.hiddenDim} heads={opts.heads} head_dim={opts.headDim} mlp={opts.mlp} rff_dim={opts.rffDim} layers={opts.layers} coord_update_layers={opts.coordUpdateLayers} batch_size={opts.batchSize} steps={opts.steps} total_steps={opts.totalSteps} coord_weight={opts.coordWeight} label_weight={opts.labelWeight} splits_weight={opts.splitsWeight} del_weight={opts.delWeight} branching_time_prob={opts.useBranchingTimeProb} split_logit_cap={splitCap}"
   if opts.generateOnly then
     IO.println s!"molecule_eval checkpoint_train_total={finalTrain.total} heldout_total={evalReport.total}"
   else
@@ -577,6 +613,18 @@ def run (opts : RunOptions) : IO Unit := do
       if cap <= 0.0 then
         throw (IO.userError "--coord-target-cap must be positive")
   | none => pure ()
+  if opts.useBranchingTimeProb < 0.0 || opts.useBranchingTimeProb > 1.0 then
+    throw (IO.userError "--branching-time-prob must be between 0 and 1")
+  if opts.coordWeight < 0.0 || opts.labelWeight < 0.0 ||
+      opts.splitsWeight < 0.0 || opts.delWeight < 0.0 then
+    throw (IO.userError "molecule loss weights must be nonnegative")
+  if opts.weightDecay < 0.0 then
+    throw (IO.userError "--weight-decay must be nonnegative")
+  match opts.splitLogitCap? with
+  | some cap =>
+      if cap > 11.0 then
+        throw (IO.userError "--split-logit-cap cannot exceed the core Julia-compatible cap of 11")
+  | none => pure ()
   if opts.heads == 0 || opts.headDim == 0 || opts.mlp == 0 then
     throw (IO.userError "heads, head-dim, and mlp must be positive")
   if opts.fullArchitecture then
@@ -613,6 +661,8 @@ def run (opts : RunOptions) : IO Unit := do
     maxLen := opts.maxLen
     padToken := 0
     anchorWeight := 1.0
+    coordWeight := opts.coordWeight
+    labelWeight := opts.labelWeight
     splitsWeight := opts.splitsWeight
     delWeight := opts.delWeight
     weightDecay := opts.weightDecay
@@ -635,7 +685,7 @@ def run (opts : RunOptions) : IO Unit := do
         (hidden := opts.hiddenDim) (heads := opts.heads) (headDim := opts.headDim)
         (mlp := opts.mlp) (rff := opts.rffDim) (layers := opts.layers)
         trainCfg.padToken params (coordUpdateLayers := opts.coordUpdateLayers)
-        (splitLogitCap? := some opts.splitLogitCap)
+        (splitLogitCap? := opts.splitLogitCap?)
         (coordTargetCap? := opts.coordTargetCap?)
         (device := opts.device)
     runWithModel (maxLen := opts.maxLen) (vocab := vocab)
@@ -650,7 +700,7 @@ def run (opts : RunOptions) : IO Unit := do
     let makeLearnedModel := fun params =>
       moleculeTransformerIOModel (maxLen := opts.maxLen) (vocab := vocab)
         (heads := opts.heads) (headDim := opts.headDim) (mlp := opts.mlp)
-        trainCfg.padToken params (splitLogitCap? := some opts.splitLogitCap)
+        trainCfg.padToken params (splitLogitCap? := opts.splitLogitCap?)
         (coordTargetCap? := opts.coordTargetCap?)
         (device := opts.device)
     runWithModel (maxLen := opts.maxLen) (vocab := vocab)
