@@ -669,6 +669,12 @@ lean_exe BranchingFlowsMoleculeTrain where
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
+/-- Molecule-shaped oracle generation with branch-event trajectory export. -/
+lean_exe BranchingFlowsMoleculeGenerate where
+  root := `Examples.BranchingFlows.MoleculeGenerationDemo
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
 /-- BranchingFlows molecule transformer overfit training check. -/
 lean_exe BranchingFlowsMoleculeTransformerTrain where
   root := `Examples.BranchingFlows.MoleculeTransformerTrainDemo

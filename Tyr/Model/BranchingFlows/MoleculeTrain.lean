@@ -28,6 +28,24 @@ structure BranchingMoleculeBatch (batch maxLen : UInt64) where
   delTarget : T #[batch, maxLen]
   deriving Repr
 
+namespace BranchingMoleculeBatch
+
+def toDevice {batch maxLen : UInt64}
+    (device : Device) (x : BranchingMoleculeBatch batch maxLen) :
+    BranchingMoleculeBatch batch maxLen :=
+  { t := x.t.to device
+    coord := x.coord.to device
+    coordAnchor := x.coordAnchor.to device
+    label := x.label.to device
+    labelAnchor := x.labelAnchor.to device
+    labelLossScale := x.labelLossScale.to device
+    padmask := x.padmask.to device
+    flowmask := x.flowmask.to device
+    splitsTarget := x.splitsTarget.to device
+    delTarget := x.delTarget.to device }
+
+end BranchingMoleculeBatch
+
 structure BranchingMoleculeModel (maxLen vocab : UInt64) (Params : Type) where
   forward : {batch : UInt64} → Params → T #[batch, maxLen, 3] → T #[batch, maxLen] → T #[batch]
     → T #[batch, maxLen]
@@ -208,10 +226,16 @@ def trainStepMolecule {maxLen vocab : UInt64} {Params : Type} [TensorStruct Para
     (result : BranchingBridgeResult MoleculeAtom)
     (lr : Float)
     (labelDFM : Option DistNoisyDiscreteConfig := none)
-    (clipGrads : Params → Float → IO Unit := fun _ _ => pure ())
+    (clipGrads : Params → Float → IO Unit := fun params maxNorm => do
+      let _ ← TensorStruct.mapM (fun tensor => do
+        let _ ← nn.clip_grad_norm_ tensor maxNorm
+        pure tensor) params
+      pure ())
+    (device : Device := Device.CPU)
     : IO (Params × Optim.AdamWState Params × BranchingMoleculeLossReport) := do
   let params := TensorStruct.zeroGrads (TensorStruct.makeLeafParams params)
-  let ⟨batch, packed⟩ ← packBranchingMolecule cfg result labelDFM
+  let ⟨batch, packedCpu⟩ ← packBranchingMolecule cfg result labelDFM
+  let packed := packedCpu.toDevice device
   let (coordPred, labelLogits, splitLogits, delLogits) ←
     model.forward (batch := batch) params packed.coord packed.label packed.t packed.padmask
   let (totalLoss, report) :=
@@ -233,9 +257,11 @@ def evalMoleculeLoss {maxLen vocab : UInt64} {Params : Type}
     (params : Params)
     (result : BranchingBridgeResult MoleculeAtom)
     (labelDFM : Option DistNoisyDiscreteConfig := none)
+    (device : Device := Device.CPU)
     : IO BranchingMoleculeLossReport := do
   torch.autograd.no_grad do
-    let ⟨batch, packed⟩ ← packBranchingMolecule cfg result labelDFM
+    let ⟨batch, packedCpu⟩ ← packBranchingMolecule cfg result labelDFM
+    let packed := packedCpu.toDevice device
     let (coordPred, labelLogits, splitLogits, delLogits) ←
       model.forward (batch := batch) params packed.coord packed.label packed.t packed.padmask
     let (_, report) :=
@@ -291,6 +317,10 @@ def sampleMoleculeBridgeBatch
       (deletionPad := deletionPad)
       (x1Modifier := maskDeletedMoleculeLabels bridgeCfg)
       (rng := rng)
+      (sampleBridge? := some (fun cfg x0 x1 t0 t rng =>
+        MoleculeBridgeConfig.sampleBridge cfg x0 x1 t0 t rng))
+      (sampleX0? := some (fun _root rng =>
+        MoleculeBridgeConfig.sampleInitialAtom bridgeCfg rng))
   pure (result, rngOut)
 
 end torch.branching
