@@ -249,16 +249,9 @@ smoke-tested through the FFI surface in `Tests/TestModdedGPT.lean`.
 
 Caveats to be aware of when extending the suite:
 
-- **Orphaned tests.** 14 files define `@[test]` functions but are imported by
-  no runner, so they compile into `lean_lib Tests` yet never execute:
-  `Tests/TestDiffEq{BrownianFin,BrownianOption,EventSave,ImplicitDense,Interpolation,KencarpInterpolation,OrderParity2,PathCompose,Path,ProgressMeterParity2,SaveAt,SteadyStateEvent}Parity.lean`,
-  `Tests/TestModularBudget.lean`, and `Tests/TestNanoGPTCopy.lean`. Five of the
-  DiffEq ones even define their own `main` but have no `lean_exe` target.
 - **Orphaned examples.** `Examples/GPU/Run{BrownianSample,BrownianDescent,EulerMaruyamaFused,RKCombine,RKFusedSolve,MhaGB10}.lean`
   are well-documented CPU↔GPU parity harnesses with no executable target; they
   only get compiled via `lake build Examples`.
-- **Empty directories.** `Tyr/TVMArith/` and `Tests/TVMArith/` exist but
-  contain nothing and are referenced nowhere — dead placeholders.
 - `Tests/Test.lean` defines helpers (`encode`, `decode`, `charToInt`, ...) at
   global scope and imports `Examples.GPT.*`, so the test library depends on the
   examples library and those generic names leak into downstream test modules.
