@@ -304,12 +304,11 @@ private def moleculeMuonOrthogonalize {s : Shape}
     (grad : T s) (numIters : UInt64) : IO (T s) := do
   let (rows, cols) := flattenedMatrixShape s
   let flat : T #[rows, cols] := reshape grad #[rows, cols]
-  let maxAbs := nn.item (nn.maxAll (nn.abs flat))
-  if maxAbs == 0.0 then
-    pure grad
-  else
-    let orth ← Optim.PolarExpress.muonOrthogonalize flat numIters
-    pure (reshape orth s)
+  -- The C++ Newton–Schulz normalizes with an epsilon guard (`X / (norm + 1e-7)`,
+  -- `cc/src/tyr_polar.cpp`), so a zero gradient orthogonalizes safely to zero.
+  -- A host-side zero check here would force a GPU→CPU sync per leaf per step.
+  let orth ← Optim.PolarExpress.muonOrthogonalize flat numIters
+  pure (reshape orth s)
 
 /--
 One Muon update over an arbitrary tensor tree.
