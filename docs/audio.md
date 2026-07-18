@@ -47,7 +47,8 @@ model frontend.
 `Tyr/Inference/KVCache.lean` provides a key/value cache for transformer decode
 loops. Each layer owns preallocated K and V buffers of shape
 `[batch, numKvHeads, maxSeqLen, headDim]`; a decode step writes the new token's
-K/V at position `cache.currentLen` (via `torch.data.sliceScatter`), slices the
+K/V at position `cache.currentLen` (in place, via
+`torch.data.sliceScatterInplace`), slices the
 layer to the valid prefix, and runs attention through `nn.tyrFlashAttn4d`
 (`Tyr/Torch.lean:1198`).
 
@@ -175,7 +176,7 @@ structure Cache (numLayers batch maxSeqLen numKvHeads headDim : UInt64) where
 | `Cache.hasRoom` | `Cache … → Bool` | `currentLen < maxLen` |
 | `Cache.appendLayer` | `(layerIdx : Nat) (newK newV : …) → Cache …` | append without attending |
 | `Cache.getLayer` / `Cache.setLayer` | `…` | per-layer access |
-| `LayerCache.append` | `(newK newV : T #[batch, numKvHeads, 1, headDim]) (pos : UInt64) → LayerCache …` | `sliceScatter` one token at `pos` |
+| `LayerCache.append` | `(newK newV : T #[batch, numKvHeads, 1, headDim]) (pos : UInt64) → LayerCache …` | in-place `sliceScatterInplace` of one token at `pos`; the passed-in layer cache must not be reused |
 | `LayerCache.attentionView` | `(validLen : UInt64) → (T #[…, validLen, …] × T #[…, validLen, …])` | unpadded K/V views over `[0, validLen)` |
 
 Notes:
@@ -185,10 +186,14 @@ Notes:
   TK route additionally requires Hopper.
 - The dtype is hardcoded to BF16 (`toBFloat16'` over `zeros`); FP16/FP32
   pipelines need a cast or their own cache.
-- `sliceScatter` currently clones the full
-  `[batch, numKvHeads, maxSeqLen, headDim]` buffer on every append
-  (`cc/src/tyr.cpp:2306`) — an O(maxSeqLen) copy per layer per token, despite
-  the preallocated-buffer design.
+- Appends mutate the cache buffers in place via `sliceScatterInplace`
+  (`cc/src/tyr.cpp` `lean_torch_slice_scatter_along_dim_inplace`: narrow +
+  copy_ on the original tensor, no clone), so a decode token costs O(1) per
+  layer instead of an O(maxSeqLen) buffer copy. The trade-off is an ownership
+  contract: a `Cache`/`LayerCache` value passed to `attendLayer` /
+  `appendLayer` / `LayerCache.append` must not be reused after the call —
+  old and new values share the mutated tensors. `Cache.init` allocates fresh
+  buffers per layer so layers never alias each other's storage.
 - An out-of-range `layerIdx` makes `attendLayer` panic with a message naming
   the index and the layer count — keep indices valid.
 - The in-tree consumer is the GPU parity harness
