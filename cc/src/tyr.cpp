@@ -2320,6 +2320,28 @@ lean_object* lean_torch_slice_scatter_along_dim(
   return fromTorchTensor(result_);
 }
 
+// In-place variant of `lean_torch_slice_scatter_along_dim`: writes `src` into
+// `input` directly instead of cloning. `input` must be uniquely owned by the
+// caller — the mutation is observable through any other alias of the tensor.
+// Same borrowed-in/inc-out contract as `lean_torch_zero_grad`.
+lean_object* lean_torch_slice_scatter_along_dim_inplace(
+  lean_obj_arg /*s*/,
+  lean_obj_arg /*src_shape*/,
+  b_lean_obj_arg input,
+  uint64_t dim,
+  uint64_t start,
+  b_lean_obj_arg src
+) {
+  auto input_ = borrowTensor(input);
+  auto src_ = borrowTensor(src);
+  auto dim_i = static_cast<int64_t>(dim);
+  auto start_i = static_cast<int64_t>(start);
+
+  input_.narrow(dim_i, start_i, src_.size(dim_i)).copy_(src_);
+  lean_inc(input);
+  return input;
+}
+
 // Slice a 2D tensor along dimension 0: data[start:start+len, :]
 lean_object* lean_torch_slice_2d(
   uint64_t /*n*/,

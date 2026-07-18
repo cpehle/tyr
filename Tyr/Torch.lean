@@ -886,6 +886,18 @@ opaque sliceScatter {s src : Shape}
     (src : @& T src)
     : T s
 
+/-- Like `sliceScatter`, but writes `src` into `data` in place and returns the
+    same tensor, avoiding a full clone (e.g. for KV-cache append).
+    WARNING: mutates its argument — only use on uniquely-owned tensors; the
+    mutation is observable through any other reference to the same tensor. -/
+@[extern "lean_torch_slice_scatter_along_dim_inplace"]
+opaque sliceScatterInplace {s src : Shape}
+    (data : @& T s)
+    (dim : UInt64 := 0)
+    (start : UInt64)
+    (src : @& T src)
+    : T s
+
 /-- Slice a 2D tensor along dimension 0: data[start:start+len, :] -/
 @[extern "lean_torch_slice_2d"]
 opaque slice2d {n d : UInt64} (data : @& T #[n, d]) (start len : UInt64) : T #[len, d]
