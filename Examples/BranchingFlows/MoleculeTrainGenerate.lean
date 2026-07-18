@@ -66,6 +66,7 @@ structure RunOptions where
   sampleCount : Nat := 1
   generate : Bool := true
   device : Device := Device.CPU
+  timePhases : Bool := false
   splitLogitCap? : Option Float := none
   coordTargetCap? : Option Float := none
   seed : UInt64 := 20260618
@@ -80,7 +81,7 @@ private def usage : String :=
   "[--mlp n] [--rff-dim n] [--layers n] [--coord-update-layers n] [--coord-target-cap x] " ++
   "[--coord-weight x] [--label-weight x] [--splits-weight x] [--del-weight x] " ++
   "[--branching-time-prob x] [--split-logit-cap x] " ++
-  "[--fixed-labels] [--device cpu|cuda] [--lr x] [--seed n]"
+  "[--fixed-labels] [--device cpu|cuda] [--lr x] [--seed n] [--time-phases]"
 
 private def parseNatArg (name value : String) : IO Nat := do
   match value.toNat? with
@@ -273,6 +274,8 @@ partial def parseArgsLoop (args : List String) (opts : RunOptions) : IO RunOptio
       | _ => throw (IO.userError s!"--device expects cpu or cuda, got '{value}'")
   | "--no-generate" :: rest =>
       parseArgsLoop rest { opts with generate := false }
+  | "--time-phases" :: rest =>
+      parseArgsLoop rest { opts with timePhases := true }
   | "--split-logit-cap" :: value :: rest =>
       parseArgsLoop rest { opts with splitLogitCap? := some (← parseFloatArg "--split-logit-cap" value) }
   | "--no-split-logit-cap" :: rest =>
@@ -477,23 +480,32 @@ private def runWithModel {Params : Type} [TensorStruct Params] {maxLen vocab : U
             pure initOptState
       | none => pure initOptState
     let mut optState := initOptState
+    let mut sampleMs : Nat := 0
+    let mut trainMs : Nat := 0
 
     for step in [:opts.steps] do
       let globalStep := startIteration + step
       let lr := scheduledLr opts globalStep
+      let t0 ← IO.monoMsNow
       let (bridgeBatch, rng') ←
         sampleMoleculeBridgeBatch bridgeCfg trainStates opts.batchSize rng
           (useBranchingTimeProb := opts.useBranchingTimeProb)
           (maxLen := some opts.maxLen.toNat) (deletionPad := opts.deletionPad)
       rng := rng'
+      let t1 ← IO.monoMsNow
       let (params', optState', report) ←
         trainStepMoleculeMuon (maxLen := maxLen) (vocab := vocab) trainCfg model
           params optState bridgeBatch lr labelDFM (device := opts.device)
+      let t2 ← IO.monoMsNow
       params := params'
       optState := optState'
       lastReport := report
+      sampleMs := sampleMs + (t1 - t0)
+      trainMs := trainMs + (t2 - t1)
       if opts.logEvery > 0 && step % opts.logEvery == 0 then
         IO.println s!"molecule_train step={globalStep} lr={lr} total={report.total} coord={report.coord} label={report.label} splits={report.splits} del={report.del}"
+        if opts.timePhases && step > 0 then
+          IO.println s!"molecule_phases step={globalStep} sample_ms_avg={(sampleMs / (step + 1))} train_ms_avg={(trainMs / (step + 1))}"
 
     finalTrain ←
       evalMoleculeLoss (maxLen := maxLen) (vocab := vocab) trainCfg model params fixedTrainBridge
