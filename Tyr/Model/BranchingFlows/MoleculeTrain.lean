@@ -394,6 +394,56 @@ def evalMoleculeLoss {maxLen vocab : UInt64} {Params : Type}
       moleculeLosses (vocab := vocab) cfg packed coordPred labelLogits splitLogits delLogits
     pure report
 
+/-- Run the molecule `branchingBridge` over a (sub-)batch of targets. Pure. -/
+private def runMoleculeBridgeBatch
+    (bridgeCfg : MoleculeBridgeConfig)
+    (branchTime : TimeDist) (deletionTime : TimeDist)
+    (policy : CoalescencePolicy MoleculeAtom)
+    (coalescenceFactor : Float) (useBranchingTimeProb : Float)
+    (maxLen : Option Nat) (maxResamples : Nat)
+    (lengthMins : GroupMinsSpec) (deletionPad : Float)
+    (targets : Array (BranchingState MoleculeAtom))
+    (times : Array Float)
+    (rng : Rng) : BranchingBridgeResult MoleculeAtom × Rng :=
+  branchingBridge
+    (fun cfg x0 x1 t0 t => MoleculeBridgeConfig.bridge cfg x0 x1 t0 t)
+    bridgeCfg
+    (fun _root => MoleculeBridgeConfig.maskedAtom bridgeCfg)
+    targets
+    times
+    branchTime
+    deletionTime
+    policy
+    (MoleculeBridgeConfig.anchorMerge bridgeCfg)
+    (coalescenceFactor := coalescenceFactor)
+    (useBranchingTimeProb := useBranchingTimeProb)
+    (maxLen := maxLen)
+    (maxResamples := maxResamples)
+    (lengthMins := lengthMins)
+    (deletionPad := deletionPad)
+    (x1Modifier := maskDeletedMoleculeLabels bridgeCfg)
+    (rng := rng)
+    (sampleBridge? := some (fun cfg x0 x1 t0 t rng =>
+      MoleculeBridgeConfig.sampleBridge cfg x0 x1 t0 t rng))
+    (sampleX0? := some (fun _root rng =>
+      MoleculeBridgeConfig.sampleInitialAtom bridgeCfg rng))
+
+/-- Golden-ratio jump constant for decorrelating per-chunk LCG streams. -/
+private def chunkRng (rng : Rng) (chunk : Nat) : Rng :=
+  { state := rng.state + (chunk.toUInt64 + 1) * 0x9E3779B97F4A7C15 }
+
+/-- Concatenate two bridge results (field-wise). -/
+private def appendBridgeResults (a b : BranchingBridgeResult MoleculeAtom) :
+    BranchingBridgeResult MoleculeAtom :=
+  { t := a.t ++ b.t
+    segments := a.segments ++ b.segments
+    Xt := a.Xt ++ b.Xt
+    X1anchor := a.X1anchor ++ b.X1anchor
+    descendants := a.descendants ++ b.descendants
+    del := a.del ++ b.del
+    splitsTarget := a.splitsTarget ++ b.splitsTarget
+    prevCoalescence := a.prevCoalescence ++ b.prevCoalescence }
+
 def sampleMoleculeBridgeBatch
     (bridgeCfg : MoleculeBridgeConfig)
     (states : Array (BranchingState MoleculeAtom))
@@ -408,6 +458,7 @@ def sampleMoleculeBridgeBatch
     (maxResamples : Nat := 8)
     (lengthMins : GroupMinsSpec := .uniform 1)
     (deletionPad : Float := 0.0)
+    (parallelism : Nat := 1)
     : IO (BranchingBridgeResult MoleculeAtom × Rng) := do
   if states.isEmpty then
     throw (IO.userError "cannot sample a molecule bridge batch from an empty dataset")
@@ -424,29 +475,39 @@ def sampleMoleculeBridgeBatch
     let t := max 1.0e-4 (min 0.9999 u)
     targets := targets.push states[idx]!
     times := times.push t
-  let (result, rngOut) :=
-    branchingBridge
-      (fun cfg x0 x1 t0 t => MoleculeBridgeConfig.bridge cfg x0 x1 t0 t)
-      bridgeCfg
-      (fun _root => MoleculeBridgeConfig.maskedAtom bridgeCfg)
-      targets
-      times
-      branchTime
-      deletionTime
-      policy
-      (MoleculeBridgeConfig.anchorMerge bridgeCfg)
-      (coalescenceFactor := coalescenceFactor)
-      (useBranchingTimeProb := useBranchingTimeProb)
-      (maxLen := maxLen)
-      (maxResamples := maxResamples)
-      (lengthMins := lengthMins)
-      (deletionPad := deletionPad)
-      (x1Modifier := maskDeletedMoleculeLabels bridgeCfg)
-      (rng := rng)
-      (sampleBridge? := some (fun cfg x0 x1 t0 t rng =>
-        MoleculeBridgeConfig.sampleBridge cfg x0 x1 t0 t rng))
-      (sampleX0? := some (fun _root rng =>
-        MoleculeBridgeConfig.sampleInitialAtom bridgeCfg rng))
-  pure (result, rngOut)
+  let numChunks := min parallelism batchSize
+  if numChunks > 1 then
+    -- Embarrassingly parallel across chunk tasks: each chunk gets its own
+    -- decorrelated LCG stream; results are concatenated in chunk order.
+    let chunkSize := (batchSize + numChunks - 1) / numChunks
+    let mut tasks : Array (Task (Except IO.Error (BranchingBridgeResult MoleculeAtom × Rng))) := #[]
+    for c in [:numChunks] do
+      let lo := c * chunkSize
+      let hi := min (lo + chunkSize) batchSize
+      if hi > lo then
+        let targetsC := targets.extract lo hi
+        let timesC := times.extract lo hi
+        let rngC := chunkRng rng c
+        let task ← IO.asTask do
+          pure (runMoleculeBridgeBatch bridgeCfg branchTime deletionTime policy
+            coalescenceFactor useBranchingTimeProb maxLen maxResamples lengthMins
+            deletionPad targetsC timesC rngC)
+        tasks := tasks.push task
+    let mut merged : BranchingBridgeResult MoleculeAtom :=
+      { t := #[], segments := #[], Xt := #[], X1anchor := #[], descendants := #[],
+        del := #[], splitsTarget := #[], prevCoalescence := #[] }
+    for task in tasks do
+      let (res, _) ← IO.ofExcept (← IO.wait task)
+      merged := appendBridgeResults merged res
+    -- The sequential path threads one rng through the whole batch; the parallel
+    -- path uses decorrelated per-chunk streams, so the returned rng simply
+    -- advances past the target/time draws above.
+    pure (merged, rng)
+  else
+    let (result, rngOut) :=
+      runMoleculeBridgeBatch bridgeCfg branchTime deletionTime policy
+        coalescenceFactor useBranchingTimeProb maxLen maxResamples lengthMins
+        deletionPad targets times rng
+    pure (result, rngOut)
 
 end torch.branching

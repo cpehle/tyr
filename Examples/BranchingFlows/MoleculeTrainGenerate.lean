@@ -67,6 +67,7 @@ structure RunOptions where
   generate : Bool := true
   device : Device := Device.CPU
   timePhases : Bool := false
+  parallelSampling : Nat := 1
   splitLogitCap? : Option Float := none
   coordTargetCap? : Option Float := none
   seed : UInt64 := 20260618
@@ -81,7 +82,7 @@ private def usage : String :=
   "[--mlp n] [--rff-dim n] [--layers n] [--coord-update-layers n] [--coord-target-cap x] " ++
   "[--coord-weight x] [--label-weight x] [--splits-weight x] [--del-weight x] " ++
   "[--branching-time-prob x] [--split-logit-cap x] " ++
-  "[--fixed-labels] [--device cpu|cuda] [--lr x] [--seed n] [--time-phases]"
+  "[--fixed-labels] [--device cpu|cuda] [--lr x] [--seed n] [--time-phases] [--parallel-sampling n]"
 
 private def parseNatArg (name value : String) : IO Nat := do
   match value.toNat? with
@@ -276,6 +277,8 @@ partial def parseArgsLoop (args : List String) (opts : RunOptions) : IO RunOptio
       parseArgsLoop rest { opts with generate := false }
   | "--time-phases" :: rest =>
       parseArgsLoop rest { opts with timePhases := true }
+  | "--parallel-sampling" :: value :: rest =>
+      parseArgsLoop rest { opts with parallelSampling := (← parseNatArg "--parallel-sampling" value) }
   | "--split-logit-cap" :: value :: rest =>
       parseArgsLoop rest { opts with splitLogitCap? := some (← parseFloatArg "--split-logit-cap" value) }
   | "--no-split-logit-cap" :: rest =>
@@ -454,7 +457,7 @@ private def runWithModel {Params : Type} [TensorStruct Params] {maxLen vocab : U
   let (fixedTrainBridge, rng') ←
     sampleMoleculeBridgeBatch bridgeCfg trainStates opts.batchSize rng
       (useBranchingTimeProb := opts.useBranchingTimeProb)
-      (maxLen := some opts.maxLen.toNat) (deletionPad := opts.deletionPad)
+      (maxLen := some opts.maxLen.toNat) (deletionPad := opts.deletionPad) (parallelism := opts.parallelSampling)
   rng := rng'
   let initTrain ←
     evalMoleculeLoss (maxLen := maxLen) (vocab := vocab) trainCfg model params fixedTrainBridge
@@ -490,7 +493,7 @@ private def runWithModel {Params : Type} [TensorStruct Params] {maxLen vocab : U
       let (bridgeBatch, rng') ←
         sampleMoleculeBridgeBatch bridgeCfg trainStates opts.batchSize rng
           (useBranchingTimeProb := opts.useBranchingTimeProb)
-          (maxLen := some opts.maxLen.toNat) (deletionPad := opts.deletionPad)
+          (maxLen := some opts.maxLen.toNat) (deletionPad := opts.deletionPad) (parallelism := opts.parallelSampling)
       rng := rng'
       let t1 ← IO.monoMsNow
       let (params', optState', report) ←
@@ -530,7 +533,7 @@ private def runWithModel {Params : Type} [TensorStruct Params] {maxLen vocab : U
   let (evalBridge, rng') ←
     sampleMoleculeBridgeBatch bridgeCfg evalStates opts.batchSize rng
       (useBranchingTimeProb := opts.useBranchingTimeProb)
-      (maxLen := some opts.maxLen.toNat) (deletionPad := opts.deletionPad)
+      (maxLen := some opts.maxLen.toNat) (deletionPad := opts.deletionPad) (parallelism := opts.parallelSampling)
   rng := rng'
   let evalReport ←
     evalMoleculeLoss (maxLen := maxLen) (vocab := vocab) trainCfg model params evalBridge
