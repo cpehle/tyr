@@ -17,7 +17,7 @@ provides the low-level operations used by higher-level model, optimizer, and tra
 - `torch.nn`: neural network functional operators and loss primitives.
 - `torch.data` and `torch.signal`: data and signal-processing helpers.
 - `torch.safetensors`: tensor checkpoint loading/saving, including sharded loading.
-- Specialized helpers in submodules such as `torch.rotary`, `torch.nanoproof`, and `torch.linalg`.
+- Specialized helpers in submodules such as `torch.rotary` and `torch.linalg`.
 
 ## Scope
 
@@ -1471,7 +1471,7 @@ opaque topk_2d {d1 d2 : UInt64}
     Reference: Lin et al., "Focal Loss for Dense Object Detection" (2017)
 
     Note: This is a convenience wrapper. For precise shape tracking, use
-    nn.cross_entropy_loss directly and implement focal weighting manually. -/
+    nn.cross_entropy (or nn.cross_entropy_none) directly and implement focal weighting manually. -/
 def focal_loss {batch num_classes : UInt64}
     (logits : T #[batch, num_classes])
     (targets : T #[batch])
