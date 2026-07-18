@@ -706,16 +706,16 @@ def sampleForest
     match sel with
     | none => break
     | some (i, j) =>
-        let i := if i < j then i else j
-        let j := if i < j then j else i
-        let left := nodesAcc[i]!
-        let right := nodesAcc[j]!
+        let lo := min i j
+        let hi := max i j
+        let left := nodesAcc[lo]!
+        let right := nodesAcc[hi]!
         let mergedData := merger left.data right.data left.weight right.weight
         let merged := FlowNode.merge 0.0 mergedData left right
-        -- replace i, remove j
-        nodesAcc := nodesAcc.set! i merged
-        nodesAcc := eraseIdx nodesAcc j
-        rng := policy.update nodesAcc i j i rng
+        -- replace lo, remove hi
+        nodesAcc := nodesAcc.set! lo merged
+        nodesAcc := eraseIdx nodesAcc hi
+        rng := policy.update nodesAcc lo hi lo rng
   nodesAcc := policy.reorder nodesAcc
   -- sample split times for each root
   let mut allTimes : Array Float := #[]
