@@ -186,10 +186,11 @@ reads the torchrun environment — `WORLD_SIZE`, `RANK`, `LOCAL_RANK`,
 `LogHandlers` (`onInfo`/`onError` callbacks, `Tyr/Pipeline.lean:373`).
 
 There is a background-task API (`background`, `await`, `backgroundTracked`,
-`awaitTrackedOrThrow`, `Tyr/Pipeline.lean:580-625`), but `spawnBackground`
-waits on the task before returning (`Tyr/Pipeline.lean:154-163`), so these
-tasks currently run synchronously. At the end, `finalizePipeline` writes
-`report.md` via the `Report` accumulator (`Tyr/Pipeline.lean:216-231`).
+`awaitTrackedOrThrow`, `Tyr/Pipeline.lean:580-625`). `spawnBackground`
+(`Tyr/Pipeline.lean:154-163`) starts the action immediately via `IO.asTask`
+and defers the wait to `await`, so these tasks run concurrently. At the end,
+`finalizePipeline` writes `report.md` via the `Report` accumulator
+(`Tyr/Pipeline.lean:216-231`).
 
 ### Run ledger: `torch.Train.RunLedger` (`Tyr/Train/RunLedger.lean`)
 
