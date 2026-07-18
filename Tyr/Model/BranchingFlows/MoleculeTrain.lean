@@ -480,7 +480,7 @@ def sampleMoleculeBridgeBatch
     -- Embarrassingly parallel across chunk tasks: each chunk gets its own
     -- decorrelated LCG stream; results are concatenated in chunk order.
     let chunkSize := (batchSize + numChunks - 1) / numChunks
-    let mut tasks : Array (Task (Except IO.Error (BranchingBridgeResult MoleculeAtom × Rng))) := #[]
+    let mut tasks : Array (Task (BranchingBridgeResult MoleculeAtom × Rng)) := #[]
     for c in [:numChunks] do
       let lo := c * chunkSize
       let hi := min (lo + chunkSize) batchSize
@@ -488,16 +488,18 @@ def sampleMoleculeBridgeBatch
         let targetsC := targets.extract lo hi
         let timesC := times.extract lo hi
         let rngC := chunkRng rng c
-        let task ← IO.asTask do
-          pure (runMoleculeBridgeBatch bridgeCfg branchTime deletionTime policy
+        -- `Task.spawn` takes a thunk so the bridge computation runs on the
+        -- worker thread; `IO.asTask (pure …)` would evaluate eagerly here.
+        let task := Task.spawn fun () =>
+          runMoleculeBridgeBatch bridgeCfg branchTime deletionTime policy
             coalescenceFactor useBranchingTimeProb maxLen maxResamples lengthMins
-            deletionPad targetsC timesC rngC)
+            deletionPad targetsC timesC rngC
         tasks := tasks.push task
     let mut merged : BranchingBridgeResult MoleculeAtom :=
       { t := #[], segments := #[], Xt := #[], X1anchor := #[], descendants := #[],
         del := #[], splitsTarget := #[], prevCoalescence := #[] }
     for task in tasks do
-      let (res, _) ← IO.ofExcept (← IO.wait task)
+      let (res, _) := task.get
       merged := appendBridgeResults merged res
     -- The sequential path threads one rng through the whole batch; the parallel
     -- path uses decorrelated per-chunk streams, so the returned rng simply
