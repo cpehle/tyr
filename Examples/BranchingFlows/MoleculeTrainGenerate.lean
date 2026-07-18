@@ -498,7 +498,7 @@ private def runWithModel {Params : Type} [TensorStruct Params] {maxLen vocab : U
       let t1 ← IO.monoMsNow
       let (params', optState', report) ←
         trainStepMoleculeMuon (maxLen := maxLen) (vocab := vocab) trainCfg model
-          params optState bridgeBatch lr labelDFM (device := opts.device)
+          params optState bridgeBatch lr labelDFM (device := opts.device) (timePhases := opts.timePhases)
       let t2 ← IO.monoMsNow
       params := params'
       optState := optState'

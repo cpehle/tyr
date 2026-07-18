@@ -359,22 +359,34 @@ def trainStepMoleculeMuon {maxLen vocab : UInt64} {Params : Type} [TensorStruct 
         pure tensor) params
       pure ())
     (device : Device := Device.CPU)
+    (timePhases : Bool := false)
     : IO (Params × MoleculeMuonState Params × BranchingMoleculeLossReport) := do
+  let t0 ← IO.monoMsNow
   let params := TensorStruct.zeroGrads (TensorStruct.makeLeafParams params)
   let ⟨batch, packedCpu⟩ ← packBranchingMolecule cfg result labelDFM
   let packed := packedCpu.toDevice device
+  if timePhases then torch.cuda_synchronize
+  let t1 ← IO.monoMsNow
   let (coordPred, labelLogits, splitLogits, delLogits) ←
     model.forward (batch := batch) params packed.coord packed.label packed.t packed.padmask
   let (totalLoss, report) :=
     moleculeLosses (vocab := vocab) cfg packed coordPred labelLogits splitLogits delLogits
+  if timePhases then torch.cuda_synchronize
+  let t2 ← IO.monoMsNow
 
   autograd.backwardLoss totalLoss
   if cfg.gradClip > 0 then
     clipGrads params cfg.gradClip
+  if timePhases then torch.cuda_synchronize
+  let t3 ← IO.monoMsNow
 
   let grads := TensorStruct.grads params
   let (params', optState') ←
     moleculeMuonStep params grads optState lr cfg.weightDecay momentumCoeff numIters
+  if timePhases then torch.cuda_synchronize
+  let t4 ← IO.monoMsNow
+  if timePhases && optState.step % 50 == 0 then
+    IO.println s!"molecule_train_phases step={optState.step} pack_ms={t1 - t0} fwd_ms={t2 - t1} bwd_ms={t3 - t2} muon_ms={t4 - t3}"
   return (params', optState', report)
 
 def evalMoleculeLoss {maxLen vocab : UInt64} {Params : Type}
