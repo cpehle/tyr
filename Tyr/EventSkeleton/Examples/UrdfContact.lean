@@ -173,6 +173,43 @@ def resetState (x : ContactState) : ContactState :=
 def postImpactState : ContactState :=
   resetState preImpactState
 
+structure ContactTrajectorySample where
+  time : Float
+  phase : String
+  state : ContactState
+  deriving Repr, Inhabited
+
+/--
+Reference trajectory used by the launch example.  Samples are evaluated from
+the analytic free-flight solution at 5 ms intervals.  At the localized impact
+time both one-sided states are retained, so the velocity reset is represented
+as a jump rather than an interpolated segment.
+-/
+def contactTrajectory : Array ContactTrajectorySample := Id.run do
+  let mut samples : Array ContactTrajectorySample := #[]
+  for i in [:81] do
+    let t := Float.ofNat i / 200.0
+    if i < 40 then
+      samples := samples.push { time := t, phase := "pre", state := freeFlightAt initialState t }
+    else if i == 40 then
+      samples := samples.push { time := impactTime, phase := "pre", state := preImpactState }
+      samples := samples.push { time := impactTime, phase := "post", state := postImpactState }
+    else
+      samples := samples.push {
+        time := t
+        phase := "post"
+        state := freeFlightAt postImpactState (t - impactTime)
+      }
+  return samples
+
+def contactTrajectoryCsv : String :=
+  let rows := contactTrajectory.map (fun sample =>
+    s!"{sample.time},{sample.phase},{sample.state.position},{sample.state.velocity}")
+  String.intercalate "\n" ((#["time,phase,position,velocity"] ++ rows).toList) ++ "\n"
+
+def writeContactTrajectoryCsv (path : String) : IO Unit :=
+  IO.FS.writeFile path contactTrajectoryCsv
+
 def freeFlightVectorField (x : ContactState) : Array Float :=
   #[x.velocity, -params.gravity]
 

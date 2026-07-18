@@ -23,7 +23,7 @@ private def printMoves (moves : Array SkeletonMove) : IO Unit := do
   for h : i in [:moves.size] do
     printMove (i + 1) moves[i]
 
-def run : IO UInt32 := do
+def run (csvPath? : Option String := none) : IO UInt32 := do
   match buildEndToEnd? with
   | .error msg =>
       IO.eprintln s!"URDF contact simulation failed: {msg}"
@@ -62,9 +62,16 @@ def run : IO UInt32 := do
 
       printSection "Projected elimination moves"
       printMoves result.moves
+      if let some path := csvPath? then
+        writeContactTrajectoryCsv path
+        IO.println s!"wrote contact trajectory {path}"
       return 0
 
 end Examples.EventSkeleton.RunUrdfContactExample
 
-def main (_args : List String) : IO UInt32 :=
-  Examples.EventSkeleton.RunUrdfContactExample.run
+def main (args : List String) : IO UInt32 :=
+  let csvPath? :=
+    match args with
+    | "--csv" :: path :: _ => some path
+    | _ => none
+  Examples.EventSkeleton.RunUrdfContactExample.run csvPath?
