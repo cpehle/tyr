@@ -379,8 +379,7 @@ parts:
 - **Decode in the Lean dispatch layer.** `mhaFwdDispatch` maps
   `.tkMhaH100Decode` to portable SDPA (`Tyr/GPU/Ops/MhaH100.lean:176-177`);
   native decode is currently only wired through `tyr::flash_attn`.
-- **Dead scale check.** `Ops/FlashAttn.lean:66` computes
-  `scaleMatchesKernel scale` and discards it; the effective scale policy is
+- **Scale policy.** The effective attention scale policy is
   `AttentionProblem.scaleMatchesDefault` (`1 / sqrt(headDim)`).
 
 ## Related guides
