@@ -159,9 +159,9 @@ def stepSingle {s : Shape} (param : T s) (grad : T s) (state : ParamState s)
 
 `stepSingle` does: momentum-buffer update on the raw gradient, Nesterov blend,
 `PolarExpress.muonOrthogonalize` (skipped on exact-zero gradients), aspect-ratio LR scaling
-(`aspectRatioScale`, `sqrt(max(1, h/w))` for 2D shapes), then the scaled subtract. Note it
-ignores `cfg.weightDecay` and `wdMul` (`NorMuon.lean:223-224`) — weight decay is dead
-config on the Muon path. Distributed variants: `stepDistributedOwner` (one rank updates,
+(`aspectRatioScale`, `sqrt(max(1, h/w))` for 2D shapes), then decoupled weight decay
+(`p ← p - effectiveLr * weightDecay * wdMul * p`, AdamW-style as in `DistAdam`) and the
+scaled subtract. Distributed variants: `stepDistributedOwner` (one rank updates,
 then broadcast) and `stepDistributedGroup` (block-cyclic ownership, reduce-scatter +
 all-gather over homogeneous `Array (T s)` groups). `ParamLabel` classifies parameters
 (`attn`, `mlp`, `embed`, `lmHead`, `scalars`, …) with `shouldOrthogonalize`,
@@ -205,8 +205,8 @@ inductive MatrixParamState (m n : UInt64) where
 `.manifoldMuon` + `.stiefel` (and not `preferGenericManifoldPath`) → the specialized
 `ManifoldMuon.stepSingle`; otherwise the generic path `stepGenericManifoldSingle`, which
 does Nesterov blending and then a `DualMapGeometry.dualMapStep` on the configured manifold
-family (`DualOptimizer.lean:344-399`). A state/config constructor mismatch silently
-re-initializes the state. Group variants `stepMatrixGroupLocal`/`stepMatrixGroupDistributed`
+family (`DualOptimizer.lean:344-399`). A state/config constructor mismatch throws
+`IO.userError` (it used to silently re-initialize the state, dropping momentum). Group variants `stepMatrixGroupLocal`/`stepMatrixGroupDistributed`
 and the closure bundle `MatrixBackendOps m n` (`matrixBackendOps`,
 `matrixBackendOpsForLabel`) cover batched and per-label use.
 
@@ -281,7 +281,7 @@ First-order / split optimizers (`torch.Optim.*`):
 
 | Name | Role |
 |---|---|
-| `NorMuon.Config` | `lr := 0.023`, `weightDecay := 1.2` (unused), `momentum := 0.95`, `beta2 := 0.95`, `numIters := 5`, `distributed`, `worldSize` |
+| `NorMuon.Config` | `lr := 0.023`, `weightDecay := 1.2` (decoupled, scaled by `wdMul`), `momentum := 0.95`, `beta2 := 0.95`, `numIters := 5`, `distributed`, `worldSize` |
 | `NorMuon.initParamState` / `stepSingle` / `stepDistributedOwner` / `stepDistributedGroup` | per-param and distributed Muon steps |
 | `NorMuon.getMomentum step totalSteps (baseMomentum := 0.95) (warmupSteps := 300)` | momentum warmup schedule |
 | `DistAdam.Config` | `lr := 0.008`, `beta1 := 0.65`, `beta2 := 0.95`, `eps := 1e-8`, `weightDecay := 0.005`, `distributed` |
@@ -370,16 +370,17 @@ pure (step.params, step.loss, step.diagnostics)
 
 ## Caveats
 
-- `NorMuon.Config.weightDecay` (and the `wdMul` argument, and DualOptimizer's scheduled
-  weight decay feeding it) has no effect in `stepSingle` — decoupled WD is only real in
-  `DistAdam` and `Optim.adamw` (`Tyr/Optim/NorMuon.lean:223`).
+- `NorMuon.stepSingle` applies decoupled weight decay as
+  `p ← p - effectiveLr * weightDecay * wdMul * p` (the aspect-ratio-scaled LR is included);
+  with the default `weightDecay := 1.2` this is a strong pull — set `weightDecay := 0.0`
+  (or pass `wdMul := 0.0`) to disable it.
 - `RiemannianTreeSGD.stepCrossEntropy` is exact but scales with `batch*seq*vocab` VJPs;
   use `stepCrossEntropySampledFisher` outside tiny test shapes.
 - `PoincareBall`'s instance uses identity `sharp`/`flat` and a Euclidean-add retraction
   (`Tyr/Manifolds/PoincareBall.lean:48-59`) — the ball constraint, not Poincaré geometry.
-- `DualOptimizer.stepMatrixSingle` silently re-initializes state when the
-  `MatrixParamState` constructor does not match the configured backend — a config change
-  mid-run quietly drops momentum.
+- `DualOptimizer.stepMatrixSingle` throws `IO.userError` when the `MatrixParamState`
+  constructor does not match the configured backend (e.g. a config change mid-run) instead
+  of silently re-initializing; rebuild state explicitly with `initMatrixParamState cfg`.
 - Distributed step functions fall back to the local path when `dist.isInitialized` is
   false or `worldSize ≤ 1`, so single-process tests exercise the fallback, not collectives.
 
