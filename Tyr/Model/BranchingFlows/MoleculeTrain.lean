@@ -1,6 +1,7 @@
 import Tyr.Model.BranchingFlows.Molecule
 import Tyr.Model.BranchingFlowsTrain
 import Tyr.Optim
+import Tyr.Optim.PolarExpress
 
 /-!
   Tensor packing helpers for molecule-shaped BranchingFlows batches.
@@ -113,7 +114,7 @@ def packBranchingMolecule (cfg : BranchingTrainConfig)
         labelAnchorArr := labelAnchorArr.set! idx (Int64.ofNat anchor.label)
         labelScaleArr := labelScaleArr.set! idx
           (match labelDFM with
-           | some dfm => dfm.lossScale (result.t.getD bi 0.0)
+           | some dfm => dfm.lossScale (result.t.getD bi 0.0) 1.0 0.2
            | none => 1.0)
         splitsArr := splitsArr.set! idx (Int64.ofNat (splits.getD j 0))
         delArr := delArr.set! idx (if dels.getD j false then 1 else 0)
@@ -175,14 +176,38 @@ private def moleculeMaskedWeightedCrossEntropy {batch maxLen vocab : UInt64}
   let denom := nn.sumAll mask2
   nn.div (nn.sumAll masked) (denom + (1.0e-8 : Float))
 
-private def moleculeMaskedMSE3d {batch maxLen dim : UInt64}
-    (pred target : T #[batch, maxLen, dim]) (mask : T #[batch, maxLen]) : T #[] :=
+private def moleculeFlowLossScale {batch maxLen : UInt64}
+    (t : T #[batch]) : T #[batch, maxLen] :=
+  let remaining : T #[batch] := torch.add_scalar (torch.mul_scalar t (-1.0)) 1.2
+  let scale : T #[batch] := nn.pow remaining (-1.0)
+  nn.expand (nn.unsqueeze scale 1) #[batch, maxLen]
+
+private def moleculeMaskedWeightedMSE3d {batch maxLen dim : UInt64}
+    (pred target : T #[batch, maxLen, dim])
+    (mask weights : T #[batch, maxLen]) : T #[] :=
   let mask3 := nn.expand (nn.unsqueeze mask 2) #[batch, maxLen, dim]
+  let weights3 := nn.expand (nn.unsqueeze weights 2) #[batch, maxLen, dim]
   let diff := pred - target
   let sq := diff * diff
-  let masked := sq * mask3
+  let masked := sq * mask3 * weights3
   let denom := nn.sumAll mask3
   nn.div (nn.sumAll masked) (denom + (1.0e-8 : Float))
+
+private def moleculeMaskedWeightedSplitPoissonLoss {batch maxLen : UInt64}
+    (logits target mask weights : T #[batch, maxLen]) : T #[] :=
+  let mu := nn.exp (torch.clampFloat logits (-100.0) 11.0)
+  let safeTarget := torch.clampFloat target 1.0e-8 1.0e20
+  let per := mu - target * nn.log mu - (target - target * nn.log safeTarget)
+  let masked := per * mask * weights
+  let denom := nn.sumAll mask
+  nn.div (nn.sumAll masked) (denom + (1.0e-8 : Float))
+
+private def moleculeMaskedWeightedBCEWithLogits {batch maxLen : UInt64}
+    (logits target mask weights : T #[batch, maxLen]) : T #[] :=
+  let per := nn.softplus logits - target * logits
+  let loss := nn.sumAll (per * mask * weights)
+  let denom := nn.sumAll mask
+  nn.div loss (denom + (1.0e-8 : Float))
 
 structure BranchingMoleculeLossReport where
   total : Float
@@ -201,13 +226,14 @@ def moleculeLosses {batch maxLen vocab : UInt64}
     (delLogits : T #[batch, maxLen]) :
     T #[] × BranchingMoleculeLossReport :=
   let mask := moleculeMask packed.padmask packed.flowmask
-  let coordLoss := moleculeMaskedMSE3d coordPred packed.coordAnchor mask
+  let flowScale := moleculeFlowLossScale (maxLen := maxLen) packed.t
+  let coordLoss := moleculeMaskedWeightedMSE3d coordPred packed.coordAnchor mask flowScale
   let labelLoss := moleculeMaskedWeightedCrossEntropy labelLogits packed.labelAnchor mask packed.labelLossScale
-  let splitLoss := maskedSplitPoissonLoss splitLogits packed.splitsTarget mask
-  let delLoss := maskedBCEWithLogits delLogits packed.delTarget mask
+  let splitLoss := moleculeMaskedWeightedSplitPoissonLoss splitLogits packed.splitsTarget mask flowScale
+  let delLoss := moleculeMaskedWeightedBCEWithLogits delLogits packed.delTarget mask flowScale
   let totalLoss :=
-    coordLoss * cfg.anchorWeight +
-    labelLoss * cfg.anchorWeight +
+    coordLoss * cfg.anchorWeight * cfg.coordWeight +
+    labelLoss * cfg.anchorWeight * cfg.labelWeight +
     splitLoss * cfg.splitsWeight +
     delLoss * cfg.delWeight
   (totalLoss, {
@@ -249,6 +275,107 @@ def trainStepMolecule {maxLen vocab : UInt64} {Params : Type} [TensorStruct Para
   let opt := Optim.adamw (lr := lr) (weight_decay := cfg.weightDecay)
   let (params', optState') := Optim.step opt params grads optState
 
+  return (params', optState', report)
+
+/-! ## Julia-compatible Muon optimizer path -/
+
+/-- Momentum-only state used by the Julia-compatible molecule Muon update. -/
+structure MoleculeMuonState (Params : Type) where
+  momentum : Params
+  step : Nat := 0
+
+def initMoleculeMuonState [TensorStruct Params] (params : Params) : MoleculeMuonState Params :=
+  { momentum := TensorStruct.map torch.zeros_like params }
+
+private def flattenedMatrixShape (s : Shape) : UInt64 × UInt64 :=
+  if s.isEmpty then
+    (1, 1)
+  else
+    let rows := s[0]!
+    let cols := (s.extract 1 s.size).foldl (fun acc d => acc * d) 1
+    (rows, cols)
+
+/--
+Apply the same first-dimension-versus-rest flattening used by the Julia Muon
+rule before Newton–Schulz orthogonalization.  This also makes vector leaves a
+valid `n × 1` matrix for the IO-backed Tyr kernel.
+-/
+private def moleculeMuonOrthogonalize {s : Shape}
+    (grad : T s) (numIters : UInt64) : IO (T s) := do
+  let (rows, cols) := flattenedMatrixShape s
+  let flat : T #[rows, cols] := reshape grad #[rows, cols]
+  let maxAbs := nn.item (nn.maxAll (nn.abs flat))
+  if maxAbs == 0.0 then
+    pure grad
+  else
+    let orth ← Optim.PolarExpress.muonOrthogonalize flat numIters
+    pure (reshape orth s)
+
+/--
+One Muon update over an arbitrary tensor tree.
+
+This follows the Julia demo's `CannotWaitForTheseOptimisers.Muon`: momentum and
+Nesterov blending on every tensor leaf, first-dimension matrix flattening,
+Newton–Schulz orthogonalization, aspect-ratio scaling, and decoupled weight
+decay.
+-/
+def moleculeMuonStep [TensorStruct Params]
+    (params grads : Params)
+    (state : MoleculeMuonState Params)
+    (lr : Float)
+    (weightDecay : Float := 0.01)
+    (momentumCoeff : Float := 0.95)
+    (numIters : UInt64 := 5) : IO (Params × MoleculeMuonState Params) := do
+  let rawGrads := TensorStruct.map autograd.detach grads
+  let momentum := TensorStruct.zipWith (fun old grad =>
+    torch.mul_scalar old momentumCoeff + torch.mul_scalar grad (1.0 - momentumCoeff))
+    state.momentum rawGrads
+  let nesterov := TensorStruct.zipWith (fun grad mom =>
+    torch.mul_scalar grad (1.0 - momentumCoeff) + torch.mul_scalar mom momentumCoeff)
+    rawGrads momentum
+  let orth ← TensorStruct.mapM (fun grad => moleculeMuonOrthogonalize grad numIters) nesterov
+  let params' := TensorStruct.zipWith (fun {s} param direction =>
+    let (rows, cols) := flattenedMatrixShape s
+    let aspect := Float.sqrt (max 1.0 (rows.toFloat / cols.toFloat))
+    let p := autograd.detach param
+    let update :=
+      torch.mul_scalar direction (lr * aspect) +
+      torch.mul_scalar p (lr * weightDecay)
+    autograd.set_requires_grad (p - update) true) params orth
+  return (params', { momentum, step := state.step + 1 })
+
+def trainStepMoleculeMuon {maxLen vocab : UInt64} {Params : Type} [TensorStruct Params]
+    (cfg : BranchingTrainConfig)
+    (model : BranchingMoleculeModel maxLen vocab Params)
+    (params : Params)
+    (optState : MoleculeMuonState Params)
+    (result : BranchingBridgeResult MoleculeAtom)
+    (lr : Float)
+    (labelDFM : Option DistNoisyDiscreteConfig := none)
+    (momentumCoeff : Float := 0.95)
+    (numIters : UInt64 := 5)
+    (clipGrads : Params → Float → IO Unit := fun params maxNorm => do
+      let _ ← TensorStruct.mapM (fun tensor => do
+        let _ ← nn.clip_grad_norm_ tensor maxNorm
+        pure tensor) params
+      pure ())
+    (device : Device := Device.CPU)
+    : IO (Params × MoleculeMuonState Params × BranchingMoleculeLossReport) := do
+  let params := TensorStruct.zeroGrads (TensorStruct.makeLeafParams params)
+  let ⟨batch, packedCpu⟩ ← packBranchingMolecule cfg result labelDFM
+  let packed := packedCpu.toDevice device
+  let (coordPred, labelLogits, splitLogits, delLogits) ←
+    model.forward (batch := batch) params packed.coord packed.label packed.t packed.padmask
+  let (totalLoss, report) :=
+    moleculeLosses (vocab := vocab) cfg packed coordPred labelLogits splitLogits delLogits
+
+  autograd.backwardLoss totalLoss
+  if cfg.gradClip > 0 then
+    clipGrads params cfg.gradClip
+
+  let grads := TensorStruct.grads params
+  let (params', optState') ←
+    moleculeMuonStep params grads optState lr cfg.weightDecay momentumCoeff numIters
   return (params', optState', report)
 
 def evalMoleculeLoss {maxLen vocab : UInt64} {Params : Type}

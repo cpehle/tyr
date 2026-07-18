@@ -243,6 +243,15 @@ def sampleBranchingStepPrediction
 end MoleculeModelPrediction
 
 /--
+Julia's forward `CoalescentFlow` step suppresses a split whenever a discrete
+component changes in the same integration interval.  Molecule states carry the
+discrete component as `label`, so equality of the old/new labels is precisely
+the corresponding admissibility predicate.
+-/
+def moleculeSplitAllowedAfterBaseStep (old new : MoleculeAtom) : Bool :=
+  old.label == new.label
+
+/--
 Base-step adapter for `MoleculeModelPrediction.toBranchingStepPrediction`.
 
 The prediction already contains the one-step OU/DFM molecule state, so the
@@ -260,7 +269,7 @@ def moleculeBranchingStep
     (x : BranchingState MoleculeAtom)
     (prediction : MoleculeModelPrediction)
     (s1 s2 : Float)
-    (splitAllowedAfterBaseStep : MoleculeAtom → MoleculeAtom → Bool := fun _ _ => true)
+    (splitAllowedAfterBaseStep : MoleculeAtom → MoleculeAtom → Bool := moleculeSplitAllowedAfterBaseStep)
     (rng : Rng := { state := 0 }) :
     BranchingStepResult MoleculeAtom × Rng :=
   branchingStep moleculePredictedBaseStep flow x
@@ -272,7 +281,7 @@ def moleculeBranchingStepSampled
     (x : BranchingState MoleculeAtom)
     (prediction : MoleculeModelPrediction)
     (s1 s2 : Float)
-    (splitAllowedAfterBaseStep : MoleculeAtom → MoleculeAtom → Bool := fun _ _ => true)
+    (splitAllowedAfterBaseStep : MoleculeAtom → MoleculeAtom → Bool := moleculeSplitAllowedAfterBaseStep)
     (rng : Rng := { state := 0 }) :
     BranchingStepResult MoleculeAtom × Rng :=
   let (sampledPrediction, rng) :=
@@ -285,7 +294,7 @@ def moleculeBranchingGenerate
     (x0 : BranchingState MoleculeAtom)
     (model : Float → BranchingState MoleculeAtom → MoleculeModelPrediction)
     (schedule : Array Float)
-    (splitAllowedAfterBaseStep : MoleculeAtom → MoleculeAtom → Bool := fun _ _ => true)
+    (splitAllowedAfterBaseStep : MoleculeAtom → MoleculeAtom → Bool := moleculeSplitAllowedAfterBaseStep)
     (rng : Rng := { state := 0 }) :
     BranchingGenerateResult MoleculeAtom × Rng := Id.run do
   if schedule.size <= 1 then
@@ -311,7 +320,7 @@ def moleculeBranchingGenerateIO
     (x0 : BranchingState MoleculeAtom)
     (model : Float → BranchingState MoleculeAtom → IO MoleculeModelPrediction)
     (schedule : Array Float)
-    (splitAllowedAfterBaseStep : MoleculeAtom → MoleculeAtom → Bool := fun _ _ => true)
+    (splitAllowedAfterBaseStep : MoleculeAtom → MoleculeAtom → Bool := moleculeSplitAllowedAfterBaseStep)
     (maxStateLen? : Option Nat := none)
     (rng : Rng := { state := 0 }) :
     IO (BranchingGenerateResult MoleculeAtom × Rng) := do
