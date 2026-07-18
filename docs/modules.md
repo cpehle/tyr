@@ -289,7 +289,7 @@ let wtW := nn.mm (nn.transpose2d w) w   -- ≈ eye 8
 
 - The `Module` / `ModuleIO` / `ModuleCtx` classes are thinly adopted: instances exist for the three built-in layers and two audio encoders (`Tyr/Model/Qwen3ASR/AudioEncoder.lean:470`, `Tyr/Model/Qwen3TTS/SpeakerEncoder.lean:314`), and the `|>` / `|>!` notations and `TrainingCtx` have no production call sites. Most model code calls `Linear.forward2d`-style functions directly, as in the examples above.
 - The `Tyr/Module.lean` umbrella re-exports `Core`, `Derive`, `Linear`, `LayerNorm`, `Affine`, and `Conv2d` — but **not** `RMSNorm`. Write `import Tyr.Module.RMSNorm` explicitly (this is what `Tyr/Model/Qwen/Model.lean:10` and others do).
-- `Affine` and `Conv2d` are legacy: no `TensorStruct`/`Module` instances, no call sites. `Conv2d.outShape` also returns the *input* channel count in the output shape (`Conv2d.lean:33`).
+- `Affine` and `Conv2d` are legacy: no `TensorStruct`/`Module` instances, no call sites.
 - There is no shared `Embedding` in `Tyr/Module`; the `Embedding` used for modular norms is `Tyr.Modular.Embedding` (`Atomic.lean:128`) and is currently only exercised by tests. There is no `NormedModule` instance for `RMSNorm`.
 
 ## Related guides
