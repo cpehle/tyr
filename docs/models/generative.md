@@ -153,8 +153,9 @@ checks. Chemistry preprocessing (canonicalization etc.) happens outside Lean.
 ### Training on tensors (`BranchingFlowsTrain.lean`, `MoleculeTrain.lean`, `MoleculeTransformer.lean`)
 
 `BranchingFlowsTrain.lean` packs `BranchingBridgeResult`s into fixed-shape tensors and
-runs one AdamW step. `BranchingTrainConfig` (`:19`) holds `maxLen`, `padToken`,
-`timeScale`, loss weights, `weightDecay`, `gradClip`. The model interface for the
+provides the generic AdamW training path. `BranchingTrainConfig` holds `maxLen`,
+`padToken`, `timeScale`, independent coordinate/label/event loss weights,
+`weightDecay`, and `gradClip`. The model interface for the
 molecule case (`BranchingModel` in `BranchingFlowsTrain.lean:50` is the discrete-token
 analog):
 
@@ -171,8 +172,10 @@ mixed coordinate+label batch (`BranchingMoleculeBatch`, `:18`). Training steps:
 `trainStep` (discrete), `trainStepContinuous`, and `trainStepMolecule` (`:221`), all
 `[TensorStruct Params]`-generic and returning a per-head loss report.
 `sampleMoleculeBridgeBatch` (`MoleculeTrain.lean:271`) is the one-call data loader: pick
-random terminal molecules, sample times, run `branchingBridge` with the molecule
-bridges, deletion padding, and masked-x0 sampling.
+random terminal molecules, sample times (optionally oversampling exact branch
+times), run `branchingBridge` with the molecule bridges, deletion padding, and
+masked-x0 sampling. `trainStepMoleculeMuon` is the Julia-compatible executable
+path; `trainStepMolecule` remains available for AdamW callers.
 
 `MoleculeTransformer.lean` provides two ready-made `BranchingMoleculeModel`s:
 `MoleculeTransformerParams` (compact; one spatial-attention block with pair-distance
@@ -268,6 +271,7 @@ BranchingFlows, training a bridge model:
 | `branchingBridge` | sample bridge batch from `x1` states | `BranchingFlows.lean:1436` |
 | `packBranchingMolecule` | bridge result → `BranchingMoleculeBatch batch maxLen` | `MoleculeTrain.lean:62` |
 | `trainStepMolecule` | one AdamW step, returns params + report | `MoleculeTrain.lean:221` |
+| `trainStepMoleculeMuon` | one Julia-compatible Muon step, returns params + momentum state + report | `MoleculeTrain.lean` |
 | `evalMoleculeLoss` | loss report on a fixed bridge batch | `MoleculeTrain.lean:254` |
 | `sampleMoleculeBridgeBatch` | one-call molecule bridge data loader | `MoleculeTrain.lean:271` |
 | `moleculeTransformerModel` / `fullMoleculeTransformerModel` | ready `BranchingMoleculeModel`s | `MoleculeTransformer.lean:191,473` |
@@ -328,20 +332,23 @@ let bridgeCfg := MoleculeBridgeConfig.qm9 vocabSize maskToken
 -- qm9RecordsToBranchingStates returns Except String _; unwrap into IO
 let states ← qm9RecordsToBranchingStates records
   { vocabSize? := some vocabSize, maskToken? := some maskToken }
-let trainCfg : BranchingTrainConfig := { maxLen := 16, splitsWeight := 0.25, delWeight := 0.25 }
+let trainCfg : BranchingTrainConfig := {
+  maxLen := 16, coordWeight := 10.0, labelWeight := 1.0 / 3.0,
+  splitsWeight := 1.0, delWeight := 1.0, weightDecay := 0.01
+}
 let model := moleculeTransformerModel (maxLen := 16) (vocab := 10)
   (heads := 2) (headDim := 8) (mlp := 48)
 let mut params ← MoleculeTransformerParams.init 10 2 8 48
 
 -- train on freshly sampled bridge batches
 let mut rng : Rng := { state := 20260618 }
-let mut optState := (Optim.adamw (lr := 8.0e-3)).init params
+let mut optState := initMoleculeMuonState params
 for step in [:steps] do
   let (batch, rng') ← sampleMoleculeBridgeBatch bridgeCfg states 4 rng
-    (maxLen := some 16) (deletionPad := 1.2)
+    (useBranchingTimeProb := 0.5) (maxLen := some 16) (deletionPad := 1.2)
   rng := rng'
   let (params', optState', report) ←
-    trainStepMolecule trainCfg model params optState batch 8.0e-3 bridgeCfg.labelDFM
+    trainStepMoleculeMuon trainCfg model params optState batch 8.0e-3 bridgeCfg.labelDFM
   params := params' ; optState := optState'
 
 -- generate from a single masked atom
@@ -356,7 +363,7 @@ writeMoleculeXYZ ⟨"generated.xyz"⟩ generated.finalState "sample" labelSymbol
 writeMoleculeTrajectoryJsonl ⟨"trajectory.jsonl"⟩ generated
 ```
 
-The full executable adds checkpoint resume (`torch.checkpoint`), LR warmup/cooldown,
+The full executable adds model and Muon-momentum checkpoint resume, LR warmup/cooldown,
 profiles (`--profile smoke|paper-qm9-main|paper-qm9-appendix`), and the
 `fullMoleculeTransformerModel` architecture (`lake exe BranchingFlowsMoleculeTrainGenerate`).
 

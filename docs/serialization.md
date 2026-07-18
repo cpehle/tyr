@@ -339,8 +339,7 @@ def Qwen35ForCausalLM.loadFromPretrained
 -- `loadFromPretrained "./my-local-qwen-dir"` uses the directory directly.
 ```
 
-Reconstructed example (from `Examples/TrainGPT.lean:78-79` and
-`Examples/BranchingFlows/MoleculeTrainGenerate.lean:436-481`):
+Reconstructed AdamW example (from `Examples/TrainGPT.lean`):
 
 ```lean
 open torch.checkpoint
@@ -357,6 +356,11 @@ def resume (initParams : α) [TensorStruct α] : IO (α × CheckpointMeta) := do
     IO.println s!"resumed optimizer at count={count}"
   pure (params, meta)
 ```
+
+The molecule BranchingFlows executable uses the same parameter checkpoint API,
+but stores its Julia-compatible Muon momentum leaves under
+`optim_muon_momentum_*` and its step in `optim_muon_count.txt`; resume requires
+both files to restore optimizer state.
 
 ## Caveats
 
