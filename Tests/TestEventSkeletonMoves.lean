@@ -24,9 +24,6 @@ def testMoveKindDefaultExactness : IO Unit := do
     (SkeletonMoveKind.learnedComplement.defaultExactness == MoveExactness.learnedApproximation)
     "Learned complements should be marked as learned approximations"
   LeanTest.assertTrue
-    (SkeletonMoveKind.dropSmallTimingTerm.defaultExactness == MoveExactness.controlledApproximation)
-    "Dropping a small timing term should be marked as a controlled approximation"
-  LeanTest.assertTrue
     (SkeletonMoveKind.clockedUpdate.defaultExactness == MoveExactness.exact)
     "Clocked deterministic discrete updates should be exact"
 

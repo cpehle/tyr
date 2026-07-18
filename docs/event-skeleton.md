@@ -38,7 +38,7 @@ structure SkeletonGraph where
   moves : Array SkeletonMove := #[]
 ```
 
-`SkeletonMoveKind` (`Core.lean:47`) has 15 constructors: `intervalAdjoint`, `saltationTime`, `resetTranspose`, `checkpointBoundary`, `rematerializeSegment`, `freezeControl`, `clockedUpdate`, `localSchurBlock`, `markMarginalize`, `markScoreSample`, `branchAggregate`, `belNoise`, `itoPQ`, `learnedComplement`, `dropSmallTimingTerm`. Each move carries a `MoveExactness` (`.exact | .unbiasedEstimator | .learnedApproximation | .controlledApproximation`), defaulted per kind by `SkeletonMoveKind.defaultExactness`, and a unitless `MoveCost` (`work`/`memory`/`variance`/`bias`). `localSchurBlock` is the designated future bridge back to the AlphaGrad eliminator. Three move kinds (`belNoise`, `itoPQ`, `dropSmallTimingTerm`) are declared vocabulary only — no kernel constructs them yet.
+`SkeletonMoveKind` (`Core.lean:47`) has 12 constructors: `intervalAdjoint`, `saltationTime`, `resetTranspose`, `checkpointBoundary`, `rematerializeSegment`, `freezeControl`, `clockedUpdate`, `localSchurBlock`, `markMarginalize`, `markScoreSample`, `branchAggregate`, `learnedComplement`. Each move carries a `MoveExactness` (`.exact | .unbiasedEstimator | .learnedApproximation | .controlledApproximation`), defaulted per kind by `SkeletonMoveKind.defaultExactness`, and a unitless `MoveCost` (`work`/`memory`/`variance`/`bias`). `localSchurBlock` is the designated future bridge back to the AlphaGrad eliminator.
 
 ### Event kernels
 
