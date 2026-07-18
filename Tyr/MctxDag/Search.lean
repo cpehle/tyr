@@ -1,5 +1,13 @@
 import Tyr.MctxDag.ActionSelection
 
+/-!
+# Tyr.MctxDag.Search
+
+Core DAG-MCTS loop over `DagTree`: root instantiation, path simulation,
+edge expansion with transposition reuse, value backup along the simulated
+path, and the `searchDag` / `searchWithDag` entry points.
+-/
+
 namespace torch.mctxdag
 
 private def updateAt (xs : Array α) (i : Nat) (v : α) : Array α :=
