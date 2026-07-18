@@ -38,6 +38,7 @@ import Tyr.Sharding
 import Tyr.Data
 import Tyr.DataLoader
 import Tyr.Tokenizer
+import Tyr.Text
 
 -- HuggingFace Hub utilities
 import Tyr.Hub
@@ -85,6 +86,7 @@ This root module re-exports the core, general-purpose surface area:
 - `Tyr.Optim` (+ scheduler/dist variants): optimizers and learning-rate scheduling.
 - `Tyr.Distributed` and `Tyr.Sharding`: distributed training and partitioning utilities.
 - `Tyr.Data`, `Tyr.DataLoader`, `Tyr.Tokenizer`: data ingestion, batching, and tokenization.
+- `Tyr.Text`: streaming text consensus and voice-activity (VAD) providers.
 - `Tyr.Checkpoint`: model/optimizer checkpoint save and restore.
 - `Tyr.Pipeline`: training/inference orchestration helpers.
 - `Tyr.GPU` (+ `Tyr.GPU.AD`, `Tyr.GPU.AutoGrad`): GPU kernel abstractions and AD support.
