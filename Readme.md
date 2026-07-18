@@ -151,6 +151,13 @@ lake build test_runner_experimental
 .lake/build/bin/test_runner_experimental
 ```
 
+## Documentation
+
+Per-component guides live in [docs/](docs/README.md) — covering the core
+tensor/FFI layer, training stack, model families, GPU kernel DSL, scientific
+computing, and the C++/build internals. An exhaustive API reference can be
+generated with doc-gen4 (see `docbuild/`).
+
 ## Examples
 
 See [Examples/README.md](Examples/README.md) for detailed per-example documentation.
