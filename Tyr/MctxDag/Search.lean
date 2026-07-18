@@ -149,7 +149,9 @@ def simulatePath
       return (parents, actions, nodeIndex, action)
   unreachable!
 
-/-- Expands one edge. If the resulting key already exists, reuses that node.
+/-- Expands one edge. If the edge is already expanded (e.g. depth cutoff), returns the
+    existing child without re-running `recurrentFn` and without touching the stored
+    reward/discount. If the resulting key already exists, reuses that node.
     If capacity is exhausted, no node is added and returns `parentIndex` as backup leaf. -/
 def expandEdge
     [Inhabited S]
@@ -164,20 +166,20 @@ def expandEdge
     (parentIndex : NodeIndex)
     (action : Action)
     : DagTree S K E × NodeIndex :=
-  let embedding := tree.embeddings.getD parentIndex default
-  let (step, nextEmbedding) := recurrentFn params rngKey action embedding
   let existingEdge := (tree.childrenIndex.getD parentIndex #[]).getD action UNVISITED
-
-  let setEdge := fun (t : DagTree S K E) (child : Int) =>
-    { t with
-      childrenIndex := updateAt2D t.childrenIndex parentIndex action child
-      childrenRewards := updateAt2D t.childrenRewards parentIndex action step.reward
-      childrenDiscounts := updateAt2D t.childrenDiscounts parentIndex action step.discount
-    }
-
   if existingEdge != UNVISITED then
-    (setEdge tree existingEdge, intToNatNonneg existingEdge)
+    (tree, intToNatNonneg existingEdge)
   else
+    let embedding := tree.embeddings.getD parentIndex default
+    let (step, nextEmbedding) := recurrentFn params rngKey action embedding
+
+    let setEdge := fun (t : DagTree S K E) (child : Int) =>
+      { t with
+        childrenIndex := updateAt2D t.childrenIndex parentIndex action child
+        childrenRewards := updateAt2D t.childrenRewards parentIndex action step.reward
+        childrenDiscounts := updateAt2D t.childrenDiscounts parentIndex action step.discount
+      }
+
     let nextKey := keyFn nextEmbedding
     match tree.keyToNode[nextKey]? with
     | some existingNode =>
