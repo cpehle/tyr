@@ -598,6 +598,32 @@ def testBranchingMoleculeSampledStepSeparatesIdenticalParticles : IO Unit := do
     s!"Independent OU samples should separate identical descendants, got separation={separation}"
 
 @[test]
+def testBranchingMoleculeSuppressesSplitWhenLabelChanges : IO Unit := do
+  let cfg : MoleculeBridgeConfig := {
+    coordOU := OUBridgeConfig.constantVariance 0.0 1.0
+    maskToken := 0
+    labelDFM := none
+  }
+  let atom : MoleculeAtom := { coord := default, label := 0 }
+  let x0 : BranchingState MoleculeAtom := BranchingState.mkDefault #[atom] #[0]
+  let prediction : MoleculeModelPrediction := {
+    coordTargets := #[default]
+    labelLogits := #[#[-20.0, 20.0]]
+    splitLogits := #[8.0]
+    delLogits := #[-100.0]
+  }
+  let flow : CoalescentFlow MoleculeBridgeConfig MoleculeAtom :=
+    CoalescentFlow.mkDefault cfg uniformTimeDist noEventTimeDist
+  let seed : Rng := { state := 20260718 }
+  let (suppressed, _) := moleculeBranchingStep flow x0 prediction 0.0 0.5 (rng := seed)
+  let (allowed, _) := moleculeBranchingStep flow x0 prediction 0.0 0.5
+    (splitAllowedAfterBaseStep := fun _ _ => true) (rng := seed)
+  LeanTest.assertEqual suppressed.state.state.size 1
+    "A molecule label change should suppress a split in the same interval"
+  LeanTest.assertTrue (allowed.state.state.size > 1)
+    "The test fixture should generate splits when the Julia compatibility predicate is bypassed"
+
+@[test]
 def testMoleculeTrainingBridgeSamplesGaussianRoots : IO Unit := do
   let cfg := MoleculeBridgeConfig.qm9 10 9
   let targetAtom : MoleculeAtom := {
@@ -621,6 +647,24 @@ def testMoleculeTrainingBridgeSamplesGaussianRoots : IO Unit := do
     "Molecule training bridge should no longer start every item at coordinate zero"
   LeanTest.assertTrue (separation > 1.0e-8)
     "Molecule training bridge should draw independent base-process samples"
+
+@[test]
+def testMoleculeTrainingBridgeCanOversampleBranchTimes : IO Unit := do
+  let cfg := MoleculeBridgeConfig.qm9 10 9
+  let atoms : Array MoleculeAtom := #[
+    { coord := { x := 0.0, y := 0.0, z := 0.0 }, label := 6 },
+    { coord := { x := 1.0, y := 0.0, z := 0.0 }, label := 8 }
+  ]
+  let target : BranchingState MoleculeAtom := BranchingState.mkDefault atoms #[0, 0]
+  let seed : Rng := { state := 20260718 }
+  let (ordinary, _) ← sampleMoleculeBridgeBatch cfg #[target] 1 seed
+    (branchTime := uniformTimeDist) (deletionTime := noEventTimeDist)
+    (coalescenceFactor := 1.0) (useBranchingTimeProb := 0.0) (deletionPad := 0.0)
+  let (atBranch, _) ← sampleMoleculeBridgeBatch cfg #[target] 1 seed
+    (branchTime := uniformTimeDist) (deletionTime := noEventTimeDist)
+    (coalescenceFactor := 1.0) (useBranchingTimeProb := 1.0) (deletionPad := 0.0)
+  LeanTest.assertTrue (Float.abs (ordinary.t[0]! - atBranch.t[0]!) > 1.0e-8)
+    "Branch-time oversampling should replace the initially sampled uniform training time"
 
 @[test]
 def testBranchingMoleculeGenerateUsesPredictionIntervals : IO Unit := do
@@ -835,7 +879,7 @@ def testBranchingMoleculePackingAndLosses : IO Unit := do
   let ⟨batchDfm, packedDfm⟩ ← packBranchingMoleculeWithDFM cfg labelDFM result
   LeanTest.assertEqual batchDfm (1 : UInt64) "DFM-packed molecule batch should preserve batch size"
   let scaleSum := nn.item (nn.sumAll packedDfm.labelLossScale)
-  LeanTest.assertTrue (scaleSum > 1.2 && scaleSum < 1.3)
+  LeanTest.assertTrue (Float.abs (scaleSum - (1.0 / 0.95)) < 1.0e-5)
     s!"DFM-packed molecule batch should carry Flowfusion label scale at t=0.25, got {scaleSum}"
   let totalDfmLogits := batchDfm.toNat * cfg.maxLen.toNat * 10
   let labelLogitsDfm : T #[batchDfm, cfg.maxLen, 10] :=
@@ -849,6 +893,73 @@ def testBranchingMoleculePackingAndLosses : IO Unit := do
     moleculeLosses cfg packedDfm packedDfm.coordAnchor labelLogitsDfm splitLogitsDfm delLogitsDfm
   LeanTest.assertTrue (dfmReport.label > report.label)
     s!"DFM label loss should apply the time scale, unscaled={report.label}, scaled={dfmReport.label}"
+
+private def singleAtomMoleculeLossFixture (t : Float) : BranchingBridgeResult MoleculeAtom :=
+  let atom : MoleculeAtom := { coord := default, label := 0 }
+  let anchor : MoleculeAtom := { coord := { x := 1.0, y := 0.0, z := 0.0 }, label := 0 }
+  let state : BranchingState MoleculeAtom := BranchingState.mkDefault #[atom] #[0]
+  {
+    t := #[t]
+    segments := #[#[]]
+    Xt := #[state]
+    X1anchor := #[#[anchor]]
+    descendants := #[#[1]]
+    del := #[#[false]]
+    splitsTarget := #[#[0]]
+    prevCoalescence := #[#[0.0]]
+  }
+
+@[test]
+def testMoleculeLossUsesJuliaTimeScalingAndIndependentWeights : IO Unit := do
+  let dfm := DistNoisyDiscreteConfig.qm9 10 0
+  let labelScaleRatio := dfm.lossScale 0.9 1.0 0.2 / dfm.lossScale 0.0 1.0 0.2
+  LeanTest.assertTrue (Float.abs (labelScaleRatio - 4.0) < 1.0e-8)
+    s!"Discrete labels should use the Julia demo's linear 0.2-epsilon scale, ratio={labelScaleRatio}"
+  let cfg : BranchingTrainConfig := {
+    maxLen := 1
+    padToken := 0
+    coordWeight := 2.0
+    labelWeight := 0.0
+    splitsWeight := 1.0
+    delWeight := 1.0
+  }
+  let ⟨batchEarly, early⟩ ← packBranchingMolecule cfg (singleAtomMoleculeLossFixture 0.0)
+  let ⟨batchLate, late⟩ ← packBranchingMolecule cfg (singleAtomMoleculeLossFixture 0.9)
+  let labelEarly : T #[batchEarly, cfg.maxLen, 1] := torch.zeros #[batchEarly, cfg.maxLen, 1]
+  let splitEarly : T #[batchEarly, cfg.maxLen] := torch.zeros #[batchEarly, cfg.maxLen]
+  let delEarly : T #[batchEarly, cfg.maxLen] := torch.zeros #[batchEarly, cfg.maxLen]
+  let (totalEarly, reportEarly) :=
+    moleculeLosses cfg early early.coord labelEarly splitEarly delEarly
+  let labelLate : T #[batchLate, cfg.maxLen, 1] := torch.zeros #[batchLate, cfg.maxLen, 1]
+  let splitLate : T #[batchLate, cfg.maxLen] := torch.zeros #[batchLate, cfg.maxLen]
+  let delLate : T #[batchLate, cfg.maxLen] := torch.zeros #[batchLate, cfg.maxLen]
+  let (_, reportLate) :=
+    moleculeLosses cfg late late.coord labelLate splitLate delLate
+  LeanTest.assertTrue (Float.abs (reportLate.coord / reportEarly.coord - 4.0) < 1.0e-4)
+    s!"Late coordinate supervision should receive Julia scalefloss amplification, early={reportEarly.coord}, late={reportLate.coord}"
+  LeanTest.assertTrue (Float.abs (reportLate.splits / reportEarly.splits - 4.0) < 1.0e-4)
+    s!"Late split supervision should receive Julia scalefloss amplification, early={reportEarly.splits}, late={reportLate.splits}"
+  LeanTest.assertTrue (Float.abs (reportLate.del / reportEarly.del - 4.0) < 1.0e-4)
+    s!"Late deletion supervision should receive Julia scalefloss amplification, early={reportEarly.del}, late={reportLate.del}"
+  let expectedTotal := reportEarly.coord * 2.0 + reportEarly.splits + reportEarly.del
+  LeanTest.assertTrue (Float.abs (nn.item totalEarly - expectedTotal) < 1.0e-5)
+    s!"Independent molecule loss weights should determine total loss, expected={expectedTotal}, got={nn.item totalEarly}"
+
+@[test]
+def testMoleculeMuonUpdatesMatrixAndVectorLeaves : IO Unit := do
+  let matrix : T #[2, 2] := reshape (data.fromFloatArray #[1.0, 2.0, 3.0, 4.0]) #[2, 2]
+  let vector : T #[2] := data.fromFloatArray #[1.0, -1.0]
+  let grads : T #[2, 2] × T #[2] := (torch.ones #[2, 2], torch.ones #[2])
+  let params : T #[2, 2] × T #[2] := (matrix, vector)
+  let state := initMoleculeMuonState params
+  let (updated, state') ← moleculeMuonStep params grads state 0.01 0.0 0.95 5
+  let matrixDelta := nn.item (nn.sumAll (nn.abs (updated.1 - params.1)))
+  let vectorDelta := nn.item (nn.sumAll (nn.abs (updated.2 - params.2)))
+  LeanTest.assertTrue (Float.isFinite matrixDelta && matrixDelta > 0.0)
+    s!"Muon should update matrix leaves, delta={matrixDelta}"
+  LeanTest.assertTrue (Float.isFinite vectorDelta && vectorDelta > 0.0)
+    s!"Muon should flatten and update vector leaves like the Julia rule, delta={vectorDelta}"
+  LeanTest.assertEqual state'.step 1 "Muon optimizer state should advance one step"
 
 private def moleculeCoordCell {maxLen : UInt64}
     (coord : T #[1, maxLen, 3]) (j k : Nat) : Float :=
