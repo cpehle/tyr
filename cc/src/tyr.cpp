@@ -2733,8 +2733,10 @@ lean_object* lean_torch_mul_tensor_scalar(
 #endif
 
 #if TYR_WITH_CUDA_GRAPH
+#include <c10/cuda/CUDAStream.h>
 namespace {
 std::unique_ptr<at::cuda::CUDAGraph> g_cuda_graph;
+c10::cuda::CUDAStream g_graph_stream;
 }
 #endif
 
@@ -2747,11 +2749,18 @@ lean_object* tyrNoCudaGraph() {
 lean_object* lean_torch_cuda_graph_capture_begin(lean_object* w) {
 #if TYR_WITH_CUDA_GRAPH
   try {
+    // Capture is illegal on the legacy default stream; mirror
+    // torch.cuda.graph's side-stream dance: sync, switch to a pool stream,
+    // capture there, and let replay run on the caller's current stream.
+    c10::cuda::getCurrentCUDAStream().synchronize();
+    g_graph_stream = c10::cuda::getStreamFromPool(false);
+    c10::cuda::setCurrentCUDAStream(g_graph_stream);
     g_cuda_graph = std::make_unique<at::cuda::CUDAGraph>();
     g_cuda_graph->capture_begin();
     return lean_io_result_mk_ok(lean_box(0));
   } catch (const std::exception& e) {
     g_cuda_graph.reset();
+    c10::cuda::setCurrentCUDAStream(c10::cuda::getDefaultCUDAStream());
     return lean_io_result_mk_error(lean_mk_io_user_error(
       lean_mk_string(("cuda graph capture_begin failed: " + std::string(e.what())).c_str())));
   }
@@ -2764,9 +2773,11 @@ lean_object* lean_torch_cuda_graph_capture_end(lean_object* w) {
 #if TYR_WITH_CUDA_GRAPH
   try {
     g_cuda_graph->capture_end();
+    c10::cuda::setCurrentCUDAStream(c10::cuda::getDefaultCUDAStream());
     return lean_io_result_mk_ok(lean_box(0));
   } catch (const std::exception& e) {
     g_cuda_graph.reset();
+    c10::cuda::setCurrentCUDAStream(c10::cuda::getDefaultCUDAStream());
     return lean_io_result_mk_error(lean_mk_io_user_error(
       lean_mk_string(("cuda graph capture_end failed: " + std::string(e.what())).c_str())));
   }
