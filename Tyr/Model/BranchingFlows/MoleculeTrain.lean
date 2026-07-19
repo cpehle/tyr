@@ -101,6 +101,23 @@ def copyInto {b1 b2 m1 m2 : UInt64}
     splitsTarget := copyInplace dst.splitsTarget src.splitsTarget
     delTarget := copyInplace dst.delTarget src.delTarget }
 
+/-- Force every field eagerly (see `torch.touch`): batch construction and
+    `copyInto` are lazy, and without forcing they would be evaluated inside
+    the CUDA graph capture region / after the replay launch. -/
+def eval {batch maxLen : UInt64}
+    (b : BranchingMoleculeBatch batch maxLen) : IO (BranchingMoleculeBatch batch maxLen) := do
+  torch.touch b.t
+  torch.touch b.coord
+  torch.touch b.coordAnchor
+  torch.touch b.label
+  torch.touch b.labelAnchor
+  torch.touch b.labelLossScale
+  torch.touch b.padmask
+  torch.touch b.flowmask
+  torch.touch b.splitsTarget
+  torch.touch b.delTarget
+  pure b
+
 end BranchingMoleculeBatch
 
 structure BranchingMoleculeModel (maxLen vocab : UInt64) (Params : Type) where

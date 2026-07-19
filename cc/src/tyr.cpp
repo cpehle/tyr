@@ -2705,6 +2705,13 @@ lean_object* lean_torch_copy_inplace(
   return dst;
 }
 
+// No-op that forces its tensor argument at the FFI boundary. Used to force
+// lazy Lean staging computations (static buffers, in-place copies) to run
+// eagerly *before* a CUDA graph capture/replay instead of inside it.
+lean_object* lean_torch_touch(lean_obj_arg /*s*/, b_lean_obj_arg /*t*/, lean_object* w) {
+  return lean_io_result_mk_ok(lean_box(0));
+}
+
 // Tensor × 0-dim tensor (broadcast scalar): lets a captured CUDA graph take a
 // scalar input (e.g. the learning rate) through a static buffer instead of a
 // baked-in Float.

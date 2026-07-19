@@ -151,6 +151,13 @@ opaque cuda_event_destroy (event : CudaEvent) : IO Unit
 @[extern "lean_torch_copy_inplace"]
 opaque copyInplace {s : Shape} (dst : @& T s) (src : @& T s) : T s
 
+/-- No-op that forces its tensor argument at the FFI boundary. Lean `let`
+    bindings are lazy, so staging computations for CUDA graph capture/replay
+    (static buffers, in-place copies) would otherwise be evaluated *inside*
+    the captured region; `touch` forces them eagerly beforehand. -/
+@[extern "lean_torch_touch"]
+opaque touch {s : Shape} (t : @& T s) : IO Unit
+
 /-- Elementwise multiply by a 0-dim tensor (broadcast scalar). Lets captured
     CUDA graphs take scalar inputs (e.g. the learning rate) through a static
     buffer rather than a baked-in Float. -/
