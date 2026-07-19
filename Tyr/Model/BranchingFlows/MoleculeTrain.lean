@@ -45,6 +45,22 @@ def toDevice {batch maxLen : UInt64}
     splitsTarget := x.splitsTarget.to device
     delTarget := x.delTarget.to device }
 
+/-- Cast the float fields of a packed batch to bfloat16 (labels/masks stay
+    integral). Used by the `--dtype bf16` experiment: halves bandwidth on the
+    model's hot path; the optimizer then also runs in bf16. -/
+def castBFloat16 {batch maxLen : UInt64}
+    (x : BranchingMoleculeBatch batch maxLen) : BranchingMoleculeBatch batch maxLen :=
+  { t := toBFloat16' x.t
+    coord := toBFloat16' x.coord
+    coordAnchor := toBFloat16' x.coordAnchor
+    label := x.label
+    labelAnchor := x.labelAnchor
+    labelLossScale := toBFloat16' x.labelLossScale
+    padmask := x.padmask
+    flowmask := x.flowmask
+    splitsTarget := toBFloat16' x.splitsTarget
+    delTarget := toBFloat16' x.delTarget }
+
 end BranchingMoleculeBatch
 
 structure BranchingMoleculeModel (maxLen vocab : UInt64) (Params : Type) where
@@ -360,11 +376,13 @@ def trainStepMoleculeMuon {maxLen vocab : UInt64} {Params : Type} [TensorStruct 
       pure ())
     (device : Device := Device.CPU)
     (timePhases : Bool := false)
+    (bf16 : Bool := false)
     : IO (Params × MoleculeMuonState Params × BranchingMoleculeLossReport) := do
   let t0 ← IO.monoMsNow
   let params := TensorStruct.zeroGrads (TensorStruct.makeLeafParams params)
   let ⟨batch, packedCpu⟩ ← packBranchingMolecule cfg result labelDFM
-  let packed := packedCpu.toDevice device
+  let packedDev := packedCpu.toDevice device
+  let packed := if bf16 then packedDev.castBFloat16 else packedDev
   if timePhases then torch.cuda_synchronize
   let t1 ← IO.monoMsNow
   let (coordPred, labelLogits, splitLogits, delLogits) ←
@@ -396,10 +414,12 @@ def evalMoleculeLoss {maxLen vocab : UInt64} {Params : Type}
     (result : BranchingBridgeResult MoleculeAtom)
     (labelDFM : Option DistNoisyDiscreteConfig := none)
     (device : Device := Device.CPU)
+    (bf16 : Bool := false)
     : IO BranchingMoleculeLossReport := do
   torch.autograd.no_grad do
     let ⟨batch, packedCpu⟩ ← packBranchingMolecule cfg result labelDFM
-    let packed := packedCpu.toDevice device
+    let packedDev := packedCpu.toDevice device
+    let packed := if bf16 then packedDev.castBFloat16 else packedDev
     let (coordPred, labelLogits, splitLogits, delLogits) ←
       model.forward (batch := batch) params packed.coord packed.label packed.t packed.padmask
     let (_, report) :=

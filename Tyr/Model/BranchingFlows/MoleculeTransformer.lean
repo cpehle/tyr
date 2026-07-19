@@ -385,9 +385,11 @@ private def spatialAttention {batch maxLen vocab hidden heads headDim mlp rff la
   let k0 : T #[batch, maxLen, heads * headDim] := torch.affine3d h layer.kW layer.kB
   let v0 : T #[batch, maxLen, heads * headDim] := torch.affine3d h layer.vW layer.vB
   let qR : T #[batch, maxLen, heads, headDim] :=
-    rotary.applyRotaryEmb (reshape q0 #[batch, maxLen, heads, headDim]) ropeCos ropeSin
+    rotary.applyRotaryEmb (reshape q0 #[batch, maxLen, heads, headDim])
+      (castLike q0 ropeCos) (castLike q0 ropeSin)
   let kR : T #[batch, maxLen, heads, headDim] :=
-    rotary.applyRotaryEmb (reshape k0 #[batch, maxLen, heads, headDim]) ropeCos ropeSin
+    rotary.applyRotaryEmb (reshape k0 #[batch, maxLen, heads, headDim])
+      (castLike k0 ropeCos) (castLike k0 ropeSin)
   let q : T #[batch, heads, maxLen, headDim] := nn.transpose_for_attention qR
   let k : T #[batch, heads, maxLen, headDim] := nn.transpose_for_attention kR
   let v : T #[batch, heads, maxLen, headDim] :=

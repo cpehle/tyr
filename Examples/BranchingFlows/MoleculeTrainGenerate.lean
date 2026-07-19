@@ -66,6 +66,7 @@ structure RunOptions where
   sampleCount : Nat := 1
   generate : Bool := true
   device : Device := Device.CPU
+  bf16 : Bool := false
   timePhases : Bool := false
   parallelSampling : Nat := 1
   splitLogitCap? : Option Float := none
@@ -273,6 +274,11 @@ partial def parseArgsLoop (args : List String) (opts : RunOptions) : IO RunOptio
       | "cpu" => parseArgsLoop rest { opts with device := Device.CPU }
       | "cuda" | "cuda:0" => parseArgsLoop rest { opts with device := Device.CUDA 0 }
       | _ => throw (IO.userError s!"--device expects cpu or cuda, got '{value}'")
+  | "--dtype" :: value :: rest =>
+      match value with
+      | "fp32" => parseArgsLoop rest { opts with bf16 := false }
+      | "bf16" => parseArgsLoop rest { opts with bf16 := true }
+      | _ => throw (IO.userError s!"--dtype expects fp32 or bf16, got '{value}'")
   | "--no-generate" :: rest =>
       parseArgsLoop rest { opts with generate := false }
   | "--time-phases" :: rest =>
@@ -451,6 +457,7 @@ private def runWithModel {Params : Type} [TensorStruct Params] {maxLen vocab : U
         IO.println s!"loaded molecule checkpoint from {checkpointDir} at iteration={checkpointMeta.iteration} trainLoss={checkpointMeta.trainLoss}"
         pure (loadedParams, checkpointMeta.iteration, some checkpointMeta)
   let initParams := TensorStruct.map (fun t => t.to opts.device) initParams
+  let initParams := if opts.bf16 then TensorStruct.map torch.toBFloat16' initParams else initParams
   let mut params := initParams
   let mut rng : Rng := { state := opts.seed + 17 }
 
@@ -461,7 +468,7 @@ private def runWithModel {Params : Type} [TensorStruct Params] {maxLen vocab : U
   rng := rng'
   let initTrain ←
     evalMoleculeLoss (maxLen := maxLen) (vocab := vocab) trainCfg model params fixedTrainBridge
-      labelDFM opts.device
+      labelDFM opts.device (bf16 := opts.bf16)
   let mut finalTrain := initTrain
   let mut lastReport := initTrain
 
@@ -507,7 +514,7 @@ private def runWithModel {Params : Type} [TensorStruct Params] {maxLen vocab : U
       let t1 ← IO.monoMsNow
       let (params', optState', report) ←
         trainStepMoleculeMuon (maxLen := maxLen) (vocab := vocab) trainCfg model
-          params optState bridgeBatch lr labelDFM (device := opts.device) (timePhases := opts.timePhases)
+          params optState bridgeBatch lr labelDFM (device := opts.device) (timePhases := opts.timePhases) (bf16 := opts.bf16)
       let t2 ← IO.monoMsNow
       params := params'
       optState := optState'
@@ -521,7 +528,7 @@ private def runWithModel {Params : Type} [TensorStruct Params] {maxLen vocab : U
 
     finalTrain ←
       evalMoleculeLoss (maxLen := maxLen) (vocab := vocab) trainCfg model params fixedTrainBridge
-        labelDFM opts.device
+        labelDFM opts.device (bf16 := opts.bf16)
     if !(Float.isFinite finalTrain.total) then
       throw (IO.userError "final train loss is not finite")
     if !(finalTrain.total < initTrain.total) then
@@ -546,7 +553,7 @@ private def runWithModel {Params : Type} [TensorStruct Params] {maxLen vocab : U
   rng := rng'
   let evalReport ←
     evalMoleculeLoss (maxLen := maxLen) (vocab := vocab) trainCfg model params evalBridge
-      labelDFM opts.device
+      labelDFM opts.device (bf16 := opts.bf16)
 
   let target := evalStates[0]!
   writeMoleculeXYZ ⟨opts.outputPrefix ++ "_target.xyz"⟩ target
@@ -595,7 +602,7 @@ private def runWithModel {Params : Type} [TensorStruct Params] {maxLen vocab : U
   IO.println s!"molecule_dataset records={recordsCount} usable={usableCount} train={trainStates.size} eval={evalStates.size}"
   let labelProcess := if opts.fixedLabels then "fixed" else "dfm"
   let splitCap := match opts.splitLogitCap? with | some cap => toString cap | none => "none"
-  IO.println s!"molecule_config architecture={architectureName opts} optimizer=muon device={deviceName opts.device} max_len={opts.maxLen} vocab_size={opts.vocabSize} mask_token={opts.maskToken} label_process={labelProcess} hidden_dim={opts.hiddenDim} heads={opts.heads} head_dim={opts.headDim} mlp={opts.mlp} rff_dim={opts.rffDim} layers={opts.layers} coord_update_layers={opts.coordUpdateLayers} batch_size={opts.batchSize} steps={opts.steps} total_steps={opts.totalSteps} coord_weight={opts.coordWeight} label_weight={opts.labelWeight} splits_weight={opts.splitsWeight} del_weight={opts.delWeight} branching_time_prob={opts.useBranchingTimeProb} split_logit_cap={splitCap}"
+  IO.println s!"molecule_config architecture={architectureName opts} optimizer=muon device={deviceName opts.device} dtype={if opts.bf16 then "bf16" else "fp32"} max_len={opts.maxLen} vocab_size={opts.vocabSize} mask_token={opts.maskToken} label_process={labelProcess} hidden_dim={opts.hiddenDim} heads={opts.heads} head_dim={opts.headDim} mlp={opts.mlp} rff_dim={opts.rffDim} layers={opts.layers} coord_update_layers={opts.coordUpdateLayers} batch_size={opts.batchSize} steps={opts.steps} total_steps={opts.totalSteps} coord_weight={opts.coordWeight} label_weight={opts.labelWeight} splits_weight={opts.splitsWeight} del_weight={opts.delWeight} branching_time_prob={opts.useBranchingTimeProb} split_logit_cap={splitCap}"
   if opts.generateOnly then
     IO.println s!"molecule_eval checkpoint_train_total={finalTrain.total} heldout_total={evalReport.total}"
   else
