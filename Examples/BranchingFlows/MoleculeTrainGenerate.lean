@@ -570,6 +570,7 @@ private def runWithModel {Params : Type} [TensorStruct Params] {maxLen vocab : U
             TensorStruct.mapM (fun t => do torch.touch t; pure t)
               (TensorStruct.zipWith (fun d s => copyInplace d s) optState.momentum outM.momentum)
           optState := { momentum := momentum', step := outM.step }
+          IO.eprintln "graphdbg: fold done"
           let (tl, cl, ll, sl, dl) := losses
           lastReport := moleculeLossReport tl cl ll sl dl
           if step == 0 || step % opts.logEvery == 0 then
@@ -595,7 +596,9 @@ private def runWithModel {Params : Type} [TensorStruct Params] {maxLen vocab : U
         -- copies before the next replay reads the canonical storage.
         let _ ← (sb.copyInto (packedCpu.toDevice opts.device)).eval
         torch.touch (copyInplace lrT (torch.full #[] lr))
+        IO.eprintln "graphdbg: replay staged"
         torch.cudaGraphReplay
+        IO.eprintln "graphdbg: replayed"
         params ← torch.autograd.no_grad do
           TensorStruct.mapM (fun t => do torch.touch t; pure t)
             (TensorStruct.zipWith (fun d s => copyInplace d s) params outP)
@@ -603,6 +606,7 @@ private def runWithModel {Params : Type} [TensorStruct Params] {maxLen vocab : U
           TensorStruct.mapM (fun t => do torch.touch t; pure t)
             (TensorStruct.zipWith (fun d s => copyInplace d s) optState.momentum outM.momentum)
         optState := { momentum := momentum', step := outM.step }
+        IO.eprintln "graphdbg: replay fold done"
         let (tl, cl, ll, sl, dl) := losses
         lastReport := moleculeLossReport tl cl ll sl dl
       else
