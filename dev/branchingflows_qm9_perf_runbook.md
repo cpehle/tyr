@@ -265,6 +265,28 @@ Reproduction commands live in "Baseline invocation" above; every iteration
 was verified with `Tests/TestBranchingFlows` (44/44) and loss-curve
 comparison (bit-identical where semantics required it).
 
+## Roofline check (from the logged config)
+
+Is 675 ms/step at the GB10's roofline? **No — ~7–15% of both ceilings;
+latency-bound, not hardware-bound.**
+
+- **Compute**: fwd ≈ 500 GFLOP, fwd+bwd ≈ 1.5 TFLOP/step (41 GFLOP/layer:
+  QKV+O ≈ 19, MLP ≈ 19, attention bmms ≈ 1.6, RFF bias affine ≈ 1.6). At
+  460 ms fwd+bwd → ~3.3 TFLOPS achieved vs ~20 TFLOPS fp32 peak → ~15%.
+- **Bandwidth**: ~9–12 GB/step (RFF pipeline 4.7 GB after hoisting, scores
+  chain ~1.2 GB fwd, bias affines 0.3 GB, backward ~2×) at 460 ms →
+  ~20–25 GB/s vs 273 GB/s spec → ~8%.
+- **Actual bound**: per-op latency. Calibration from the muon phase: ~1200
+  small ops in 70 ms ≈ 60 µs/op; fwd+bwd carries ~1.5–2k ops at similar
+  effective cost ≈ the measured 460 ms. Grace/aarch64 eager dispatch is
+  expensive per op; tiny tiles also quantize badly on the GPU.
+
+Levers in order of leverage: (1) op-count collapse (hand-fused RFF kernel,
+CUDA graphs) — attacks the real bound; (2) bf16 (halves traffic, needs
+Julia-precision parity check); (3) H100-class hardware (12× bandwidth +
+faster dispatch CPU) — helps, but even there the stack stays below
+roofline, just at acceptable absolute cost.
+
 ## Progress log
 
 ### 2026-07-17 — setup
