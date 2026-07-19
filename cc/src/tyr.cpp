@@ -2653,6 +2653,39 @@ lean_object* lean_torch_sdpa_4d(
   return fromTorchTensor(result_);
 }
 
+// Fused SDPA with an explicit additive float bias [batch, n_head, seq, seq].
+// Replaces the manual matmul -> bias add -> masked_fill -> softmax -> matmul
+// pipeline (and its un-fused backward) for the molecule transformers.
+lean_object* lean_torch_sdpa_4d_bias(
+  lean_obj_arg /*batch*/,
+  lean_obj_arg /*n_head*/,
+  lean_obj_arg /*seq*/,
+  lean_obj_arg /*head_dim*/,
+  b_lean_obj_arg query,
+  b_lean_obj_arg key,
+  b_lean_obj_arg value,
+  b_lean_obj_arg bias,
+  double dropout_p,
+  uint8_t is_causal
+) {
+  auto query_ = borrowTensor(query);
+  auto key_ = borrowTensor(key);
+  auto value_ = borrowTensor(value);
+  auto bias_ = borrowTensor(bias);
+
+  auto result_ = torch::scaled_dot_product_attention(
+    query_,
+    key_,
+    value_,
+    bias_,  // attn_mask: additive float bias
+    dropout_p,
+    is_causal
+  );
+
+
+  return fromTorchTensor(result_);
+}
+
 // Save tensor to a binary file
 lean_object* lean_torch_save_tensor(lean_obj_arg /*s*/, b_lean_obj_arg tensor, b_lean_obj_arg path_obj, lean_object* w) {
   auto tensor_ = borrowTensor(tensor);

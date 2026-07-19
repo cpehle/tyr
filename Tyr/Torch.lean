@@ -713,6 +713,19 @@ opaque scaled_dot_product_attention {batch n_head seq head_dim : UInt64}
     (dropout_p : Float := 0.0)
     (is_causal : Bool := true) : T #[batch, n_head, seq, head_dim]
 
+/-- Fused scaled dot-product attention with an explicit additive float bias.
+    Q, K, V: [batch, n_head, seq, head_dim], bias: [batch, n_head, seq, seq]
+    -> output: [batch, n_head, seq, head_dim]. Replaces a manual
+    matmul/bias/masked_fill/softmax pipeline with one fused kernel. -/
+@[extern "lean_torch_sdpa_4d_bias"]
+opaque scaled_dot_product_attention_bias {batch n_head seq head_dim : UInt64}
+    (query : @& T #[batch, n_head, seq, head_dim])
+    (key : @& T #[batch, n_head, seq, head_dim])
+    (value : @& T #[batch, n_head, seq, head_dim])
+    (bias : @& T #[batch, n_head, seq, seq])
+    (dropout_p : Float := 0.0)
+    (is_causal : Bool := false) : T #[batch, n_head, seq, head_dim]
+
 -- Lower triangular (for manual causal masking)
 @[extern "lean_torch_tril"] opaque tril {s : Shape} (t : @& T s) (diagonal : Int := 0) : T s
 

@@ -133,23 +133,19 @@ private def spatialAttention {batch maxLen vocab heads headDim mlp : UInt64}
     nn.transpose_for_attention (reshape k0 #[batch, maxLen, heads, headDim])
   let v : T #[batch, heads, maxLen, headDim] :=
     nn.transpose_for_attention (reshape v0 #[batch, maxLen, heads, headDim])
-  let kt : T #[batch, heads, headDim, maxLen] := nn.transpose k 2 3
-  let scores0 : T #[batch, heads, maxLen, maxLen] :=
-    (nn.bmm4d q kt) / (Float.sqrt headDim.toFloat)
   let dist : T #[batch, maxLen, maxLen] := pairwiseDistanceSq coord
-  let dist4 : T #[batch, heads, maxLen, maxLen] :=
-    nn.expand (reshape dist #[batch, 1, maxLen, maxLen]) #[batch, heads, maxLen, maxLen]
   let slope : T #[heads] := nn.softplus params.pairDistSlope
-  let slope4 : T #[batch, heads, maxLen, maxLen] :=
-    nn.expand (reshape slope #[1, heads, 1, 1]) #[batch, heads, maxLen, maxLen]
-  let scores1 := scores0 - (slope4 * dist4)
+  let distBias : T #[batch, heads, maxLen, maxLen] :=
+    nn.expand (reshape slope #[1, heads, 1, 1]) #[batch, heads, maxLen, maxLen] *
+      nn.expand (reshape dist #[batch, 1, maxLen, maxLen]) #[batch, heads, maxLen, maxLen]
   let keyMask0 : T #[batch, 1, 1, maxLen] := nn.unsqueeze (nn.unsqueeze padmask 1) 1
-  let keyMask : T #[batch, heads, maxLen, maxLen] :=
-    nn.expand keyMask0 #[batch, heads, maxLen, maxLen]
-  let invalid : T #[batch, heads, maxLen, maxLen] := torch.lt_scalar keyMask 0.5
-  let scores := nn.masked_fill scores1 invalid (-1.0e9)
-  let attn : T #[batch, heads, maxLen, maxLen] := nn.softmax_dim scores 3
-  let ctx : T #[batch, heads, maxLen, headDim] := nn.bmm4d attn v
+  let invalid0 : T #[batch, 1, 1, maxLen] := torch.lt_scalar keyMask0 0.5
+  let maskTerm : T #[batch, 1, 1, maxLen] :=
+    nn.masked_fill (torch.zeros #[batch, 1, 1, maxLen]) invalid0 (-1.0e9)
+  let bias : T #[batch, heads, maxLen, maxLen] :=
+    nn.expand maskTerm #[batch, heads, maxLen, maxLen] - distBias
+  let ctx : T #[batch, heads, maxLen, headDim] :=
+    nn.scaled_dot_product_attention_bias q k v bias
   let out4 : T #[batch, maxLen, heads, headDim] := nn.transpose_from_attention ctx
   let out3 : T #[batch, maxLen, heads * headDim] := reshape out4 #[batch, maxLen, heads * headDim]
   torch.affine3d out3 params.oW params.oB
@@ -392,17 +388,15 @@ private def spatialAttention {batch maxLen vocab hidden heads headDim mlp rff la
   let k : T #[batch, heads, maxLen, headDim] := nn.transpose_for_attention kR
   let v : T #[batch, heads, maxLen, headDim] :=
     nn.transpose_for_attention (reshape v0 #[batch, maxLen, heads, headDim])
-  let kt : T #[batch, heads, headDim, maxLen] := nn.transpose k 2 3
-  let scores0 : T #[batch, heads, maxLen, maxLen] :=
-    (nn.bmm4d q kt) / (Float.sqrt headDim.toFloat)
-  let scores1 := scores0 + pairAttentionBias params layer coord
+  let pairBias : T #[batch, heads, maxLen, maxLen] := pairAttentionBias params layer coord
   let keyMask0 : T #[batch, 1, 1, maxLen] := nn.unsqueeze (nn.unsqueeze padmask 1) 1
-  let keyMask : T #[batch, heads, maxLen, maxLen] :=
-    nn.expand keyMask0 #[batch, heads, maxLen, maxLen]
-  let invalid : T #[batch, heads, maxLen, maxLen] := torch.lt_scalar keyMask 0.5
-  let scores := nn.masked_fill scores1 invalid (-1.0e9)
-  let attn : T #[batch, heads, maxLen, maxLen] := nn.softmax_dim scores 3
-  let ctx : T #[batch, heads, maxLen, headDim] := nn.bmm4d attn v
+  let invalid0 : T #[batch, 1, 1, maxLen] := torch.lt_scalar keyMask0 0.5
+  let maskTerm : T #[batch, 1, 1, maxLen] :=
+    nn.masked_fill (torch.zeros #[batch, 1, 1, maxLen]) invalid0 (-1.0e9)
+  let bias : T #[batch, heads, maxLen, maxLen] :=
+    pairBias + nn.expand maskTerm #[batch, heads, maxLen, maxLen]
+  let ctx : T #[batch, heads, maxLen, headDim] :=
+    nn.scaled_dot_product_attention_bias q k v bias
   let out4 : T #[batch, maxLen, heads, headDim] := nn.transpose_from_attention ctx
   let out3 : T #[batch, maxLen, heads * headDim] := reshape out4 #[batch, maxLen, heads * headDim]
   torch.affine3d out3 layer.oW layer.oB
