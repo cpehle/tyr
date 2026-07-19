@@ -2673,17 +2673,21 @@ lean_object* lean_torch_sdpa_4d_bias(
   auto value_ = borrowTensor(value);
   auto bias_ = borrowTensor(bias);
 
-  auto result_ = torch::scaled_dot_product_attention(
-    query_,
-    key_,
-    value_,
-    bias_,  // attn_mask: additive float bias
-    dropout_p,
-    is_causal
-  );
-
-
-  return fromTorchTensor(result_);
+  try {
+    auto result_ = torch::scaled_dot_product_attention(
+      query_,
+      key_,
+      value_,
+      bias_,  // attn_mask: additive float bias
+      dropout_p,
+      is_causal
+    );
+    return fromTorchTensor(result_);
+  } catch (const c10::Error& e) {
+    std::fprintf(stderr, "[tyr] sdpa_4d_bias libtorch error:\n%s\n", e.what());
+    std::fflush(stderr);
+    std::abort();
+  }
 }
 
 // Save tensor to a binary file
