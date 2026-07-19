@@ -2690,6 +2690,101 @@ lean_object* lean_torch_sdpa_4d_bias(
   }
 }
 
+// In-place whole-tensor copy: `dst.copy_(src)` (converts dtype if needed).
+// Same ownership contract as the other in-place mutators (zero_grad etc.):
+// borrowed args, returns an inc'd reference to the mutated `dst`.
+lean_object* lean_torch_copy_inplace(
+  lean_obj_arg /*s*/,
+  b_lean_obj_arg dst,
+  b_lean_obj_arg src
+) {
+  auto dst_ = borrowTensor(dst);
+  auto src_ = borrowTensor(src);
+  dst_.copy_(src_);
+  lean_inc(dst);
+  return dst;
+}
+
+// --- Generic CUDA graph capture/replay -------------------------------------
+// A single process-wide graph slot is enough for the training-step use case:
+// capture a static-shaped region once, replay it with fresh data copied into
+// the same input buffers. Errors surface as Lean IO errors so callers can
+// fall back to eager execution. CPU-only libtorch builds (which lack the CUDA
+// cmake macros header) get stubs that report unavailability.
+
+#if __has_include(<ATen/cuda/CUDAGraph.h>) && __has_include(<c10/cuda/impl/cuda_cmake_macros.h>)
+#define TYR_WITH_CUDA_GRAPH 1
+#include <ATen/cuda/CUDAGraph.h>
+#else
+#define TYR_WITH_CUDA_GRAPH 0
+#endif
+
+#if TYR_WITH_CUDA_GRAPH
+namespace {
+std::unique_ptr<at::cuda::CUDAGraph> g_cuda_graph;
+}
+#endif
+
+namespace {
+lean_object* tyrNoCudaGraph() {
+  return lean_io_result_mk_error(lean_mk_io_user_error(
+    lean_mk_string("CUDA graphs not available in this libtorch build")));
+}
+
+lean_object* lean_torch_cuda_graph_capture_begin(lean_object* w) {
+#if TYR_WITH_CUDA_GRAPH
+  try {
+    g_cuda_graph = std::make_unique<at::cuda::CUDAGraph>();
+    g_cuda_graph->capture_begin();
+    return lean_io_result_mk_ok(lean_box(0));
+  } catch (const std::exception& e) {
+    g_cuda_graph.reset();
+    return lean_io_result_mk_error(lean_mk_io_user_error(
+      lean_mk_string(("cuda graph capture_begin failed: " + std::string(e.what())).c_str())));
+  }
+#else
+  return tyrNoCudaGraph();
+#endif
+}
+
+lean_object* lean_torch_cuda_graph_capture_end(lean_object* w) {
+#if TYR_WITH_CUDA_GRAPH
+  try {
+    g_cuda_graph->capture_end();
+    return lean_io_result_mk_ok(lean_box(0));
+  } catch (const std::exception& e) {
+    g_cuda_graph.reset();
+    return lean_io_result_mk_error(lean_mk_io_user_error(
+      lean_mk_string(("cuda graph capture_end failed: " + std::string(e.what())).c_str())));
+  }
+#else
+  return tyrNoCudaGraph();
+#endif
+}
+
+lean_object* lean_torch_cuda_graph_replay(lean_object* w) {
+#if TYR_WITH_CUDA_GRAPH
+  try {
+    g_cuda_graph->replay();
+    return lean_io_result_mk_ok(lean_box(0));
+  } catch (const std::exception& e) {
+    return lean_io_result_mk_error(lean_mk_io_user_error(
+      lean_mk_string(("cuda graph replay failed: " + std::string(e.what())).c_str())));
+  }
+#else
+  return tyrNoCudaGraph();
+#endif
+}
+
+lean_object* lean_torch_cuda_graph_reset(lean_object* w) {
+#if TYR_WITH_CUDA_GRAPH
+  g_cuda_graph.reset();
+#endif
+  return lean_io_result_mk_ok(lean_box(0));
+}
+
+} // anonymous namespace
+
 // Save tensor to a binary file
 lean_object* lean_torch_save_tensor(lean_obj_arg /*s*/, b_lean_obj_arg tensor, b_lean_obj_arg path_obj, lean_object* w) {
   auto tensor_ = borrowTensor(tensor);

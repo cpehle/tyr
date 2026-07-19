@@ -145,6 +145,33 @@ opaque cuda_event_elapsed_ms (start stop : CudaEvent) : IO Float
 @[extern "lean_torch_cuda_event_destroy"]
 opaque cuda_event_destroy (event : CudaEvent) : IO Unit
 
+/-- In-place whole-tensor copy (`dst.copy_(src)`, converting dtype if needed).
+    Mutates `dst`; only use on uniquely-owned tensors. Used by the CUDA-graph
+    static-buffer discipline. -/
+@[extern "lean_torch_copy_inplace"]
+opaque copyInplace {s : Shape} (dst : @& T s) (src : @& T s) : T s
+
+/-- Begin CUDA graph capture into the process-wide graph slot. Subsequent
+    CUDA work (including autograd backward) is recorded until
+    `cudaGraphCaptureEnd`. Capture requires static shapes and stable buffer
+    addresses; copy fresh inputs into the captured buffers before each
+    `cudaGraphReplay`. Throws an IO error if capture is not possible
+    (e.g. an op synchronizes or allocates illegally inside the region). -/
+@[extern "lean_torch_cuda_graph_capture_begin"]
+opaque cudaGraphCaptureBegin : IO Unit
+
+/-- End the active CUDA graph capture. -/
+@[extern "lean_torch_cuda_graph_capture_end"]
+opaque cudaGraphCaptureEnd : IO Unit
+
+/-- Replay the captured CUDA graph. -/
+@[extern "lean_torch_cuda_graph_replay"]
+opaque cudaGraphReplay : IO Unit
+
+/-- Free the captured CUDA graph. -/
+@[extern "lean_torch_cuda_graph_reset"]
+opaque cudaGraphReset : IO Unit
+
 /-- Check if MPS (Metal Performance Shaders) is available -/
 @[extern "lean_torch_mps_is_available"]
 opaque mps_is_available : IO Bool
