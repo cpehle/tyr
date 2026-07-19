@@ -287,6 +287,50 @@ Julia-precision parity check); (3) H100-class hardware (12× bandwidth +
 faster dispatch CPU) — helps, but even there the stack stays below
 roofline, just at acceptable absolute cost.
 
+## Roofline push (phase 2)
+
+Constraints: no problem-specific C++; generic FFI infrastructure and Lean-
+or DSL-level changes are in scope. Specialised-kernel exploration goes
+through Tyr's own GPU DSL (`@[gpu_kernel]` codegen — `nvcc` confirmed at
+`/usr/local/cuda/bin/nvcc` on spark-e626, though off the default PATH).
+
+Decomposition being attacked (per step, GB10, fp32):
+
+| component | ms | nature |
+|---|---|---|
+| fwd+bwd | ~460 | mix: big-op traffic (near-roofline) + small-op latency |
+| muon | ~70 | ~1200 small ops, latency-bound |
+| sample | ~110 | partially overlapped; CPU-bound |
+| pack | ~3 | negligible |
+
+Planned levers, in order:
+
+1. **bf16 compute path** (`--dtype bf16`): halves big-op traffic and doubles
+   tensor-core rates. Lean-only via `toBFloat16'` + `castLike` (rope freqs).
+   Optimizer also runs bf16 in this experiment — momentum-precision risk is
+   acceptable for a measurement; loss-curve drift vs fp32 is the gate.
+2. **Muon leaf batching**: group same-shaped leaves through
+   `PolarExpress.applyBatch`-style stacking; targets the ~70 ms muon phase.
+3. **CUDA-graph capture** (generic FFI infra): kill per-launch latency for
+   the static-shape step. Requires static buffer discipline (copy-in/out of
+   the packed batch + params), since the functional param-update style
+   reallocates leaves every step.
+4. **GPU DSL fused RFF kernel** (dist→rff→sin/cos→bias): forward-only, so it
+   fits the *generation* path (10k×1000 sampling); training needs backward
+   through the kernel, which requires autograd registration — noted as the
+   boundary of the no-problem-specific-C++ constraint.
+
+### Phase-2 measurements
+
+| run | commit | config | ms/step | notes |
+|---|---|---|---|---|
+| bf16 | `d67edff` | bf16 params+activations | **435** | fwd 172→96, bwd 288→151, muon 66, train 321; loss drift ~4.6% at 50 steps (33.89 vs 33.81 init) — acceptable for the experiment, parity decision pending for the paper run |
+
+bf16 is the single biggest generic lever so far (4.0× total vs baseline).
+Remaining at 435 ms/step: sample ~110 (partially overlapped), train 321 —
+of which the small-op latency share is now the main attack surface
+(CUDA-graph capture), with muon leaf batching as a minor follow-up.
+
 ## Progress log
 
 ### 2026-07-17 — setup
