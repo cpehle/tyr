@@ -486,15 +486,24 @@ private def runWithModel {Params : Type} [TensorStruct Params] {maxLen vocab : U
     let mut sampleMs : Nat := 0
     let mut trainMs : Nat := 0
 
+    -- Pipelined sampling: the next batch is sampled on a worker thread while
+    -- the current step trains. `sampleMoleculeBridgeBatchPure` is
+    -- deterministic given its rng, and rng chaining preserves the sequential
+    -- draw order, so results are identical to the non-pipelined loop.
+    let sampleNext := fun (rng : Rng) =>
+      sampleMoleculeBridgeBatchPure bridgeCfg trainStates opts.batchSize rng
+        (useBranchingTimeProb := opts.useBranchingTimeProb)
+        (maxLen := some opts.maxLen.toNat) (deletionPad := opts.deletionPad)
+        (parallelism := opts.parallelSampling)
+    let mut pendingSample := Task.spawn (fun () => sampleNext rng)
+
     for step in [:opts.steps] do
       let globalStep := startIteration + step
       let lr := scheduledLr opts globalStep
       let t0 ← IO.monoMsNow
-      let (bridgeBatch, rng') ←
-        sampleMoleculeBridgeBatch bridgeCfg trainStates opts.batchSize rng
-          (useBranchingTimeProb := opts.useBranchingTimeProb)
-          (maxLen := some opts.maxLen.toNat) (deletionPad := opts.deletionPad) (parallelism := opts.parallelSampling)
+      let (bridgeBatch, rng') := pendingSample.get
       rng := rng'
+      pendingSample := Task.spawn (fun () => sampleNext rng)
       let t1 ← IO.monoMsNow
       let (params', optState', report) ←
         trainStepMoleculeMuon (maxLen := maxLen) (vocab := vocab) trainCfg model

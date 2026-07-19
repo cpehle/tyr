@@ -456,7 +456,13 @@ private def appendBridgeResults (a b : BranchingBridgeResult MoleculeAtom) :
     splitsTarget := a.splitsTarget ++ b.splitsTarget
     prevCoalescence := a.prevCoalescence ++ b.prevCoalescence }
 
-def sampleMoleculeBridgeBatch
+/-- Pure core of `sampleMoleculeBridgeBatch` (no validation throws), so the
+    train loop can pre-spawn the next batch's sampling as a `Task` and overlap
+    it with the current train step. All randomness flows through `rng`, so a
+    pipelined call sequence is deterministic and identical to the sequential
+    one. The parallel-chunk path itself uses `Task.spawn`/`Task.get`, which
+    are pure and nest fine inside a worker thread. -/
+def sampleMoleculeBridgeBatchPure
     (bridgeCfg : MoleculeBridgeConfig)
     (states : Array (BranchingState MoleculeAtom))
     (batchSize : Nat)
@@ -471,11 +477,7 @@ def sampleMoleculeBridgeBatch
     (lengthMins : GroupMinsSpec := .uniform 1)
     (deletionPad : Float := 0.0)
     (parallelism : Nat := 1)
-    : IO (BranchingBridgeResult MoleculeAtom × Rng) := do
-  if states.isEmpty then
-    throw (IO.userError "cannot sample a molecule bridge batch from an empty dataset")
-  if batchSize == 0 then
-    throw (IO.userError "molecule bridge batch size must be positive")
+    : BranchingBridgeResult MoleculeAtom × Rng := Id.run do
   let mut rng := rng
   let mut targets : Array (BranchingState MoleculeAtom) := #[]
   let mut times : Array Float := #[]
@@ -518,10 +520,32 @@ def sampleMoleculeBridgeBatch
     -- advances past the target/time draws above.
     pure (merged, rng)
   else
-    let (result, rngOut) :=
-      runMoleculeBridgeBatch bridgeCfg branchTime deletionTime policy
-        coalescenceFactor useBranchingTimeProb maxLen maxResamples lengthMins
-        deletionPad targets times rng
-    pure (result, rngOut)
+    pure (runMoleculeBridgeBatch bridgeCfg branchTime deletionTime policy
+      coalescenceFactor useBranchingTimeProb maxLen maxResamples lengthMins
+      deletionPad targets times rng)
+
+def sampleMoleculeBridgeBatch
+    (bridgeCfg : MoleculeBridgeConfig)
+    (states : Array (BranchingState MoleculeAtom))
+    (batchSize : Nat)
+    (rng : Rng)
+    (branchTime : TimeDist := TimeDist.betaOneThreeHalves)
+    (deletionTime : TimeDist := TimeDist.uniform)
+    (policy : CoalescencePolicy MoleculeAtom := sequentialUniformPolicy MoleculeAtom)
+    (coalescenceFactor : Float := 1.0)
+    (useBranchingTimeProb : Float := 0.0)
+    (maxLen : Option Nat := none)
+    (maxResamples : Nat := 8)
+    (lengthMins : GroupMinsSpec := .uniform 1)
+    (deletionPad : Float := 0.0)
+    (parallelism : Nat := 1)
+    : IO (BranchingBridgeResult MoleculeAtom × Rng) := do
+  if states.isEmpty then
+    throw (IO.userError "cannot sample a molecule bridge batch from an empty dataset")
+  if batchSize == 0 then
+    throw (IO.userError "molecule bridge batch size must be positive")
+  pure (sampleMoleculeBridgeBatchPure bridgeCfg states batchSize rng branchTime deletionTime
+    policy coalescenceFactor useBranchingTimeProb maxLen maxResamples lengthMins deletionPad
+    parallelism)
 
 end torch.branching
