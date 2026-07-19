@@ -357,15 +357,18 @@ private def coordRffEmbedding {batch maxLen vocab hidden heads headDim mlp rff l
   let features : T #[batch, maxLen, rff * 2] := reshape featFlat #[batch, maxLen, rff * 2]
   torch.affine3d features params.coordProjW params.coordProjB
 
-private def pairAttentionBias {batch maxLen vocab hidden heads headDim mlp rff layers : UInt64}
+private def pairRffFeatures {batch maxLen vocab hidden heads headDim mlp rff layers : UInt64}
     (params : FullMoleculeTransformerParams vocab hidden heads headDim mlp rff layers)
-    (layer : FullMoleculeTransformerLayerParams hidden heads headDim mlp rff)
-    (coord : T #[batch, maxLen, 3]) : T #[batch, heads, maxLen, maxLen] :=
+    (coord : T #[batch, maxLen, 3]) : T #[batch * maxLen * maxLen, rff * 2] :=
   let dist : T #[batch, maxLen, maxLen] := pairwiseDistanceSq coord
   let distFlat : T #[batch * maxLen * maxLen, 1] := reshape dist #[batch * maxLen * maxLen, 1]
   let phase : T #[batch * maxLen * maxLen, rff] := torch.affine distFlat params.pairRffW params.pairRffB
-  let featFlat : T #[batch * maxLen * maxLen, rff * 2] := nn.cat (nn.sin phase) (nn.cos phase) 1
-  let biasFlat : T #[batch * maxLen * maxLen, heads] := torch.affine featFlat layer.pairW layer.pairB
+  nn.cat (nn.sin phase) (nn.cos phase) 1
+
+private def pairAttentionBiasFrom {batch maxLen hidden heads headDim mlp rff : UInt64}
+    (layer : FullMoleculeTransformerLayerParams hidden heads headDim mlp rff)
+    (features : T #[batch * maxLen * maxLen, rff * 2]) : T #[batch, heads, maxLen, maxLen] :=
+  let biasFlat : T #[batch * maxLen * maxLen, heads] := torch.affine features layer.pairW layer.pairB
   let bias0 : T #[batch, maxLen, maxLen, heads] := reshape biasFlat #[batch, maxLen, maxLen, heads]
   let bias1 : T #[batch, maxLen, heads, maxLen] := nn.transpose bias0 2 3
   nn.transpose bias1 1 2
@@ -373,7 +376,7 @@ private def pairAttentionBias {batch maxLen vocab hidden heads headDim mlp rff l
 private def spatialAttention {batch maxLen vocab hidden heads headDim mlp rff layers : UInt64}
     (params : FullMoleculeTransformerParams vocab hidden heads headDim mlp rff layers)
     (layer : FullMoleculeTransformerLayerParams hidden heads headDim mlp rff)
-    (coord : T #[batch, maxLen, 3])
+    (pairFeatures : T #[batch * maxLen * maxLen, rff * 2])
     (padmask : T #[batch, maxLen])
     (ropeCos : T #[maxLen, headDim / 2])
     (ropeSin : T #[maxLen, headDim / 2])
@@ -389,7 +392,7 @@ private def spatialAttention {batch maxLen vocab hidden heads headDim mlp rff la
   let k : T #[batch, heads, maxLen, headDim] := nn.transpose_for_attention kR
   let v : T #[batch, heads, maxLen, headDim] :=
     nn.transpose_for_attention (reshape v0 #[batch, maxLen, heads, headDim])
-  let pairBias : T #[batch, heads, maxLen, maxLen] := pairAttentionBias params layer coord
+  let pairBias : T #[batch, heads, maxLen, maxLen] := pairAttentionBiasFrom layer pairFeatures
   let keyMask0 : T #[batch, 1, 1, maxLen] := nn.unsqueeze (nn.unsqueeze padmask 1) 1
   -- (1 - keyMask) · -1e9, computed on-device (a `torch.zeros`-based masked_fill
   -- would be CPU-resident and crash on CUDA inputs).
@@ -407,6 +410,7 @@ private def forwardLayer {batch maxLen vocab hidden heads headDim mlp rff layers
     (params : FullMoleculeTransformerParams vocab hidden heads headDim mlp rff layers)
     (layer : FullMoleculeTransformerLayerParams hidden heads headDim mlp rff)
     (applyCoordUpdate : Bool)
+    (pairFeatures : T #[batch * maxLen * maxLen, rff * 2])
     (ropeCos : T #[maxLen, headDim / 2])
     (ropeSin : T #[maxLen, headDim / 2])
     (padmask : T #[batch, maxLen])
@@ -414,7 +418,7 @@ private def forwardLayer {batch maxLen vocab hidden heads headDim mlp rff layers
     (coord : T #[batch, maxLen, 3]) :
     T #[batch, maxLen, hidden] × T #[batch, maxLen, 3] :=
   let h1n := nn.layer_norm h layer.attnLnWeight layer.attnLnBias 1.0e-5
-  let attnOut := spatialAttention params layer coord padmask ropeCos ropeSin h1n
+  let attnOut := spatialAttention params layer pairFeatures padmask ropeCos ropeSin h1n
   let h1 := h + attnOut
   let h2n := nn.layer_norm h1 layer.mlpLnWeight layer.mlpLnBias 1.0e-5
   let mlp1 := nn.gelu (torch.affine3d h2n layer.fc1W layer.fc1B)
@@ -447,10 +451,16 @@ def forward {batch maxLen vocab hidden heads headDim mlp rff layers : UInt64}
   let mut h := coordEmb + labelEmb + timeEmb
   let mut runningCoord := coord
   let updateStart := if params.blocks.size > coordUpdateLayers then params.blocks.size - coordUpdateLayers else 0
+  -- RFF pair features depend only on the running coordinates: shared by all
+  -- layers until the next coordinate update, so recompute only then
+  -- (7 computations instead of 12 at layers=12, coordUpdateLayers=6).
+  let mut pairFeatures := pairRffFeatures params runningCoord
   let mut i := 0
   for block in params.blocks do
+    if i > updateStart then
+      pairFeatures := pairRffFeatures params runningCoord
     let (h', coord') :=
-      forwardLayer params block (i >= updateStart) ropeCos ropeSin padmask h runningCoord
+      forwardLayer params block (i >= updateStart) pairFeatures ropeCos ropeSin padmask h runningCoord
     h := h'
     runningCoord := coord'
     i := i + 1
