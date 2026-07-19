@@ -139,9 +139,10 @@ private def spatialAttention {batch maxLen vocab heads headDim mlp : UInt64}
     nn.expand (reshape slope #[1, heads, 1, 1]) #[batch, heads, maxLen, maxLen] *
       nn.expand (reshape dist #[batch, 1, maxLen, maxLen]) #[batch, heads, maxLen, maxLen]
   let keyMask0 : T #[batch, 1, 1, maxLen] := nn.unsqueeze (nn.unsqueeze padmask 1) 1
-  let invalid0 : T #[batch, 1, 1, maxLen] := torch.lt_scalar keyMask0 0.5
+  -- (1 - keyMask) · -1e9, computed on-device (a `torch.zeros`-based masked_fill
+  -- would be CPU-resident and crash on CUDA inputs).
   let maskTerm : T #[batch, 1, 1, maxLen] :=
-    nn.masked_fill (torch.zeros #[batch, 1, 1, maxLen]) invalid0 (-1.0e9)
+    torch.mul_scalar (torch.add_scalar (torch.mul_scalar keyMask0 (-1.0)) 1.0) (-1.0e9)
   let bias : T #[batch, heads, maxLen, maxLen] :=
     nn.expand maskTerm #[batch, heads, maxLen, maxLen] - distBias
   let ctx : T #[batch, heads, maxLen, headDim] :=
@@ -390,9 +391,10 @@ private def spatialAttention {batch maxLen vocab hidden heads headDim mlp rff la
     nn.transpose_for_attention (reshape v0 #[batch, maxLen, heads, headDim])
   let pairBias : T #[batch, heads, maxLen, maxLen] := pairAttentionBias params layer coord
   let keyMask0 : T #[batch, 1, 1, maxLen] := nn.unsqueeze (nn.unsqueeze padmask 1) 1
-  let invalid0 : T #[batch, 1, 1, maxLen] := torch.lt_scalar keyMask0 0.5
+  -- (1 - keyMask) · -1e9, computed on-device (a `torch.zeros`-based masked_fill
+  -- would be CPU-resident and crash on CUDA inputs).
   let maskTerm : T #[batch, 1, 1, maxLen] :=
-    nn.masked_fill (torch.zeros #[batch, 1, 1, maxLen]) invalid0 (-1.0e9)
+    torch.mul_scalar (torch.add_scalar (torch.mul_scalar keyMask0 (-1.0)) 1.0) (-1.0e9)
   let bias : T #[batch, heads, maxLen, maxLen] :=
     pairBias + nn.expand maskTerm #[batch, heads, maxLen, maxLen]
   let ctx : T #[batch, heads, maxLen, headDim] :=
