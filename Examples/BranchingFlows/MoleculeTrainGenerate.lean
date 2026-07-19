@@ -555,10 +555,14 @@ private def runWithModel {Params : Type} [TensorStruct Params] {maxLen vocab : U
           -- The capture executed this step's compute; fold outputs back into
           -- the canonical buffers (their storage must not change), forcing
           -- the copies before the next replay reads the canonical storage.
-          params ← TensorStruct.mapM (fun t => do torch.touch t; pure t)
-            (TensorStruct.zipWith (fun d s => copyInplace d s) params outP)
-          let momentum' ← TensorStruct.mapM (fun t => do torch.touch t; pure t)
-            (TensorStruct.zipWith (fun d s => copyInplace d s) optState.momentum outM.momentum)
+          -- no_grad: the canonical params are requires-grad leaves, and
+          -- in-place copy_ into them is only legal with autograd off.
+          params ← torch.autograd.no_grad do
+            TensorStruct.mapM (fun t => do torch.touch t; pure t)
+              (TensorStruct.zipWith (fun d s => copyInplace d s) params outP)
+          let momentum' ← torch.autograd.no_grad do
+            TensorStruct.mapM (fun t => do torch.touch t; pure t)
+              (TensorStruct.zipWith (fun d s => copyInplace d s) optState.momentum outM.momentum)
           optState := { momentum := momentum', step := outM.step }
           let (tl, cl, ll, sl, dl) := losses
           lastReport := moleculeLossReport tl cl ll sl dl
@@ -586,10 +590,12 @@ private def runWithModel {Params : Type} [TensorStruct Params] {maxLen vocab : U
         let _ ← (sb.copyInto (packedCpu.toDevice opts.device)).eval
         torch.touch (copyInplace lrT (torch.full #[] lr))
         torch.cudaGraphReplay
-        params ← TensorStruct.mapM (fun t => do torch.touch t; pure t)
-          (TensorStruct.zipWith (fun d s => copyInplace d s) params outP)
-        let momentum' ← TensorStruct.mapM (fun t => do torch.touch t; pure t)
-          (TensorStruct.zipWith (fun d s => copyInplace d s) optState.momentum outM.momentum)
+        params ← torch.autograd.no_grad do
+          TensorStruct.mapM (fun t => do torch.touch t; pure t)
+            (TensorStruct.zipWith (fun d s => copyInplace d s) params outP)
+        let momentum' ← torch.autograd.no_grad do
+          TensorStruct.mapM (fun t => do torch.touch t; pure t)
+            (TensorStruct.zipWith (fun d s => copyInplace d s) optState.momentum outM.momentum)
         optState := { momentum := momentum', step := outM.step }
         let (tl, cl, ll, sl, dl) := losses
         lastReport := moleculeLossReport tl cl ll sl dl
