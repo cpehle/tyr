@@ -2693,6 +2693,8 @@ lean_object* lean_torch_sdpa_4d_bias(
 // In-place whole-tensor copy: `dst.copy_(src)` (converts dtype if needed).
 // Same ownership contract as the other in-place mutators (zero_grad etc.):
 // borrowed args, returns an inc'd reference to the mutated `dst`.
+// NoGradGuard: copying into requires-grad leaves (optimizer/state fold-back)
+// is only legal with autograd off.
 lean_object* lean_torch_copy_inplace(
   lean_obj_arg /*s*/,
   b_lean_obj_arg dst,
@@ -2700,6 +2702,7 @@ lean_object* lean_torch_copy_inplace(
 ) {
   auto dst_ = borrowTensor(dst);
   auto src_ = borrowTensor(src);
+  torch::NoGradGuard guard;
   dst_.copy_(src_);
   lean_inc(dst);
   return dst;
