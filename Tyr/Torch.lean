@@ -151,6 +151,12 @@ opaque cuda_event_destroy (event : CudaEvent) : IO Unit
 @[extern "lean_torch_copy_inplace"]
 opaque copyInplace {s : Shape} (dst : @& T s) (src : @& T s) : T s
 
+/-- Elementwise multiply by a 0-dim tensor (broadcast scalar). Lets captured
+    CUDA graphs take scalar inputs (e.g. the learning rate) through a static
+    buffer rather than a baked-in Float. -/
+@[extern "lean_torch_mul_tensor_scalar"]
+opaque mulTensorScalar {s : Shape} (input : @& T s) (scalar : @& T #[]) : T s
+
 /-- Begin CUDA graph capture into the process-wide graph slot. Subsequent
     CUDA work (including autograd backward) is recorded until
     `cudaGraphCaptureEnd`. Capture requires static shapes and stable buffer

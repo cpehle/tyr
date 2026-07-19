@@ -2705,6 +2705,19 @@ lean_object* lean_torch_copy_inplace(
   return dst;
 }
 
+// Tensor × 0-dim tensor (broadcast scalar): lets a captured CUDA graph take a
+// scalar input (e.g. the learning rate) through a static buffer instead of a
+// baked-in Float.
+lean_object* lean_torch_mul_tensor_scalar(
+  lean_obj_arg /*s*/,
+  b_lean_obj_arg input,
+  b_lean_obj_arg scalar
+) {
+  auto input_ = borrowTensor(input);
+  auto scalar_ = borrowTensor(scalar);
+  return fromTorchTensor(input_ * scalar_);
+}
+
 // --- Generic CUDA graph capture/replay -------------------------------------
 // A single process-wide graph slot is enough for the training-step use case:
 // capture a static-shaped region once, replay it with fresh data copied into

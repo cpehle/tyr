@@ -67,6 +67,7 @@ structure RunOptions where
   generate : Bool := true
   device : Device := Device.CPU
   bf16 : Bool := false
+  cudaGraph : Bool := true
   timePhases : Bool := false
   parallelSampling : Nat := 1
   splitLogitCap? : Option Float := none
@@ -283,6 +284,10 @@ partial def parseArgsLoop (args : List String) (opts : RunOptions) : IO RunOptio
       parseArgsLoop rest { opts with generate := false }
   | "--time-phases" :: rest =>
       parseArgsLoop rest { opts with timePhases := true }
+  | "--cuda-graph" :: rest =>
+      parseArgsLoop rest { opts with cudaGraph := true }
+  | "--no-cuda-graph" :: rest =>
+      parseArgsLoop rest { opts with cudaGraph := false }
   | "--parallel-sampling" :: value :: rest =>
       parseArgsLoop rest { opts with parallelSampling := (← parseNatArg "--parallel-sampling" value) }
   | "--split-logit-cap" :: value :: rest =>
@@ -504,6 +509,19 @@ private def runWithModel {Params : Type} [TensorStruct Params] {maxLen vocab : U
         (parallelism := opts.parallelSampling)
     let mut pendingSample := Task.spawn (fun () => sampleNext rng)
 
+    -- CUDA-graph training: step 0 runs eagerly (warmup + canonical buffers);
+    -- at step 1 the step is captured once into a CUDA graph over static
+    -- buffers (packed batch, lr scalar, canonical params/momentum), later
+    -- steps replay it. Any capture failure falls back to the eager loop.
+    let isCuda := match opts.device with | .CUDA _ => true | _ => false
+    let batchU := opts.batchSize.toUInt64
+    let mut graphAttempted := false
+    let mut graphed := false
+    let mut staticBatch? : Option (BranchingMoleculeBatch batchU maxLen) := none
+    let mut lrBuf? : Option (T #[]) := none
+    let mut graphOut? : Option
+      (Params × MoleculeMuonState Params × (T #[] × T #[] × T #[] × T #[] × T #[])) := none
+
     for step in [:opts.steps] do
       let globalStep := startIteration + step
       let lr := scheduledLr opts globalStep
@@ -512,17 +530,69 @@ private def runWithModel {Params : Type} [TensorStruct Params] {maxLen vocab : U
       rng := rng'
       pendingSample := Task.spawn (fun () => sampleNext rng)
       let t1 ← IO.monoMsNow
-      let (params', optState', report) ←
-        trainStepMoleculeMuon (maxLen := maxLen) (vocab := vocab) trainCfg model
-          params optState bridgeBatch lr labelDFM (device := opts.device) (timePhases := opts.timePhases) (bf16 := opts.bf16)
+      if opts.cudaGraph && isCuda && !graphAttempted && step >= 1 then
+        graphAttempted := true
+        try
+          let ⟨_batch, packedCpu⟩ ← packBranchingMolecule trainCfg bridgeBatch labelDFM
+          let sb : BranchingMoleculeBatch batchU maxLen :=
+            BranchingMoleculeBatch.zeros batchU maxLen opts.device opts.bf16
+          let sb := sb.copyInto (packedCpu.toDevice opts.device)
+          let lrT : T #[] := torch.full #[] lr false opts.device
+          torch.cudaGraphCaptureBegin
+          let (outP, outM, losses) ←
+            trainStepMoleculeMuonCoreT (batch := batchU) (maxLen := maxLen) (vocab := vocab) trainCfg model
+              params optState sb lrT labelDFM
+          torch.cudaGraphCaptureEnd
+          staticBatch? := some sb
+          lrBuf? := some lrT
+          graphOut? := some (outP, outM, losses)
+          graphed := true
+          -- The capture executed this step's compute; fold outputs back into
+          -- the canonical buffers (their storage must not change).
+          params := TensorStruct.zipWith (fun d s => copyInplace d s) params outP
+          optState := { momentum := TensorStruct.zipWith (fun d s => copyInplace d s) optState.momentum outM.momentum
+                        step := outM.step }
+          let (tl, cl, ll, sl, dl) := losses
+          lastReport := moleculeLossReport tl cl ll sl dl
+          if step == 0 || step % opts.logEvery == 0 then
+            IO.println "molecule_train cuda graph captured"
+        catch e =>
+          IO.eprintln s!"cuda graph capture failed at step {globalStep}; continuing eagerly: {e}"
+          torch.cudaGraphReset
+          staticBatch? := none
+          lrBuf? := none
+          graphOut? := none
+          let (params', optState', report) ←
+            trainStepMoleculeMuon (maxLen := maxLen) (vocab := vocab) trainCfg model
+              params optState bridgeBatch lr labelDFM (device := opts.device) (timePhases := opts.timePhases) (bf16 := opts.bf16)
+          params := params'
+          optState := optState'
+          lastReport := report
+      else if graphed then
+        let some sb := staticBatch? | panic! "graphed without static batch"
+        let some lrT := lrBuf? | panic! "graphed without lr buffer"
+        let some (outP, outM, losses) := graphOut? | panic! "graphed without outputs"
+        let ⟨_batch, packedCpu⟩ ← packBranchingMolecule trainCfg bridgeBatch labelDFM
+        let _ := sb.copyInto (packedCpu.toDevice opts.device)
+        let _ := copyInplace lrT (torch.full #[] lr)
+        torch.cudaGraphReplay
+        params := TensorStruct.zipWith (fun d s => copyInplace d s) params outP
+        optState := { momentum := TensorStruct.zipWith (fun d s => copyInplace d s) optState.momentum outM.momentum
+                      step := outM.step }
+        let (tl, cl, ll, sl, dl) := losses
+        lastReport := moleculeLossReport tl cl ll sl dl
+      else
+        let (params', optState', report) ←
+          trainStepMoleculeMuon (maxLen := maxLen) (vocab := vocab) trainCfg model
+            params optState bridgeBatch lr labelDFM (device := opts.device) (timePhases := opts.timePhases) (bf16 := opts.bf16)
+        params := params'
+        optState := optState'
+        lastReport := report
       let t2 ← IO.monoMsNow
-      params := params'
-      optState := optState'
-      lastReport := report
       sampleMs := sampleMs + (t1 - t0)
       trainMs := trainMs + (t2 - t1)
       if opts.logEvery > 0 && step % opts.logEvery == 0 then
-        IO.println s!"molecule_train step={globalStep} lr={lr} total={report.total} coord={report.coord} label={report.label} splits={report.splits} del={report.del}"
+        IO.println s!"molecule_train step={globalStep} lr={lr} total={lastReport.total} coord={lastReport.coord} label={lastReport.label} splits={lastReport.splits} del={lastReport.del}"
         if opts.timePhases && step > 0 then
           IO.println s!"molecule_phases step={globalStep} sample_ms_avg={(sampleMs / (step + 1))} train_ms_avg={(trainMs / (step + 1))}"
 

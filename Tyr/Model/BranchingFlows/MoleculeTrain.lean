@@ -61,6 +61,46 @@ def castBFloat16 {batch maxLen : UInt64}
     splitsTarget := toBFloat16' x.splitsTarget
     delTarget := toBFloat16' x.delTarget }
 
+/-- Allocate a static batch of zero buffers (float fields f32, integral fields
+    i64), optionally bf16-cast — the CUDA-graph static input buffer. -/
+def zeros (batch maxLen : UInt64) (device : Device) (bf16 : Bool := false) :
+    BranchingMoleculeBatch batch maxLen :=
+  let f (s : Shape) : T s := zerosOn device
+  let i (s : Shape) : T s := (full_int s 0).to device
+  let b : BranchingMoleculeBatch batch maxLen := {
+    t := f #[batch]
+    coord := f #[batch, maxLen, 3]
+    coordAnchor := f #[batch, maxLen, 3]
+    label := i #[batch, maxLen]
+    labelAnchor := i #[batch, maxLen]
+    labelLossScale := f #[batch, maxLen]
+    padmask := i #[batch, maxLen]
+    flowmask := i #[batch, maxLen]
+    splitsTarget := f #[batch, maxLen]
+    delTarget := f #[batch, maxLen]
+  }
+  if bf16 then b.castBFloat16 else b
+
+/-- Copy a freshly packed batch into the static buffer in place. The batch
+    and maxLen indices may differ at the type level (the packed batch carries
+    existentials / structure projections); runtime shapes must match —
+    `copy_` enforces that, and the sampler always produces exactly the
+    configured batch size. -/
+def copyInto {b1 b2 m1 m2 : UInt64}
+    (dst : BranchingMoleculeBatch b1 m1)
+    (src : BranchingMoleculeBatch b2 m2) :
+    BranchingMoleculeBatch b1 m1 :=
+  { t := copyInplace dst.t src.t
+    coord := copyInplace dst.coord src.coord
+    coordAnchor := copyInplace dst.coordAnchor src.coordAnchor
+    label := copyInplace dst.label src.label
+    labelAnchor := copyInplace dst.labelAnchor src.labelAnchor
+    labelLossScale := copyInplace dst.labelLossScale src.labelLossScale
+    padmask := copyInplace dst.padmask src.padmask
+    flowmask := copyInplace dst.flowmask src.flowmask
+    splitsTarget := copyInplace dst.splitsTarget src.splitsTarget
+    delTarget := copyInplace dst.delTarget src.delTarget }
+
 end BranchingMoleculeBatch
 
 structure BranchingMoleculeModel (maxLen vocab : UInt64) (Params : Type) where
@@ -233,14 +273,16 @@ structure BranchingMoleculeLossReport where
   del : Float
   deriving Repr
 
-def moleculeLosses {batch maxLen vocab : UInt64}
+/-- Loss tensors for the molecule four-head objective, without any host
+    readback — safe to run inside a CUDA graph capture region. -/
+def moleculeLossTensors {batch maxLen vocab : UInt64}
     (cfg : BranchingTrainConfig)
     (packed : BranchingMoleculeBatch batch maxLen)
     (coordPred : T #[batch, maxLen, 3])
     (labelLogits : T #[batch, maxLen, vocab])
     (splitLogits : T #[batch, maxLen])
     (delLogits : T #[batch, maxLen]) :
-    T #[] × BranchingMoleculeLossReport :=
+    T #[] × T #[] × T #[] × T #[] × T #[] :=
   let mask := moleculeMask packed.padmask packed.flowmask
   let flowScale := moleculeFlowLossScale (maxLen := maxLen) packed.t
   let coordLoss := moleculeMaskedWeightedMSE3d coordPred packed.coordAnchor mask flowScale
@@ -252,13 +294,29 @@ def moleculeLosses {batch maxLen vocab : UInt64}
     labelLoss * cfg.anchorWeight * cfg.labelWeight +
     splitLoss * cfg.splitsWeight +
     delLoss * cfg.delWeight
-  (totalLoss, {
-    total := nn.item totalLoss,
-    coord := nn.item coordLoss,
-    label := nn.item labelLoss,
-    splits := nn.item splitLoss,
-    del := nn.item delLoss
-  })
+  (totalLoss, coordLoss, labelLoss, splitLoss, delLoss)
+
+/-- Host-side loss report from the loss tensors (syncs on read). -/
+def moleculeLossReport
+    (total coord label splits del : T #[]) : BranchingMoleculeLossReport := {
+  total := nn.item total,
+  coord := nn.item coord,
+  label := nn.item label,
+  splits := nn.item splits,
+  del := nn.item del
+}
+
+def moleculeLosses {batch maxLen vocab : UInt64}
+    (cfg : BranchingTrainConfig)
+    (packed : BranchingMoleculeBatch batch maxLen)
+    (coordPred : T #[batch, maxLen, 3])
+    (labelLogits : T #[batch, maxLen, vocab])
+    (splitLogits : T #[batch, maxLen])
+    (delLogits : T #[batch, maxLen]) :
+    T #[] × BranchingMoleculeLossReport :=
+  let (totalLoss, coordLoss, labelLoss, splitLoss, delLoss) :=
+    moleculeLossTensors cfg packed coordPred labelLogits splitLogits delLogits
+  (totalLoss, moleculeLossReport totalLoss coordLoss labelLoss splitLoss delLoss)
 
 def trainStepMolecule {maxLen vocab : UInt64} {Params : Type} [TensorStruct Params]
     (cfg : BranchingTrainConfig)
@@ -358,6 +416,67 @@ def moleculeMuonStep [TensorStruct Params]
       torch.mul_scalar p (lr * weightDecay)
     autograd.set_requires_grad (p - update) true) params orth
   return (params', { momentum, step := state.step + 1 })
+
+/-- `moleculeMuonStep` with the learning rate supplied as a 0-dim tensor, so a
+    captured CUDA graph can read it from a static buffer (a baked Float would
+    be frozen at capture time). Numerically identical. -/
+def moleculeMuonStepT [TensorStruct Params]
+    (params grads : Params)
+    (state : MoleculeMuonState Params)
+    (lrT : T #[])
+    (weightDecay : Float := 0.01)
+    (momentumCoeff : Float := 0.95)
+    (numIters : UInt64 := 5) : IO (Params × MoleculeMuonState Params) := do
+  let rawGrads := TensorStruct.map autograd.detach grads
+  let momentum := TensorStruct.zipWith (fun old grad =>
+    torch.mul_scalar old momentumCoeff + torch.mul_scalar grad (1.0 - momentumCoeff))
+    state.momentum rawGrads
+  let nesterov := TensorStruct.zipWith (fun grad mom =>
+    torch.mul_scalar grad (1.0 - momentumCoeff) + torch.mul_scalar mom momentumCoeff)
+    rawGrads momentum
+  let orth ← TensorStruct.mapM (fun grad => moleculeMuonOrthogonalize grad numIters) nesterov
+  let params' := TensorStruct.zipWith (fun {s} param direction =>
+    let (rows, cols) := flattenedMatrixShape s
+    let aspect := Float.sqrt (max 1.0 (rows.toFloat / cols.toFloat))
+    let p := autograd.detach param
+    let update :=
+      torch.mulTensorScalar (torch.mul_scalar direction aspect) lrT +
+      torch.mul_scalar (torch.mulTensorScalar p lrT) weightDecay
+    autograd.set_requires_grad (p - update) true) params orth
+  return (params', { momentum, step := state.step + 1 })
+
+/-- Graph-safe core of `trainStepMoleculeMuon`: takes a pre-packed batch (the
+    static input buffer) and a tensor learning rate, performs no host
+    readbacks, and returns the loss tensors (host reporting happens outside
+    the capture region). Used by the CUDA-graph training loop. -/
+def trainStepMoleculeMuonCoreT {batch maxLen vocab : UInt64} {Params : Type} [TensorStruct Params]
+    (cfg : BranchingTrainConfig)
+    (model : BranchingMoleculeModel maxLen vocab Params)
+    (params : Params)
+    (optState : MoleculeMuonState Params)
+    (packed : BranchingMoleculeBatch batch maxLen)
+    (lrT : T #[])
+    (labelDFM : Option DistNoisyDiscreteConfig := none)
+    (momentumCoeff : Float := 0.95)
+    (numIters : UInt64 := 5)
+    (clipGrads : Params → Float → IO Unit := fun params maxNorm => do
+      let _ ← TensorStruct.mapM (fun tensor => do
+        let _ ← nn.clip_grad_norm_ tensor maxNorm
+        pure tensor) params
+      pure ())
+    : IO (Params × MoleculeMuonState Params × (T #[] × T #[] × T #[] × T #[] × T #[])) := do
+  let params := TensorStruct.zeroGrads (TensorStruct.makeLeafParams params)
+  let (coordPred, labelLogits, splitLogits, delLogits) ←
+    model.forward (batch := batch) params packed.coord packed.label packed.t packed.padmask
+  let (totalLoss, coordLoss, labelLoss, splitLoss, delLoss) :=
+    moleculeLossTensors (vocab := vocab) cfg packed coordPred labelLogits splitLogits delLogits
+  autograd.backwardLoss totalLoss
+  if cfg.gradClip > 0 then
+    clipGrads params cfg.gradClip
+  let grads := TensorStruct.grads params
+  let (params', optState') ←
+    moleculeMuonStepT params grads optState lrT cfg.weightDecay momentumCoeff numIters
+  return (params', optState', (totalLoss, coordLoss, labelLoss, splitLoss, delLoss))
 
 def trainStepMoleculeMuon {maxLen vocab : UInt64} {Params : Type} [TensorStruct Params]
     (cfg : BranchingTrainConfig)
