@@ -2674,6 +2674,16 @@ lean_object* lean_torch_sdpa_4d_bias(
   auto bias_ = borrowTensor(bias);
 
   try {
+    // Force the math backend: the fused flash/mem-efficient SDPA kernels (and
+    // especially their backward paths) are not available for every arch +
+    // additive-bias combination (observed: hard crash on sm_120 / GB10).
+    // The math fallback runs on any arch and still collapses the manual
+    // matmul/bias/softmax/matmul pipeline into one op with a fused backward.
+    auto& sdpaCtx = at::globalContext();
+    const bool prevFlash = sdpaCtx.userEnabledFlashSDP();
+    const bool prevMemEff = sdpaCtx.userEnabledMemEfficientSDP();
+    sdpaCtx.setSDPUseFlash(false);
+    sdpaCtx.setSDPUseMemEfficient(false);
     auto result_ = torch::scaled_dot_product_attention(
       query_,
       key_,
@@ -2682,6 +2692,8 @@ lean_object* lean_torch_sdpa_4d_bias(
       dropout_p,
       is_causal
     );
+    sdpaCtx.setSDPUseFlash(prevFlash);
+    sdpaCtx.setSDPUseMemEfficient(prevMemEff);
     return fromTorchTensor(result_);
   } catch (const c10::Error& e) {
     std::fprintf(stderr, "[tyr] sdpa_4d_bias libtorch error:\n%s\n", e.what());
