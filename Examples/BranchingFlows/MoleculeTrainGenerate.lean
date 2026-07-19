@@ -535,25 +535,19 @@ private def runWithModel {Params : Type} [TensorStruct Params] {maxLen vocab : U
         graphAttempted := true
         try
           let ⟨_batch, packedCpu⟩ ← packBranchingMolecule trainCfg bridgeBatch labelDFM
-          IO.eprintln "graphdbg: packed"
           let sb : BranchingMoleculeBatch batchU maxLen :=
             BranchingMoleculeBatch.zeros batchU maxLen opts.device opts.bf16
           -- Force the lazy staging (alloc + in-place copies) to run *before*
           -- capture begins; pure lets would otherwise evaluate inside it.
           let sb ← (sb.copyInto (packedCpu.toDevice opts.device)).eval
-          IO.eprintln "graphdbg: static batch staged"
           let lrT : T #[] := torch.full #[] lr false opts.device
           torch.touch lrT
-          IO.eprintln "graphdbg: lr staged"
           torch.cudaGraphCaptureBegin
-          IO.eprintln "graphdbg: capture begin"
           let (outP, outM, losses) ←
             trainStepMoleculeMuonCoreT (batch := batchU) (maxLen := maxLen) (vocab := vocab) trainCfg
               (graphModel?.getD model)
               params optState sb lrT labelDFM
-          IO.eprintln "graphdbg: core done"
           torch.cudaGraphCaptureEnd
-          IO.eprintln "graphdbg: capture end"
           staticBatch? := some sb
           lrBuf? := some lrT
           graphOut? := some (outP, outM, losses)
@@ -570,7 +564,6 @@ private def runWithModel {Params : Type} [TensorStruct Params] {maxLen vocab : U
             TensorStruct.mapM (fun t => do torch.touch t; pure t)
               (TensorStruct.zipWith (fun d s => copyInplace d s) optState.momentum outM.momentum)
           optState := { momentum := momentum', step := outM.step }
-          IO.eprintln "graphdbg: fold done"
           let (tl, cl, ll, sl, dl) := losses
           lastReport := moleculeLossReport tl cl ll sl dl
           if step == 0 || step % opts.logEvery == 0 then
@@ -596,9 +589,7 @@ private def runWithModel {Params : Type} [TensorStruct Params] {maxLen vocab : U
         -- copies before the next replay reads the canonical storage.
         let _ ← (sb.copyInto (packedCpu.toDevice opts.device)).eval
         torch.touch (copyInplace lrT (torch.full #[] lr))
-        IO.eprintln "graphdbg: replay staged"
         torch.cudaGraphReplay
-        IO.eprintln "graphdbg: replayed"
         params ← torch.autograd.no_grad do
           TensorStruct.mapM (fun t => do torch.touch t; pure t)
             (TensorStruct.zipWith (fun d s => copyInplace d s) params outP)
@@ -606,8 +597,7 @@ private def runWithModel {Params : Type} [TensorStruct Params] {maxLen vocab : U
           TensorStruct.mapM (fun t => do torch.touch t; pure t)
             (TensorStruct.zipWith (fun d s => copyInplace d s) optState.momentum outM.momentum)
         optState := { momentum := momentum', step := outM.step }
-        IO.eprintln "graphdbg: replay fold done"
-        let (tl, cl, ll, sl, dl) := losses
+                let (tl, cl, ll, sl, dl) := losses
         lastReport := moleculeLossReport tl cl ll sl dl
       else
         let (params', optState', report) ←
