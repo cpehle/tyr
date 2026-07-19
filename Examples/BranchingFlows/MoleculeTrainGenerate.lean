@@ -451,7 +451,8 @@ private def runWithModel {Params : Type} [TensorStruct Params] {maxLen vocab : U
     (trainCfg : BranchingTrainConfig)
     (model : BranchingMoleculeModel maxLen vocab Params)
     (initParams : Params)
-    (makeLearnedModel : Params → Float → BranchingState MoleculeAtom → IO MoleculeModelPrediction) :
+    (makeLearnedModel : Params → Float → BranchingState MoleculeAtom → IO MoleculeModelPrediction)
+    (graphModel? : Option (BranchingMoleculeModel maxLen vocab Params) := none) :
     IO Unit := do
   let (initParams, startIteration, resumedMeta?) ←
     match opts.resumeCheckpoint? with
@@ -540,7 +541,8 @@ private def runWithModel {Params : Type} [TensorStruct Params] {maxLen vocab : U
           let lrT : T #[] := torch.full #[] lr false opts.device
           torch.cudaGraphCaptureBegin
           let (outP, outM, losses) ←
-            trainStepMoleculeMuonCoreT (batch := batchU) (maxLen := maxLen) (vocab := vocab) trainCfg model
+            trainStepMoleculeMuonCoreT (batch := batchU) (maxLen := maxLen) (vocab := vocab) trainCfg
+              (graphModel?.getD model)
               params optState sb lrT labelDFM
           torch.cudaGraphCaptureEnd
           staticBatch? := some sb
@@ -789,9 +791,22 @@ def run (opts : RunOptions) : IO Unit := do
         (splitLogitCap? := opts.splitLogitCap?)
         (coordTargetCap? := opts.coordTargetCap?)
         (device := opts.device)
+    -- Graph-safe model: rotary frequencies precomputed on-device outside the
+    -- capture region (`forward` recomputes them per call with a host→device
+    -- copy, which is illegal during CUDA stream capture).
+    let (ropeCos, ropeSin) :=
+      rotary.computeFreqsOnDevicePure opts.maxLen opts.headDim 10000.0 opts.device
+    let graphModel : BranchingMoleculeModel opts.maxLen vocab
+        (FullMoleculeTransformerParams vocab opts.hiddenDim opts.heads opts.headDim
+          opts.mlp opts.rffDim opts.layers) :=
+      { forward := fun {batch} params coord label t padmask =>
+          FullMoleculeTransformerParams.forwardFreqs (batch := batch) params coord label t
+            padmask ropeCos ropeSin
+            (coordUpdateLayers := opts.coordUpdateLayers)
+            (coordTargetCap? := opts.coordTargetCap?) }
     runWithModel (maxLen := opts.maxLen) (vocab := vocab)
       opts records.size states.size trainStates evalStates bridgeCfg labelDFM trainCfg
-      model initParams makeLearnedModel
+      model initParams makeLearnedModel (graphModel? := some graphModel)
   else
     let model :=
       moleculeTransformerModel (maxLen := opts.maxLen) (vocab := vocab)

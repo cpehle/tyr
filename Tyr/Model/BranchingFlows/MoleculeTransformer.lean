@@ -433,12 +433,17 @@ private def forwardLayer {batch maxLen vocab hidden heads headDim mlp rff layers
   else
     (h2, coord)
 
-def forward {batch maxLen vocab hidden heads headDim mlp rff layers : UInt64}
+/-- Forward with precomputed rotary frequencies. Split out so CUDA-graph
+    capture can hoist `rotary.computeFreqs` (which does a host→device copy,
+    illegal during stream capture) out of the captured region. -/
+def forwardFreqs {batch maxLen vocab hidden heads headDim mlp rff layers : UInt64}
     (params : FullMoleculeTransformerParams vocab hidden heads headDim mlp rff layers)
     (coord : T #[batch, maxLen, 3])
     (label : T #[batch, maxLen])
     (t : T #[batch])
     (padmask : T #[batch, maxLen])
+    (ropeCos : T #[maxLen, headDim / 2])
+    (ropeSin : T #[maxLen, headDim / 2])
     (coordUpdateLayers : Nat := 6)
     (coordTargetCap? : Option Float := none) :
     IO (T #[batch, maxLen, 3] × T #[batch, maxLen, vocab] × T #[batch, maxLen] × T #[batch, maxLen]) := do
@@ -449,7 +454,6 @@ def forward {batch maxLen vocab hidden heads headDim mlp rff layers : UInt64}
   let time0 : T #[batch, 1, 1] := nn.unsqueeze (nn.unsqueeze t 1) 1
   let timeIn : T #[batch, maxLen, 1] := nn.expand time0 #[batch, maxLen, 1]
   let timeEmb : T #[batch, maxLen, hidden] := torch.affine3d timeIn params.timeW params.timeB
-  let (ropeCos, ropeSin) ← rotary.computeFreqs maxLen headDim 10000.0
   let mut h := coordEmb + labelEmb + timeEmb
   let mut runningCoord := coord
   let updateStart := if params.blocks.size > coordUpdateLayers then params.blocks.size - coordUpdateLayers else 0
@@ -475,6 +479,21 @@ def forward {batch maxLen vocab hidden heads headDim mlp rff layers : UInt64}
   let splitLogits : T #[batch, maxLen] := reshape split3 #[batch, maxLen]
   let delLogits : T #[batch, maxLen] := reshape del3 #[batch, maxLen]
   pure (coordPred, labelLogits, splitLogits, delLogits)
+
+/-- Forward computing rotary frequencies on the fly (one host→device copy per
+    call); see `forwardFreqs` for the graph-safe variant. -/
+def forward {batch maxLen vocab hidden heads headDim mlp rff layers : UInt64}
+    (params : FullMoleculeTransformerParams vocab hidden heads headDim mlp rff layers)
+    (coord : T #[batch, maxLen, 3])
+    (label : T #[batch, maxLen])
+    (t : T #[batch])
+    (padmask : T #[batch, maxLen])
+    (coordUpdateLayers : Nat := 6)
+    (coordTargetCap? : Option Float := none) :
+    IO (T #[batch, maxLen, 3] × T #[batch, maxLen, vocab] × T #[batch, maxLen] × T #[batch, maxLen]) := do
+  let (ropeCos, ropeSin) ← rotary.computeFreqs maxLen headDim 10000.0
+  forwardFreqs params coord label t padmask ropeCos ropeSin
+    (coordUpdateLayers := coordUpdateLayers) (coordTargetCap? := coordTargetCap?)
 
 end FullMoleculeTransformerParams
 
