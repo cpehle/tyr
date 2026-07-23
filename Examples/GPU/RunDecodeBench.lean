@@ -19,6 +19,7 @@ import Lean.Data.Json.Basic
 import Lean.Data.Json.Printer
 import Lean.Data.Json.FromToJson
 import Tyr.Torch
+import Examples.GPU.Benchmark
 
 namespace Examples.GPU
 
@@ -148,29 +149,11 @@ private def meanFloat (xs : Array Float) : Option Float :=
   if xs.isEmpty then none
   else some <| xs.foldl (· + ·) 0.0 / xs.size.toFloat
 
-/-- The action returns a Float that the bench loop sums into a sink — this
-    keeps Lean's compiler from dead-code-eliminating the kernel call when
-    it sees the tensor result going unused. -/
-private def benchmarkAction (warmup iters repeats : Nat)
-    (action : IO Float) : IO (Array Float) := do
-  let mut latencies : Array Float := #[]
-  let mut sink : Float := 0.0
-  for _ in [:repeats] do
-    for _ in [:warmup] do
-      let v ← action
-      sink := sink + v
-    let _ ← torch.cuda_synchronize
-    let t0 ← IO.monoNanosNow
-    for _ in [:iters] do
-      let v ← action
-      sink := sink + v
-    let _ ← torch.cuda_synchronize
-    let t1 ← IO.monoNanosNow
-    let avgMs := (t1 - t0).toFloat / 1000000.0 / iters.toFloat
-    latencies := latencies.push avgMs
-  -- Print the sink so the compiler can't drop accumulated `out` reads.
-  if sink == 0.0 / 0.0 then IO.println s!"sink={sink}"
-  pure latencies
+/-- Time completed device execution with the shared CUDA-event contract. -/
+private def benchmarkAction (runId : String) (warmup iters repeats : Nat)
+    (stream : UInt64) (action : IO Unit) : IO (Array Float) := do
+  let cfg : Benchmark.Config := { warmup, iters, repeats, runId }
+  Benchmark.timeCudaEvents cfg stream action
 
 private structure DecodeRow where
   event : String := "summary"
@@ -196,6 +179,7 @@ private structure DecodeRow where
 private def runOne (runId : String) (warmup iters repeats : Nat)
     (c : DecodeBenchCase) (backend : DecodeBackend) : IO DecodeRow := do
   let device := Device.CUDA 0
+  let stream ← torch.cuda_current_stream
   let qShape : Shape := #[c.batch, c.qHeads, 1, c.headDim]
   let kvShape : Shape := #[c.batch, c.kvHeads, c.kvSeq, c.headDim]
   let qBase ← torch.randn qShape false device
@@ -213,16 +197,11 @@ private def runOne (runId : String) (warmup iters repeats : Nat)
 
   match backend with
   | .torchSdpa =>
-      -- Action: regenerate q each iter (small qSeq=1, cheap) so Lean's
-      -- referential-transparency optimizer can't CSE the pure FFI call
-      -- across iterations. Without this we measure ~100 ns of cache-hit
-      -- noise instead of real attention latency.
-      let action : IO Float := do
-        let qFresh ← torch.randn qShape false device
-        let qFresh := torch.toBFloat16' qFresh
-        let out := nn.scaledDotProductAttentionGQAQKV qFresh k v 0.0 false true
-        pure (torch.nn.item (torch.nn.maxAll (torch.nn.abs out)))
-      let lats ← benchmarkAction warmup iters repeats action
+      let sink : T #[c.batch, c.qHeads, 1, c.headDim] := torch.zeros_like q
+      let action : IO Unit := do
+        let out := nn.scaledDotProductAttentionGQAQKV q k v 0.0 false true
+        torch.copy_ sink out
+      let lats ← benchmarkAction runId warmup iters repeats stream action
       pure {
         runId := runId, caseId := c.caseId, backend := "torch_sdpa",
         batch := c.batch.toNat, qHeads := c.qHeads.toNat,
@@ -244,12 +223,11 @@ private def runOne (runId : String) (warmup iters repeats : Nat)
       let outMax := torch.nn.item (torch.nn.maxAll (torch.nn.abs (outActual - outRef)))
       let okRoute := routeActual == c.expectedTyrRoute
       let okOut := torch.allclose outRef outActual 5.0e-2 5.0e-2
-      let action : IO Float := do
-        let qFresh ← torch.randn qShape false device
-        let qFresh := torch.toBFloat16' qFresh
-        let out := nn.tyrFlashAttn4d qFresh k v none 0.0 false none true
-        pure (torch.nn.item (torch.nn.maxAll (torch.nn.abs out)))
-      let lats ← benchmarkAction warmup iters repeats action
+      let sink : T #[c.batch, c.qHeads, 1, c.headDim] := torch.zeros_like q
+      let action : IO Unit := do
+        let out := nn.tyrFlashAttn4d q k v none 0.0 false none true
+        torch.copy_ sink out
+      let lats ← benchmarkAction runId warmup iters repeats stream action
       pure {
         runId := runId, caseId := c.caseId, backend := "tyr_runtime",
         routeActual := routeActual,

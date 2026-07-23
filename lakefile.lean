@@ -258,6 +258,7 @@ package tyr where
   moreLinkArgs := packageLinkArgs
 
 require LeanTest from git "https://github.com/cpehle/lean_test.git" @ "b42cd3d78716e5a2de5b640ac82d7fe3f05f2a4c"
+require LeanBenchmark from "../lean-benchmark"
 
 /-! ## Platform Detection
 
