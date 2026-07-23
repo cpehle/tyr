@@ -92,7 +92,7 @@ def GpuArch.capabilities : GpuArch → ArchCapabilities
     }
   | .SM100 => {
       hasTMA := true
-      hasWGMMA := true
+      hasWGMMA := false
       hasFP8 := true
       hasFP8E8M0 := true
       hasFP4 := true
@@ -109,7 +109,7 @@ def GpuArch.capabilities : GpuArch → ArchCapabilities
 /-- Check if architecture supports a dtype -/
 def GpuArch.supportsDtype (arch : GpuArch) (dtype : GpuFloat) : Bool :=
   match dtype with
-  | .Float32 | .Float16 | .BFloat16 => true
+  | .Int64 | .Float32 | .Float16 | .BFloat16 => true
   | .FP8E4M3 | .FP8E5M2 => arch.capabilities.hasFP8
   | .FP8E8M0 => arch.capabilities.hasFP8E8M0
   | .FP4E2M1X2 => arch.capabilities.hasFP4

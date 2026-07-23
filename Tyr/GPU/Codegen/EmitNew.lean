@@ -236,6 +236,8 @@ private def collectRvLayoutsStmt
       unifyRvVars rvVars st dst src
   | .unary _ dst src =>
       unifyRvVars rvVars st dst src
+  | .convertVecLayout _ _ =>
+      st
   | .binary _ dst a b =>
       let st' := unifyRvVars rvVars st dst a
       unifyRvVars rvVars st' dst b
@@ -408,7 +410,10 @@ def renderGlobalParamCppType
   -- `make_unsafe_gl_arg<1>` returns nullptr), which made multi-batch /
   -- multi-head kernels (e.g. decode) TMA-OOB-zero-fill any (batch>0, head>0)
   -- coordinate.
-  s!"gl<{p.dtype.toCpp}, -1, -1, -1, -1{tmaSuffix}>"
+  if p.dtype == .Int64 then
+    "tyr_raw_gl<int64_t>"
+  else
+    s!"gl<{p.dtype.toCpp}, -1, -1, -1, -1{tmaSuffix}>"
 
 private def renderGlobalCoord
     (tileInfo : Std.HashMap VarId TileInfo)
@@ -511,6 +516,8 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout)
       s!"{indent}__shared__ KITTENS_ALIGN_AS(1024) {ty} {v.toIdent}[{len}];\n"
   | .declTT v dtype rows cols =>
     s!"{indent}tt<{dtype.toCpp}, {rows}, {cols}> {v.toIdent};\n"
+  | .declTMEMPool v numCtas clusterSize =>
+    s!"{indent}tensor_allocator<{numCtas}, {clusterSize}> {v.toIdent}" ++ "{};\n"
   | .declSemaphore v =>
     s!"{indent}__shared__ semaphore {v.toIdent};\n"
   | .declSemaphoreArray v len =>
@@ -530,6 +537,11 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout)
 
   -- Memory operations
   | .load dst src => s!"{indent}warp::load({dst.toIdent}, {src.toIdent});\n"
+  | .loadSubtile dst src rows cols rowIdx colIdx =>
+    s!"{indent}warp::load({dst.toIdent}, {src.toIdent}.template subtile<{rows}, {cols}>(make_int2({rowIdx}, {colIdx})));\n"
+  | .loadSubtileVal dst src rows cols rowIdx colIdx =>
+    s!"{indent}warp::load({dst.toIdent}, {src.toIdent}.template subtile<{rows}, {cols}>(make_int2({rowIdx.toIdent}, {colIdx.toIdent})));\n"
+  | .warpgroupLoad dst src => s!"{indent}group<4>::load({dst.toIdent}, {src.toIdent});\n"
   | .store dst src => s!"{indent}warp::store({dst.toIdent}, {src.toIdent});\n"
   | .loadAsync dst src => s!"{indent}warp::load_async({dst.toIdent}, {src.toIdent});\n"
   | .storeAsync dst src => s!"{indent}warp::store_async({dst.toIdent}, {src.toIdent});\n"
@@ -556,7 +568,19 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout)
   | .loadGlobal dst src coordB coordD coordR coordC =>
     let coord := renderGlobalCoord tileInfo dst coordB coordD coordR coordC
     s!"{indent}warp::load({dst.toIdent}, {src.toIdent}, {coord});\n"
+  | .warpgroupLoadGlobal dst src coordB coordD coordR coordC =>
+    let coord := renderGlobalCoord tileInfo dst coordB coordD coordR coordC
+    s!"{indent}group<4>::load({dst.toIdent}, {src.toIdent}, {coord});\n"
+  | .loadRegisterGlobal dst src coordB coordD coordR coordC =>
+    let coord := renderGlobalCoord tileInfo dst coordB coordD coordR coordC
+    s!"{indent}warp::load({dst.toIdent}, {src.toIdent}, {coord});\n"
   | .storeGlobal dst src coordB coordD coordR coordC =>
+    let coord := renderGlobalCoord tileInfo src coordB coordD coordR coordC
+    s!"{indent}warp::store({dst.toIdent}, {src.toIdent}, {coord});\n"
+  | .warpgroupStoreGlobal dst src coordB coordD coordR coordC =>
+    let coord := renderGlobalCoord tileInfo src coordB coordD coordR coordC
+    s!"{indent}group<4>::store({dst.toIdent}, {src.toIdent}, {coord});\n"
+  | .storeRegisterGlobal dst src coordB coordD coordR coordC =>
     let coord := renderGlobalCoord tileInfo src coordB coordD coordR coordC
     s!"{indent}warp::store({dst.toIdent}, {src.toIdent}, {coord});\n"
   | .loadGlobalAsync dst src coordB coordD coordR coordC sem =>
@@ -672,10 +696,18 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout)
     s!"{indent}warpgroup::mma2_{trans.toSuffix}({dst.toIdent}, {a.toIdent}, {b.toIdent}, {c.toIdent}, {scaleA.toIdent}, {scaleB.toIdent});\n"
   | .tcgen05Commit sem clusterSize =>
     s!"{indent}detail::tcgen05::commit<{clusterSize}>({sem.toIdent});\n"
+  | .tensorLoadAsync dst src =>
+    s!"{indent}warpgroup::load_async({dst.toIdent}, {src.toIdent});\n"
+  | .tensorLoadWait =>
+    s!"{indent}tensor_load_wait();\n"
 
   -- Tensor memory operations (Blackwell SM100)
-  | .tmemAllocate dst pool offset =>
-    s!"{indent}auto {dst.toIdent} = {pool.toIdent}.allocate({offset});\n"
+  | .tmemAllocate dst pool dtype rows cols superlane offset =>
+    let ty := s!"tt<{dtype.toCpp}, {rows}, {cols}>"
+    if rows == 64 then
+      s!"{indent}auto {dst.toIdent} = {pool.toIdent}.allocate<{ty}>({superlane}, {offset});\n"
+    else
+      s!"{indent}auto {dst.toIdent} = {pool.toIdent}.allocate<{ty}>({offset});\n"
   | .tmemProvision pool clusterSize =>
     s!"{indent}if(elect_one) {pool.toIdent}.provision<{clusterSize}>(tmem_addr);\n"
   | .tmemDeprovision pool =>
@@ -831,6 +863,7 @@ partial def generateStmt (rvLayouts : Std.HashMap VarId RVLayout)
     else
       s!"{indent}warp::transpose_sep({dst.toIdent}, {src.toIdent});\n"
   | .convert dst src => s!"{indent}warp::copy({dst.toIdent}, {src.toIdent});\n"
+  | .convertVecLayout dst src => s!"{indent}warp::copy({dst.toIdent}, {src.toIdent});\n"
 
   -- Masking
   | .mask op dst src fillVal =>
@@ -1318,17 +1351,18 @@ private partial def stmtUses (p : KStmt → Bool) : KStmt → Bool
       | .declRT .. | .declST .. | .declSTArray .. | .declSTAlias .. | .declRV .. | .declSV ..
       | .declSTRowVec .. | .declSTColVec .. | .declSTColVecArray ..
       | .declSemaphore .. | .declSemaphoreArray ..
-      | .declTT ..
+      | .declTT .. | .declTMEMPool ..
       | .declGPtr .. | .declKVal ..
       | .declScalar ..
-      | .load .. | .store .. | .loadAsync .. | .storeAsync ..
+      | .load .. | .loadSubtile .. | .loadSubtileVal .. | .store .. | .loadAsync .. | .storeAsync ..
       | .storeAdd .. | .storeAddAsync .. | .storeMinAsync ..
-      | .warpgroupStore .. | .warpgroupStoreIdx ..
+      | .warpgroupLoad .. | .warpgroupStore .. | .warpgroupStoreIdx ..
       | .tmaStoreCommitGroup | .tmaStoreAsyncWait
       | .prefetch .. | .tmaExpect ..
       | .blockSync | .groupSync .. | .groupSyncVal ..
       | .tmaLoad .. | .tmaStore ..
-      | .loadGlobal .. | .storeGlobal ..
+      | .loadGlobal .. | .warpgroupLoadGlobal .. | .loadRegisterGlobal ..
+      | .storeGlobal .. | .warpgroupStoreGlobal .. | .storeRegisterGlobal ..
       | .loadGlobalAsync .. | .loadGlobalAsyncWarp ..
       | .loadGlobalAsyncIdx .. | .loadGlobalAsyncIdxSemIdx .. | .loadGlobalAsyncWarpIdx ..
       | .storeGlobalAsync .. | .storeGlobalAsyncIdx ..
@@ -1345,6 +1379,7 @@ private partial def stmtUses (p : KStmt → Bool) : KStmt → Bool
       | .warpgroupMmaIdx .. | .warpgroupMmIdx .. | .warpgroupMmaRhsIdx ..
       | .mmaFence .. | .mmaCommitGroup | .mmaAsyncWait ..
       | .tcgen05Mm .. | .tcgen05Mma .. | .tcgen05MmaScaled .. | .tcgen05Commit ..
+      | .tensorLoadAsync .. | .tensorLoadWait
       | .tmemAllocate .. | .tmemProvision .. | .tmemDeprovision ..
       | .loadScaleTmem .. | .tmemSubtile ..
       | .clusterIdx .. | .clusterTmaLoad .. | .clusterTmaStore ..
@@ -1356,7 +1391,7 @@ private partial def stmtUses (p : KStmt → Bool) : KStmt → Bool
       | .reduce .. | .reduceAccum ..
       | .cumsum .. | .cumprod ..
       | .outer ..
-      | .swapLayout .. | .transpose .. | .convert ..
+      | .swapLayout .. | .transpose .. | .convert .. | .convertVecLayout ..
       | .mask .. | .maskRightFillVal ..
       | .sliceRows .. | .sliceCols .. | .concatCols ..
       | .sync .. | .arrive .. | .arriveAndWait ..
