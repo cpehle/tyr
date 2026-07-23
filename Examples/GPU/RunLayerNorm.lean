@@ -3,6 +3,7 @@ import Tyr.Torch
 import Tyr.GPU.Kernels.FusedLayerNorm
 import Examples.GPU.Parity
 import Examples.GPU.FixtureRunner
+import Examples.GPU.Benchmark
 
 namespace Examples.GPU.RunLayerNorm
 
@@ -100,28 +101,18 @@ private def runInputs (label : String) (inputs : LayerNormInputs) : IO Bool := d
       let (expectedOut, expectedResid) := layerNormReference inputs
       let out := torch.zeros_like inputs.x
       let outResid := torch.zeros_like inputs.residual
-      if blackwell then
-        tkFusedLayerNormResidual1024F32Blackwell.launch
-          inputs.x inputs.residual inputs.weight inputs.bias out outResid
-          1 1 1 launchBlockX 1 1 0 stream
-      else
-        tkFusedLayerNormResidual1024F32.launch
-          inputs.x inputs.residual inputs.weight inputs.bias out outResid
-          1 1 1 launchBlockX 1 1 0 stream
+      fusedLayerNormResidual64x1024F32Direct.launch
+        inputs.x inputs.residual inputs.weight inputs.bias out outResid
+        64 1 1 256 1 1 0 stream
       let _ ← torch.cuda_synchronize
       compareResults (if blackwell then "blackwell.f32" else "f32") expectedOut expectedResid out outResid 5e-3 5e-3
   | .ok .BFloat16 => do
       let (expectedOut, expectedResid) := layerNormReferenceBFloat16 inputs
       let out := torch.zeros_like inputs.x
       let outResid := torch.zeros_like inputs.residual
-      if blackwell then
-        tkFusedLayerNormResidual1024Blackwell.launch
-          inputs.x inputs.residual inputs.weight inputs.bias out outResid
-          1 1 1 launchBlockX 1 1 0 stream
-      else
-        tkFusedLayerNormResidual1024.launch
-          inputs.x inputs.residual inputs.weight inputs.bias out outResid
-          1 1 1 launchBlockX 1 1 0 stream
+      fusedLayerNormResidual64x1024Bf16Direct.launch
+        inputs.x inputs.residual inputs.weight inputs.bias out outResid
+        64 1 1 256 1 1 0 stream
       let _ ← torch.cuda_synchronize
       compareResults (if blackwell then "blackwell.bf16" else "bf16") expectedOut expectedResid out outResid 2e-2 2e-2
   | .ok dtype =>
@@ -191,7 +182,61 @@ def runOnce : IO Bool := do
   }
   runInputs "fixtures" inputs
 
+
+private def benchmarkFloat32 (cfg : Benchmark.Config) (stream : UInt64)
+    (_blackwell : Bool) : IO (String × Bool) := do
+  let inputs ← randomInputs .Float32
+  let (expectedOut, expectedResid) := layerNormReference inputs
+  let out := torch.zeros_like inputs.x
+  let outResid := torch.zeros_like inputs.residual
+  let launch := do
+    fusedLayerNormResidual64x1024F32Direct.launch
+      inputs.x inputs.residual inputs.weight inputs.bias out outResid
+      64 1 1 256 1 1 0 stream
+  launch
+  torch.cuda_synchronize
+  let correct ← compareResults "bench.f32" expectedOut expectedResid out outResid 5e-3 5e-3
+  let samples ← Benchmark.timeCudaEvents cfg stream launch
+  let route := "generated_direct_row_cta_256x4"
+  pure (Benchmark.summaryJson cfg "layernorm_residual_f32_64x1024" "tyr" route samples correct, correct)
+
+private def benchmarkBFloat16 (cfg : Benchmark.Config) (stream : UInt64)
+    (_blackwell : Bool) : IO (String × Bool) := do
+  let inputs ← randomInputs .BFloat16
+  let (expectedOut, expectedResid) := layerNormReferenceBFloat16 inputs
+  let out := torch.zeros_like inputs.x
+  let outResid := torch.zeros_like inputs.residual
+  let launch := do
+    fusedLayerNormResidual64x1024Bf16Direct.launch
+      inputs.x inputs.residual inputs.weight inputs.bias out outResid
+      64 1 1 256 1 1 0 stream
+  launch
+  torch.cuda_synchronize
+  let correct ← compareResults "bench.bf16" expectedOut expectedResid out outResid 2e-2 2e-2
+  let samples ← Benchmark.timeCudaEvents cfg stream launch
+  let route := "generated_direct_row_cta_256x4"
+  pure (Benchmark.summaryJson cfg "layernorm_residual_bf16_64x1024" "tyr" route samples correct, correct)
+
+private def runBenchmark (args : List String) : IO UInt32 := do
+  if !(← requireCuda suiteName) then return 1
+  let cfg ← Benchmark.parseConfig args "layernorm_bench"
+  seedFixtures s!"{suiteName}.benchmark" 0
+  let stream ← torch.cuda_current_stream
+  let blackwell ← isBlackwellFamily
+  let (f32Line, f32Ok) ← benchmarkFloat32 cfg stream blackwell
+  let (bf16Line, bf16Ok) ← benchmarkBFloat16 cfg stream blackwell
+  IO.println f32Line
+  IO.println bf16Line
+  match cfg.jsonlOut? with
+  | some path => Benchmark.writeJsonl path #[f32Line, bf16Line]
+  | none => pure ()
+  pure (if f32Ok && bf16Ok then 0 else 1)
+
 def main (args : List String) : IO UInt32 := do
-  runWithFixtures args suiteName fixtureSpec generateFixtures runOnce
+  if args.contains "--benchmark" then runBenchmark args else
+    runWithFixtures args suiteName fixtureSpec generateFixtures runOnce
 
 end Examples.GPU.RunLayerNorm
+
+def main (args : List String) : IO UInt32 :=
+  Examples.GPU.RunLayerNorm.main args

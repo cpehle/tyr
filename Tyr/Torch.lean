@@ -54,6 +54,8 @@ namespace torch
 @[extern "lean_torch_zeros_like"] opaque zeros_like {s : Shape} (t : @& T s) : T s
 -- ones_like: Returns a tensor filled with ones, same shape/device as input
 @[extern "lean_torch_ones_like"] opaque ones_like {s : Shape} (t : @& T s) : T s
+/-- Copy `src` into the already-allocated `dst`, matching PyTorch copy_. -/
+@[extern "lean_torch_copy_"] opaque copy_ {s : Shape} (dst src : @& T s) : IO Unit
 
 @[extern "lean_torch_requires_grad"] opaque T.requires_grad {s : Shape} (t : @& T s) : Bool
 
@@ -124,6 +126,24 @@ opaque cuda_current_stream : IO UInt64
 /-- Synchronize CUDA device; useful for deterministic validation around custom kernels. -/
 @[extern "lean_torch_cuda_synchronize"]
 opaque cuda_synchronize : IO Unit
+
+/-- Opaque CUDA event handle for device-side benchmark timing. -/
+abbrev CudaEvent := UInt64
+
+@[extern "lean_torch_cuda_event_create"]
+opaque cuda_event_create : IO CudaEvent
+
+@[extern "lean_torch_cuda_event_record"]
+opaque cuda_event_record (event : CudaEvent) (stream : UInt64 := 0) : IO Unit
+
+@[extern "lean_torch_cuda_event_synchronize"]
+opaque cuda_event_synchronize (event : CudaEvent) : IO Unit
+
+@[extern "lean_torch_cuda_event_elapsed_ms"]
+opaque cuda_event_elapsed_ms (start stop : CudaEvent) : IO Float
+
+@[extern "lean_torch_cuda_event_destroy"]
+opaque cuda_event_destroy (event : CudaEvent) : IO Unit
 
 /-- Check if MPS (Metal Performance Shaders) is available -/
 @[extern "lean_torch_mps_is_available"]

@@ -534,6 +534,18 @@ lean_object* lean_torch_ones_like(lean_obj_arg /*s*/, b_lean_obj_arg self) {
   return fromTorchTensor(t);
 }
 
+lean_object* lean_torch_copy_(lean_obj_arg /*s*/, b_lean_obj_arg dst,
+                              b_lean_obj_arg src, lean_object* /*w*/) {
+  try {
+    borrowTensor(dst).copy_(borrowTensor(src));
+    return lean_io_result_mk_ok(lean_box(0));
+  } catch (const c10::Error& e) {
+    return mkC10IoError("copy_ failed", e);
+  } catch (const std::exception& e) {
+    return mkStdIoError("copy_ failed", e);
+  }
+}
+
 lean_object* lean_torch_arange(int start, int stop, int step) {
   auto t = torch::arange(start, stop, step, torch::kLong);
   return fromTorchTensor(t);
@@ -4640,6 +4652,75 @@ lean_object* lean_torch_cuda_synchronize(lean_object* /*w*/) {
       lean_mk_string((std::string("cuda_synchronize failed: ") +
                       cudaGetErrorString(err)).c_str())));
   }
+#endif
+  return lean_io_result_mk_ok(lean_box(0));
+}
+
+#if TYR_HAS_CUDA_API
+static cudaEvent_t tyr_cuda_event_from_raw(uint64_t raw) {
+  return reinterpret_cast<cudaEvent_t>(raw);
+}
+
+static lean_object* tyr_cuda_error(const char* operation, cudaError_t err) {
+  return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string(
+    (std::string(operation) + " failed: " + cudaGetErrorString(err)).c_str())));
+}
+#endif
+
+lean_object* lean_torch_cuda_event_create(lean_object* /*w*/) {
+#if TYR_HAS_CUDA_API
+  cudaEvent_t event{};
+  const cudaError_t err = cudaEventCreate(&event);
+  if (err != cudaSuccess) return tyr_cuda_error("cudaEventCreate", err);
+  return lean_io_result_mk_ok(lean_box_uint64(reinterpret_cast<uint64_t>(event)));
+#else
+  return lean_io_result_mk_error(lean_mk_io_user_error(
+    lean_mk_string("CUDA event timing requires the CUDA runtime API")));
+#endif
+}
+
+lean_object* lean_torch_cuda_event_record(uint64_t raw_event, uint64_t raw_stream,
+                                           lean_object* /*w*/) {
+#if TYR_HAS_CUDA_API
+  const cudaError_t err = cudaEventRecord(
+    tyr_cuda_event_from_raw(raw_event), reinterpret_cast<cudaStream_t>(raw_stream));
+  if (err != cudaSuccess) return tyr_cuda_error("cudaEventRecord", err);
+  return lean_io_result_mk_ok(lean_box(0));
+#else
+  return lean_io_result_mk_error(lean_mk_io_user_error(
+    lean_mk_string("CUDA event timing requires the CUDA runtime API")));
+#endif
+}
+
+lean_object* lean_torch_cuda_event_synchronize(uint64_t raw_event, lean_object* /*w*/) {
+#if TYR_HAS_CUDA_API
+  const cudaError_t err = cudaEventSynchronize(tyr_cuda_event_from_raw(raw_event));
+  if (err != cudaSuccess) return tyr_cuda_error("cudaEventSynchronize", err);
+  return lean_io_result_mk_ok(lean_box(0));
+#else
+  return lean_io_result_mk_error(lean_mk_io_user_error(
+    lean_mk_string("CUDA event timing requires the CUDA runtime API")));
+#endif
+}
+
+lean_object* lean_torch_cuda_event_elapsed_ms(uint64_t raw_start, uint64_t raw_stop,
+                                               lean_object* /*w*/) {
+#if TYR_HAS_CUDA_API
+  float elapsed_ms = 0.0f;
+  const cudaError_t err = cudaEventElapsedTime(
+    &elapsed_ms, tyr_cuda_event_from_raw(raw_start), tyr_cuda_event_from_raw(raw_stop));
+  if (err != cudaSuccess) return tyr_cuda_error("cudaEventElapsedTime", err);
+  return lean_io_result_mk_ok(lean_box_float(static_cast<double>(elapsed_ms)));
+#else
+  return lean_io_result_mk_error(lean_mk_io_user_error(
+    lean_mk_string("CUDA event timing requires the CUDA runtime API")));
+#endif
+}
+
+lean_object* lean_torch_cuda_event_destroy(uint64_t raw_event, lean_object* /*w*/) {
+#if TYR_HAS_CUDA_API
+  const cudaError_t err = cudaEventDestroy(tyr_cuda_event_from_raw(raw_event));
+  if (err != cudaSuccess) return tyr_cuda_error("cudaEventDestroy", err);
 #endif
   return lean_io_result_mk_ok(lean_box(0));
 }
