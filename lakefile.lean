@@ -68,7 +68,18 @@ def linuxCudaLinkArgs : Array String := run_io do
   ]
   let hasTorchCuda ← torchCudaCandidates.anyM (·.pathExists)
   if hasTorchCuda then
-    pure (#["-ltorch_cuda", "-lc10_cuda", "-lcudart"] ++ linuxCudaDriverStubLinkArgs)
+    let vendorCuDir : FilePath :=
+      __dir__ / "external" / "libtorch" / "lib" / ".." / ".." /
+        "nvidia" / "cu13" / "lib"
+    let vendorCublasLt := vendorCuDir / "libcublasLt.so.13"
+    let cublasLtArgs :=
+      if ← vendorCublasLt.pathExists then
+        #[s!"-L{vendorCuDir}", "-l:libcublasLt.so.13",
+          s!"-Wl,-rpath,{vendorCuDir}"]
+      else
+        #["-lcublasLt"]
+    pure (#["-ltorch_cuda", "-lc10_cuda", "-lcudart"] ++ cublasLtArgs ++
+      linuxCudaDriverStubLinkArgs)
   else
     pure #[]
 
@@ -505,7 +516,11 @@ extern_lib libtyr pkg := do
         cmd := "lake"
         args := #["-R", "build", "GenerateGpuKernels"]
         cwd := pkg.dir
-        env := #[("LEAN_HOME", some sysroot.toString), ("TYR_SKIP_GPU_CODEGEN", some "1")] ++ extraEnv
+        env := #[
+          ("LEAN_HOME", some sysroot.toString),
+          ("TYR_SKIP_GPU_CODEGEN", some "1"),
+          ("TYR_GPU_CODEGEN_MODULE", some gpuCodegenModule)
+        ] ++ gpuEnv ++ extraEnv
       }
       let chmod := if System.Platform.isWindows then "cmd" else "chmod"
       let chmodArgs :=
@@ -527,7 +542,11 @@ extern_lib libtyr pkg := do
                   ++ gpuCodegenModules
                   ++ #["--out-dir", generatedCudaDir.toString]
         cwd := pkg.dir
-        env := #[("LEAN_HOME", some sysroot.toString), ("TYR_SKIP_GPU_CODEGEN", some "1")] ++ extraEnv
+        env := #[
+          ("LEAN_HOME", some sysroot.toString),
+          ("TYR_SKIP_GPU_CODEGEN", some "1"),
+          ("TYR_GPU_CODEGEN_MODULE", some gpuCodegenModule)
+        ] ++ gpuEnv ++ extraEnv
       }
     let buildTyrCDylib :=
       match (← IO.getEnv "TYR_BUILD_TYRC_DYLIB") with
@@ -800,6 +819,60 @@ lean_exe TestGPUGB10E2E where
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
+/-- Laguna config.json parsing tests. -/
+lean_exe LagunaConfigTest where
+  root := `Tests.RunLagunaConfig
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
+/-- Laguna tokenizer encode/decode tests. -/
+lean_exe LagunaTokenizerTest where
+  root := `Tests.RunLagunaTokenizer
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
+/-- Laguna NVFP4 dequantization tests. -/
+lean_exe LagunaNvFp4Test where
+  root := `Tests.RunLagunaNvFp4
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
+/-- Laguna MoE block (router + packed experts) tests. -/
+lean_exe LagunaMoeTest where
+  root := `Tests.RunLagunaMoe
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
+/-- Laguna attention/model forward tests. -/
+lean_exe LagunaModelTest where
+  root := `Tests.RunLagunaModel
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
+/-- Laguna end-to-end parity test vs the HF reference (tiny fixture). -/
+lean_exe LagunaParityTest where
+  root := `Tests.RunLagunaParity
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
+/-- Laguna fused NVFP4 MoE kernel tests. -/
+lean_exe LagunaFusedTest where
+  root := `Tests.RunLagunaFused
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
+/-- Laguna rotary (YaRN + plain) table tests. -/
+lean_exe LagunaRopeTest where
+  root := `Tests.RunLagunaRope
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
+/-- Laguna-S-2.1 model loader/generation demo with HF repo-id resolution. -/
+lean_exe LagunaRunHF where
+  root := `Examples.Laguna.RunHF
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
 /-- NVIDIA TileIR rendering and toolchain driver tests. -/
 lean_exe TestGPUTileIR where
   root := `Tests.RunTestGPUTileIR
@@ -917,6 +990,18 @@ lean_exe RunRMSNorm where
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
+/-- Fused BF16 cross-entropy training benchmark. -/
+lean_exe RunLoss where
+  root := `Examples.GPU.RunLoss
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
+/-- Fused mixed-precision AdamW training benchmark. -/
+lean_exe RunOptimizer where
+  root := `Examples.GPU.RunOptimizer
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
 /-- End-to-end ThunderKittens flash attention fixture validation. -/
 lean_exe RunFlashAttn where
   root := `Examples.GPU.RunFlashAttn
@@ -977,6 +1062,12 @@ lean_exe RunMhaH100 where
 /-- End-to-end `mha_h100` training/benchmark demo (kernel + optional torch baseline). -/
 lean_exe RunMhaH100Train where
   root := `Examples.GPU.RunMhaH100Train
+  supportInterpreter := true
+  moreLinkArgs := commonLinkArgs
+
+/-- End-to-end GB10 MHA validation and synchronized benchmark. -/
+lean_exe RunMhaGB10 where
+  root := `Examples.GPU.RunMhaGB10
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
@@ -1172,10 +1263,15 @@ script buildMhaH100Examples (_args) do
     `extern_lib libtyr` build flow instead of manually invoking `GenerateGpuKernels`
     and `make`.
     Usage:
-      `lake run buildGpuTarget -- <KernelModule> <BuildTarget> [ExtraBuildTarget ...]` -/
+      `lake -R run buildGpuTarget <KernelModule> <BuildTarget> [ExtraBuildTarget ...]`
+
+    Lake versions differ on whether a script-level `--` separator is consumed or
+    forwarded. Accept it in either position so the documented helper cannot
+    accidentally request a kernel module literally named `--`. -/
 script buildGpuTarget (args) do
+  let args := if args.head? == some "--" then args.drop 1 else args
   if args.length < 2 then
-    IO.eprintln "Usage: lake run buildGpuTarget -- <KernelModule> <BuildTarget> [ExtraBuildTarget ...]"
+    IO.eprintln "Usage: lake -R run buildGpuTarget <KernelModule> <BuildTarget> [ExtraBuildTarget ...]"
     pure 2
   else
     let rootPath := (← getWorkspace).root.dir

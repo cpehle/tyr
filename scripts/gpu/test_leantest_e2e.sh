@@ -63,10 +63,10 @@ detect_gpu_family() {
   fi
   case "$(detect_gpu_target)" in
     GB10)
-      # Default to Hopper compatibility on GB10 because the current suite still
-      # exercises Hopper-authored kernels. Override with TYR_GPU_FAMILY=BLACKWELL
-      # when validating true SM100 surfaces.
-      echo "HOPPER"
+      # GB10 is a Blackwell-generation product, but physical SM121 does not
+      # support SM100a tcgen05/TMEM. The native source gate enforces that
+      # instruction distinction before NVCC.
+      echo "BLACKWELL"
       ;;
     B200|B300) echo "BLACKWELL" ;;
     A100) echo "AMPERE" ;;

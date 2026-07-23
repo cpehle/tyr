@@ -13,6 +13,11 @@ label="$3"
 shift 3
 extra_build_targets=("$@")
 
+# Preserve the requested module through nested Lake/Make builds. Otherwise the
+# generator build falls back to MhaH100 and may compile an unrelated,
+# architecture-incompatible generated translation unit.
+export TYR_GPU_CODEGEN_MODULE="${kernel_module}"
+
 source ./load_modules.sh
 
 export LEAN_CC="$PWD/scripts/lean_cc_wrapper.sh"
@@ -57,8 +62,7 @@ detect_gpu_family() {
   fi
   case "$(detect_gpu_target)" in
     GB10)
-      # Most current e2e kernels in this repo are still Hopper-authored.
-      echo "HOPPER"
+      echo "BLACKWELL"
       ;;
     B200|B300) echo "BLACKWELL" ;;
     A100) echo "AMPERE" ;;
