@@ -72,7 +72,7 @@ detect_gpu_family() {
   fi
   case "$(detect_gpu_target)" in
     GB10)
-      echo "HOPPER"
+      echo "BLACKWELL"
       ;;
     B200|B300) echo "BLACKWELL" ;;
     A100) echo "AMPERE" ;;
