@@ -23,7 +23,7 @@ namespace Tyr.GPU
 class GpuCapabilities (arch : GpuArch) where
   /-- Maximum shared memory in bytes -/
   maxSharedMem : Nat
-  /-- Supported floating point types -/
+  /-- Supported global-memory element types -/
   supportedTypes : List GpuFloat
   /-- Has Tensor Memory Accelerator (TMA) -/
   hasTMA : Bool
@@ -44,7 +44,7 @@ class GpuCapabilities (arch : GpuArch) where
 
 instance : GpuCapabilities .SM80 where
   maxSharedMem := 164 * 1024  -- 164 KB
-  supportedTypes := [.Float32, .Float16, .BFloat16]
+  supportedTypes := [.Int64, .Float32, .Float16, .BFloat16]
   hasTMA := false
   hasWGMMA := false
   hasTMEM := false
@@ -56,7 +56,7 @@ instance : GpuCapabilities .SM80 where
 
 instance : GpuCapabilities .SM90 where
   maxSharedMem := 228 * 1024  -- 228 KB
-  supportedTypes := [.Float32, .Float16, .BFloat16, .FP8E4M3, .FP8E5M2]
+  supportedTypes := [.Int64, .Float32, .Float16, .BFloat16, .FP8E4M3, .FP8E5M2]
   hasTMA := true
   hasWGMMA := true
   hasTMEM := false
@@ -69,11 +69,12 @@ instance : GpuCapabilities .SM90 where
 instance : GpuCapabilities .SM100 where
   maxSharedMem := 256 * 1024  -- 256 KB (estimated)
   supportedTypes := [
+    .Int64,
     .Float32, .Float16, .BFloat16,
     .FP8E4M3, .FP8E5M2, .FP8E8M0, .FP4E2M1X2
   ]
   hasTMA := true
-  hasWGMMA := true
+  hasWGMMA := false
   hasTMEM := true
   hasFP8E8M0 := true
   hasFP4 := true
@@ -96,9 +97,6 @@ class RequiresWGMMA (arch : GpuArch) [GpuCapabilities arch] where
   h_wgmma : GpuCapabilities.hasWGMMA arch = true
 
 instance : RequiresWGMMA .SM90 where
-  h_wgmma := rfl
-
-instance : RequiresWGMMA .SM100 where
   h_wgmma := rfl
 
 /-- Require tensor-memory support for Blackwell tensor-core pipelines. -/

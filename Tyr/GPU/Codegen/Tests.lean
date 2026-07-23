@@ -235,6 +235,36 @@ __global__ void row_reduction(/* empty parameter list */) {
 #guard_msgs in
 #eval IO.println (generateKernel rowReductionKernel)
 
+/-- Explicit RV layout conversion keeps a row reduction in `ortho` layout while
+    adapting its consumer to the `align` layout required by a column map. -/
+def rvLayoutConversionKernel : Kernel :=
+  buildKernelM "rv_layout_conversion" .SM90 #[] do
+    let t : RT GpuFloat.Float32 16 16 ← allocRT .Float32 16 16
+    let reduced : RV GpuFloat.Float32 16 ← allocRV .Float32 16
+    let broadcast : RV GpuFloat.Float32 16 ← allocRV .Float32 16
+    rowSum reduced t
+    convertVecLayout broadcast reduced
+    subRow t t broadcast
+
+/--
+info: #include <type_traits>
+#include <kittens.cuh>
+using namespace kittens;
+
+#if defined(KITTENS_HOPPER)
+__global__ void rv_layout_conversion(/* empty parameter list */) {
+  rt<float, 16, 16, row_l> v0;
+  rv<float, 16, ducks::rv_layout::ortho> v1;
+  rv<float, 16, ducks::rv_layout::align> v2;
+  warp::row_sum(v1, v0);
+  warp::copy(v2, v1);
+  warp::sub_col(v0, v0, v2);
+}
+#endif
+-/
+#guard_msgs in
+#eval IO.println (generateKernel rvLayoutConversionKernel)
+
 /-- Column broadcast operations -/
 def colBroadcastKernel : Kernel :=
   buildKernelM "col_broadcast" .SM90 #[] do
@@ -444,7 +474,7 @@ __global__ void mini_flash_attn(gl<bf16, 1, 1, -1, -1> v0, gl<bf16, 1, 1, -1, -1
 
 #guard GpuArch.SM80.capabilities.hasWGMMA = false
 #guard GpuArch.SM90.capabilities.hasWGMMA = true
-#guard GpuArch.SM100.capabilities.hasWGMMA = true
+#guard GpuArch.SM100.capabilities.hasWGMMA = false
 
 #guard GpuArch.SM80.capabilities.hasFP8 = false
 #guard GpuArch.SM90.capabilities.hasFP8 = true
@@ -737,6 +767,62 @@ __global__ void tmem_pool(/* empty parameter list */) {
 -/
 #guard_msgs in
 #eval IO.println (generateKernel tmemPoolKernel)
+
+/-- Concrete one-CTA TMEM allocation and TMEM-to-register load path. -/
+def tmemRegisterLoadKernel : Kernel :=
+  buildKernelM "tmem_register_load" .SM100 #[] do
+    let pool ← allocTMEMPool 1 1
+    let tile ← tmemAllocate pool .Float32 64 64 0
+    let fragment ← allocRT .Float32 16 64
+    tensorLoadAsync fragment tile
+    tensorLoadWait
+
+/--
+info: #include <type_traits>
+#include <kittens.cuh>
+using namespace kittens;
+
+#if defined(KITTENS_BLACKWELL)
+__global__ void tmem_register_load(/* empty parameter list */) {
+  tensor_allocator<1, 1> v0{};
+  auto v1 = v0.allocate<tt<float, 64, 64>>(0, 0);
+  rt<float, 16, 64, row_l> v2;
+  warpgroup::load_async(v2, v1);
+  tensor_load_wait();
+}
+#endif
+-/
+#guard_msgs in
+#eval IO.println (generateKernel tmemRegisterLoadKernel)
+
+/-- Static and runtime-indexed shared-tile fragment loads. -/
+def sharedSubtileLoadKernel : Kernel :=
+  buildKernelM "shared_subtile_load" .SM90 #[] do
+    let src ← allocST .BFloat16 128 64
+    let dst ← allocRT .BFloat16 64 64
+    loadSubtile dst src 1 0
+    let row ← constIntVal 0 "fragment_row"
+    loadSubtileVal dst src row row
+
+/--
+info: #include <type_traits>
+#include <kittens.cuh>
+using namespace kittens;
+
+#if defined(KITTENS_HOPPER)
+__global__ void shared_subtile_load(/* empty parameter list */) {
+  extern __shared__ int __shm[];
+  tma_swizzle_allocator al(__shm);
+  auto &v0 = al.allocate<st<bf16, 128, 64>>(); // layout: row_l
+  rt<bf16, 64, 64, row_l> v1;
+  warp::load(v1, v0.template subtile<64, 64>(make_int2(1, 0)));
+  int v2 = 0;
+  warp::load(v1, v0.template subtile<64, 64>(make_int2(v2, v2)));
+}
+#endif
+-/
+#guard_msgs in
+#eval IO.println (generateKernel sharedSubtileLoadKernel)
 
 /-! ## Pipeline Tests -/
 

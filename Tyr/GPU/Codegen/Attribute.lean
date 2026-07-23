@@ -164,7 +164,8 @@ structure ExtractedParam where
 /-- Try to extract GpuFloat from a type expression -/
 def extractGpuFloat? (type : Expr) : MetaM (Option GpuFloat) := do
   let type ← whnf type
-  if type.isConstOf ``GpuFloat.Float32 then return some .Float32
+  if type.isConstOf ``GpuFloat.Int64 then return some .Int64
+  else if type.isConstOf ``GpuFloat.Float32 then return some .Float32
   else if type.isConstOf ``GpuFloat.Float16 then return some .Float16
   else if type.isConstOf ``GpuFloat.BFloat16 then return some .BFloat16
   else if type.isConstOf ``GpuFloat.FP8E4M3 then return some .FP8E4M3
@@ -302,6 +303,7 @@ def generateKernelCompanion (declName : Name) (arch : GpuArch)
   -- Build KParam array syntax
   let kparamStxs ← params.mapM fun p => do
     let dtypeStx := match p.dtype with
+      | .Int64 => mkIdent ``GpuFloat.Int64
       | .Float32 => mkIdent ``GpuFloat.Float32
       | .Float16 => mkIdent ``GpuFloat.Float16
       | .BFloat16 => mkIdent ``GpuFloat.BFloat16
@@ -362,16 +364,28 @@ def generatePtrExtractionAttr
     let tmaTypes := match paramTmaTypes[idx]? with
       | some tys => tys
       | none => #[]
+    let dtypeCheck :=
+      if p.dtype == .Int64 then
+        s!"    if (v{idx}_tensor.scalar_type() != at::kLong) return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string(\"{p.name} must have dtype int64\")));\n"
+      else
+        ""
+    let wrapper :=
+      if p.dtype == .Int64 then
+        s!"    using v{idx}_gl_t = {renderGlobalParamCppType p tmaTypes};\n" ++
+        s!"    auto v{idx}_gl = v{idx}_gl_t\{reinterpret_cast<int64_t*>(v{idx}_tensor.data_ptr())};\n"
+      else
+        s!"    using v{idx}_gl_t = {renderGlobalParamCppType p tmaTypes};\n" ++
+        s!"    auto v{idx}_gl = kittens::make_gl<v{idx}_gl_t, false>(reinterpret_cast<uint64_t>(v{idx}_tensor.data_ptr()),\n" ++
+        s!"      v{idx}_shape[0], v{idx}_shape[1], v{idx}_shape[2], v{idx}_shape[3]);\n"
     s!"    auto v{idx}_tensor = borrowTensor({p.name});\n" ++
     s!"    if (!v{idx}_tensor.is_cuda()) return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string(\"{p.name} must be a CUDA tensor\")));\n" ++
+    dtypeCheck ++
     s!"    if (!v{idx}_tensor.is_contiguous()) return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string(\"{p.name} must be contiguous\")));\n" ++
     s!"    if (v{idx}_tensor.dim() > 4) return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string(\"{p.name} must have dim <= 4\")));\n" ++
     s!"    std::array<int, 4> v{idx}_shape = \{1, 1, 1, 1};\n" ++
     s!"    for (int i = 0; i < static_cast<int>(v{idx}_tensor.dim()); ++i)\n" ++
     s!"      v{idx}_shape[4 - v{idx}_tensor.dim() + i] = static_cast<int>(v{idx}_tensor.size(i));\n" ++
-    s!"    using v{idx}_gl_t = {renderGlobalParamCppType p tmaTypes};\n" ++
-    s!"    auto v{idx}_gl = kittens::make_gl<v{idx}_gl_t, false>(reinterpret_cast<uint64_t>(v{idx}_tensor.data_ptr()),\n" ++
-    s!"      v{idx}_shape[0], v{idx}_shape[1], v{idx}_shape[2], v{idx}_shape[3]);\n"
+    wrapper
   else ""
 
 /-- Generate complete C++ launcher code for a kernel -/
@@ -528,6 +542,7 @@ def generatePolyKernelCompanion (declName : Name) (arch : GpuArch) (archLevel : 
   -- Build KParam array syntax
   let kparamStxs ← params.mapM fun p => do
     let dtypeStx := match p.dtype with
+      | .Int64 => mkIdent ``GpuFloat.Int64
       | .Float32 => mkIdent ``GpuFloat.Float32
       | .Float16 => mkIdent ``GpuFloat.Float16
       | .BFloat16 => mkIdent ``GpuFloat.BFloat16

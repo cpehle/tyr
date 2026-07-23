@@ -74,6 +74,7 @@ def generateLeanLaunchWrapper (kernel : RegisteredKernel) : String :=
 /-- Convert GpuFloat to C++ CUDA type for pointers -/
 def gpuFloatToCudaPtr (dtype : GpuFloat) : String :=
   match dtype with
+  | .Int64 => "int64_t*"
   | .Float32 => "float*"
   | .Float16 => "__half*"
   | .BFloat16 => "__nv_bfloat16*"
@@ -125,6 +126,7 @@ def generateCppHeader : String :=
   "#include <cuda_fp4.h>\n" ++
   "#endif\n\n" ++
   "using namespace kittens;\n\n" ++
+  "template <typename T> struct tyr_raw_gl { T* raw_ptr; };\n\n" ++
   "// Forward declarations\n" ++
   "extern torch::Tensor borrowTensor(b_lean_obj_arg o);\n" ++
   "\n" ++

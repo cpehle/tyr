@@ -101,6 +101,8 @@ inductive KStmt where
   -- Tensor memory tile declarations (Blackwell SM100)
   /-- Declare a Blackwell tensor-memory tile `tt<dtype, rows, cols>` (SM100 TMEM). -/
   | declTT (v : VarId) (dtype : GpuFloat) (rows cols : Nat)
+  /-- Declare a Blackwell tensor-memory allocator. -/
+  | declTMEMPool (v : VarId) (numCtas clusterSize : Nat)
 
   -- Kernel parameter declarations (used by attribute-generated code)
   /-- Declare a global-memory pointer kernel parameter (named in C++). -/
@@ -113,6 +115,13 @@ inductive KStmt where
   -- Memory operations
   /-- SMEM→register tile copy: `kittens::load(rt, st)`; shapes/layout must match. -/
   | load (dst src : VarId)
+  /-- Load a compile-time tile fragment from shared memory into a register tile. -/
+  | loadSubtile (dst src : VarId) (rows cols rowIdx colIdx : Nat)
+  /-- Load a runtime-selected tile fragment from shared memory into registers. -/
+  | loadSubtileVal (dst src : VarId) (rows cols : Nat) (rowIdx colIdx : VarId)
+  /-- Four-warp cooperative shared-to-register load. Each warp receives one
+      row fragment of the shared tile. -/
+  | warpgroupLoad (dst src : VarId)
   /-- Register→SMEM tile copy: `kittens::store(st, rt)`; shapes/layout must match. -/
   | store (dst src : VarId)
   /-- Async SMEM→SMEM copy via TMA: `kittens::load_async`. -/
@@ -153,8 +162,16 @@ inductive KStmt where
   -- Global memory operations with 4D coordinates (ThunderKittens style)
   /-- Synchronous GMEM→SMEM tile load at 4D coord `{b,d,r,c}` (`kittens::load`). -/
   | loadGlobal (dst src : VarId) (coordB coordD coordR coordC : VarId)
+  /-- Four-warp cooperative GMEM→register tile load at 4D coord. -/
+  | warpgroupLoadGlobal (dst src : VarId) (coordB coordD coordR coordC : VarId)
+  /-- Warp-level GMEM→register tile load at 4D coord. -/
+  | loadRegisterGlobal (dst src : VarId) (coordB coordD coordR coordC : VarId)
   /-- Synchronous SMEM→GMEM tile store at 4D coord `{b,d,r,c}` (`kittens::store`). -/
   | storeGlobal (dst src : VarId) (coordB coordD coordR coordC : VarId)
+  /-- Four-warp cooperative register→GMEM tile store at 4D coord. -/
+  | warpgroupStoreGlobal (dst src : VarId) (coordB coordD coordR coordC : VarId)
+  /-- Warp-level register→GMEM tile store at 4D coord. -/
+  | storeRegisterGlobal (dst src : VarId) (coordB coordD coordR coordC : VarId)
   /-- Async TMA load at 4D coord, signaling completion on `sem` (`tma::load_async`). -/
   | loadGlobalAsync (dst src : VarId) (coordB coordD coordR coordC sem : VarId)
   /-- Async TMA load at 4D coord issued by the currently active warp. -/
@@ -245,10 +262,14 @@ inductive KStmt where
   | tcgen05MmaScaled (trans : MMATranspose) (dst a b c scaleA scaleB : VarId)
   /-- Commit tcgen05 results to a cluster-aware semaphore. -/
   | tcgen05Commit (sem : VarId) (clusterSize : Nat)
+  /-- Cooperatively load a tensor-memory tile into per-warp register fragments. -/
+  | tensorLoadAsync (dst src : VarId)
+  /-- Wait for prior tensor-memory loads to become visible in registers. -/
+  | tensorLoadWait
 
   -- Tensor memory operations (Blackwell SM100)
   /-- Allocate a TT from a TMEM pool at a given byte offset. -/
-  | tmemAllocate (dst pool : VarId) (offset : Nat)
+  | tmemAllocate (dst pool : VarId) (dtype : GpuFloat) (rows cols superlane offset : Nat)
   /-- Provision a TMEM pool across `clusterSize` CTAs (must be inside `electOneSync`). -/
   | tmemProvision (pool : VarId) (clusterSize : Nat)
   /-- Release a previously provisioned TMEM pool. -/
@@ -327,6 +348,8 @@ inductive KStmt where
   | transpose (dst src : VarId)
   /-- Element-wise dtype conversion (e.g. BF16↔Float32) on matching-shape tiles. -/
   | convert (dst src : VarId)
+  /-- Copy a register vector while converting between TK align/ortho layouts. -/
+  | convertVecLayout (dst src : VarId)
 
   -- Masking
   /-- Apply a compile-time mask op (causal/tri/fill) optionally with a fill value. -/

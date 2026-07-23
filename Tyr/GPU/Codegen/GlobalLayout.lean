@@ -281,6 +281,22 @@ def loadGlobal {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
     : KernelM Unit := do
   emit (.loadGlobal dst.id src.id coord.b coord.d coord.r coord.c)
 
+/-- Load one 16-row register fragment per warp directly from a 64-row global tile. -/
+def warpgroupLoadGlobal {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
+    (dst : RT dtype rows cols layout)
+    (src : GPtr dtype)
+    (coord : RTileCoord)
+    : KernelM Unit := do
+  emit (.warpgroupLoadGlobal dst.id src.id coord.b coord.d coord.r coord.c)
+
+/-- Load a register tile directly from global memory with one warp. -/
+def loadRegisterGlobal {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
+    (dst : RT dtype rows cols layout)
+    (src : GPtr dtype)
+    (coord : RTileCoord)
+    : KernelM Unit := do
+  emit (.loadRegisterGlobal dst.id src.id coord.b coord.d coord.r coord.c)
+
 /-- Store tile from shared memory to global memory using RTileCoord.
     Usage: `storeGlobal dst src coord` -/
 def storeGlobal {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
@@ -289,6 +305,22 @@ def storeGlobal {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
     (coord : RTileCoord)
     : KernelM Unit := do
   emit (.storeGlobal dst.id src.id coord.b coord.d coord.r coord.c)
+
+/-- Store one register fragment per warp directly to a 64-row global tile. -/
+def warpgroupStoreGlobal {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
+    (dst : GPtr dtype)
+    (src : RT dtype rows cols layout)
+    (coord : RTileCoord)
+    : KernelM Unit := do
+  emit (.warpgroupStoreGlobal dst.id src.id coord.b coord.d coord.r coord.c)
+
+/-- Store a register tile directly to global memory with one warp. -/
+def storeRegisterGlobal {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
+    (dst : GPtr dtype)
+    (src : RT dtype rows cols layout)
+    (coord : RTileCoord)
+    : KernelM Unit := do
+  emit (.storeRegisterGlobal dst.id src.id coord.b coord.d coord.r coord.c)
 
 /-- Async load from global to shared with semaphore (TMA).
     Usage: `loadGlobalAsync dst src coord sem` -/
@@ -461,6 +493,14 @@ def loadVecGlobalRowRV {dtype : GpuFloat} {len : Nat}
 def storeVecGlobalRow {dtype : GpuFloat} {len : Nat}
     (dst : GPtr dtype)
     (src : SV dtype len)
+    (coord : RTileCoord)
+    : KernelM Unit := do
+  emit (.storeVecGlobal dst.id src.id coord.rowOffset)
+
+/-- Store a register vector directly to global memory using row offset. -/
+def storeVecGlobalRowRV {dtype : GpuFloat} {len : Nat}
+    (dst : GPtr dtype)
+    (src : RV dtype len)
     (coord : RTileCoord)
     : KernelM Unit := do
   emit (.storeVecGlobal dst.id src.id coord.rowOffset)

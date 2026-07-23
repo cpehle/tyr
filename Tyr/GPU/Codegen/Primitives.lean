@@ -158,6 +158,13 @@ def allocTT (dtype : GpuFloat) (rows cols : Nat) : KernelM (TT dtype rows cols) 
   emit (.declTT v dtype rows cols)
   pure ⟨v⟩
 
+/-- Declare a concrete ThunderKittens tensor-memory allocator. -/
+def allocTMEMPool (numCtas : Nat := 1) (clusterSize : Nat := 1)
+    : KernelM TMEMPool := do
+  let v ← freshVar
+  emit (.declTMEMPool v numCtas clusterSize)
+  pure ⟨v⟩
+
 /-- Allocate a zero-initialized tensor memory tile -/
 def zeroTT (dtype : GpuFloat) (rows cols : Nat) : KernelM (TT dtype rows cols) := do
   let tile ← allocTT dtype rows cols
@@ -166,9 +173,9 @@ def zeroTT (dtype : GpuFloat) (rows cols : Nat) : KernelM (TT dtype rows cols) :
 
 /-- Allocate a TT from a TMEM pool at a given byte offset. -/
 def tmemAllocate (pool : TMEMPool) (dtype : GpuFloat) (rows cols : Nat) (offset : Nat)
-    : KernelM (TT dtype rows cols) := do
+    (superlane : Nat := 0) : KernelM (TT dtype rows cols) := do
   let v ← freshVar
-  emit (.tmemAllocate v pool.id offset)
+  emit (.tmemAllocate v pool.id dtype rows cols superlane offset)
   pure ⟨v⟩
 
 /-- Provision a TMEM pool across the cluster. Must be called inside `electOneSync`. -/
@@ -227,6 +234,31 @@ def load {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
     (dst : RT dtype rows cols layout)
     (src : ST dtype rows cols layout) : KernelM Unit := do
   emit (.load dst.id src.id)
+
+/-- Load one compile-time fragment of a larger shared tile into registers.
+    `rowIdx` and `colIdx` are fragment indices, matching TK's `st.subtile` API. -/
+def loadSubtile {dtype : GpuFloat} {rows cols srcRows srcCols : Nat}
+    {layout : TileLayout}
+    (dst : RT dtype rows cols layout)
+    (src : ST dtype srcRows srcCols layout)
+    (rowIdx colIdx : Nat) : KernelM Unit := do
+  emit (.loadSubtile dst.id src.id rows cols rowIdx colIdx)
+
+/-- Runtime-indexed counterpart of `loadSubtile`; dimensions remain static. -/
+def loadSubtileVal {dtype : GpuFloat} {rows cols srcRows srcCols : Nat}
+    {layout : TileLayout}
+    (dst : RT dtype rows cols layout)
+    (src : ST dtype srcRows srcCols layout)
+    (rowIdx colIdx : KVal UInt32) : KernelM Unit := do
+  emit (.loadSubtileVal dst.id src.id rows cols rowIdx.id colIdx.id)
+
+/-- Load one row fragment per warp from a shared tile using four warps. -/
+def warpgroupLoad {dtype : GpuFloat} {dstRows srcRows cols : Nat} {layout : TileLayout}
+    (dst : RT dtype dstRows cols layout)
+    (src : ST dtype srcRows cols layout)
+    (hRows : srcRows = 4 * dstRows := by decide) : KernelM Unit := do
+  let _ := hRows
+  emit (.warpgroupLoad dst.id src.id)
 
 /-- Store from register to shared -/
 def store {dtype : GpuFloat} {rows cols : Nat} {layout : TileLayout}
@@ -513,6 +545,13 @@ def fillVecScalar {dtype : GpuFloat} {len : Nat} {T : Type}
 def copyVec {dtype : GpuFloat} {len : Nat}
     (dst src : RV dtype len) : KernelM Unit := do
   emit (.unary .Copy dst.id src.id)
+
+/-- Copy a register vector while allowing its physical TK layout to change.
+    Unlike `copyVec`, source and destination layout inference is deliberately
+    independent; `warp::copy` performs the required warp shuffle. -/
+def convertVecLayout {dtype : GpuFloat} {len : Nat}
+    (dst src : RV dtype len) : KernelM Unit := do
+  emit (.convertVecLayout dst.id src.id)
 
 /-- Zero vector -/
 def zeroVec {dtype : GpuFloat} {len : Nat}
@@ -1835,6 +1874,17 @@ def tcgen05MmaScaled {M K N : Nat} {inDtype accDtype scaleDtype : GpuFloat}
 /-- Commit tcgen05 results to the cluster-aware semaphore. -/
 def tcgen05Commit (sem : Semaphore) (clusterSize : Nat := 1) : KernelM Unit := do
   emit (.tcgen05Commit sem.id clusterSize)
+
+/-- Load one register fragment per warp from a tensor-memory tile. -/
+def tensorLoadAsync {dtype : GpuFloat} {warpRows rows cols : Nat}
+    {layout : TileLayout}
+    (dst : RT dtype warpRows cols layout) (src : TT dtype rows cols)
+    : KernelM Unit := do
+  emit (.tensorLoadAsync dst.id src.id)
+
+/-- Wait for all preceding tensor-memory loads. -/
+def tensorLoadWait : KernelM Unit := do
+  emit .tensorLoadWait
 
 /-! ## Cluster Operations -/
 

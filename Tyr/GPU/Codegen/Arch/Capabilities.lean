@@ -96,7 +96,7 @@ instance : ArchConfig .Blackwell where
   mmaTileSize := (64, 64, 32)
   maxSharedMem := 256 * 1024  -- 256 KB (estimated)
   hasTMA := true
-  hasWGMMA := true
+  hasWGMMA := false
   hasFP8 := true
   hasFP8E8M0 := true
   hasFP4 := true
@@ -174,8 +174,6 @@ class HasWGMMACapability (arch : ArchLevel) where
   proof : arch.capabilities.hasWGMMA = true
 
 instance : HasWGMMACapability .Hopper := ⟨rfl⟩
-instance : HasWGMMACapability .Blackwell := ⟨rfl⟩
-
 /-- Type-level boolean for FP8 support -/
 class HasFP8Capability (arch : ArchLevel) where
   proof : arch.capabilities.hasFP8 = true
@@ -205,7 +203,7 @@ instance : HasDSMCapability .Blackwell := ⟨rfl⟩
 /-- Check if a dtype is supported by an architecture -/
 def ArchLevel.supportsDtype (arch : ArchLevel) (dtype : GpuFloat) : Bool :=
   match dtype with
-  | .Float32 | .Float16 | .BFloat16 => true
+  | .Int64 | .Float32 | .Float16 | .BFloat16 => true
   | .FP8E4M3 | .FP8E5M2 => arch.capabilities.hasFP8
   | .FP8E8M0 => arch.capabilities.hasFP8E8M0
   | .FP4E2M1X2 => arch.capabilities.hasFP4

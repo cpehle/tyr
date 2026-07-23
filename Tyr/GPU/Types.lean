@@ -17,8 +17,9 @@ ThunderKittens/CUDA code.
 
 namespace Tyr.GPU
 
-/-- GPU floating point types, matching ThunderKittens supported dtypes -/
+/-- GPU global-memory element types supported by the generated backend -/
 inductive GpuFloat where
+  | Int64     -- signed 64-bit integer storage (indices/targets)
   | Float32   -- float
   | Float16   -- half
   | BFloat16  -- bf16
@@ -30,6 +31,7 @@ inductive GpuFloat where
 
 instance : ToString GpuFloat where
   toString
+    | .Int64 => "Int64"
     | .Float32 => "Float32"
     | .Float16 => "Float16"
     | .BFloat16 => "BFloat16"
@@ -40,6 +42,7 @@ instance : ToString GpuFloat where
 
 /-- Convert GpuFloat to C++ type string -/
 def GpuFloat.toCpp : GpuFloat → String
+  | .Int64 => "int64_t"
   | .Float32 => "float"
   | .Float16 => "half"
   | .BFloat16 => "bf16"
@@ -50,6 +53,7 @@ def GpuFloat.toCpp : GpuFloat → String
 
 /-- Bytes per element for each dtype -/
 def GpuFloat.bytes : GpuFloat → Nat
+  | .Int64 => 8
   | .Float32 => 4
   | .Float16 => 2
   | .BFloat16 => 2
