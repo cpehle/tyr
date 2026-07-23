@@ -1,0 +1,825 @@
+/-
+  Tyr/Model/Laguna/Model.lean
+
+  Full poolside Laguna text causal-LM (Laguna-S-2.1, NVFP4 variant):
+  gated attention (per-head softplus output gate), dense SwiGLU / sparse MoE
+  FFN, interleaved full + sliding-window attention layers, static KV cache,
+  and cached greedy/sampled generation.
+
+  Mirrors the HuggingFace reference in `dev/laguna_reference/modeling_laguna.py`
+  (`LagunaAttention`, `LagunaMLP`, `LagunaDecoderLayer`, `LagunaModel`,
+  `LagunaForCausalLM`) and follows the structural idioms of
+  `Tyr/Model/Qwen35/Model.lean` (KV cache, `forwardWithCache`/`forwardStep`,
+  `decodeLoopCached`) and `Tyr/Model/Gemma4/Model.lean` (sliding-window decode
+  KV truncation: `useLen = min kvLen sliding_window`).
+
+  Attention math per layer (H = 48 full / 72 sliding, KV = 8, head_dim = 128,
+  no biases anywhere):
+
+    q,k,v      = q_proj/k_proj/v_proj(xn)        xn = input_layernorm output
+    q,k        = per-head RMSNorm over head_dim  (q_norm/k_norm, BEFORE rope)
+    q,k        = RoPE  (full layers: partial rotary on the first
+                        `cfg.rotaryDimFull` = 64 channels with YaRN tables;
+                        sliding layers: full-width 128 rotary with plain tables)
+    attn       = SDPA, GQA, scale = head_dim^-0.5 (the tyr SDPA default);
+                 full layers causal, sliding layers causal + window
+                 `cfg.sliding_window` = 512
+    gate       = softplus(g_proj(xn).float()).to(bf16)   [B, T, H]
+    attn       = attn * gate.unsqueeze(-1)               per-head gate
+    out        = o_proj(attn.flatten(-2))
+
+  Layer: `h = x + attn(input_layernorm(x))`;
+         `out = h + ffn(post_attention_layernorm(h))` with ffn = dense SwiGLU
+  (layers in `cfg.mlp_only_layers`) or `LagunaSparseMoeBlock` (wave 1).
+
+  Deviations from the HF reference (all below BF16 rounding or documented):
+  - RMSNorm multiplies by the weight in FP32 and casts back once, instead of
+    casting first and multiplying in BF16 (same idiom as Qwen35).
+  - `forwardWithCache` is a PREFILL entry point: it writes the KV cache at
+    offset 0 and assumes a fresh cache (chunked prefill is not supported).
+  - The random-init path (`*.init`) synthesizes NVFP4 expert banks from int64
+    "bytes" + F32 scales (dequant only needs `toLong`/`toFloat'`); checkpoint
+    loading replaces them with real U8 / F8_E4M3 tensors (see Weights.lean).
+  - SDPA op choice: attention NEVER uses `nn.scaledDotProductAttentionGQA` /
+    `...GQAQKV`. Those bindings route through `tyr_ops::flash_attn_dispatch`,
+    whose CUDA flash-only attempt throws `c10::Error` when flash declines the
+    input (always for fp32; on sm_121 also for bf16 — this torch build's
+    kernels cover ≤ sm_120) and the exception cannot be caught across the
+    vendored libstdc++/libc++ ABI mix, so the process hard-terminates
+    (`libc++abi: terminating`). Instead: full-attention prefill uses
+    `GQAMask` with an all-ones padding mask (identical causal math), sliding
+    prefill uses `GQAWindow`, and decode uses `GQAMaskQKV` with an all-ones
+    qk mask — all of which call `torch::scaled_dot_product_attention`
+    directly with default backends. Same math, works on CPU + CUDA.
+    Caveat: the explicit `[seq, seq]` masks make long-context prefill
+    memory-heavier than flash; revisiting this needs a cc/ change (out of
+    scope for this wave).
+-/
+import Tyr.Torch
+import Tyr.TensorStruct
+import Tyr.Module.Derive
+import Tyr.Model.Qwen.Attention
+import Tyr.Model.Laguna.Config
+import Tyr.Model.Laguna.Rope
+import Tyr.Model.Laguna.MoE
+import Tyr.Model.Utils
+import Tyr.Model.Generation
+
+namespace torch.laguna
+
+open torch
+open torch.Model
+
+/-! ## RMSNorm helpers (plain one-centered LagunaRMSNorm) -/
+
+/-- FP32 RMSNorm over the last dim of a 2D tensor, then weight scale.
+    Matches HF `LagunaRMSNorm`: `weight * (x / sqrt(mean x² + eps))`. -/
+private def rmsNormWeighted2d {n dim : UInt64}
+    (weight : T #[dim])
+    (x : T #[n, dim])
+    (eps : Float)
+    : T #[n, dim] :=
+  let xf : T #[n, dim] := toFloat' x
+  let var : T #[n, 1] := nn.meanDim (xf * xf) 1 true
+  let inv : T #[n, 1] := nn.rsqrt (var + eps)
+  let inv : T #[n, dim] := nn.expand inv #[n, dim]
+  let w : T #[n, dim] := nn.expand (reshape (toFloat' weight) #[1, dim]) #[n, dim]
+  restoreInputDType x (xf * inv * w)
+
+/-- FP32 RMSNorm over the last dim of a 3D `[batch, seq, dim]` tensor. -/
+private def rmsNormWeighted3d {batch seq dim : UInt64}
+    (weight : T #[dim])
+    (x : T #[batch, seq, dim])
+    (eps : Float)
+    : T #[batch, seq, dim] :=
+  let flat : T #[batch * seq, dim] := reshape x #[batch * seq, dim]
+  reshape (rmsNormWeighted2d weight flat eps) #[batch, seq, dim]
+
+/-- Per-head RMSNorm (q_norm/k_norm) over the head_dim of a 4D
+    `[batch, seq, nHeads, headDim]` tensor. -/
+private def applyHeadNorm {batch seq nHeads headDim : UInt64}
+    (weight : T #[headDim])
+    (x : T #[batch, seq, nHeads, headDim])
+    (eps : Float)
+    : T #[batch, seq, nHeads, headDim] :=
+  let flat : T #[batch * seq * nHeads, headDim] := reshape x #[batch * seq * nHeads, headDim]
+  reshape (rmsNormWeighted2d weight flat eps) #[batch, seq, nHeads, headDim]
+
+/-! ## Dense SwiGLU MLP (layer 0 / `mlp_only_layers`) -/
+
+/-- Dense SwiGLU MLP for Laguna (`LagunaMLP` in the HF reference). -/
+structure LagunaMLP (cfg : Config) where
+  gate_proj : T #[cfg.intermediate_size, cfg.hidden_size]
+  up_proj : T #[cfg.intermediate_size, cfg.hidden_size]
+  down_proj : T #[cfg.hidden_size, cfg.intermediate_size]
+  deriving TensorStruct
+
+namespace LagunaMLP
+
+def init (cfg : Config) : IO (LagunaMLP cfg) := do
+  let gate ← initWeight #[cfg.intermediate_size, cfg.hidden_size] cfg.hidden_size
+  let up ← initWeight #[cfg.intermediate_size, cfg.hidden_size] cfg.hidden_size
+  let down ← initWeight #[cfg.hidden_size, cfg.intermediate_size] cfg.intermediate_size
+  pure { gate_proj := gate, up_proj := up, down_proj := down }
+
+/-- `down_proj(silu(gate_proj(x)) * up_proj(x))` (`hidden_act = "silu"`). -/
+def forward {batch seq : UInt64}
+    (m : LagunaMLP cfg)
+    (x : T #[batch, seq, cfg.hidden_size])
+    : T #[batch, seq, cfg.hidden_size] :=
+  linear3d (nn.silu (linear3d x m.gate_proj) * linear3d x m.up_proj) m.down_proj
+
+end LagunaMLP
+
+/-- 3D convenience wrapper around the wave-1 `LagunaSparseMoeBlock.forward2d`. -/
+def LagunaSparseMoeBlock.forward3d {batch seq : UInt64}
+    (cfg : Config)
+    (m : LagunaSparseMoeBlock cfg)
+    (x : T #[batch, seq, cfg.hidden_size])
+    : IO (T #[batch, seq, cfg.hidden_size]) := do
+  let flat : T #[batch * seq, cfg.hidden_size] := reshape x #[batch * seq, cfg.hidden_size]
+  let out ← m.forward2d cfg flat
+  pure (reshape out #[batch, seq, cfg.hidden_size])
+
+/-! ## Attention -/
+
+/-- Laguna attention block: no QKV bias, per-head Q/K RMSNorm before RoPE,
+    per-head softplus output gate (`g_proj`) applied before `o_proj`.
+
+    `numHeads` is the per-layer query head count
+    (`cfg.num_attention_heads` on full layers, `cfg.num_attention_heads_sliding`
+    on sliding-window layers); KV heads are always `cfg.num_key_value_heads`. -/
+structure LagunaAttention (cfg : Config) (numHeads : UInt64) where
+  q_proj : T #[numHeads * cfg.head_dim, cfg.hidden_size]
+  k_proj : T #[cfg.num_key_value_heads * cfg.head_dim, cfg.hidden_size]
+  v_proj : T #[cfg.num_key_value_heads * cfg.head_dim, cfg.hidden_size]
+  o_proj : T #[cfg.hidden_size, numHeads * cfg.head_dim]
+  /-- Per-head gate projection: one softplus gate per head, broadcast over head_dim. -/
+  g_proj : T #[numHeads, cfg.hidden_size]
+  q_norm : T #[cfg.head_dim]
+  k_norm : T #[cfg.head_dim]
+  deriving TensorStruct
+
+namespace LagunaAttention
+
+/-- Per-layer static KV cache (shape-erased K/V stores of runtime shape
+    `[batch, cfg.num_key_value_heads, maxLen, cfg.head_dim]`). -/
+abbrev KVCache (cfg : Config) (batch : UInt64) :=
+  qwen.QwenAttention.KVCache batch cfg.num_key_value_heads cfg.head_dim
+
+def init (cfg : Config) (numHeads : UInt64) : IO (LagunaAttention cfg numHeads) := do
+  let q ← initWeight #[numHeads * cfg.head_dim, cfg.hidden_size] cfg.hidden_size
+  let k ← initWeight #[cfg.num_key_value_heads * cfg.head_dim, cfg.hidden_size] cfg.hidden_size
+  let v ← initWeight #[cfg.num_key_value_heads * cfg.head_dim, cfg.hidden_size] cfg.hidden_size
+  let o ← initWeight #[cfg.hidden_size, numHeads * cfg.head_dim] (numHeads * cfg.head_dim)
+  let g ← initWeight #[numHeads, cfg.hidden_size] cfg.hidden_size
+  let qn := autograd.set_requires_grad (torch.ones #[cfg.head_dim]) true
+  let kn := autograd.set_requires_grad (torch.ones #[cfg.head_dim]) true
+  pure {
+    q_proj := q
+    k_proj := k
+    v_proj := v
+    o_proj := o
+    g_proj := g
+    q_norm := qn
+    k_norm := kn
+  }
+
+/-- QKV projection + per-head Q/K RMSNorm + (partial) RoPE.
+    `rotaryDim` is `cfg.rotaryDimFull` (64, YaRN) on full-attention layers and
+    `cfg.rotaryDimSliding` (128, plain) on sliding-window layers; cos/sin are
+    the matching rows sliced from `LagunaRotaryTables`. -/
+private def qkvRope {batch seq rotaryDim numHeads : UInt64}
+    (cfg : Config)
+    (m : LagunaAttention cfg numHeads)
+    (x : T #[batch, seq, cfg.hidden_size])
+    (cos : T #[seq, rotaryDim / 2])
+    (sin : T #[seq, rotaryDim / 2])
+    : T #[batch, seq, numHeads, cfg.head_dim]
+      × T #[batch, seq, cfg.num_key_value_heads, cfg.head_dim]
+      × T #[batch, seq, cfg.num_key_value_heads, cfg.head_dim] :=
+  let qFlat : T #[batch, seq, numHeads * cfg.head_dim] := linear3d x m.q_proj
+  let kFlat : T #[batch, seq, cfg.num_key_value_heads * cfg.head_dim] := linear3d x m.k_proj
+  let vFlat : T #[batch, seq, cfg.num_key_value_heads * cfg.head_dim] := linear3d x m.v_proj
+  let q : T #[batch, seq, numHeads, cfg.head_dim] :=
+    reshape qFlat #[batch, seq, numHeads, cfg.head_dim]
+  let k : T #[batch, seq, cfg.num_key_value_heads, cfg.head_dim] :=
+    reshape kFlat #[batch, seq, cfg.num_key_value_heads, cfg.head_dim]
+  let v : T #[batch, seq, cfg.num_key_value_heads, cfg.head_dim] :=
+    reshape vFlat #[batch, seq, cfg.num_key_value_heads, cfg.head_dim]
+  -- Per-head Q/K RMSNorm BEFORE RoPE (HF `LagunaAttention`).
+  let q := applyHeadNorm m.q_norm q cfg.rms_norm_eps
+  let k := applyHeadNorm m.k_norm k cfg.rms_norm_eps
+  -- GLM-style rotate-half RoPE; `applyRotaryPartial` passes the tail through
+  -- untouched when `rotaryDim < cfg.head_dim` and degenerates to full-width
+  -- rotary when `rotaryDim == cfg.head_dim` (sliding layers).
+  let q := applyRotaryPartial (rotary_dim := rotaryDim) q cos sin
+  let k := applyRotaryPartial (rotary_dim := rotaryDim) k cos sin
+  (q, k, v)
+
+/-- Per-head softplus output gate + o_proj:
+    `o_proj(softplus(g_proj(xn).float()).to(dtype).unsqueeze(-1) * attn)`. -/
+private def gateAndOut {batch seq numHeads : UInt64}
+    (cfg : Config)
+    (m : LagunaAttention cfg numHeads)
+    (xn : T #[batch, seq, cfg.hidden_size])
+    (attn : T #[batch, seq, numHeads, cfg.head_dim])
+    : T #[batch, seq, cfg.hidden_size] :=
+  let gateRaw : T #[batch, seq, numHeads] := linear3d xn m.g_proj
+  let gate : T #[batch, seq, numHeads] := castLike xn (nn.softplus (toFloat' gateRaw))
+  let gate4 : T #[batch, seq, numHeads, cfg.head_dim] :=
+    nn.expand (nn.unsqueeze gate 3) #[batch, seq, numHeads, cfg.head_dim]
+  let gated : T #[batch, seq, numHeads * cfg.head_dim] :=
+    reshape (attn * gate4) #[batch, seq, numHeads * cfg.head_dim]
+  linear3d gated m.o_proj
+
+/-- Uncached full-sequence forward (sliding layers use the window SDPA op).
+
+    SDPA op choice: full layers run through `GQAMask` with an all-ones padding
+    mask (the C++ builds the causal mask internally and calls
+    `torch::scaled_dot_product_attention` directly), NOT the bare `GQA` op —
+    see the module doc for the ABI reason. -/
+def forward {batch seq rotaryDim numHeads : UInt64}
+    (cfg : Config)
+    (m : LagunaAttention cfg numHeads)
+    (x : T #[batch, seq, cfg.hidden_size])
+    (cos : T #[seq, rotaryDim / 2])
+    (sin : T #[seq, rotaryDim / 2])
+    (window : Option UInt64 := none)
+    : T #[batch, seq, cfg.hidden_size] :=
+  let (q, k, v) := qkvRope cfg m x cos sin
+  let qh : T #[batch, numHeads, seq, cfg.head_dim] := nn.transpose_for_attention q
+  let kh : T #[batch, cfg.num_key_value_heads, seq, cfg.head_dim] := nn.transpose_for_attention k
+  let vh : T #[batch, cfg.num_key_value_heads, seq, cfg.head_dim] := nn.transpose_for_attention v
+  let attn : T #[batch, numHeads, seq, cfg.head_dim] :=
+    match window with
+    | some w => nn.scaledDotProductAttentionGQAWindow qh kh vh 0.0 true true w
+    | none =>
+      let padMask : T #[batch, seq] := onesOn qh.device
+      nn.scaledDotProductAttentionGQAMask qh kh vh padMask 0.0 true true
+  let attn : T #[batch, seq, numHeads, cfg.head_dim] := nn.transpose_from_attention attn
+  gateAndOut cfg m x attn
+
+/-- Batch prefill with KV-cache update. Writes K/V at cache offset 0 and sets
+    `cache.seq := seq` — call this on a FRESH cache (chunked prefill is not
+    supported). Sliding layers attend with the window SDPA over the fresh K/V. -/
+def forwardWithCache {batch seq rotaryDim numHeads : UInt64}
+    (cfg : Config)
+    (m : LagunaAttention cfg numHeads)
+    (x : T #[batch, seq, cfg.hidden_size])
+    (cos : T #[seq, rotaryDim / 2])
+    (sin : T #[seq, rotaryDim / 2])
+    (window : Option UInt64)
+    (cache : KVCache cfg batch)
+    : T #[batch, seq, cfg.hidden_size] × KVCache cfg batch :=
+  let (q, k, v) := qkvRope cfg m x cos sin
+  let qh : T #[batch, numHeads, seq, cfg.head_dim] := nn.transpose_for_attention q
+  let kh : T #[batch, cfg.num_key_value_heads, seq, cfg.head_dim] := nn.transpose_for_attention k
+  let vh : T #[batch, cfg.num_key_value_heads, seq, cfg.head_dim] := nn.transpose_for_attention v
+  let kStore : T #[batch, cfg.num_key_value_heads, cache.maxLen, cfg.head_dim] :=
+    castLike kh (reshape cache.kStoreDyn #[batch, cfg.num_key_value_heads, cache.maxLen, cfg.head_dim])
+  let vStore : T #[batch, cfg.num_key_value_heads, cache.maxLen, cfg.head_dim] :=
+    castLike vh (reshape cache.vStoreDyn #[batch, cfg.num_key_value_heads, cache.maxLen, cfg.head_dim])
+  let kStore' := data.sliceScatter kStore 2 0 kh
+  let vStore' := data.sliceScatter vStore 2 0 vh
+  let cache' : KVCache cfg batch := {
+    kStoreDyn := nn.eraseShape kStore'
+    vStoreDyn := nn.eraseShape vStore'
+    seq := seq
+    maxLen := cache.maxLen
+  }
+  let attn : T #[batch, numHeads, seq, cfg.head_dim] :=
+    match window with
+    | some w => nn.scaledDotProductAttentionGQAWindow qh kh vh 0.0 true true w
+    | none =>
+      let padMask : T #[batch, seq] := onesOn qh.device
+      nn.scaledDotProductAttentionGQAMask qh kh vh padMask 0.0 true true
+  let attn : T #[batch, seq, numHeads, cfg.head_dim] := nn.transpose_from_attention attn
+  (gateAndOut cfg m x attn, cache')
+
+/-- Single-token decode step with KV-cache update. Sliding-window layers
+    truncate the cache READ to the last `min(kvLen, window)` entries
+    (Gemma4 pattern) — every entry in the truncated span is attendable, so a
+    plain non-causal GQA decode is exact. -/
+def forwardStep {batch rotaryDim numHeads : UInt64}
+    (cfg : Config)
+    (m : LagunaAttention cfg numHeads)
+    (x : T #[batch, 1, cfg.hidden_size])
+    (cos : T #[1, rotaryDim / 2])
+    (sin : T #[1, rotaryDim / 2])
+    (window : Option UInt64)
+    (cache : KVCache cfg batch)
+    : T #[batch, 1, cfg.hidden_size] × KVCache cfg batch :=
+  let (q, k, v) := qkvRope cfg m x cos sin
+  let qh : T #[batch, numHeads, 1, cfg.head_dim] := nn.transpose_for_attention q
+  let kNew : T #[batch, cfg.num_key_value_heads, 1, cfg.head_dim] := nn.transpose_for_attention k
+  let vNew : T #[batch, cfg.num_key_value_heads, 1, cfg.head_dim] := nn.transpose_for_attention v
+  let kStore : T #[batch, cfg.num_key_value_heads, cache.maxLen, cfg.head_dim] :=
+    castLike kNew (reshape cache.kStoreDyn #[batch, cfg.num_key_value_heads, cache.maxLen, cfg.head_dim])
+  let vStore : T #[batch, cfg.num_key_value_heads, cache.maxLen, cfg.head_dim] :=
+    castLike vNew (reshape cache.vStoreDyn #[batch, cfg.num_key_value_heads, cache.maxLen, cfg.head_dim])
+  let writePos : UInt64 :=
+    if cache.seq < cache.maxLen then cache.seq
+    else if cache.maxLen == 0 then 0 else cache.maxLen - 1
+  let kStore' : T #[batch, cfg.num_key_value_heads, cache.maxLen, cfg.head_dim] :=
+    data.sliceScatter kStore 2 writePos kNew
+  let vStore' : T #[batch, cfg.num_key_value_heads, cache.maxLen, cfg.head_dim] :=
+    data.sliceScatter vStore 2 writePos vNew
+  let kvLen : UInt64 := if cache.seq < cache.maxLen then cache.seq + 1 else cache.maxLen
+  -- Sliding-window read truncation: keep only the last `useLen` entries.
+  let useLen : UInt64 :=
+    match window with
+    | some w => if kvLen > w then w else kvLen
+    | none => kvLen
+  let start : UInt64 := kvLen - useLen
+  let kAll : T #[batch, cfg.num_key_value_heads, useLen, cfg.head_dim] := data.slice kStore' 2 start useLen
+  let vAll : T #[batch, cfg.num_key_value_heads, useLen, cfg.head_dim] := data.slice vStore' 2 start useLen
+  -- All-ones [batch, 1, useLen] qk mask (every cached entry is attendable,
+  -- including inside the truncated sliding window); `GQAMaskQKV` calls
+  -- `torch::scaled_dot_product_attention` directly (see module doc).
+  let qkMask : T #[batch, 1, useLen] := onesOn qh.device
+  let attn : T #[batch, numHeads, 1, cfg.head_dim] :=
+    nn.scaledDotProductAttentionGQAMaskQKV qh kAll vAll qkMask 0.0 true
+  let attn : T #[batch, 1, numHeads, cfg.head_dim] := nn.transpose_from_attention attn
+  let cache' : KVCache cfg batch := {
+    kStoreDyn := nn.eraseShape kStore'
+    vStoreDyn := nn.eraseShape vStore'
+    seq := kvLen
+    maxLen := cache.maxLen
+  }
+  (gateAndOut cfg m x attn, cache')
+
+end LagunaAttention
+
+/-! ## KV cache -/
+
+/-- Full-model KV cache: one static KV cache per decoder layer (sliding
+    layers keep a full-length store and truncate reads at decode time). -/
+structure LagunaCache (cfg : Config) (batch : UInt64) where
+  kvCaches : Array (LagunaAttention.KVCache cfg batch)
+
+/-! ## Decoder layer -/
+
+/-- One Laguna decoder layer: RMSNorm → attention → residual → RMSNorm →
+    FFN (dense SwiGLU or sparse MoE) → residual.  Exactly one attention
+    variant (`attnFull`/`attnSliding`) and one FFN variant
+    (`denseMlp`/`sparseMoe`) is set per layer. -/
+structure LagunaLayer (cfg : Config) where
+  input_layernorm : T #[cfg.hidden_size]
+  attnFull : Option (LagunaAttention cfg cfg.num_attention_heads) := none
+  attnSliding : Option (LagunaAttention cfg cfg.num_attention_heads_sliding) := none
+  post_attention_layernorm : T #[cfg.hidden_size]
+  denseMlp : Option (LagunaMLP cfg) := none
+  sparseMoe : Option (LagunaSparseMoeBlock cfg) := none
+  deriving TensorStruct
+
+namespace LagunaLayer
+
+/-- Random-init NVFP4 expert bank stand-in for fresh (non-checkpoint) models.
+    `packed` banks are int64 tensors with values in `[0, 256)` standing in for
+    U8 byte pairs (dequant only applies `data.toLong`), and `scale` banks are
+    F32 (dequant's `toFloat'` is a no-op). Checkpoint loading replaces these
+    with real U8 / F8_E4M3 tensors of the same runtime shapes. -/
+private def initPackedExperts (cfg : Config) : IO (LagunaPackedExperts cfg) := do
+  let e := cfg.num_experts
+  let mi := cfg.moe_intermediate_size
+  let h := cfg.hidden_size
+  let scaleVal := 0.05
+  let gatePacked ← torch.randint 0 256 #[e, mi, h / 2]
+  let upPacked ← torch.randint 0 256 #[e, mi, h / 2]
+  let downPacked ← torch.randint 0 256 #[e, h, mi / 2]
+  let gateScale := mul_scalar (← torch.rand #[e, mi, h / 16]) scaleVal
+  let upScale := mul_scalar (← torch.rand #[e, mi, h / 16]) scaleVal
+  let downScale := mul_scalar (← torch.rand #[e, h, mi / 16]) scaleVal
+  pure {
+    gatePacked := nn.eraseShape gatePacked
+    gateScale := nn.eraseShape gateScale
+    gateGlobal := nn.eraseShape (torch.ones #[e])
+    upPacked := nn.eraseShape upPacked
+    upScale := nn.eraseShape upScale
+    upGlobal := nn.eraseShape (torch.ones #[e])
+    downPacked := nn.eraseShape downPacked
+    downScale := nn.eraseShape downScale
+    downGlobal := nn.eraseShape (torch.ones #[e])
+  }
+
+/-- Random-init sparse MoE block (random router + packed-expert stand-ins +
+    random shared expert). For fresh models/tests; checkpoint loading
+    constructs `LagunaSparseMoeBlock` directly from real tensors. -/
+def initSparseMoeBlock (cfg : Config) : IO (LagunaSparseMoeBlock cfg) := do
+  let routerW ← initWeight #[cfg.num_experts, cfg.hidden_size] cfg.hidden_size
+  let experts ← initPackedExperts cfg
+  let sharedGate ← initWeight #[cfg.shared_expert_intermediate_size, cfg.hidden_size] cfg.hidden_size
+  let sharedUp ← initWeight #[cfg.shared_expert_intermediate_size, cfg.hidden_size] cfg.hidden_size
+  let sharedDown ← initWeight #[cfg.hidden_size, cfg.shared_expert_intermediate_size]
+    cfg.shared_expert_intermediate_size
+  pure {
+    router := { weight := routerW, eScoreCorrectionBias := none }
+    experts := experts
+    sharedGateProj := sharedGate
+    sharedUpProj := sharedUp
+    sharedDownProj := sharedDown
+  }
+
+def init (cfg : Config) (layerIdx : UInt64) : IO (LagunaLayer cfg) := do
+  let inputNorm := autograd.set_requires_grad (torch.ones #[cfg.hidden_size]) true
+  let postNorm := autograd.set_requires_grad (torch.ones #[cfg.hidden_size]) true
+  let attnFull ←
+    match cfg.layerType layerIdx with
+    | .fullAttention =>
+      let m ← LagunaAttention.init cfg cfg.num_attention_heads
+      pure (some m)
+    | .slidingAttention => pure none
+  let attnSliding ←
+    match cfg.layerType layerIdx with
+    | .slidingAttention =>
+      let m ← LagunaAttention.init cfg cfg.num_attention_heads_sliding
+      pure (some m)
+    | .fullAttention => pure none
+  let denseMlp ←
+    if cfg.isDenseMlpLayer layerIdx || !cfg.isMoE then
+      let m ← LagunaMLP.init cfg
+      pure (some m)
+    else
+      pure none
+  let sparseMoe ←
+    if cfg.isDenseMlpLayer layerIdx || !cfg.isMoE then
+      pure none
+    else
+      let m ← initSparseMoeBlock cfg
+      pure (some m)
+  pure {
+    input_layernorm := inputNorm
+    attnFull := attnFull
+    attnSliding := attnSliding
+    post_attention_layernorm := postNorm
+    denseMlp := denseMlp
+    sparseMoe := sparseMoe
+  }
+
+/-- FFN dispatch shared by all three layer entry points. -/
+private def ffnForward {batch seq : UInt64}
+    (cfg : Config)
+    (layer : LagunaLayer cfg)
+    (h : T #[batch, seq, cfg.hidden_size])
+    : IO (T #[batch, seq, cfg.hidden_size]) := do
+  match layer.denseMlp, layer.sparseMoe with
+  | some mlp, _ => pure (mlp.forward h)
+  | _, some moe => moe.forward3d cfg h
+  | _, _ => pure h
+
+/-- Uncached full-sequence layer forward. -/
+def forward {batch seq : UInt64}
+    (cfg : Config)
+    (layer : LagunaLayer cfg)
+    (x : T #[batch, seq, cfg.hidden_size])
+    (tables : LagunaRotaryTables)
+    : IO (T #[batch, seq, cfg.hidden_size]) := do
+  let h1 := rmsNormWeighted3d layer.input_layernorm x cfg.rms_norm_eps
+  let mixed ←
+    match layer.attnFull, layer.attnSliding with
+    | some a, _ =>
+      let cos : T #[seq, cfg.rotaryDimFull / 2] := sliceRotaryRows tables.fullCos 0 seq
+      let sin : T #[seq, cfg.rotaryDimFull / 2] := sliceRotaryRows tables.fullSin 0 seq
+      pure (a.forward (rotaryDim := cfg.rotaryDimFull) cfg h1 cos sin none)
+    | _, some a =>
+      let cos : T #[seq, cfg.rotaryDimSliding / 2] := sliceRotaryRows tables.slidingCos 0 seq
+      let sin : T #[seq, cfg.rotaryDimSliding / 2] := sliceRotaryRows tables.slidingSin 0 seq
+      pure (a.forward (rotaryDim := cfg.rotaryDimSliding) cfg h1 cos sin (some cfg.sliding_window))
+    | _, _ => pure h1
+  let h2 := x + mixed
+  let h3 := rmsNormWeighted3d layer.post_attention_layernorm h2 cfg.rms_norm_eps
+  let ffn ← ffnForward cfg layer h3
+  pure (h2 + ffn)
+
+/-- Batch prefill with KV-cache update (fresh cache; see
+    `LagunaAttention.forwardWithCache`). -/
+def forwardWithCache {batch seq : UInt64}
+    (cfg : Config)
+    (layer : LagunaLayer cfg)
+    (x : T #[batch, seq, cfg.hidden_size])
+    (tables : LagunaRotaryTables)
+    (cache : LagunaCache cfg batch)
+    (layerIdx : Nat)
+    : IO (T #[batch, seq, cfg.hidden_size] × LagunaCache cfg batch) := do
+  let h1 := rmsNormWeighted3d layer.input_layernorm x cfg.rms_norm_eps
+  let (mixed, cache') ←
+    match layer.attnFull, layer.attnSliding, cache.kvCaches[layerIdx]? with
+    | some a, _, some kv =>
+      let cos : T #[seq, cfg.rotaryDimFull / 2] := sliceRotaryRows tables.fullCos 0 seq
+      let sin : T #[seq, cfg.rotaryDimFull / 2] := sliceRotaryRows tables.fullSin 0 seq
+      let (out, kv') := a.forwardWithCache (rotaryDim := cfg.rotaryDimFull) cfg h1 cos sin none kv
+      pure (out, { cache with kvCaches := cache.kvCaches.set! layerIdx kv' })
+    | _, some a, some kv =>
+      let cos : T #[seq, cfg.rotaryDimSliding / 2] := sliceRotaryRows tables.slidingCos 0 seq
+      let sin : T #[seq, cfg.rotaryDimSliding / 2] := sliceRotaryRows tables.slidingSin 0 seq
+      let (out, kv') :=
+        a.forwardWithCache (rotaryDim := cfg.rotaryDimSliding) cfg h1 cos sin (some cfg.sliding_window) kv
+      pure (out, { cache with kvCaches := cache.kvCaches.set! layerIdx kv' })
+    | _, _, _ => pure (h1, cache)
+  let h2 := x + mixed
+  let h3 := rmsNormWeighted3d layer.post_attention_layernorm h2 cfg.rms_norm_eps
+  let ffn ← ffnForward cfg layer h3
+  pure (h2 + ffn, cache')
+
+/-- Single-token decode step with KV-cache update. -/
+def forwardStep {batch : UInt64}
+    (cfg : Config)
+    (layer : LagunaLayer cfg)
+    (x : T #[batch, 1, cfg.hidden_size])
+    (tables : LagunaRotaryTables)
+    (position : UInt64)
+    (cache : LagunaCache cfg batch)
+    (layerIdx : Nat)
+    : IO (T #[batch, 1, cfg.hidden_size] × LagunaCache cfg batch) := do
+  let h1 := rmsNormWeighted3d layer.input_layernorm x cfg.rms_norm_eps
+  let (mixed, cache') ←
+    match layer.attnFull, layer.attnSliding, cache.kvCaches[layerIdx]? with
+    | some a, _, some kv =>
+      let cos : T #[1, cfg.rotaryDimFull / 2] := sliceRotaryRows tables.fullCos position 1
+      let sin : T #[1, cfg.rotaryDimFull / 2] := sliceRotaryRows tables.fullSin position 1
+      let (out, kv') := a.forwardStep (rotaryDim := cfg.rotaryDimFull) cfg h1 cos sin none kv
+      pure (out, { cache with kvCaches := cache.kvCaches.set! layerIdx kv' })
+    | _, some a, some kv =>
+      let cos : T #[1, cfg.rotaryDimSliding / 2] := sliceRotaryRows tables.slidingCos position 1
+      let sin : T #[1, cfg.rotaryDimSliding / 2] := sliceRotaryRows tables.slidingSin position 1
+      let (out, kv') :=
+        a.forwardStep (rotaryDim := cfg.rotaryDimSliding) cfg h1 cos sin (some cfg.sliding_window) kv
+      pure (out, { cache with kvCaches := cache.kvCaches.set! layerIdx kv' })
+    | _, _, _ => pure (h1, cache)
+  let h2 := x + mixed
+  let h3 := rmsNormWeighted3d layer.post_attention_layernorm h2 cfg.rms_norm_eps
+  let ffn ← ffnForward cfg layer h3
+  pure (h2 + ffn, cache')
+
+end LagunaLayer
+
+/-! ## Model -/
+
+/-- Laguna base model: token embedding → `num_hidden_layers` decoder layers →
+    final RMSNorm. -/
+structure LagunaModel (cfg : Config) where
+  embed_tokens : T #[cfg.vocab_size, cfg.hidden_size]
+  layers : Array (LagunaLayer cfg)
+  norm : T #[cfg.hidden_size]
+  deriving TensorStruct
+
+namespace LagunaModel
+
+def init (cfg : Config) : IO (LagunaModel cfg) := do
+  let embRaw ← torch.randn #[cfg.vocab_size, cfg.hidden_size]
+  let embedTokens := autograd.set_requires_grad (mul_scalar embRaw 0.02) true
+  let mut layers : Array (LagunaLayer cfg) := Array.mkEmpty cfg.num_hidden_layers.toNat
+  for i in [:cfg.num_hidden_layers.toNat] do
+    layers := layers.push (← LagunaLayer.init cfg i.toUInt64)
+  let norm := autograd.set_requires_grad (torch.ones #[cfg.hidden_size]) true
+  pure { embed_tokens := embedTokens, layers := layers, norm := norm }
+
+/-- Allocate a fresh per-layer KV cache with capacity `maxLen` on `device`. -/
+def initCache {batch : UInt64}
+    (cfg : Config)
+    (m : LagunaModel cfg)
+    (maxLen : UInt64)
+    (device : Device)
+    : LagunaCache cfg batch :=
+  Id.run do
+    let mut caches : Array (LagunaAttention.KVCache cfg batch) := Array.mkEmpty m.layers.size
+    for _ in [:m.layers.size] do
+      caches := caches.push (qwen.QwenAttention.initKVCache
+        maxLen
+        (batch := batch)
+        (num_kv_heads := cfg.num_key_value_heads)
+        (head_dim := cfg.head_dim)
+        device)
+    return { kvCaches := caches }
+
+/-- Uncached full-sequence forward (token ids → final hidden states).
+    RoPE tables are precomputed for `[0, seq)` on the fly. -/
+def forward {batch seq : UInt64}
+    (cfg : Config)
+    (m : LagunaModel cfg)
+    (inputIds : T #[batch, seq])
+    : IO (T #[batch, seq, cfg.hidden_size]) := do
+  let x0 : T #[batch, seq, cfg.hidden_size] := nn.embedding inputIds m.embed_tokens
+  let tables ← precomputeRotaryTables cfg seq x0.device
+  let mut h := x0
+  for layer in m.layers do
+    h ← layer.forward cfg h tables
+  pure (rmsNormWeighted3d m.norm h cfg.rms_norm_eps)
+
+/-- Batch prefill over embeddings with KV-cache update (fresh cache).
+    `tables` must cover positions `[0, seq)`. -/
+def forwardWithCache {batch seq : UInt64}
+    (cfg : Config)
+    (m : LagunaModel cfg)
+    (x0 : T #[batch, seq, cfg.hidden_size])
+    (tables : LagunaRotaryTables)
+    (cache : LagunaCache cfg batch)
+    : IO (T #[batch, seq, cfg.hidden_size] × LagunaCache cfg batch) := do
+  let mut h := x0
+  let mut c := cache
+  for i in [:m.layers.size] do
+    let layer ←
+      match m.layers[i]? with
+      | some l => pure l
+      | none => throw <| IO.userError s!"missing Laguna layer at index {i}"
+    let (hNext, cNext) ← layer.forwardWithCache cfg h tables c i
+    h := hNext
+    c := cNext
+  return (rmsNormWeighted3d m.norm h cfg.rms_norm_eps, c)
+
+/-- Single-token decode step over one token embedding at absolute `position`. -/
+def forwardStep {batch : UInt64}
+    (cfg : Config)
+    (m : LagunaModel cfg)
+    (tokenEmbed : T #[batch, 1, cfg.hidden_size])
+    (tables : LagunaRotaryTables)
+    (position : UInt64)
+    (cache : LagunaCache cfg batch)
+    : IO (T #[batch, 1, cfg.hidden_size] × LagunaCache cfg batch) := do
+  let mut h := tokenEmbed
+  let mut c := cache
+  for i in [:m.layers.size] do
+    let layer ←
+      match m.layers[i]? with
+      | some l => pure l
+      | none => throw <| IO.userError s!"missing Laguna layer at index {i}"
+    let (hNext, cNext) ← layer.forwardStep cfg h tables position c i
+    h := hNext
+    c := cNext
+  return (rmsNormWeighted3d m.norm h cfg.rms_norm_eps, c)
+
+end LagunaModel
+
+/-! ## ForCausalLM + generation -/
+
+/-- Full Laguna causal language model (untied `lm_head` by default). -/
+structure LagunaForCausalLM (cfg : Config) where
+  model : LagunaModel cfg
+  lmHead : T #[cfg.vocab_size, cfg.hidden_size]
+  tieWordEmbeddings : Bool := false
+  deriving TensorStruct
+
+namespace LagunaForCausalLM
+
+def init (cfg : Config) (tieWordEmbeddings : Bool := false) : IO (LagunaForCausalLM cfg) := do
+  let model ← LagunaModel.init cfg
+  let lmHead ←
+    if tieWordEmbeddings then
+      pure model.embed_tokens
+    else
+      initWeight #[cfg.vocab_size, cfg.hidden_size] cfg.hidden_size
+  pure { model := model, lmHead := lmHead, tieWordEmbeddings := tieWordEmbeddings }
+
+def embedTokens {batch seq : UInt64}
+    (m : LagunaForCausalLM cfg)
+    (inputIds : T #[batch, seq])
+    : T #[batch, seq, cfg.hidden_size] :=
+  nn.embedding inputIds m.model.embed_tokens
+
+/-- Uncached full-sequence forward (token ids → logits). -/
+def forward {batch seq : UInt64}
+    (cfg : Config)
+    (m : LagunaForCausalLM cfg)
+    (inputIds : T #[batch, seq])
+    : IO (T #[batch, seq, cfg.vocab_size]) := do
+  let hidden ← m.model.forward cfg inputIds
+  pure (linear3d hidden m.lmHead)
+
+/-- Single-pass prompt prefill; returns last-position logits + updated cache. -/
+def prefill {batch seq : UInt64}
+    (cfg : Config)
+    (m : LagunaForCausalLM cfg)
+    (tables : LagunaRotaryTables)
+    (inputsEmbeds : T #[batch, seq, cfg.hidden_size])
+    (cache : LagunaCache cfg batch)
+    : IO (T #[batch, cfg.vocab_size] × LagunaCache cfg batch) := do
+  let (hidden, cache') ← LagunaModel.forwardWithCache cfg m.model inputsEmbeds tables cache
+  let lastHidden : T #[batch, 1, cfg.hidden_size] := data.slice hidden 1 (seq - 1) 1
+  let logits3 : T #[batch, 1, cfg.vocab_size] := linear3d lastHidden m.lmHead
+  pure (reshape logits3 #[batch, cfg.vocab_size], cache')
+
+/-- Single decode step from one token embedding at absolute `position`. -/
+def decodeStep {batch : UInt64}
+    (cfg : Config)
+    (m : LagunaForCausalLM cfg)
+    (tables : LagunaRotaryTables)
+    (tokenEmbed : T #[batch, 1, cfg.hidden_size])
+    (position : UInt64)
+    (cache : LagunaCache cfg batch)
+    : IO (T #[batch, cfg.vocab_size] × LagunaCache cfg batch) := do
+  let (hidden, cache') ← m.model.forwardStep cfg tokenEmbed tables position cache
+  let logits3 : T #[batch, 1, cfg.vocab_size] := linear3d hidden m.lmHead
+  pure (reshape logits3 #[batch, cfg.vocab_size], cache')
+
+private partial def decodeLoopCached {batch : UInt64}
+    (cfg : Config)
+    (m : LagunaForCausalLM cfg)
+    (tables : LagunaRotaryTables)
+    (strategy : SamplingStrategy)
+    (eosTokenIds : Array UInt64)
+    (finished : T #[batch])
+    (remaining : Nat)
+    (cache : LagunaCache cfg batch)
+    (lastLogits : T #[batch, cfg.vocab_size])
+    (onStep : Option (StreamCallback batch))
+    (generatedSoFar : UInt64)
+    {curSeq : UInt64}
+    (curIds : T #[batch, curSeq])
+    : IO (Sigma (fun outSeq => T #[batch, outSeq])) := do
+  if remaining == 0 then
+    return ⟨curSeq, curIds⟩
+
+  let nextTokRaw ← sampleFromLogits lastLogits strategy
+  let finished' : T #[batch] :=
+    if eosTokenIds.isEmpty then
+      finished
+    else
+      logicalOr finished (tokenInSet nextTokRaw eosTokenIds)
+  let nextTok : T #[batch] :=
+    if eosTokenIds.isEmpty then
+      nextTokRaw
+    else
+      applyFinishedEos nextTokRaw finished (eosTokenIds.getD 0 0)
+
+  match onStep with
+  | some cb => cb generatedSoFar nextTok
+  | none => pure ()
+
+  let nextCol : T #[batch, 1] := reshape nextTok #[batch, 1]
+  let appended : T #[batch, curSeq + 1] := nn.cat curIds nextCol 1
+
+  let stop :=
+    if eosTokenIds.isEmpty then
+      false
+    else
+      !(any (logical_not finished'))
+  if stop then
+    return ⟨curSeq + 1, appended⟩
+  else
+    let nextEmb : T #[batch, 1, cfg.hidden_size] := m.embedTokens nextCol
+    let (nextLogits, cache') ← decodeStep cfg m tables nextEmb curSeq cache
+    decodeLoopCached cfg m tables strategy eosTokenIds finished' (remaining - 1) cache'
+      nextLogits onStep (generatedSoFar + 1) appended
+
+/-- Exact generation entry point using KV-caching. -/
+private def generateCore {batch seq : UInt64}
+    (cfg : Config)
+    (m : LagunaForCausalLM cfg)
+    (inputIds : T #[batch, seq])
+    (maxNewTokens : UInt64)
+    (strategy : SamplingStrategy)
+    (eosTokenIds : Array UInt64)
+    (onStep : Option (StreamCallback batch))
+    : IO (Sigma (fun outSeq => T #[batch, outSeq])) := do
+  if seq == 0 then
+    throw <| IO.userError "generate requires non-empty prompt sequence"
+  if maxNewTokens == 0 then
+    return ⟨seq, inputIds⟩
+  let inputsEmbeds := m.embedTokens inputIds
+  let maxLen := seq + maxNewTokens
+  let tables ← precomputeRotaryTables cfg maxLen inputsEmbeds.device
+  let cache := LagunaModel.initCache cfg m.model maxLen inputsEmbeds.device
+  let (logits, caches) ← prefill cfg m tables inputsEmbeds cache
+  let finished0 : T #[batch] := falseMask (n := batch) inputIds.device
+  decodeLoopCached cfg m tables strategy eosTokenIds finished0 maxNewTokens.toNat
+    caches logits onStep 0 inputIds
+
+/-- Greedy/sampled generation from token ids. Terminates when every row is
+    finished (`eosTokenIds`, default `cfg.eos_token_ids`) or the
+    `maxNewTokens` budget is spent. -/
+def generate {batch seq : UInt64}
+    (cfg : Config)
+    (m : LagunaForCausalLM cfg)
+    (inputIds : T #[batch, seq])
+    (maxNewTokens : UInt64 := 256)
+    (strategy : SamplingStrategy := .greedy)
+    (eosTokenIds : Array UInt64 := cfg.eos_token_ids)
+    : IO (Sigma (fun outSeq => T #[batch, outSeq])) :=
+  generateCore cfg m inputIds maxNewTokens strategy eosTokenIds none
+
+/-- `generate` with a per-step token callback (streaming). -/
+def generateStream {batch seq : UInt64}
+    (cfg : Config)
+    (m : LagunaForCausalLM cfg)
+    (inputIds : T #[batch, seq])
+    (onStep : StreamCallback batch)
+    (maxNewTokens : UInt64 := 256)
+    (strategy : SamplingStrategy := .greedy)
+    (eosTokenIds : Array UInt64 := cfg.eos_token_ids)
+    : IO (Sigma (fun outSeq => T #[batch, outSeq])) :=
+  generateCore cfg m inputIds maxNewTokens strategy eosTokenIds (some onStep)
+
+/-- Convenience wrapper for greedy generation. -/
+def generateGreedy {batch seq : UInt64}
+    (cfg : Config)
+    (m : LagunaForCausalLM cfg)
+    (inputIds : T #[batch, seq])
+    (maxNewTokens : UInt64 := 256)
+    (eosTokenIds : Array UInt64 := cfg.eos_token_ids)
+    : IO (Sigma (fun outSeq => T #[batch, outSeq])) :=
+  generate cfg m inputIds maxNewTokens .greedy eosTokenIds
+
+end LagunaForCausalLM
+
+end torch.laguna
