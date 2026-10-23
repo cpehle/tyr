@@ -15,4 +15,19 @@ std::vector<at::Tensor> segmented_lora_backward_cuda(
 at::Tensor segmented_lora(const at::Tensor& x, const at::Tensor& base,
     const at::Tensor& a, const at::Tensor& b, const at::Tensor& offsets,
     const at::Tensor& ranks, const at::Tensor& alphas);
+// Opt-in fixed feature-axis reductions for the frozen base and its input gradient.
+// The original entry points above retain their default GEMM implementation.
+std::vector<at::Tensor> segmented_lora_forward_cuda(
+    const at::Tensor& x, const at::Tensor& base, const at::Tensor& a,
+    const at::Tensor& b, const at::Tensor& offsets, const at::Tensor& ranks,
+    const at::Tensor& scales, bool invariant);
+std::vector<at::Tensor> segmented_lora_backward_cuda(
+    const at::Tensor& dy, const at::Tensor& x, const at::Tensor& base,
+    const at::Tensor& a, const at::Tensor& b, const at::Tensor& h,
+    const at::Tensor& offsets, const at::Tensor& ranks, const at::Tensor& scales,
+    bool invariant);
+at::Tensor segmented_lora_invariant(const at::Tensor& x, const at::Tensor& base,
+    const at::Tensor& a, const at::Tensor& b, const at::Tensor& offsets,
+    const at::Tensor& ranks, const at::Tensor& alphas);
+
 }

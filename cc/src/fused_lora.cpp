@@ -9,8 +9,9 @@ class SegmentedLoRA : public torch::autograd::Function<SegmentedLoRA> {
  public:
   static at::Tensor forward(torch::autograd::AutogradContext* ctx,
       at::Tensor x, at::Tensor base, at::Tensor a, at::Tensor b,
-      at::Tensor offsets, at::Tensor ranks, at::Tensor scales) {
-    auto result = segmented_lora_forward_cuda(x, base, a, b, offsets, ranks, scales);
+      at::Tensor offsets, at::Tensor ranks, at::Tensor scales, bool invariant) {
+    auto result = segmented_lora_forward_cuda(x, base, a, b, offsets, ranks, scales, invariant);
+    ctx->saved_data["invariant"] = invariant;
     ctx->save_for_backward({x, base, a, b, result[1], offsets, ranks, scales});
     return result[0];
   }
@@ -18,9 +19,10 @@ class SegmentedLoRA : public torch::autograd::Function<SegmentedLoRA> {
       torch::autograd::variable_list outputs) {
     auto saved = ctx->get_saved_variables();
     auto grads = segmented_lora_backward_cuda(outputs[0].contiguous(), saved[0], saved[1],
-        saved[2], saved[3], saved[4], saved[5], saved[6], saved[7]);
+        saved[2], saved[3], saved[4], saved[5], saved[6], saved[7],
+        ctx->saved_data["invariant"].toBool());
     // The shared base and packing metadata never acquire gradients.
-    return {grads[0], at::Tensor(), grads[1], grads[2], at::Tensor(), at::Tensor(), at::Tensor()};
+    return {grads[0], at::Tensor(), grads[1], grads[2], at::Tensor(), at::Tensor(), at::Tensor(), at::Tensor()};
   }
 };
 void check_tensor(const at::Tensor& tensor, const at::Tensor& x, int dims, const char* name) {
@@ -30,9 +32,9 @@ void check_tensor(const at::Tensor& tensor, const at::Tensor& x, int dims, const
   TORCH_CHECK(tensor.numel() <= std::numeric_limits<int>::max(), name, " exceeds kernel indexing limit");
 }
 }
-at::Tensor segmented_lora(const at::Tensor& x, const at::Tensor& base,
+static at::Tensor segmented_lora_impl(const at::Tensor& x, const at::Tensor& base,
     const at::Tensor& a, const at::Tensor& b, const at::Tensor& offsets,
-    const at::Tensor& ranks, const at::Tensor& alphas) {
+    const at::Tensor& ranks, const at::Tensor& alphas, bool invariant) {
   TORCH_CHECK(x.is_cuda(), "segmented LoRA requires CUDA tensors");
   TORCH_CHECK(x.scalar_type() == at::kFloat || x.scalar_type() == at::kBFloat16,
       "segmented LoRA supports Float32 and BFloat16");
@@ -67,6 +69,17 @@ at::Tensor segmented_lora(const at::Tensor& x, const at::Tensor& base,
     scale[tenant] = float(value);
   }
   return SegmentedLoRA::apply(x, base.detach(), a, b, offsets.to(x.device()),
-      ranks.to(x.device()), scales.to(x.device()));
+      ranks.to(x.device()), scales.to(x.device()), invariant);
 }
+at::Tensor segmented_lora(const at::Tensor& x, const at::Tensor& base,
+    const at::Tensor& a, const at::Tensor& b, const at::Tensor& offsets,
+    const at::Tensor& ranks, const at::Tensor& alphas) {
+  return segmented_lora_impl(x, base, a, b, offsets, ranks, alphas, false);
+}
+at::Tensor segmented_lora_invariant(const at::Tensor& x, const at::Tensor& base,
+    const at::Tensor& a, const at::Tensor& b, const at::Tensor& offsets,
+    const at::Tensor& ranks, const at::Tensor& alphas) {
+  return segmented_lora_impl(x, base, a, b, offsets, ranks, alphas, true);
+}
+
 }

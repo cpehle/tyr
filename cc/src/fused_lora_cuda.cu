@@ -26,6 +26,30 @@ __device__ float block_sum(float value) {
   }
   return sums[0];
 }
+// A fixed tree per output cell. Grid size only changes which independent
+// cells a block visits, never their feature reduction order or dtype boundary.
+// transpose_weight=false: x * W^T; true: dy * W.
+template <typename scalar_t, bool transpose_weight>
+__global__ void fixed_base_product(const scalar_t* x, const scalar_t* weight,
+    scalar_t* y, int rows, int columns, int reduction) {
+  const int64_t cells = int64_t(rows) * columns;
+  for (int64_t cell = blockIdx.x; cell < cells; cell += gridDim.x) {
+    const int64_t row = cell / columns;
+    const int column = cell % columns;
+    float sum = 0.0f;
+    for (int64_t k = threadIdx.x; k < reduction; k += THREADS) {
+      const int64_t wi = transpose_weight ? int64_t(k) * columns + column
+                                         : int64_t(column) * reduction + k;
+      sum += float(x[row * reduction + k]) * float(weight[wi]);
+    }
+    sum = block_sum(sum);
+    if (threadIdx.x == 0) y[cell] = scalar_t(sum);
+    // Keep shared reduction scratch quiescent before the next grid-stride cell.
+    __syncthreads();
+  }
+}
+int fixed_blocks(int64_t cells) { return int(cells < 65535 ? cells : 65535); }
+
 template <typename scalar_t>
 __global__ void project_down(const scalar_t* x, const scalar_t* a, float* h,
     const int* offsets, const int* ranks, int tenants, int input, int max_rank) {
@@ -123,15 +147,21 @@ int blocks(int64_t n) { return int((n + THREADS - 1) / THREADS); }
 std::vector<at::Tensor> segmented_lora_forward_cuda(
     const at::Tensor& x, const at::Tensor& base, const at::Tensor& a,
     const at::Tensor& b, const at::Tensor& offsets, const at::Tensor& ranks,
-    const at::Tensor& scales) {
+    const at::Tensor& scales, bool invariant) {
   c10::cuda::CUDAGuard guard(x.device());
   int rows = x.size(0), input = x.size(1), output = base.size(0);
   int tenants = a.size(0), max_rank = a.size(1);
-  auto y = at::matmul(x, base.transpose(0, 1));
+  auto y = invariant ? at::empty({rows, output}, x.options())
+                     : at::matmul(x, base.transpose(0, 1));
   auto h = at::empty({rows, max_rank}, x.options().dtype(at::kFloat));
   if (rows == 0) return {y, h};
   auto stream = at::cuda::getCurrentCUDAStream();
   AT_DISPATCH_FLOATING_TYPES_AND2(at::kHalf, at::kBFloat16, x.scalar_type(), "segmented_lora_forward", [&] {
+    if (invariant) {
+      fixed_base_product<scalar_t, false><<<fixed_blocks(int64_t(rows) * output), THREADS, 0, stream>>>(
+          x.data_ptr<scalar_t>(), base.data_ptr<scalar_t>(), y.data_ptr<scalar_t>(), rows, output, input);
+      C10_CUDA_KERNEL_LAUNCH_CHECK();
+    }
     project_down<scalar_t><<<dim3(rows, max_rank), THREADS, 0, stream>>>(
         x.data_ptr<scalar_t>(), a.data_ptr<scalar_t>(), h.data_ptr<float>(),
         offsets.data_ptr<int>(), ranks.data_ptr<int>(), tenants, input, max_rank);
@@ -147,16 +177,21 @@ std::vector<at::Tensor> segmented_lora_forward_cuda(
 std::vector<at::Tensor> segmented_lora_backward_cuda(
     const at::Tensor& dy, const at::Tensor& x, const at::Tensor& base,
     const at::Tensor& a, const at::Tensor& b, const at::Tensor& h,
-    const at::Tensor& offsets, const at::Tensor& ranks, const at::Tensor& scales) {
+    const at::Tensor& offsets, const at::Tensor& ranks, const at::Tensor& scales, bool invariant) {
   c10::cuda::CUDAGuard guard(x.device());
   int rows = x.size(0), input = x.size(1), output = base.size(0);
   int tenants = a.size(0), max_rank = a.size(1);
-  auto dx = at::matmul(dy, base);
+  auto dx = invariant ? at::empty_like(x) : at::matmul(dy, base);
   auto da = at::zeros_like(a), db = at::zeros_like(b);
   if (rows == 0) return {dx, da, db};
   auto dh = at::empty_like(h);
   auto stream = at::cuda::getCurrentCUDAStream();
   AT_DISPATCH_FLOATING_TYPES_AND2(at::kHalf, at::kBFloat16, x.scalar_type(), "segmented_lora_backward", [&] {
+    if (invariant) {
+      fixed_base_product<scalar_t, true><<<fixed_blocks(int64_t(rows) * input), THREADS, 0, stream>>>(
+          dy.data_ptr<scalar_t>(), base.data_ptr<scalar_t>(), dx.data_ptr<scalar_t>(), rows, input, output);
+      C10_CUDA_KERNEL_LAUNCH_CHECK();
+    }
     backward_down<scalar_t><<<dim3(rows, max_rank), THREADS, 0, stream>>>(
         dy.data_ptr<scalar_t>(), b.data_ptr<scalar_t>(), dh.data_ptr<float>(),
         offsets.data_ptr<int>(), ranks.data_ptr<int>(), scales.data_ptr<float>(),
@@ -177,4 +212,17 @@ std::vector<at::Tensor> segmented_lora_backward_cuda(
   });
   return {dx, da, db};
 }
+std::vector<at::Tensor> segmented_lora_forward_cuda(
+    const at::Tensor& x, const at::Tensor& base, const at::Tensor& a,
+    const at::Tensor& b, const at::Tensor& offsets, const at::Tensor& ranks,
+    const at::Tensor& scales) {
+  return segmented_lora_forward_cuda(x, base, a, b, offsets, ranks, scales, false);
+}
+std::vector<at::Tensor> segmented_lora_backward_cuda(
+    const at::Tensor& dy, const at::Tensor& x, const at::Tensor& base,
+    const at::Tensor& a, const at::Tensor& b, const at::Tensor& h,
+    const at::Tensor& offsets, const at::Tensor& ranks, const at::Tensor& scales) {
+  return segmented_lora_backward_cuda(dy, x, base, a, b, h, offsets, ranks, scales, false);
+}
+
 }
