@@ -72,6 +72,7 @@ AR := ar
 CC := gcc
 CXX := c++
 NVCC ?= nvcc
+PYTHON_CONFIG ?= python3-config
 HAS_NVCC := $(shell command -v $(NVCC) >/dev/null 2>&1 && echo 1 || echo 0)
 CUDA_MAJOR_VERSION := $(shell $(NVCC) --version 2>/dev/null | sed -n 's/.*release \([0-9][0-9]*\)\..*/\1/p' | head -n1)
 CUDA_HOME ?= $(patsubst %/bin/nvcc,%,$(shell command -v $(NVCC) 2>/dev/null))
@@ -226,6 +227,12 @@ SRCS := \
 	tyr_parquet.cpp\
 	tyr_execution.cpp\
 	float_buffer.cpp
+SRCS += fused_lora_lean.cpp
+ifeq ($(HAS_NVCC),1)
+SRCS += fused_lora.cpp
+else
+SRCS += fused_lora_stub.cpp
+endif
 ifneq ($(GPU),H100)
 SRCS += tk_vendor_stubs.cpp
 endif
@@ -259,6 +266,10 @@ STATIC_CU_SRCS := $(SRC_DIR)/tk_vendor_mha_h100.cu
 else
 STATIC_CU_SRCS :=
 endif
+ifeq ($(HAS_NVCC),1)
+STATIC_CU_SRCS += $(SRC_DIR)/fused_lora_cuda.cu
+endif
+
 GPU_CODEGEN_MODULES := $(strip $(TYR_GPU_CODEGEN_MODULE))
 ifeq ($(GPU_CODEGEN_MODULES),)
 CU_SRCS := $(STATIC_CU_SRCS) $(wildcard $(SRC_DIR)/generated/*.cu)
@@ -416,6 +427,10 @@ $(OUT_DIR)/%.o : $(SRC_DIR)/%.mm $(HDR_FILES) | check-submodules $(OUT_DIR)
 	@mkdir -p $(dir $@)
 	$(CXX) -x objective-c++ $(CXX_STD_FLAG) -o $@ -c $< -I$(HDR_DIR) -I$(LEAN_INCLUDE) $(TORCH_INC_FLAGS) $(CUDA_INC_FLAGS) $(NCCL_INC_FLAGS) $(XLA_INC_FLAGS) $(ARROW_INC_FLAGS) $(SOXR_INC_FLAGS) $(EXTRA_CXX_FLAGS) -fPIC -fobjc-arc
 
+# The vendored H100 wrapper includes PyTorch's pybind headers even though
+# Python module registration is disabled. Keep Python headers scoped to it.
+$(OUT_DIR)/tk_vendor_mha_h100.o: NVCCFLAGS += $(shell $(PYTHON_CONFIG) --includes 2>/dev/null)
+
 $(OUT_DIR)/%.o : $(SRC_DIR)/%.cu $(HDR_FILES) | check-submodules $(OUT_DIR)
 	@mkdir -p $(dir $@)
 	$(NVCC) -o $@ -c $< -I$(HDR_DIR) -I$(LEAN_INCLUDE) $(TORCH_INC_FLAGS) $(CUDA_INC_FLAGS) $(TK_INC_FLAGS) $(NVCCFLAGS)
@@ -427,3 +442,5 @@ $(GPU_STUB_SRC): $(GPU_STUB_SCRIPT)
 clean:
 	$(RMPATH) $(OUT_DIR)
 	$(RMPATH) $(SOXR_BUILD_DIR)
+
+$(OUT_DIR)/fused_lora.o $(OUT_DIR)/fused_lora_cuda.o $(OUT_DIR)/fused_lora_lean.o $(OUT_DIR)/fused_lora_stub.o: $(HDR_DIR)/fused_lora.h
