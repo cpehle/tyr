@@ -910,6 +910,11 @@ opaque wavFinalize (path : @& String) : IO Unit
 @[extern "lean_torch_load_tensor"]
 opaque loadTensor (s : Shape) (path : @& String) : IO (T s)
 
+/-- Load exactly one serialized tensor onto CPU, preserving its dtype. Reject
+shape mismatches rather than reshaping equal-sized archives. -/
+@[extern "lean_torch_load_tensor_exact"]
+opaque loadTensorExact (s : @& Shape) (path : @& String) : IO (T s)
+
 /-- Check if a file exists -/
 @[extern "lean_torch_file_exists"]
 opaque fileExists (path : @& String) : IO Bool

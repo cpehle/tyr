@@ -2549,6 +2549,32 @@ lean_object* lean_torch_load_tensor(lean_obj_arg shape, b_lean_obj_arg path_obj,
   }
 }
 
+// Strict checkpoint loading: no implicit reshape, dtype conversion, or GPU
+// allocation from the archive's original device. Both Lean inputs are borrowed.
+lean_object* lean_torch_load_tensor_exact(b_lean_obj_arg shape, b_lean_obj_arg path_obj, lean_object* /*w*/) {
+  try {
+    const auto expected_shape = getShape(shape);
+    torch::serialize::InputArchive archive;
+    archive.load_from(lean_string_cstr(path_obj), torch::Device(torch::kCPU));
+    const auto keys = archive.keys();
+    if (keys.size() != 1 || keys[0] != "0") {
+      throw std::runtime_error("Expected exactly one tensor in checkpoint archive");
+    }
+    torch::Tensor tensor;
+    archive.read("0", tensor);
+    if (!tensor.defined() || tensor.sizes().vec() != expected_shape) {
+      throw std::runtime_error("Serialized tensor shape does not match expected shape");
+    }
+    return lean_io_result_mk_ok(fromTorchTensor(tensor));
+  } catch (const c10::Error& error) {
+    return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string(error.what())));
+  } catch (const std::exception& error) {
+    return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string(error.what())));
+  } catch (...) {
+    return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string("Unknown strict tensor load failure")));
+  }
+}
+
 // Check if a file exists
 lean_object* lean_torch_file_exists(b_lean_obj_arg path_obj, lean_object* w) {
   const char* path = lean_string_cstr(path_obj);
