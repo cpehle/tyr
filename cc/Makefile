@@ -227,11 +227,11 @@ SRCS := \
 	tyr_parquet.cpp\
 	tyr_execution.cpp\
 	float_buffer.cpp
-SRCS += fused_lora_lean.cpp
+SRCS += fused_lora_lean.cpp invariant_rmsnorm_lean.cpp
 ifeq ($(HAS_NVCC),1)
-SRCS += fused_lora.cpp
+SRCS += fused_lora.cpp invariant_rmsnorm.cpp
 else
-SRCS += fused_lora_stub.cpp
+SRCS += fused_lora_stub.cpp invariant_rmsnorm_stub.cpp
 endif
 ifneq ($(GPU),H100)
 SRCS += tk_vendor_stubs.cpp
@@ -267,7 +267,7 @@ else
 STATIC_CU_SRCS :=
 endif
 ifeq ($(HAS_NVCC),1)
-STATIC_CU_SRCS += $(SRC_DIR)/fused_lora_cuda.cu
+STATIC_CU_SRCS += $(SRC_DIR)/fused_lora_cuda.cu $(SRC_DIR)/invariant_rmsnorm_cuda.cu
 endif
 
 GPU_CODEGEN_MODULES := $(strip $(TYR_GPU_CODEGEN_MODULE))
@@ -444,3 +444,9 @@ clean:
 	$(RMPATH) $(SOXR_BUILD_DIR)
 
 $(OUT_DIR)/fused_lora.o $(OUT_DIR)/fused_lora_cuda.o $(OUT_DIR)/fused_lora_lean.o $(OUT_DIR)/fused_lora_stub.o: $(HDR_DIR)/fused_lora.h
+
+$(OUT_DIR)/invariant_rmsnorm.o $(OUT_DIR)/invariant_rmsnorm_cuda.o $(OUT_DIR)/invariant_rmsnorm_lean.o $(OUT_DIR)/invariant_rmsnorm_stub.o: $(HDR_DIR)/invariant_rmsnorm.h
+
+# Preserve positive subnormal epsilon and accurate division/sqrt in fixed RMSNorm.
+# These options follow --use_fast_math and affect this CUDA translation unit only.
+$(OUT_DIR)/invariant_rmsnorm_cuda.o: NVCCFLAGS += --ftz=false --prec-div=true --prec-sqrt=true
