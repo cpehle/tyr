@@ -415,6 +415,7 @@ extern_lib libtyr pkg := do
     else
       pure true
   if shouldWriteConfig then
+    IO.FS.createDirAll pkg.buildDir
     IO.FS.writeFile gpuCodegenConfigPath gpuCodegenConfig
 
   -- Track Makefile plus C/CUDA sources/headers so Lake reruns `make` when FFI changes.
