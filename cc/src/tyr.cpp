@@ -1855,7 +1855,10 @@ lean_object* lean_torch_pow_tensor(lean_obj_arg /*s*/, b_lean_obj_arg input, dou
 }
 
 // Lower triangular (for causal masking)
-lean_object* lean_torch_tril(lean_obj_arg /*s*/, b_lean_obj_arg input, int64_t diagonal) {
+lean_object* lean_torch_tril(lean_obj_arg /*s*/, b_lean_obj_arg input, lean_obj_arg diagonal_obj) {
+  // Lean Int is an owned boxed object, not an unboxed Int64.
+  int64_t diagonal = static_cast<int64_t>(lean_int64_of_int(diagonal_obj));
+  lean_dec(diagonal_obj);
   auto input_ = borrowTensor(input);
   auto result_ = torch::tril(input_, diagonal);
   return fromTorchTensor(result_);
