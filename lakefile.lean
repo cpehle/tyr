@@ -575,6 +575,11 @@ lean_exe test_runner where
   supportInterpreter := true
   moreLinkArgs := commonLinkArgs
 
+/-- Two-rank analytical tests for the explicit tensor-parallel autograd mappings. -/
+lean_exe tp_autograd_tests where
+  root := `Tests.TensorParallelAutograd
+  moreLinkArgs := commonLinkArgs
+
 /-- Extra link args for `GenerateGpuKernels`. The auto-attached
     `libtyr.static` references CUDA driver API symbols
     (`cuTensorMapEncodeTiled`, `cuGetErrorString`) via `tk_vendor_mha_h100.o`,
