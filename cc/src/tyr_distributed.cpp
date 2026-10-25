@@ -9,6 +9,7 @@
 
 #include <lean/lean.h>
 #include <torch/torch.h>
+#include <torch/csrc/autograd/custom_function.h>
 #include <torch/csrc/distributed/c10d/ProcessGroup.hpp>
 #include <torch/csrc/distributed/c10d/TCPStore.hpp>
 
@@ -52,6 +53,8 @@ c10::intrusive_ptr<c10d::Store> g_store;
 int g_rank = 0;
 int g_world_size = 1;
 bool g_initialized = false;
+// Never reused; graphs retain only this number, never a backend/store owner.
+int64_t g_process_group_generation = 0;
 std::mutex g_dist_mutex;
 
 // Future storage for async operations
@@ -79,6 +82,78 @@ void maybeSetCurrentCudaDeviceFromTensor(const torch::Tensor& t) {
     (void)t;
 #endif
 }
+
+// All helpers below run with g_dist_mutex held. The mutex covers validation,
+// submission, and wait, so teardown cannot replace a group during a mapping.
+// It does not coordinate ordering across ranks: callers must serialize the
+// entire distributed forward/backward schedule identically on every rank.
+void requireTpGeneration(int64_t generation) {
+    TORCH_CHECK(g_initialized && g_process_group &&
+                generation == g_process_group_generation,
+                "Tensor-parallel autograd process-group generation is no longer active");
+}
+
+void sumTpTensor(torch::Tensor& tensor) {
+    maybeSetCurrentCudaDeviceFromTensor(tensor);
+    std::vector<torch::Tensor> tensors{tensor};
+    c10d::AllreduceOptions options;
+    options.reduceOp = c10d::ReduceOp::SUM;
+    auto work = g_process_group->allreduce(tensors, options);
+    TORCH_CHECK(work->wait(), "Tensor-parallel autograd SUM did not complete");
+}
+
+void requireFirstOrderTpBackward(const torch::autograd::variable_list& gradients) {
+    // The autograd engine enables GradMode in backward only for create_graph.
+    // Raw c10d collectives do not build a higher-order autograd graph.
+    TORCH_CHECK(!torch::autograd::GradMode::is_enabled(),
+                "Tensor-parallel autograd mappings support first-order gradients only");
+    TORCH_CHECK(gradients.size() == 1 && gradients[0].defined(),
+                "Tensor-parallel autograd mapping requires one defined output gradient");
+}
+
+class CopyToTensorParallel : public torch::autograd::Function<CopyToTensorParallel> {
+public:
+    static torch::Tensor forward(torch::autograd::AutogradContext* context,
+                                 const torch::Tensor& input) {
+        std::lock_guard<std::mutex> lock(g_dist_mutex);
+        requireTpGeneration(g_process_group_generation);
+        context->saved_data["generation"] = g_process_group_generation;
+        return input.clone(at::MemoryFormat::Contiguous);
+    }
+
+    static torch::autograd::variable_list backward(torch::autograd::AutogradContext* context,
+                                                  torch::autograd::variable_list gradients) {
+        std::lock_guard<std::mutex> lock(g_dist_mutex);
+        requireTpGeneration(context->saved_data.at("generation").toInt());
+        requireFirstOrderTpBackward(gradients);
+        // Never reduce the engine-owned grad_output: it may have other users.
+        auto result = gradients[0].clone(at::MemoryFormat::Contiguous);
+        sumTpTensor(result);
+        return {result};
+    }
+};
+
+class ReduceFromTensorParallel : public torch::autograd::Function<ReduceFromTensorParallel> {
+public:
+    static torch::Tensor forward(torch::autograd::AutogradContext* context,
+                                 const torch::Tensor& input) {
+        std::lock_guard<std::mutex> lock(g_dist_mutex);
+        requireTpGeneration(g_process_group_generation);
+        context->saved_data["generation"] = g_process_group_generation;
+        auto result = input.clone(at::MemoryFormat::Contiguous);
+        sumTpTensor(result);
+        return result;
+    }
+
+    static torch::autograd::variable_list backward(torch::autograd::AutogradContext* context,
+                                                  torch::autograd::variable_list gradients) {
+        std::lock_guard<std::mutex> lock(g_dist_mutex);
+        // Identity backward still belongs to the original group lifetime.
+        requireTpGeneration(context->saved_data.at("generation").toInt());
+        requireFirstOrderTpBackward(gradients);
+        return {gradients[0]};
+    }
+};
 
 } // anonymous namespace
 
@@ -142,9 +217,21 @@ lean_object* lean_torch_dist_init_process_group(
                     " is out of range [0, 65535]").c_str())));
         }
 
-        g_rank = static_cast<int>(rank);
-        g_world_size = static_cast<int>(world_size);
+        TORCH_CHECK(world_size > 0 && world_size <= static_cast<uint64_t>(std::numeric_limits<int>::max()) &&
+                    rank < world_size, "Invalid process-group rank/world size");
+        TORCH_CHECK(g_process_group_generation < std::numeric_limits<int64_t>::max(),
+                    "Process-group generation exhausted");
+        TORCH_CHECK(backend == "nccl" || backend == "gloo", "Unsupported backend: ", backend);
+        TORCH_CHECK(backend != "nccl" || TYR_HAS_NCCL,
+                    "NCCL backend requested but ProcessGroupNCCL is unavailable in this build");
+        TORCH_CHECK(backend != "gloo" || TYR_HAS_GLOO,
+                    "Gloo backend requested but ProcessGroupGloo is unavailable in this build");
+        const int next_rank = static_cast<int>(rank);
+        const int next_world_size = static_cast<int>(world_size);
 
+        // Build candidate ownership locally. Any failed initialization releases
+        // its store/backend without exposing an incomplete global lifetime.
+        c10::intrusive_ptr<c10d::Backend> next_group;
         // Create TCP store for rendezvous
         bool is_master = (rank == 0);
         auto store_opts = c10d::TCPStoreOptions();
@@ -153,14 +240,14 @@ lean_object* lean_torch_dist_init_process_group(
         store_opts.numWorkers = static_cast<int>(world_size);
         store_opts.waitWorkers = true;
 
-        g_store = c10::make_intrusive<c10d::TCPStore>(master_addr, store_opts);
+        auto next_store = c10::make_intrusive<c10d::TCPStore>(master_addr, store_opts);
 
         if (backend == "nccl") {
 #if TYR_HAS_NCCL
             auto options = c10d::ProcessGroupNCCL::Options::create();
             options->is_high_priority_stream = true;
-            g_process_group = c10::make_intrusive<c10d::ProcessGroupNCCL>(
-                g_store, g_rank, g_world_size, options);
+            next_group = c10::make_intrusive<c10d::ProcessGroupNCCL>(
+                next_store, next_rank, next_world_size, options);
 #else
             return lean_io_result_mk_error(lean_mk_io_user_error(
                 lean_mk_string("NCCL backend requested but ProcessGroupNCCL is unavailable in this build")));
@@ -168,8 +255,8 @@ lean_object* lean_torch_dist_init_process_group(
         } else if (backend == "gloo") {
 #if TYR_HAS_GLOO
             auto options = c10d::ProcessGroupGloo::Options::create();
-            g_process_group = c10d::ProcessGroupGloo::createProcessGroupGloo(
-                g_store, g_rank, g_world_size, options);
+            next_group = c10d::ProcessGroupGloo::createProcessGroupGloo(
+                next_store, next_rank, next_world_size, options);
 #else
             return lean_io_result_mk_error(lean_mk_io_user_error(
                 lean_mk_string("Gloo backend requested but ProcessGroupGloo is unavailable in this build")));
@@ -179,6 +266,11 @@ lean_object* lean_torch_dist_init_process_group(
                 lean_mk_string(("Unsupported backend: " + backend).c_str())));
         }
 
+        g_process_group = std::move(next_group);
+        g_store = std::move(next_store);
+        g_rank = next_rank;
+        g_world_size = next_world_size;
+        ++g_process_group_generation;
         g_initialized = true;
         return lean_io_result_mk_ok(lean_box(0));
 
@@ -318,6 +410,25 @@ lean_object* lean_torch_dist_all_reduce(
     } catch (const std::exception& e) {
         return lean_io_result_mk_error(lean_mk_io_user_error(
             lean_mk_string(("All-reduce failed: " + std::string(e.what())).c_str())));
+    }
+}
+
+// Custom autograd owns its lock; these wrappers must not acquire it again.
+lean_object* lean_torch_dist_copy_to_tensor_parallel(
+    lean_obj_arg /*s*/, b_lean_obj_arg tensor, lean_object* /*w*/) {
+    try {
+        return lean_io_result_mk_ok(fromTorchTensor(CopyToTensorParallel::apply(borrowTensor(tensor))));
+    } catch (const std::exception& error) {
+        return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string(error.what())));
+    }
+}
+
+lean_object* lean_torch_dist_reduce_from_tensor_parallel(
+    lean_obj_arg /*s*/, b_lean_obj_arg tensor, lean_object* /*w*/) {
+    try {
+        return lean_io_result_mk_ok(fromTorchTensor(ReduceFromTensorParallel::apply(borrowTensor(tensor))));
+    } catch (const std::exception& error) {
+        return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string(error.what())));
     }
 }
 

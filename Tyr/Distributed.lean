@@ -109,6 +109,27 @@ def allReduceAsync {s : Shape} (tensor : T s) (op : ReduceOp := .sum) : IO WorkH
   let id ← allReduceImpl tensor op.toUInt8 1
   return ⟨id⟩
 
+/-- Tensor-parallel copy mapping: forward returns an owned identity clone;
+backward sums the gradient across the current process group without modifying
+its incoming gradient. Supports first-order autograd only (not `create_graph`).
+
+All ranks must execute the same collective sequence. The training owner must
+serialize the complete forward/backward schedule; per-call locking cannot fix
+inconsistent rank ordering. The graph belongs to the process-group lifetime at
+forward time: backward fails after destroy or destroy/reinitialization, and the
+graph does not retain the destroyed backend. -/
+@[extern "lean_torch_dist_copy_to_tensor_parallel"]
+opaque copyToTensorParallel {s : Shape} (tensor : @& T s) : IO (T s)
+
+/-- Tensor-parallel reduction mapping: forward synchronously sums an owned
+clone across ranks; backward is identity (no extra SUM). The input is unchanged.
+
+Uses the same first-order, collective-ordering and process-group lifetime
+contract as `copyToTensorParallel`; even identity backward rejects a stale group.
+These mappings do not change the in-place inference collectives above. -/
+@[extern "lean_torch_dist_reduce_from_tensor_parallel"]
+opaque reduceFromTensorParallel {s : Shape} (tensor : @& T s) : IO (T s)
+
 /-- Broadcast tensor from source rank to all processes.
 
     Args:
