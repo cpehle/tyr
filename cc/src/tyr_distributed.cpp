@@ -274,6 +274,11 @@ lean_object* lean_torch_dist_init_process_group(
         g_initialized = true;
         return lean_io_result_mk_ok(lean_box(0));
 
+    } catch (const c10::Error& e) {
+        // Match LibTorch exceptions directly across the mixed Lean/LibTorch
+        // C++ runtime boundary, as the backward IO bindings already do.
+        return lean_io_result_mk_error(lean_mk_io_user_error(
+            lean_mk_string(("Failed to init process group: " + std::string(e.what())).c_str())));
     } catch (const std::exception& e) {
         return lean_io_result_mk_error(lean_mk_io_user_error(
             lean_mk_string(("Failed to init process group: " + std::string(e.what())).c_str())));
@@ -427,6 +432,8 @@ lean_object* lean_torch_dist_copy_to_tensor_parallel(
     lean_obj_arg /*s*/, b_lean_obj_arg tensor, lean_object* /*w*/) {
     try {
         return lean_io_result_mk_ok(fromTorchTensor(CopyToTensorParallel::apply(borrowTensor(tensor))));
+    } catch (const c10::Error& error) {
+        return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string(error.what())));
     } catch (const std::exception& error) {
         return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string(error.what())));
     }
@@ -436,6 +443,8 @@ lean_object* lean_torch_dist_reduce_from_tensor_parallel(
     lean_obj_arg /*s*/, b_lean_obj_arg tensor, lean_object* /*w*/) {
     try {
         return lean_io_result_mk_ok(fromTorchTensor(ReduceFromTensorParallel::apply(borrowTensor(tensor))));
+    } catch (const c10::Error& error) {
+        return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string(error.what())));
     } catch (const std::exception& error) {
         return lean_io_result_mk_error(lean_mk_io_user_error(lean_mk_string(error.what())));
     }
