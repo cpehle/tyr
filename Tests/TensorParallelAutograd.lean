@@ -6,6 +6,11 @@ open Lean torch
 private def check (condition : Bool) (message : String) : IO Unit :=
   unless condition do throw <| IO.userError message
 
+private def traceStage (label : String) : IO Unit := do
+  let stream ← IO.getStderr
+  stream.putStrLn s!"TP TEST: {label}"
+  stream.flush
+
 private def tensor (shape : Shape) (values : Array Float) (device : Device)
     (trainable : Bool := false) : T shape :=
   autograd.set_requires_grad (autograd.detach ((reshape (data.fromFloatArray values) shape).to device)) trainable
@@ -14,6 +19,7 @@ private def values {s : Shape} (x : T s) : IO (Array Float) :=
   data.tensorToFloatArray' (nn.eraseShape (autograd.detach x))
 
 private def equal {s : Shape} (label : String) (x : T s) (expected : Array Float) : IO Unit := do
+  traceStage s!"check {label}"
   let actual ← values x
   check (actual.size == expected.size) s!"{label}: wrong element count"
   for i in [:expected.size] do
@@ -34,7 +40,9 @@ private def copyRule (rank : Nat) (device : Device) : IO Unit := do
   equal "copy forward" output #[2,3]
   let upstream := tensor #[2] (if rank == 0 then #[1,2] else #[3,5]) device
   -- Passing the upstream tensor directly also checks backward does not mutate it.
-  let gradient := autograd.grad output x upstream
+  traceStage "explicit-upstream backward"
+  autograd.backward output upstream
+  let gradient := autograd.grad_of x
   equal "copy backward SUM" gradient #[4,7]
   equal "copy upstream unchanged" upstream (if rank == 0 then #[1,2] else #[3,5])
   equal "copy input unchanged" x #[2,3]
@@ -47,7 +55,9 @@ private def reduceRule (rank : Nat) (device : Device) : IO Unit := do
   equal "reduce forward input unchanged" x original
   let upstreamValues : Array Float := if rank == 0 then #[2,3] else #[5,7]
   let upstream := tensor #[2] upstreamValues device
-  let gradient := autograd.grad output x upstream
+  traceStage "explicit-upstream backward"
+  autograd.backward output upstream
+  let gradient := autograd.grad_of x
   equal "reduce backward identity, not SUM" gradient upstreamValues
   equal "reduce upstream unchanged" upstream upstreamValues
 
@@ -70,7 +80,9 @@ private def noncontiguous (rank : Nat) (device : Device) : IO Unit := do
   let copied ← dist.copyToTensorParallel view
   equal "noncontiguous copy output" copied #[1,3,2,4]
   let upstream := nn.transpose (tensor #[2,2] (if rank == 0 then #[1,2,3,4] else #[5,6,7,8]) device) 0 1
-  equal "noncontiguous copy gradient" (autograd.grad copied original upstream) #[6,8,10,12]
+  traceStage "noncontiguous copy backward"
+  autograd.backward copied upstream
+  equal "noncontiguous copy gradient" (autograd.grad_of original) #[6,8,10,12]
   equal "noncontiguous upstream unchanged" upstream (if rank == 0 then #[1,3,2,4] else #[5,7,6,8])
   dist.allReduce (autograd.detach copied) .sum
   equal "noncontiguous copy owns storage" original #[1,2,3,4]
@@ -80,7 +92,9 @@ private def noncontiguous (rank : Nat) (device : Device) : IO Unit := do
   equal "noncontiguous reduce output" reduced #[6,10,8,12]
   let gradientValues : Array Float := if rank == 0 then #[2,3,5,7] else #[11,13,17,19]
   let upstream := nn.transpose (tensor #[2,2] gradientValues device) 0 1
-  equal "noncontiguous reduce gradient" (autograd.grad reduced original upstream) gradientValues
+  traceStage "noncontiguous reduce backward"
+  autograd.backward reduced upstream
+  equal "noncontiguous reduce gradient" (autograd.grad_of original) gradientValues
   dist.allReduce (autograd.detach reduced) .sum
   equal "noncontiguous reduce owns storage" original originalValues
 
@@ -123,13 +137,17 @@ private def staleGraphs (backend address : String) (port rank : Nat) (device : D
   dist.destroyProcessGroup
   rejected dist.getProcessGroupGeneration
   let stale := "Tensor-parallel autograd process-group generation is no longer active"
+  traceStage "reject destroyedCopy"
   rejected (autograd.backwardLoss destroyedCopy) stale
+  traceStage "reject destroyedReduce"
   rejected (autograd.backwardLoss destroyedReduce) stale
   rejected (dist.copyToTensorParallel (tensor #[1] #[1] device))
   rejected (dist.reduceFromTensorParallel (tensor #[1] #[1] device))
   dist.initProcessGroup backend address (port+1).toUInt64 rank.toUInt64 2
   check ((← dist.getProcessGroupGeneration) > originalGeneration) "replacement group did not advance native generation"
+  traceStage "reject replacedCopy"
   rejected (autograd.backwardLoss replacedCopy) stale
+  traceStage "reject replacedReduce"
   rejected (autograd.backwardLoss replacedReduce) stale
   -- Rejection of stale graphs must not poison the valid replacement group.
   copyRule rank device
@@ -169,18 +187,24 @@ def main (args : List String) : IO Unit := do
   dist.initProcessGroup backend address port.toUInt64 rank.toUInt64 2
   try
     readyGate rank device
+    traceStage "begin copyRule"
     copyRule rank device
-    IO.println "copy identity/SUM and upstream nonmutation PASS"
+    traceStage "copy identity/SUM and upstream nonmutation PASS"
+    traceStage "begin reduceRule"
     reduceRule rank device
-    IO.println "reduce SUM/identity and input nonmutation PASS"
+    traceStage "reduce SUM/identity and input nonmutation PASS"
+    traceStage "begin ownedStorage"
     ownedStorage rank device
-    IO.println "owned output storage PASS"
+    traceStage "owned output storage PASS"
+    traceStage "begin noncontiguous"
     noncontiguous rank device
-    IO.println "noncontiguous inputs/upstreams and storage ownership PASS"
+    traceStage "noncontiguous inputs/upstreams and storage ownership PASS"
+    traceStage "begin denseComposition"
     denseComposition rank device
-    IO.println "column/row composition and ordinary gradient reference PASS"
+    traceStage "column/row composition and ordinary gradient reference PASS"
+    traceStage "begin staleGraphs"
     staleGraphs backend address port rank device
-    IO.println "destroyed/replaced group graph rejection and fresh graph recovery PASS"
+    traceStage "destroyed/replaced group graph rejection and fresh graph recovery PASS"
     dist.barrier
   finally
     if ← dist.isInitialized then dist.destroyProcessGroup
