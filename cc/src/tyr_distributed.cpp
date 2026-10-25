@@ -312,6 +312,15 @@ lean_object* lean_torch_dist_is_initialized(lean_object* w) {
     return lean_io_result_mk_ok(lean_box(g_initialized ? 1 : 0));
 }
 
+lean_object* lean_torch_dist_get_process_group_generation(lean_object* /*w*/) {
+    std::lock_guard<std::mutex> lock(g_dist_mutex);
+    if (!g_initialized) {
+        return lean_io_result_mk_error(lean_mk_io_user_error(
+            lean_mk_string("Process group not initialized")));
+    }
+    return lean_io_result_mk_ok(lean_box_uint64(static_cast<uint64_t>(g_process_group_generation)));
+}
+
 /**
  * Destroy the process group and clean up resources.
  */

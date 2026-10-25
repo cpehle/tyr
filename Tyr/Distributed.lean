@@ -77,6 +77,12 @@ opaque getWorldSize : IO UInt64
 @[extern "lean_torch_dist_is_initialized"]
 opaque isInitialized : IO Bool
 
+/-- Local process-group lifetime token. Valid only while initialized; compare
+locally to reject state retained across destroy/reinitialization. Tokens are not
+cross-rank identities and need not have equal numeric values on different ranks. -/
+@[extern "lean_torch_dist_get_process_group_generation"]
+opaque getProcessGroupGeneration : IO UInt64
+
 /-- Destroy the process group and clean up resources -/
 @[extern "lean_torch_dist_destroy_process_group"]
 opaque destroyProcessGroup : IO Unit
