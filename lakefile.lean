@@ -192,6 +192,9 @@ def linuxLinkTail : Array String :=
   ] ++ linuxCudaLinkArgs ++ linuxSystemLinkDirs ++ soxrLinkArgs ++ linuxArrowLinkArgs
     ++ linuxGlibc234CompatLinkArgs ++ #[
     "-l:libgomp.so.1", "-l:libstdc++.so.6",
+    -- Keep exception handling dynamic: Lean's static libc++abi combined with
+    -- GCC's dynamic personality routine aborts on caught Torch exceptions.
+    "-lc++", "-lc++abi",
     s!"-Wl,-rpath,{linuxTorchLibDir}",
     "-Wl,-rpath,$ORIGIN/../../../external/libtorch/lib"
   ]
