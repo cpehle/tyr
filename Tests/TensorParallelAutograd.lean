@@ -135,13 +135,16 @@ private def staleGraphs (backend address : String) (port rank : Nat) (device : D
   let replacedReduce ← make true
   dist.barrier
   dist.destroyProcessGroup
+  traceStage "reject generation query without group"
   rejected dist.getProcessGroupGeneration
   let stale := "Tensor-parallel autograd process-group generation is no longer active"
   traceStage "reject destroyedCopy"
   rejected (autograd.backwardLoss destroyedCopy) stale
   traceStage "reject destroyedReduce"
   rejected (autograd.backwardLoss destroyedReduce) stale
+  traceStage "reject copy without group"
   rejected (dist.copyToTensorParallel (tensor #[1] #[1] device))
+  traceStage "reject reduce without group"
   rejected (dist.reduceFromTensorParallel (tensor #[1] #[1] device))
   dist.initProcessGroup backend address (port+1).toUInt64 rank.toUInt64 2
   check ((← dist.getProcessGroupGeneration) > originalGeneration) "replacement group did not advance native generation"
@@ -170,22 +173,31 @@ private def readyGate (rank : Nat) (device : Device) : IO Unit := do
     IO.sleep 10
 
 def main (args : List String) : IO Unit := do
+  traceStage "main entry"
   let [backend,address,portText,rankText,output] := args |
     throw <| IO.userError "usage: BACKEND MASTER_ADDR PORT RANK OUTPUT_JSON"
   let some port := portText.toNat? | throw <| IO.userError "invalid port"
   let some rank := rankText.toNat? | throw <| IO.userError "invalid rank"
   check (port > 0 && port < 65535 && rank < 2 && (backend == "gloo" || backend == "nccl")) "invalid topology"
   let device := if backend == "nccl" then Device.CUDA 0 else Device.CPU
+  traceStage "set CUDA device"
   if backend == "nccl" then dist.setCudaDevice 0
+  traceStage "enable gradients"
   autograd.set_grad_enabled true
+  traceStage "reject generation query without group"
   rejected dist.getProcessGroupGeneration
+  traceStage "reject copy without group"
   rejected (dist.copyToTensorParallel (tensor #[1] #[1] device))
+  traceStage "reject reduce without group"
   rejected (dist.reduceFromTensorParallel (tensor #[1] #[1] device))
+  traceStage "reject unsupported backend"
   rejected (dist.initProcessGroup "unsupported-test-backend" address port.toUInt64 rank.toUInt64 2)
     "Unsupported backend"
   check (!(← dist.isInitialized)) "failed initialization exposed a group"
+  traceStage "initialize valid process group"
   dist.initProcessGroup backend address port.toUInt64 rank.toUInt64 2
   try
+    traceStage "ready gate"
     readyGate rank device
     traceStage "begin copyRule"
     copyRule rank device
