@@ -96,6 +96,20 @@ sudo apt install libarrow-dev libparquet-dev
 - macOS: Xcode command line tools (`xcode-select --install`)
 - Linux: GCC 9+ or Clang 10+ (`sudo apt install build-essential`)
 
+### Shared C++ exception runtime (Linux)
+
+Linux builds link shared `libc++` and `libc++abi` alongside LibTorch's
+`libstdc++`. Install the development libraries so the linker can resolve them:
+
+```bash
+sudo apt install libc++-dev libc++abi-dev
+```
+
+The shared runtime must also be available when running the executable. This
+keeps caught LibTorch exceptions from aborting through a mixture of Lean's
+static exception runtime and GCC's dynamic exception handling. If the shared
+libraries are installed in a custom directory, include it in `LD_LIBRARY_PATH`.
+
 ## Quick Start
 
 ### Building
