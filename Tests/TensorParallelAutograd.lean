@@ -1,4 +1,5 @@
 import Tyr.Distributed
+import Lean
 
 open Lean torch
 
@@ -65,20 +66,20 @@ private def ownedStorage (rank : Nat) (device : Device) : IO Unit := do
 
 private def noncontiguous (rank : Nat) (device : Device) : IO Unit := do
   let original := tensor #[2,2] #[1,2,3,4] device true
-  let view := transpose original 0 1
+  let view := nn.transpose original 0 1
   let copied ← dist.copyToTensorParallel view
   equal "noncontiguous copy output" copied #[1,3,2,4]
-  let upstream := transpose (tensor #[2,2] (if rank == 0 then #[1,2,3,4] else #[5,6,7,8]) device) 0 1
+  let upstream := nn.transpose (tensor #[2,2] (if rank == 0 then #[1,2,3,4] else #[5,6,7,8]) device) 0 1
   equal "noncontiguous copy gradient" (autograd.grad copied original upstream) #[6,8,10,12]
   equal "noncontiguous upstream unchanged" upstream (if rank == 0 then #[1,3,2,4] else #[5,7,6,8])
   dist.allReduce (autograd.detach copied) .sum
   equal "noncontiguous copy owns storage" original #[1,2,3,4]
   let originalValues : Array Float := if rank == 0 then #[1,2,3,4] else #[5,6,7,8]
   let original := tensor #[2,2] originalValues device true
-  let reduced ← dist.reduceFromTensorParallel (transpose original 0 1)
+  let reduced ← dist.reduceFromTensorParallel (nn.transpose original 0 1)
   equal "noncontiguous reduce output" reduced #[6,10,8,12]
   let gradientValues : Array Float := if rank == 0 then #[2,3,5,7] else #[11,13,17,19]
-  let upstream := transpose (tensor #[2,2] gradientValues device) 0 1
+  let upstream := nn.transpose (tensor #[2,2] gradientValues device) 0 1
   equal "noncontiguous reduce gradient" (autograd.grad reduced original upstream) gradientValues
   dist.allReduce (autograd.detach reduced) .sum
   equal "noncontiguous reduce owns storage" original originalValues
@@ -88,8 +89,8 @@ private def denseComposition (rank : Nat) (device : Device) : IO Unit := do
   let column := tensor #[2,1] (if rank == 0 then #[1,2] else #[3,4]) device true
   let row := tensor #[1,2] (if rank == 0 then #[5,6] else #[7,8]) device true
   let copied ← dist.copyToTensorParallel input
-  let hidden := mm copied column
-  let output ← dist.reduceFromTensorParallel (mm hidden row)
+  let hidden := nn.mm copied column
+  let output ← dist.reduceFromTensorParallel (nn.mm hidden row)
   equal "toy output" output #[166,192]
   let upstream := tensor #[1,2] #[2,-1] device
   autograd.backwardLoss (nn.sumAll (output * upstream))
@@ -100,7 +101,7 @@ private def denseComposition (rank : Nat) (device : Device) : IO Unit := do
   let referenceInput := tensor #[1,2] #[2,3] device true
   let referenceColumn := tensor #[2,2] #[1,3,2,4] device true
   let referenceRow := tensor #[2,2] #[5,6,7,8] device true
-  let reference := mm (mm referenceInput referenceColumn) referenceRow
+  let reference := nn.mm (nn.mm referenceInput referenceColumn) referenceRow
   equal "ordinary toy output" reference #[166,192]
   autograd.backwardLoss (nn.sumAll (reference * upstream))
   equal "ordinary toy input gradient" (autograd.grad_of referenceInput) #[22,32]
@@ -108,6 +109,8 @@ private def denseComposition (rank : Nat) (device : Device) : IO Unit := do
   equal "ordinary toy row gradient" (autograd.grad_of referenceRow) #[16,-8,36,-18]
 
 private def staleGraphs (backend address : String) (port rank : Nat) (device : Device) : IO Unit := do
+  let originalGeneration ← dist.getProcessGroupGeneration
+  check (originalGeneration > 0) "active group generation must be positive"
   let make := fun (reduce : Bool) => do
     let x := tensor #[2] #[2,3] device true
     let y ← if reduce then dist.reduceFromTensorParallel x else dist.copyToTensorParallel x
@@ -118,12 +121,14 @@ private def staleGraphs (backend address : String) (port rank : Nat) (device : D
   let replacedReduce ← make true
   dist.barrier
   dist.destroyProcessGroup
+  rejected dist.getProcessGroupGeneration
   let stale := "Tensor-parallel autograd process-group generation is no longer active"
   rejected (autograd.backwardLoss destroyedCopy) stale
   rejected (autograd.backwardLoss destroyedReduce) stale
   rejected (dist.copyToTensorParallel (tensor #[1] #[1] device))
   rejected (dist.reduceFromTensorParallel (tensor #[1] #[1] device))
   dist.initProcessGroup backend address (port+1).toUInt64 rank.toUInt64 2
+  check ((← dist.getProcessGroupGeneration) > originalGeneration) "replacement group did not advance native generation"
   rejected (autograd.backwardLoss replacedCopy) stale
   rejected (autograd.backwardLoss replacedReduce) stale
   -- Rejection of stale graphs must not poison the valid replacement group.
@@ -155,6 +160,7 @@ def main (args : List String) : IO Unit := do
   let device := if backend == "nccl" then Device.CUDA 0 else Device.CPU
   if backend == "nccl" then dist.setCudaDevice 0
   autograd.set_grad_enabled true
+  rejected dist.getProcessGroupGeneration
   rejected (dist.copyToTensorParallel (tensor #[1] #[1] device))
   rejected (dist.reduceFromTensorParallel (tensor #[1] #[1] device))
   rejected (dist.initProcessGroup "unsupported-test-backend" address port.toUInt64 rank.toUInt64 2)
