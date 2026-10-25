@@ -186,10 +186,13 @@ def main (args : List String) : IO Unit := do
   autograd.set_grad_enabled true
   traceStage "reject generation query without group"
   rejected dist.getProcessGroupGeneration
-  traceStage "reject copy without group"
-  rejected (dist.copyToTensorParallel (tensor #[1] #[1] device))
+  traceStage "construct and materialize preinit probe"
+  let probe := tensor #[1] #[1] device
+  equal "preinit probe" probe #[1]
+  traceStage "preinit probe materialized; reject copy without group"
+  rejected (dist.copyToTensorParallel probe)
   traceStage "reject reduce without group"
-  rejected (dist.reduceFromTensorParallel (tensor #[1] #[1] device))
+  rejected (dist.reduceFromTensorParallel probe)
   traceStage "reject unsupported backend"
   rejected (dist.initProcessGroup "unsupported-test-backend" address port.toUInt64 rank.toUInt64 2)
     "Unsupported backend"
