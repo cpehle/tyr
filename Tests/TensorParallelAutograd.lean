@@ -112,7 +112,9 @@ private def denseComposition (rank : Nat) (device : Device) : IO Unit := do
   equal "toy column gradient" (autograd.grad_of column) (if rank == 0 then #[8,12] else #[12,18])
   equal "toy row gradient" (autograd.grad_of row) (if rank == 0 then #[16,-8] else #[36,-18])
   -- Independent ordinary full-matrix graph, without any distributed mapping.
-  let referenceInput := tensor #[1,2] #[2,3] device true
+  -- Explicit new storage prevents Lean CSE of identical pure tensor constructors
+  -- from reusing the distributed graph leaf and its accumulated gradient.
+  let referenceInput := autograd.set_requires_grad (autograd.detach (autograd.clone input)) true
   let referenceColumn := tensor #[2,2] #[1,3,2,4] device true
   let referenceRow := tensor #[2,2] #[5,6,7,8] device true
   let reference := nn.mm (nn.mm referenceInput referenceColumn) referenceRow
